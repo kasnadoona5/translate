@@ -25,7 +25,7 @@ env/
 .env
 
 # Job data
-jobs/
+/jobs/
 *.db
 *.sqlite
 
