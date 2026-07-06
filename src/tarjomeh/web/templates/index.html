@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ترجمه — Tarjomeh Translation System</title>
+    <meta name="description" content="Professional academic book translation system — English to Persian">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="header-brand">
+                <h1 class="logo">ترجمه</h1>
+                <span class="logo-subtitle">Tarjomeh Translation System</span>
+            </div>
+            <div class="header-status">
+                <span class="status-indicator" id="statusDot"></span>
+                <span id="statusText">Ready</span>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="app-main">
+            <!-- Upload Section -->
+            <section class="card upload-section" id="uploadSection">
+                <h2>📄 Translate Document</h2>
+                <div class="upload-zone" id="dropZone">
+                    <div class="upload-icon">📁</div>
+                    <p>Drag & drop your document here</p>
+                    <p class="upload-hint">PDF, EPUB, DOCX, TXT, SRT, or Markdown</p>
+                    <input type="file" id="fileInput" accept=".pdf,.epub,.docx,.txt,.srt,.md" hidden>
+                    <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">
+                        Choose File
+                    </button>
+                </div>
+
+                <!-- Config Panel -->
+                <div class="config-panel" id="configPanel" style="display:none;">
+                    <div class="config-row">
+                        <label>Mode</label>
+                        <select id="cfgMode">
+                            <option value="academic" selected>Academic (highest quality)</option>
+                            <option value="quality">Quality (balanced)</option>
+                            <option value="fast">Fast (draft)</option>
+                        </select>
+                    </div>
+                    <div class="config-row">
+                        <label>Output Format</label>
+                        <select id="cfgFormat">
+                            <option value="pdf">PDF</option>
+                            <option value="epub">EPUB</option>
+                            <option value="docx">DOCX</option>
+                            <option value="txt">TXT</option>
+                        </select>
+                    </div>
+                    <div class="config-row">
+                        <label>Bilingual Mode</label>
+                        <select id="cfgBilingual">
+                            <option value="inline">Inline (EN + FA)</option>
+                            <option value="side_by_side">Side by Side</option>
+                            <option value="target_only">Persian Only</option>
+                        </select>
+                    </div>
+                    <div class="config-row">
+                        <label id="selectedFileName"></label>
+                        <button class="btn btn-primary btn-lg" id="startBtn" onclick="startTranslation()">
+                            🚀 Start Translation
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Progress Section -->
+            <section class="card progress-section" id="progressSection" style="display:none;">
+                <h2>⏳ Translation Progress</h2>
+                <div class="progress-bar-container">
+                    <div class="progress-bar" id="progressBar" style="width: 0%"></div>
+                </div>
+                <div class="progress-info">
+                    <span id="progressPct">0%</span>
+                    <span id="progressStage">Initializing...</span>
+                </div>
+                <div class="progress-log" id="progressLog"></div>
+            </section>
+
+            <!-- Jobs List -->
+            <section class="card jobs-section">
+                <h2>📋 Translation History</h2>
+                <div id="jobsList" class="jobs-list">
+                    <p class="empty-state">Loading jobs...</p>
+                </div>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="app-footer">
+            <p>Tarjomeh v0.1.0 — Licensed under AGPL-3.0</p>
+        </footer>
+    </div>
+    <script src="/static/app.js"></script>
+</body>
+</html>

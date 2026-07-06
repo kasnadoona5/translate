@@ -1,0 +1,94 @@
+# Tarjomeh (ترجمه) Configuration
+# Copy this to config.toml and customize
+
+[llm]
+provider = "openrouter"          # "openrouter" | "ollama"
+model = "anthropic/claude-sonnet-4-5-20250514"
+temperature = 0.3
+max_tokens = 4096
+
+[llm.openrouter]
+api_keys = ["${OPENROUTER_API_KEY}"]  # supports rotation via env
+site_url = "https://tarjomeh.local"
+app_name = "Tarjomeh"
+
+[llm.ollama]
+host = "http://localhost:11434"
+model = "llama3.1:70b"
+
+[translation]
+source_lang = "English"
+target_lang = "Persian (Farsi)"
+country = "Iran"                 # dialect: "Iran" (فارسی) vs "Afghanistan" (دری)
+mode = "academic"                # "fast" | "quality" | "academic"
+style_register = "academic"      # "academic" | "literary" | "general"
+domain = "political theory, sociology, philosophy"
+enable_critique = true           # auto-set by mode, overridable
+enable_back_translation = true   # auto-set by mode, overridable
+back_translation_sample_pct = 20 # auto-set by mode: fast=0, quality=5, academic=20
+enable_web_context = true        # Aphra-style web search for term disambiguation
+parallel_workers = 1             # >1 only in fast/quality mode; academic always 1
+
+[chunking]
+strategy = "semantic"            # "semantic" | "fixed"
+max_chunk_tokens = 1000          # auto-set by mode: fast=3000, quality=1500, academic=1000
+overlap_sentences = 2
+
+[glossary]
+path = "glossary/academic_political_theory.csv"
+enable_auto_extraction = true
+enable_compliance_check = true
+
+[output]
+format = "pdf"                   # "pdf" | "epub" | "docx" | "txt" | "srt"
+bilingual_mode = "inline"        # "inline" | "side_by_side" | "target_only"
+
+[persian]
+convert_numerals = true
+normalize_zwnj = true
+fix_punctuation = true
+font_family = "Vazirmatn"
+
+[memory]
+enable_4layer = true
+summary_update_interval = "chapter"
+long_term_retrieval_k = 5
+short_term_window = 4
+
+[pdf]
+parser_backend = "pymupdf"       # "pymupdf" | "doclayout-yolo"
+enable_ocr = false
+
+[retry]
+max_retries = 5
+base_delay = 1.0
+max_delay = 60.0
+jitter = true
+max_consecutive_errors = 3       # pause pipeline after N consecutive chunk failures
+
+[notifications]
+webhook_url = ""                 # Telegram bot, ntfy.sh, Discord, Slack — any POST endpoint
+notify_on_complete = true
+notify_on_error = true
+
+[server]
+host = "127.0.0.1"              # bind to localhost by default (access via SSH tunnel)
+port = 8080
+# UI_SECRET_TOKEN set in .env — required for web access
+
+[system_prompt]
+template = """You are a professional Persian translator specializing in academic texts
+in political theory, sociology, and philosophy. You produce publication-quality
+Iranian Persian (فارسی) prose suitable for university press publication (نثر آکادمیک).
+
+Your translations should:
+- Maintain the precise meaning and nuance of the original academic text
+- Use formal academic Persian register appropriate for scholarly publication
+- Follow established Persian academic conventions for transliteration of proper nouns
+- Preserve the author's argumentative structure and rhetorical style
+- Use the provided glossary terms consistently throughout
+- Use Iranian Persian vocabulary and conventions (not Dari/Afghan Persian)
+
+Domain expertise: {domain}
+Style register: {style_register}
+Country/dialect: {country}"""
