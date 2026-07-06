@@ -129,6 +129,7 @@ class TranslationConfig:
     enable_web_context: bool = True
     parallel_workers: int = 1
     max_refine_iterations: int = 2
+    critique_threshold: float = 7.0
 
 
 @dataclass
@@ -147,6 +148,7 @@ class GlossaryConfig:
     path: str = "glossary/academic_political_theory.csv"
     enable_auto_extraction: bool = True
     enable_compliance_check: bool = True
+    enable_auto_correction: bool = True
 
 
 @dataclass
@@ -265,8 +267,18 @@ class TarjomehConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TarjomehConfig:
-        """Create a TarjomehConfig from a dictionary."""
-        config = cls._from_raw(data)
+        """Create a TarjomehConfig from a dictionary.
+
+        Processing order (consistent with from_toml):
+        1. Expand env variables recursively.
+        2. Apply mode preset defaults.
+        3. Enforce default country.
+        """
+        expanded = _expand_env_recursive(data)
+        config = cls._from_raw(expanded)
+        config._apply_mode_preset(expanded)
+        if not config.translation.country:
+            config.translation.country = "Iran"
         config.validate()
         return config
 

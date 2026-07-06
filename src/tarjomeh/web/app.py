@@ -261,21 +261,33 @@ def _register_api(app: Flask) -> None:
     @_require_auth
     def api_pause_job(job_id: str):
         """Pause a running job."""
+        from tarjomeh.jobs.database import JobDatabase, JobStatus
+        db = JobDatabase()
+        job = db.get_job(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+
+        # Update DB status to PAUSED
+        db.update_job_status(job_id, JobStatus.PAUSED)
+
         future = _active_jobs.get(job_id)
         if future and not future.done():
             future.cancel()
             return jsonify({"status": "paused", "job_id": job_id})
-        return jsonify({"error": "Job not running"}), 400
+        return jsonify({"status": "paused", "job_id": job_id})
 
     @app.route("/api/jobs/<job_id>/resume", methods=["POST"])
     @_require_auth
     def api_resume_job(job_id: str):
         """Resume a paused job."""
-        from tarjomeh.jobs.database import JobDatabase
+        from tarjomeh.jobs.database import JobDatabase, JobStatus
         db = JobDatabase()
         job = db.get_job(job_id)
         if not job:
             return jsonify({"error": "Job not found"}), 404
+
+        # Update DB status to RUNNING
+        db.update_job_status(job_id, JobStatus.RUNNING)
 
         # Re-submit to executor
         _progress_queues[job_id] = queue.Queue()

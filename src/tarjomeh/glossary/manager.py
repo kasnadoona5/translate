@@ -38,6 +38,7 @@ class GlossaryEntry:
     tgt_lng: str = "fa"
     context: str = ""
     domain: str = ""
+    is_auto: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +104,27 @@ class GlossaryManager:
                     "domain": entry.domain,
                 })
 
+    def save_auto_extracted(self, csv_path: str | Path) -> None:
+        """Persist only auto-extracted (discovered) terms to a CSV file."""
+        path = Path(csv_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        with path.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(
+                fh,
+                fieldnames=["source", "target", "tgt_lng", "context", "domain"],
+            )
+            writer.writeheader()
+            for entry in self._entries:
+                if entry.is_auto:
+                    writer.writerow({
+                        "source": entry.source,
+                        "target": entry.target,
+                        "tgt_lng": entry.tgt_lng,
+                        "context": entry.context,
+                        "domain": entry.domain,
+                    })
+
     # -- mutation ------------------------------------------------------------
 
     def add_term(
@@ -112,6 +134,7 @@ class GlossaryManager:
         tgt_lng: str = "fa",
         context: str = "",
         domain: str = "",
+        is_auto: bool = False,
     ) -> None:
         """Add or update a glossary term.
 
@@ -125,6 +148,7 @@ class GlossaryManager:
                 existing.tgt_lng = tgt_lng
                 existing.context = context or existing.context
                 existing.domain = domain or existing.domain
+                existing.is_auto = existing.is_auto or is_auto
                 self._rebuild_pattern(existing)
                 return
         entry = GlossaryEntry(
@@ -133,6 +157,7 @@ class GlossaryManager:
             tgt_lng=tgt_lng,
             context=context.strip(),
             domain=domain.strip(),
+            is_auto=is_auto,
         )
         self._add_entry(entry)
 

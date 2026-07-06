@@ -38,6 +38,14 @@ Core directives:
   explicitly instructed.
 """
 
+ACADEMIC_REGISTER_MODIFIER: str = """\
+Use a highly formal, precise, and scholarly academic register. \
+Employ complex sentence structures where appropriate, utilize established scholarly terminology, \
+and avoid any colloquialisms, slang, or overly simplified vocabulary. The tone must reflect that of \
+a publication by a reputable university press (نثر فاخر و دانشگاهی).\
+"""
+
+
 # ---------------------------------------------------------------------------
 # 2. Per-chunk translation prompt
 # ---------------------------------------------------------------------------

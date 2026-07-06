@@ -17,16 +17,18 @@ class TxtExporter(BaseExporter):
     ) -> Path:
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
+        RLM = "\u200f"
         with out.open("w", encoding="utf-8") as f:
             f.write(f"# {document.title}\n")
             if document.author:
                 f.write(f"Author: {document.author}\n")
             f.write("\n")
             for p in document.paragraphs:
+                translated_rlm = f"{RLM}{p.translated_text}{RLM}"
                 if bilingual_mode == "target_only":
-                    f.write(p.translated_text + "\n\n")
+                    f.write(translated_rlm + "\n\n")
                 elif bilingual_mode == "inline":
-                    f.write(p.source_text + "\n" + p.translated_text + "\n\n")
+                    f.write(p.source_text + "\n" + translated_rlm + "\n\n")
                 else:  # side_by_side fallback
-                    f.write(f"[EN]: {p.source_text}\n[FA]: {p.translated_text}\n\n")
+                    f.write(f"[EN]: {p.source_text}\n[FA]: {translated_rlm}\n\n")
         return out

@@ -12,12 +12,7 @@ import re
 from collections import Counter
 
 
-# Try importing hazm for Persian word tokenization if needed in the future
-try:
-    import hazm  # type: ignore[import-untyped]
-    HAS_HAZM = True
-except ImportError:
-    HAS_HAZM = False
+
 
 
 def _tokenize_english(text: str) -> list[str]:

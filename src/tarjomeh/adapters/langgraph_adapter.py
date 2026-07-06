@@ -82,6 +82,7 @@ class LangGraphTranslationAdapter:
         idx = state["current_idx"]
         chunks = state["chunks"]
         translations = dict(state["translations"])
+        job_id = state["job_id"]
 
         if idx >= len(chunks):
             return {"status": "assembling"}
@@ -89,8 +90,57 @@ class LangGraphTranslationAdapter:
         chunk = chunks[idx]
         logger.info("LangGraph Node: Translating chunk %d/%d", idx + 1, len(chunks))
 
-        # Renders dummy translation (real adapter uses LLMClient + memory)
-        translation = f" [ترجمه: {chunk.text}]"
+        # Re-use real pipeline's logic:
+        from tarjomeh.core.pipeline import TranslationPipeline
+        from tarjomeh.memory.manager import MemoryManager
+        from tarjomeh.context.web_searcher import WebContextSearcher
+        from tarjomeh.glossary.manager import GlossaryManager
+        from tarjomeh.glossary.compliance import GlossaryComplianceChecker
+        from tarjomeh.quality.critique import TranslationCritique
+        from tarjomeh.quality.refiner import TranslationRefiner
+        from tarjomeh.quality.back_translator import BackTranslator
+
+        pipeline = TranslationPipeline(self.config)
+        
+        # Load glossary
+        glossary_manager = GlossaryManager()
+        if self.config.glossary.path:
+            try:
+                glossary_manager.load(self.config.glossary.path)
+            except Exception as e:
+                logger.warning("Could not load glossary: %s", e)
+
+        # Load or create memory state
+        memory_manager = MemoryManager(self.config)
+        mem_state = pipeline.db.get_memory_state(job_id)
+        if mem_state:
+            memory_manager.from_dict(mem_state)
+
+        web_searcher = WebContextSearcher(self.config, pipeline.llm_client)
+        compliance_checker = GlossaryComplianceChecker()
+        critique_tool = TranslationCritique(llm_client=pipeline.llm_client)
+        refiner_tool = TranslationRefiner(llm_client=pipeline.llm_client, max_iterations=self.config.translation.max_refine_iterations)
+        back_translator = BackTranslator(llm_client=pipeline.llm_client, sample_pct=self.config.translation.back_translation_sample_pct)
+
+        # Call translation logic
+        translation = pipeline._translate_single_chunk(
+            idx=idx,
+            chunk=chunk,
+            memory_manager=memory_manager,
+            web_searcher=web_searcher,
+            glossary_manager=glossary_manager,
+            compliance_checker=compliance_checker,
+            critique_tool=critique_tool,
+            refiner_tool=refiner_tool,
+            back_translator=back_translator,
+            translations=translations,
+            job_id=job_id,
+        )
+
+        # Save memory state back to DB
+        pipeline.db.save_memory_state(job_id, memory_manager.to_dict())
+        pipeline.db.update_chunk(job_id, idx, "completed", translation)
+
         translations[idx] = translation
 
         return {
@@ -162,6 +212,8 @@ class LangGraphTranslationAdapter:
 
         # Setup SQLite checkpointer for resume compatibility
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        memory = SqliteSaver.from_conn_string(db_path)
+        import sqlite3
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        memory = SqliteSaver(conn)
 
         return builder.compile(checkpointer=memory)

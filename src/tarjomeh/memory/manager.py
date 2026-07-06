@@ -160,4 +160,7 @@ class MemoryManager:
         self.proper_nouns.deserialize(data.get("proper_nouns", {}))
         self.bilingual_summary.deserialize(data.get("bilingual_summary", {}))
         self.long_term.deserialize(data.get("past_translations", []))
-        self.short_term.deserialize(data.get("short_term_context", []))
+        self.short_term = ShortTermMemory.deserialize(
+            data.get("short_term_context", []),
+            window_size=self.short_term.window_size
+        )

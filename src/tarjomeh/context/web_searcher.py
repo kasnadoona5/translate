@@ -84,18 +84,21 @@ class WebContextSearcher:
                     def_str = "\n".join(f"- {r.snippet} (source: {r.url})" for r in results[:3])
                     self.cache[term_lower] = def_str
                 else:
-                    self.cache[term_lower] = "No definition found via web search."
+                    self.cache[term_lower] = ""
 
         except Exception as exc:
             logger.warning("Web context term search/extraction failed: %s", exc)
 
         # Match cached terms in the current chunk text
         matched_definitions = []
-        chunk_text_lower = chunk.text.lower()
         
+        import re
         for term_lower, definition in self.cache.items():
-            # Use basic boundary check or simple substring presence
-            if term_lower in chunk_text_lower:
+            if not definition:
+                continue
+            escaped_term = re.escape(term_lower)
+            pattern = re.compile(rf"\b{escaped_term}\b", re.IGNORECASE)
+            if pattern.search(chunk.text):
                 matched_definitions.append(
                     f"Term: {term_lower.title()}\n"
                     f"Definition:\n{definition}"

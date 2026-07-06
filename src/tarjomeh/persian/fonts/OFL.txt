@@ -1,0 +1,11 @@
+This directory requires the actual Vazirmatn font files for correct Persian text rendering.
+
+Please download the following files from the official Vazirmatn repository (https://github.com/rastikerdar/vazirmatn) under the SIL Open Font License (OFL):
+1. Vazirmatn-Regular.ttf
+2. Vazirmatn-Bold.ttf
+
+Copy these files directly into this directory (src/tarjomeh/persian/fonts/).
+
+SIL Open Font License 1.1:
+The Vazirmatn font is licensed under the SIL Open Font License, Version 1.1.
+This license is available with a FAQ at: http://scripts.sil.org/OFL

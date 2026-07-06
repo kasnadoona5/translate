@@ -13,35 +13,8 @@ from tarjomeh.quality.critique import CritiqueResult
 
 logger = logging.getLogger(__name__)
 
-# ── Refinement prompt ────────────────────────────────────────────────
-REFINE_PROMPT = """\
-You are a senior Persian translation editor specialising in academic \
-texts (political theory, sociology, philosophy).
-
-Below is an English source passage, its initial Persian translation, \
-and a quality critique identifying specific issues.  Produce an \
-**improved Persian translation** that addresses every issue raised in \
-the critique while preserving the meaning and academic register.
-
-### Source (English)
-{source_text}
-
-### Initial Translation (Persian)
-{translation}
-
-### Quality Critique
-Scores — Accuracy: {accuracy}/10, Fluency: {fluency}/10, \
-Terminology: {terminology}/10, Register: {register}/10 \
-(Average: {average:.1f}/10)
-
-Issues:
-{issues_text}
-
-### Instructions
-- Fix every listed issue.
-- Do NOT add commentary — return ONLY the refined Persian translation.
-- Maintain publication-quality Iranian academic prose (نثر آکادمیک).
-"""
+import json
+from tarjomeh.core.prompts import REFINE_PROMPT
 
 # ── Mode → max iterations mapping ───────────────────────────────────
 _MODE_MAX_ITERATIONS: dict[str, int] = {
@@ -115,12 +88,7 @@ class TranslationRefiner:
         prompt = REFINE_PROMPT.format(
             source_text=source_text,
             translation=translation,
-            accuracy=critique.accuracy,
-            fluency=critique.fluency,
-            terminology=critique.terminology,
-            register=critique.register,
-            average=critique.average,
-            issues_text=issues_text,
+            critique=json.dumps(critique.to_dict(), indent=2),
         )
 
         refined: str = await self._llm.chat(prompt)

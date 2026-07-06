@@ -15,15 +15,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# ── Back-translation prompt ──────────────────────────────────────────
-BACK_TRANSLATE_PROMPT = """\
-Translate the following Persian academic text back into English.  \
-Produce a faithful, literal English translation — do NOT add \
-commentary or explanations.  Return ONLY the English translation.
-
-### Persian Text
-{persian_text}
-"""
+from tarjomeh.core.prompts import BACK_TRANSLATE_PROMPT
 
 
 @dataclass

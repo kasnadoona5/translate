@@ -28,6 +28,8 @@ enable_back_translation = true   # auto-set by mode, overridable
 back_translation_sample_pct = 20 # auto-set by mode: fast=0, quality=5, academic=20
 enable_web_context = true        # Aphra-style web search for term disambiguation
 parallel_workers = 1             # >1 only in fast/quality mode; academic always 1
+max_refine_iterations = 2        # max critique-refine loops
+critique_threshold = 7.0         # threshold score to pass critique
 
 [chunking]
 strategy = "semantic"            # "semantic" | "fixed"
@@ -38,6 +40,7 @@ overlap_sentences = 2
 path = "glossary/academic_political_theory.csv"
 enable_auto_extraction = true
 enable_compliance_check = true
+enable_auto_correction = true
 
 [output]
 format = "pdf"                   # "pdf" | "epub" | "docx" | "txt" | "srt"

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import zipfile
+import html
+from datetime import datetime
 from pathlib import Path
 from tarjomeh.exporters.base import BaseExporter, TranslatedDocument, BilingualMode
 
@@ -43,8 +45,29 @@ class EpubExporter(BaseExporter):
         if not chapters:
             chapters.append({"title": "Document", "paragraphs": []})
 
-        # 2. Build CSS Stylesheet
-        css_content = """body {
+        # 2. Build CSS Stylesheet and Font Embedding
+        font_styles = ""
+        reg_path = self._resolve_font_path("Vazirmatn-Regular.ttf")
+        bold_path = self._resolve_font_path("Vazirmatn-Bold.ttf")
+
+        if reg_path and reg_path.is_file():
+            font_styles += """@font-face {
+    font-family: 'Vazirmatn';
+    src: url('fonts/Vazirmatn-Regular.ttf') format('truetype');
+    font-weight: normal;
+    font-style: normal;
+}
+"""
+        if bold_path and bold_path.is_file():
+            font_styles += """@font-face {
+    font-family: 'Vazirmatn-Bold';
+    src: url('fonts/Vazirmatn-Bold.ttf') format('truetype');
+    font-weight: bold;
+    font-style: normal;
+}
+"""
+
+        css_content = font_styles + """body {
     direction: rtl;
     text-align: justify;
     font-family: 'Vazirmatn', sans-serif;
@@ -55,6 +78,7 @@ class EpubExporter(BaseExporter):
 h1, h2, h3, h4 {
     direction: rtl;
     text-align: center;
+    font-family: 'Vazirmatn-Bold', 'Vazirmatn', sans-serif;
 }
 
 .source {
@@ -117,6 +141,14 @@ h1, h2, h3, h4 {
             ]
             spine_items = []
 
+            # If fonts exist, copy them and add to manifest
+            if reg_path and reg_path.is_file():
+                zf.write(str(reg_path), "OEBPS/fonts/Vazirmatn-Regular.ttf")
+                manifest_items.append('<item id="font-regular" href="fonts/Vazirmatn-Regular.ttf" media-type="font/ttf"/>')
+            if bold_path and bold_path.is_file():
+                zf.write(str(bold_path), "OEBPS/fonts/Vazirmatn-Bold.ttf")
+                manifest_items.append('<item id="font-bold" href="fonts/Vazirmatn-Bold.ttf" media-type="font/ttf"/>')
+
             for idx, chap in enumerate(chapters, 1):
                 xhtml_parts = []
                 for p in chap["paragraphs"]:
@@ -129,23 +161,26 @@ h1, h2, h3, h4 {
                     if p.heading_level is not None:
                         p_tag = f"h{min(p.heading_level, 6)}"
 
+                    escaped_source = html.escape(p.source_text)
+                    escaped_translated = html.escape(p.translated_text)
+
                     if bilingual_mode == "target_only":
-                        xhtml_parts.append(f"<{p_tag} class='target'>{p.translated_text}</{p_tag}>")
+                        xhtml_parts.append(f"<{p_tag} class='target'>{escaped_translated}</{p_tag}>")
                     elif bilingual_mode == "inline":
                         xhtml_parts.append(
-                            f"<{p_tag} class='source'>{p.source_text}</{p_tag}>\n"
-                            f"<{p_tag} class='target'>{p.translated_text}</{p_tag}>"
+                            f"<{p_tag} class='source'>{escaped_source}</{p_tag}>\n"
+                            f"<{p_tag} class='target'>{escaped_translated}</{p_tag}>"
                         )
                     else:  # side_by_side
                         xhtml_parts.append(
                             f"<div class='side-by-side'>\n"
-                            f"  <div class='left'>{p.source_text}</div>\n"
-                            f"  <div class='right'>{p.translated_text}</div>\n"
+                            f"  <div class='left'>{escaped_source}</div>\n"
+                            f"  <div class='right'>{escaped_translated}</div>\n"
                             f"</div>"
                         )
 
                 paragraphs_xhtml = "\n".join(xhtml_parts)
-                chapter_title = chap["title"]
+                chapter_title = html.escape(chap["title"])
 
                 xhtml_content = f"""<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
@@ -171,7 +206,7 @@ h1, h2, h3, h4 {
             # EPUB3 Navigation Page (nav.xhtml)
             nav_links = []
             for idx, chap in enumerate(chapters, 1):
-                nav_links.append(f'<li><a href="chapter_{idx}.xhtml">{chap["title"]}</a></li>')
+                nav_links.append(f'<li><a href="chapter_{idx}.xhtml">{html.escape(chap["title"])}</a></li>')
             nav_list = "\n".join(nav_links)
 
             nav_xhtml = f"""<?xml version="1.0" encoding="utf-8"?>
@@ -197,14 +232,19 @@ h1, h2, h3, h4 {
             manifest_str = "\n    ".join(manifest_items)
             spine_str = "\n    ".join(spine_items)
 
+            modified_time = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            escaped_title = html.escape(document.title)
+            escaped_author = html.escape(document.author or "Unknown")
+
             opf_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" unique-identifier="pub-id" version="3.0">
     <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
-        <dc:identifier id="pub-id">urn:uuid:tarjomeh-job-{document.title.replace(" ", "-")}</dc:identifier>
-        <dc:title>{document.title}</dc:title>
-        <dc:creator>{document.author or "Unknown"}</dc:creator>
+        <dc:identifier id="pub-id">urn:uuid:tarjomeh-job-{escaped_title.replace(" ", "-")}</dc:identifier>
+        <dc:title>{escaped_title}</dc:title>
+        <dc:creator>{escaped_author}</dc:creator>
         <dc:language>fa</dc:language>
-        <meta property="dcterms:modified">2026-07-06T12:00:00Z</meta>
+        <meta property="dcterms:modified">{modified_time}</meta>
     </metadata>
     <manifest>
         {manifest_str}

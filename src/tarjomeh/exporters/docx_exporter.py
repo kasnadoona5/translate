@@ -55,11 +55,11 @@ class DocxExporter(BaseExporter):
 
         def make_run_rtl(r_obj) -> None:
             rPr = r_obj._r.get_or_add_rPr()
-            bidi = rPr.find(qn('w:bidi'))
-            if bidi is None:
-                bidi_el = OxmlElement('w:bidi')
-                bidi_el.set(qn('w:val'), '1')
-                rPr.append(bidi_el)
+            rtl = rPr.find(qn('w:rtl'))
+            if rtl is None:
+                rtl_el = OxmlElement('w:rtl')
+                rtl_el.set(qn('w:val'), '1')
+                rPr.append(rtl_el)
             
             # Set complex script font to Vazirmatn
             rFonts = rPr.find(qn('w:rFonts'))

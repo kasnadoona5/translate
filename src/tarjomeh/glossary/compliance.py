@@ -112,11 +112,22 @@ class GlossaryComplianceChecker:
 
         for entry in matched_entries:
             if not self._target_present(entry.target, translation):
+                escaped_source = re.escape(entry.source)
+                if re.search(rf"\b{escaped_source}\b", translation, re.IGNORECASE):
+                    status = "wrong"
+                else:
+                    target_norm = _normalise_persian(entry.target)
+                    translation_norm = _normalise_persian(translation)
+                    if len(target_norm) >= 4 and target_norm[:3] in translation_norm:
+                        status = "wrong"
+                    else:
+                        status = "missing"
+
                 violations.append(
                     Violation(
                         term=entry.source,
                         expected=entry.target,
-                        status="missing",
+                        status=status,
                         chunk_location=chunk_location,
                     )
                 )

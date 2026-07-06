@@ -14,41 +14,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# ── Critique prompt ──────────────────────────────────────────────────
-CRITIQUE_PROMPT = """\
-You are a senior Persian translation quality evaluator specialising in \
-academic texts (political theory, sociology, philosophy).
-
-Evaluate the following Persian translation against its English source \
-on four dimensions.  For each dimension give a score from 1 (worst) \
-to 10 (best) and list specific issues if the score is below 8.
-
-Dimensions:
-1. **Accuracy** – Does the translation faithfully convey the meaning, \
-nuances, and implications of the source text?
-2. **Fluency** – Does the Persian read naturally as publication-quality \
-Iranian academic prose (نثر آکادمیک)?
-3. **Terminology** – Are domain-specific terms translated consistently \
-and according to established Persian academic conventions?
-4. **Register** – Is the formality level appropriate for a university \
-press publication?
-
-### Source (English)
-{source_text}
-
-### Translation (Persian)
-{translation}
-
-Respond with **only** a JSON object in this exact schema — no markdown \
-fences, no commentary:
-{{
-  "accuracy": <int 1-10>,
-  "fluency": <int 1-10>,
-  "terminology": <int 1-10>,
-  "register": <int 1-10>,
-  "issues": ["issue 1", "issue 2", ...]
-}}
-"""
+from tarjomeh.core.prompts import CRITIQUE_PROMPT
 
 
 @dataclass
@@ -188,15 +154,34 @@ class TranslationCritique:
             logger.warning("Failed to parse critique JSON, returning zero scores.")
             return CritiqueResult(raw_response=raw)
 
-        accuracy = _clamp(data.get("accuracy", 0), 1, 10)
-        fluency = _clamp(data.get("fluency", 0), 1, 10)
-        terminology = _clamp(data.get("terminology", 0), 1, 10)
-        register = _clamp(data.get("register", 0), 1, 10)
-        average = (accuracy + fluency + terminology + register) / 4.0
+        scores = data.get("scores", {})
+        if not isinstance(scores, dict):
+            scores = {}
 
-        issues = data.get("issues", [])
-        if not isinstance(issues, list):
-            issues = [str(issues)]
+        accuracy = _clamp(scores.get("accuracy") if scores.get("accuracy") is not None else data.get("accuracy", 0), 1, 10)
+        fluency = _clamp(scores.get("fluency") if scores.get("fluency") is not None else data.get("fluency", 0), 1, 10)
+        terminology = _clamp(scores.get("terminology") if scores.get("terminology") is not None else data.get("terminology", 0), 1, 10)
+        register = _clamp(scores.get("register") if scores.get("register") is not None else data.get("register", 0), 1, 10)
+
+        overall = data.get("overall")
+        if overall is not None:
+            average = _clamp(overall, 1, 10)
+        else:
+            average = (accuracy + fluency + terminology + register) / 4.0
+
+        raw_issues = data.get("issues", [])
+        issues = []
+        if isinstance(raw_issues, list):
+            for issue in raw_issues:
+                if isinstance(issue, dict):
+                    category = issue.get("category", "")
+                    fix = issue.get("suggested_fix", "")
+                    explanation = issue.get("explanation", "")
+                    issues.append(f"[{category}] Suggestion: {fix} (Reason: {explanation})")
+                else:
+                    issues.append(str(issue))
+        else:
+            issues = [str(raw_issues)]
 
         return CritiqueResult(
             accuracy=accuracy,
@@ -204,7 +189,7 @@ class TranslationCritique:
             terminology=terminology,
             register=register,
             average=average,
-            issues=[str(i) for i in issues],
+            issues=issues,
             raw_response=raw,
         )
 

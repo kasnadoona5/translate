@@ -254,18 +254,18 @@ class EpubParser(BaseParser):
         toc_entries: list[str] = []
 
         def _walk(items: Any) -> None:
-            if isinstance(items, (list, tuple)):
-                for item in items:
-                    _walk(item)
-            elif isinstance(items, epub.Link):
-                if items.title:
-                    toc_entries.append(items.title)
-            elif isinstance(items, tuple) and len(items) == 2:
+            if isinstance(items, tuple) and len(items) == 2:
                 # (Section, children) tuple
                 section, children = items
                 if hasattr(section, "title") and section.title:
                     toc_entries.append(section.title)
                 _walk(children)
+            elif isinstance(items, (list, tuple)):
+                for item in items:
+                    _walk(item)
+            elif isinstance(items, epub.Link):
+                if items.title:
+                    toc_entries.append(items.title)
 
         _walk(book.toc)
         return toc_entries

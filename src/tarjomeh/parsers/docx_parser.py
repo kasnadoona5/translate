@@ -111,11 +111,13 @@ class DocxParser(BaseParser):
         notes: dict[str, str] = {}
         # Access the footnotes part if available
         try:
-            footnotes_part = docx_doc.part.package.part_related_by(
-                "/word/footnotes.xml"
+            footnotes_part = docx_doc.part.part_related_by(
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes"
             )
-        except Exception:
-            # Many documents don't have footnotes
+        except KeyError:
+            return notes
+        except Exception as e:
+            logger.warning("Error looking up footnotes part: %s", e)
             return notes
 
         if footnotes_part is None:
@@ -144,10 +146,13 @@ class DocxParser(BaseParser):
         """Extract endnotes keyed by endnote ID (same approach as footnotes)."""
         notes: dict[str, str] = {}
         try:
-            endnotes_part = docx_doc.part.package.part_related_by(
-                "/word/endnotes.xml"
+            endnotes_part = docx_doc.part.part_related_by(
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes"
             )
-        except Exception:
+        except KeyError:
+            return notes
+        except Exception as e:
+            logger.warning("Error looking up endnotes part: %s", e)
             return notes
 
         if endnotes_part is None:

@@ -10,6 +10,7 @@ import logging
 import time
 import uuid
 import threading
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -17,7 +18,6 @@ from typing import Any, Callable
 
 from tarjomeh.core.config import TarjomehConfig
 from tarjomeh.core.llm_client import LLMClient
-from tarjomeh.core.state_machine import StateMachine
 from tarjomeh.parsers.base import BaseParser, Document, EXTENSION_PARSER_MAP
 from tarjomeh.chunking.chunker import SemanticChunker, FixedChunker, Chunk
 from tarjomeh.memory.manager import MemoryManager, MemoryContext
@@ -38,6 +38,11 @@ from tarjomeh.core.prompts import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class PipelinePausedException(Exception):
+    """Raised when the translation pipeline is cooperatively paused."""
+    pass
 
 
 class PipelineResult:
@@ -132,6 +137,14 @@ class TranslationPipeline:
         t0 = time.monotonic()
         input_path = Path(input_path)
         self.warnings = []
+
+        # Run OCR preprocessing first if enabled
+        if input_path.suffix.lower() == ".pdf" and getattr(self.config.pdf, "enable_ocr", False):
+            if progress_callback:
+                progress_callback("Ingestion", 0.02, "Running OCR Preprocessing...")
+            from tarjomeh.parsers.ocr_preprocessor import OCRPreprocessor
+            ocr_processor = OCRPreprocessor()
+            input_path = ocr_processor.preprocess(input_path)
 
         # 1. Establish Job ID and Database Record
         is_resume = False
@@ -243,7 +256,7 @@ class TranslationPipeline:
                     term = item.get("term")
                     persian = item.get("suggested_persian")
                     if term and persian:
-                        glossary_manager.add_term(source=term, target=persian, tgt_lng="fa", context=item.get("context", ""), domain=self.config.translation.domain)
+                        glossary_manager.add_term(source=term, target=persian, tgt_lng="fa", context=item.get("context", ""), domain=self.config.translation.domain, is_auto=True)
             except Exception as e:
                 logger.warning("Automatic term extraction failed: %s", e)
 
@@ -266,300 +279,214 @@ class TranslationPipeline:
         refiner_tool = TranslationRefiner(llm_client=self.llm_client, max_iterations=self.config.translation.max_refine_iterations)
         back_translator = BackTranslator(llm_client=self.llm_client, sample_pct=self.config.translation.back_translation_sample_pct)
 
-        # Separate execution paths based on workers
-        workers = self.config.translation.parallel_workers
-        if workers > 1:
-            # Concurrent Pass (Fast / Quality modes only)
-            logger.info("Running parallel translation with %d workers", workers)
-            lock = threading.Lock()
+        try:
+            # Separate execution paths based on workers
+            workers = self.config.translation.parallel_workers
+            if workers > 1:
+                # Concurrent Pass (Fast / Quality modes only)
+                logger.info("Running parallel translation with %d workers", workers)
+                lock = threading.Lock()
 
-            def process_chunk_parallel(idx: int) -> tuple[int, str]:
-                nonlocal consecutive_errors
-                chunk = chunks[idx]
-                
-                # Fetch memory context safely under lock
-                with lock:
-                    mem_context = memory_manager.get_context_for_chunk(chunk)
-                
-                # Web context (slow, run outside lock)
-                web_context_str = ""
-                if self.config.translation.enable_web_context:
-                    web_context_str = self._run_async(web_searcher.get_context_for_chunk(chunk, mem_context.format()))
-
-                # Prep prompts
-                prev_trans = translations.get(idx - 1, "")
-                matched_entries = glossary_manager.find_terms(chunk.text)
-                glossary_terms_str = "\n".join(f"- {e.source} -> {e.target}" for e in matched_entries)
-
-                sys_prompt = TRANSLATE_SYSTEM_PROMPT.format(
-                    domain=self.config.translation.domain,
-                    style_register=self.config.translation.style_register,
-                    country=self.config.translation.country,
-                )
-                user_content = TRANSLATE_CHUNK_PROMPT.format(
-                    glossary_terms=glossary_terms_str,
-                    memory_context=mem_context.format(),
-                    web_context=web_context_str,
-                    previous_translation=prev_trans,
-                    source_text=chunk.text,
-                )
-
-                # Call Translation LLM
-                self.db.update_chunk(job_id, idx, ChunkStatus.TRANSLATING)
-                translation = self.llm_client.complete(
-                    messages=[{"role": "user", "content": user_content}],
-                    system_prompt=sys_prompt
-                )
-
-                # Critique and Refine Loop (if enabled)
-                if self.config.translation.enable_critique:
-                    for ref_iter in range(self.config.translation.max_refine_iterations + 1):
-                        critique_rep = self._run_async(critique_tool.critique(chunk.text, translation))
-                        if critique_rep.average >= 7.0 or ref_iter == self.config.translation.max_refine_iterations:
-                            break
-                        # Refine
-                        translation = self._run_async(refiner_tool.refine(chunk.text, translation, critique_rep))
-
-                # Glossary compliance post-check
-                if self.config.glossary.enable_compliance_check:
-                    report = compliance_checker.check(
-                        translation=translation,
-                        source_text=chunk.text,
+                def process_chunk_parallel(idx: int) -> tuple[int, str]:
+                    chunk = chunks[idx]
+                    translation = self._translate_single_chunk(
+                        idx=idx,
+                        chunk=chunk,
+                        memory_manager=memory_manager,
+                        web_searcher=web_searcher,
                         glossary_manager=glossary_manager,
-                        chunk_location=f"Chunk {idx}",
+                        compliance_checker=compliance_checker,
+                        critique_tool=critique_tool,
+                        refiner_tool=refiner_tool,
+                        back_translator=back_translator,
+                        translations=translations,
+                        job_id=job_id,
+                        lock=lock,
                     )
-                    if not report.compliant:
-                        for v in report.violations:
-                            warn_msg = f"Glossary violation: Term '{v.term}' expected '{v.expected}'"
-                            logger.warning("%s in %s", warn_msg, v.chunk_location)
-                            with lock:
-                                self.warnings.append(f"{v.chunk_location}: {warn_msg}")
 
-                # Back-translate sample
-                if self.config.translation.enable_back_translation:
-                    # Deterministic sampling based on chunk index percent
-                    sample_interval = int(100 / self.config.translation.back_translation_sample_pct) if self.config.translation.back_translation_sample_pct > 0 else 0
-                    if sample_interval > 0 and idx % sample_interval == 0:
-                        back_translated = self._run_async(back_translator.back_translate(translation))
-                        back_translator.compare(chunk.text, back_translated)
-
-                # Update shared memory and database safely under lock
-                with lock:
-                    translations[idx] = translation
-                    memory_manager.update_after_translation(chunk, translation)
-                    
-                    if self.config.memory.enable_4layer:
-                        try:
-                            self._run_async(memory_manager.update_proper_nouns(self.llm_client, chunk.text))
-                        except Exception as e:
-                            logger.warning("Incremental proper noun extraction failed: %s", e)
-
-                        is_chapter_end = False
-                        if idx == total_chunks - 1:
-                            is_chapter_end = True
-                        else:
-                            next_chunk = chunks[idx + 1]
-                            if next_chunk.chapter_title != chunk.chapter_title:
-                                is_chapter_end = True
-
-                        if is_chapter_end:
-                            chap_source = []
-                            chap_trans = []
-                            for i in range(idx + 1):
-                                c = chunks[i]
-                                if c.chapter_title == chunk.chapter_title:
-                                    chap_source.append(c.text)
-                                    chap_trans.append(translations.get(i, ""))
-                            
-                            new_content = "\n\n".join(chap_source)
-                            chap_translation = "\n\n".join(chap_trans)
-                            try:
-                                self._run_async(memory_manager.update_bilingual_summary(
-                                    self.llm_client,
-                                    new_content=new_content,
-                                    translation=chap_translation
-                                ))
-                            except Exception as e:
-                                logger.warning("Bilingual summary update failed: %s", e)
-
-                    self.db.update_chunk(job_id, idx, ChunkStatus.COMPLETED, translation)
-                    self.db.save_memory_state(job_id, memory_manager.to_dict())
-                
-                return idx, translation
-
-            # Submit remaining chunks
-            pending_indices = [i for i in range(total_chunks) if i not in translations]
-            
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                future_to_idx = {
-                    executor.submit(process_chunk_parallel, idx): idx for idx in pending_indices
-                }
-
-                completed_count = len(translations)
-                for future in as_completed(future_to_idx):
-                    idx = future_to_idx[future]
-                    try:
-                        _, trans = future.result()
-                        translations[idx] = trans
-                        completed_count += 1
-                        consecutive_errors = 0  # reset on success
+                    # Update shared memory and database safely under lock
+                    with lock:
+                        translations[idx] = translation
+                        memory_manager.update_after_translation(chunk, translation)
                         
-                        if progress_callback:
-                            pct = 0.10 + (completed_count / total_chunks) * 0.80
-                            progress_callback("Translation", pct, f"Translated chunk {completed_count}/{total_chunks}")
+                        if self.config.memory.enable_4layer:
+                            try:
+                                self._run_async(memory_manager.update_proper_nouns(self.llm_client, chunk.text))
+                            except Exception as e:
+                                logger.warning("Incremental proper noun extraction failed: %s", e)
+
+                            is_chapter_end = False
+                            if idx == total_chunks - 1:
+                                is_chapter_end = True
+                            else:
+                                next_chunk = chunks[idx + 1]
+                                if next_chunk.chapter_title != chunk.chapter_title:
+                                    is_chapter_end = True
+
+                            if is_chapter_end:
+                                chap_source = []
+                                chap_trans = []
+                                for i in range(idx + 1):
+                                    c = chunks[i]
+                                    if c.chapter_title == chunk.chapter_title:
+                                        chap_source.append(c.text)
+                                        chap_trans.append(translations.get(i, ""))
+                                
+                                new_content = "\n\n".join(chap_source)
+                                chap_translation = "\n\n".join(chap_trans)
+                                try:
+                                    self._run_async(memory_manager.update_bilingual_summary(
+                                        self.llm_client,
+                                        new_content=new_content,
+                                        translation=chap_translation
+                                    ))
+                                except Exception as e:
+                                    logger.warning("Bilingual summary update failed: %s", e)
+
+                        self.db.update_chunk(job_id, idx, ChunkStatus.COMPLETED, translation)
+                        self.db.save_memory_state(job_id, memory_manager.to_dict())
+                    
+                    return idx, translation
+
+                # Submit remaining chunks
+                pending_indices = [i for i in range(total_chunks) if i not in translations]
+                
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    future_to_idx = {
+                        executor.submit(process_chunk_parallel, idx): idx for idx in pending_indices
+                    }
+
+                    completed_count = len(translations)
+                    for future in as_completed(future_to_idx):
+                        idx = future_to_idx[future]
+                        try:
+                            _, trans = future.result()
+                            translations[idx] = trans
+                            completed_count += 1
+                            consecutive_errors = 0  # reset on success
+                            
+                            if progress_callback:
+                                pct = 0.10 + (completed_count / total_chunks) * 0.80
+                                progress_callback("Translation", pct, f"Translated chunk {completed_count}/{total_chunks}")
+                        except Exception as e:
+                            # Propagate cooperative pause exceptions out of parallel workers immediately
+                            if isinstance(e, PipelinePausedException) or (hasattr(e, "__cause__") and isinstance(e.__cause__, PipelinePausedException)):
+                                executor.shutdown(wait=False, cancel_futures=True)
+                                raise PipelinePausedException("Job paused cooperatively")
+                            
+                            logger.error("Failed to translate chunk %d: %s", idx, e)
+                            self.db.update_chunk(job_id, idx, ChunkStatus.ERROR)
+                            consecutive_errors += 1
+                            
+                            if consecutive_errors >= max_errors:
+                                # Pause and trigger error termination
+                                self.db.update_job_status(job_id, JobStatus.PAUSED_ERROR, str(e))
+                                self._send_webhook(
+                                    "tarjomeh.job.paused_error",
+                                    f"Pipeline paused after {consecutive_errors} consecutive failures: {e}",
+                                    JobStatus.PAUSED_ERROR,
+                                )
+                                # Cancel remaining tasks
+                                executor.shutdown(wait=False, cancel_futures=True)
+                                raise RuntimeError(
+                                    f"Pipeline terminated due to {consecutive_errors} consecutive failures. "
+                                    f"Last error: {e}"
+                                ) from e
+
+            else:
+                # Sequential Pass (Academic mode default)
+                for idx in range(total_chunks):
+                    if idx in translations:
+                        continue
+
+                    chunk = chunks[idx]
+                    if progress_callback:
+                        pct = 0.10 + (idx / total_chunks) * 0.80
+                        progress_callback("Translation", pct, f"Translating chunk {idx + 1}/{total_chunks}...")
+
+                    try:
+                        # Check pause and translate
+                        translation = self._translate_single_chunk(
+                            idx=idx,
+                            chunk=chunk,
+                            memory_manager=memory_manager,
+                            web_searcher=web_searcher,
+                            glossary_manager=glossary_manager,
+                            compliance_checker=compliance_checker,
+                            critique_tool=critique_tool,
+                            refiner_tool=refiner_tool,
+                            back_translator=back_translator,
+                            translations=translations,
+                            job_id=job_id,
+                        )
+
+                        # Successful translation updates
+                        translations[idx] = translation
+                        consecutive_errors = 0
+
+                        memory_manager.update_after_translation(chunk, translation)
+
+                        if self.config.memory.enable_4layer:
+                            try:
+                                self._run_async(memory_manager.update_proper_nouns(self.llm_client, chunk.text))
+                            except Exception as e:
+                                logger.warning("Incremental proper noun extraction failed: %s", e)
+
+                            is_chapter_end = False
+                            if idx == total_chunks - 1:
+                                is_chapter_end = True
+                            else:
+                                next_chunk = chunks[idx + 1]
+                                if next_chunk.chapter_title != chunk.chapter_title:
+                                    is_chapter_end = True
+
+                            if is_chapter_end:
+                                chap_source = []
+                                chap_trans = []
+                                for i in range(idx + 1):
+                                    c = chunks[i]
+                                    if c.chapter_title == chunk.chapter_title:
+                                        chap_source.append(c.text)
+                                        chap_trans.append(translations.get(i, ""))
+                                
+                                new_content = "\n\n".join(chap_source)
+                                chap_translation = "\n\n".join(chap_trans)
+                                try:
+                                    self._run_async(memory_manager.update_bilingual_summary(
+                                        self.llm_client,
+                                        new_content=new_content,
+                                        translation=chap_translation
+                                    ))
+                                except Exception as e:
+                                    logger.warning("Bilingual summary update failed: %s", e)
+
+                        self.db.update_chunk(job_id, idx, ChunkStatus.COMPLETED, translation)
+                        self.db.save_memory_state(job_id, memory_manager.to_dict())
+
+                    except PipelinePausedException as e:
+                        raise e
                     except Exception as e:
                         logger.error("Failed to translate chunk %d: %s", idx, e)
                         self.db.update_chunk(job_id, idx, ChunkStatus.ERROR)
                         consecutive_errors += 1
-                        
+
                         if consecutive_errors >= max_errors:
-                            # Pause and trigger error termination
                             self.db.update_job_status(job_id, JobStatus.PAUSED_ERROR, str(e))
                             self._send_webhook(
                                 "tarjomeh.job.paused_error",
                                 f"Pipeline paused after {consecutive_errors} consecutive failures: {e}",
                                 JobStatus.PAUSED_ERROR,
                             )
-                            # Cancel remaining tasks
-                            executor.shutdown(wait=False, cancel_futures=True)
                             raise RuntimeError(
                                 f"Pipeline terminated due to {consecutive_errors} consecutive failures. "
                                 f"Last error: {e}"
                             ) from e
-
-        else:
-            # Sequential Pass (Academic mode default)
-            for idx in range(total_chunks):
-                if idx in translations:
-                    continue
-
-                chunk = chunks[idx]
-                if progress_callback:
-                    pct = 0.10 + (idx / total_chunks) * 0.80
-                    progress_callback("Translation", pct, f"Translating chunk {idx + 1}/{total_chunks}...")
-
-                try:
-                    # 4-Layer memory retrieval
-                    mem_context = memory_manager.get_context_for_chunk(chunk)
-
-                    # Web context (Aphra-style)
-                    web_context_str = ""
-                    if self.config.translation.enable_web_context:
-                        web_context_str = self._run_async(web_searcher.get_context_for_chunk(chunk, mem_context.format()))
-
-                    # Prep prompts
-                    prev_trans = translations.get(idx - 1, "")
-                    matched_entries = glossary_manager.find_terms(chunk.text)
-                    glossary_terms_str = "\n".join(f"- {e.source} -> {e.target}" for e in matched_entries)
-
-                    sys_prompt = TRANSLATE_SYSTEM_PROMPT.format(
-                        domain=self.config.translation.domain,
-                        style_register=self.config.translation.style_register,
-                        country=self.config.translation.country,
-                    )
-                    user_content = TRANSLATE_CHUNK_PROMPT.format(
-                        glossary_terms=glossary_terms_str,
-                        memory_context=mem_context.format(),
-                        web_context=web_context_str,
-                        previous_translation=prev_trans,
-                        source_text=chunk.text,
-                    )
-
-                    # Translate
-                    self.db.update_chunk(job_id, idx, ChunkStatus.TRANSLATING)
-                    translation = self.llm_client.complete(
-                        messages=[{"role": "user", "content": user_content}],
-                        system_prompt=sys_prompt
-                    )
-
-                    # Critique and Refine
-                    if self.config.translation.enable_critique:
-                        for ref_iter in range(self.config.translation.max_refine_iterations + 1):
-                            critique_rep = self._run_async(critique_tool.critique(chunk.text, translation))
-                            if critique_rep.average >= 7.0 or ref_iter == self.config.translation.max_refine_iterations:
-                                break
-                            translation = self._run_async(refiner_tool.refine(chunk.text, translation, critique_rep))
-
-                    # Glossary Compliance
-                    if self.config.glossary.enable_compliance_check:
-                        report = compliance_checker.check(
-                            translation=translation,
-                            source_text=chunk.text,
-                            glossary_manager=glossary_manager,
-                            chunk_location=f"Chunk {idx}",
-                        )
-                        if not report.compliant:
-                            for v in report.violations:
-                                warn_msg = f"Glossary violation: Term '{v.term}' expected '{v.expected}'"
-                                logger.warning("%s in %s", warn_msg, v.chunk_location)
-                                self.warnings.append(f"{v.chunk_location}: {warn_msg}")
-
-                    # Back translation verification
-                    if self.config.translation.enable_back_translation:
-                        sample_interval = int(100 / self.config.translation.back_translation_sample_pct) if self.config.translation.back_translation_sample_pct > 0 else 0
-                        if sample_interval > 0 and idx % sample_interval == 0:
-                            back_translated = self._run_async(back_translator.back_translate(translation))
-                            back_translator.compare(chunk.text, back_translated)
-
-                    # Successful translation updates
-                    translations[idx] = translation
-                    consecutive_errors = 0
-
-                    memory_manager.update_after_translation(chunk, translation)
-
-                    if self.config.memory.enable_4layer:
-                        try:
-                            self._run_async(memory_manager.update_proper_nouns(self.llm_client, chunk.text))
-                        except Exception as e:
-                            logger.warning("Incremental proper noun extraction failed: %s", e)
-
-                        is_chapter_end = False
-                        if idx == total_chunks - 1:
-                            is_chapter_end = True
-                        else:
-                            next_chunk = chunks[idx + 1]
-                            if next_chunk.chapter_title != chunk.chapter_title:
-                                is_chapter_end = True
-
-                        if is_chapter_end:
-                            chap_source = []
-                            chap_trans = []
-                            for i in range(idx + 1):
-                                c = chunks[i]
-                                if c.chapter_title == chunk.chapter_title:
-                                    chap_source.append(c.text)
-                                    chap_trans.append(translations.get(i, ""))
-                            
-                            new_content = "\n\n".join(chap_source)
-                            chap_translation = "\n\n".join(chap_trans)
-                            try:
-                                self._run_async(memory_manager.update_bilingual_summary(
-                                    self.llm_client,
-                                    new_content=new_content,
-                                    translation=chap_translation
-                                ))
-                            except Exception as e:
-                                logger.warning("Bilingual summary update failed: %s", e)
-
-                    self.db.update_chunk(job_id, idx, ChunkStatus.COMPLETED, translation)
-                    self.db.save_memory_state(job_id, memory_manager.to_dict())
-
-                except Exception as e:
-                    logger.error("Failed to translate chunk %d: %s", idx, e)
-                    self.db.update_chunk(job_id, idx, ChunkStatus.ERROR)
-                    consecutive_errors += 1
-
-                    if consecutive_errors >= max_errors:
-                        self.db.update_job_status(job_id, JobStatus.PAUSED_ERROR, str(e))
-                        self._send_webhook(
-                            "tarjomeh.job.paused_error",
-                            f"Pipeline paused after {consecutive_errors} consecutive failures: {e}",
-                            JobStatus.PAUSED_ERROR,
-                        )
-                        raise RuntimeError(
-                            f"Pipeline terminated due to {consecutive_errors} consecutive failures. "
-                            f"Last error: {e}"
-                        ) from e
+        except PipelinePausedException:
+            logger.info("Pipeline paused cooperatively for job %s", job_id)
+            if progress_callback:
+                progress_callback("Paused", len(translations) / total_chunks, "Job paused cooperatively.")
+            duration = time.monotonic() - t0
+            return PipelineResult(output_path, len(translations), duration, warnings=["Job paused"])
 
         # 7. Assemble Document
         if progress_callback:
@@ -647,3 +574,154 @@ class TranslationPipeline:
             progress_callback("Complete", 1.0, f"Finished! Output at {output_path.name}")
 
         return PipelineResult(output_path, total_chunks, duration, warnings=self.warnings)
+
+    def _translate_single_chunk(
+        self,
+        idx: int,
+        chunk: Chunk,
+        memory_manager: MemoryManager,
+        web_searcher: WebContextSearcher,
+        glossary_manager: GlossaryManager,
+        compliance_checker: GlossaryComplianceChecker,
+        critique_tool: TranslationCritique,
+        refiner_tool: TranslationRefiner,
+        back_translator: BackTranslator,
+        translations: dict[int, str],
+        job_id: str,
+        lock: threading.Lock | None = None,
+    ) -> str:
+        # Cooperative pause check
+        job_record = self.db.get_job(job_id)
+        if job_record and job_record.get("status") == JobStatus.PAUSED:
+            logger.info("Pipeline paused cooperatively for job %s", job_id)
+            raise PipelinePausedException("Job paused cooperatively")
+
+        # 4-Layer memory retrieval
+        if lock:
+            with lock:
+                mem_context = memory_manager.get_context_for_chunk(chunk)
+        else:
+            mem_context = memory_manager.get_context_for_chunk(chunk)
+
+        # Web context (Aphra-style)
+        web_context_str = ""
+        if self.config.translation.enable_web_context:
+            web_context_str = self._run_async(web_searcher.get_context_for_chunk(chunk, mem_context.format()))
+
+        # Prep prompts
+        if lock:
+            with lock:
+                prev_trans = translations.get(idx - 1, "")
+        else:
+            prev_trans = translations.get(idx - 1, "")
+
+        matched_entries = glossary_manager.find_terms(chunk.text)
+        glossary_terms_str = "\n".join(f"- {e.source} -> {e.target}" for e in matched_entries)
+
+        style_register = self.config.translation.style_register
+        if style_register == "academic":
+            from tarjomeh.core.prompts import ACADEMIC_REGISTER_MODIFIER
+            style_register_value = f"{style_register}\n{ACADEMIC_REGISTER_MODIFIER}"
+        else:
+            style_register_value = style_register
+
+        sys_prompt = TRANSLATE_SYSTEM_PROMPT.format(
+            domain=self.config.translation.domain,
+            style_register=style_register_value,
+            country=self.config.translation.country,
+        )
+        user_content = TRANSLATE_CHUNK_PROMPT.format(
+            glossary_terms=glossary_terms_str,
+            memory_context=mem_context.format(),
+            web_context=web_context_str,
+            previous_translation=prev_trans,
+            source_text=chunk.text,
+        )
+
+        # Translate
+        self.db.update_chunk(job_id, idx, ChunkStatus.TRANSLATING)
+        translation = self.llm_client.complete(
+            messages=[{"role": "user", "content": user_content}],
+            system_prompt=sys_prompt
+        )
+        self.db.update_chunk(job_id, idx, ChunkStatus.TRANSLATED, translation)
+
+        # Critique and Refine
+        if self.config.translation.enable_critique:
+            for ref_iter in range(self.config.translation.max_refine_iterations + 1):
+                critique_rep = self._run_async(critique_tool.critique(chunk.text, translation))
+                self.db.update_chunk(job_id, idx, ChunkStatus.CRITIQUED)
+                threshold = getattr(self.config.translation, "critique_threshold", 7.0)
+                if critique_rep.passes_threshold(threshold) or ref_iter == self.config.translation.max_refine_iterations:
+                    break
+                translation = self._run_async(refiner_tool.refine(chunk.text, translation, critique_rep))
+                self.db.update_chunk(job_id, idx, ChunkStatus.REFINED, translation)
+
+        # Glossary Compliance
+        if self.config.glossary.enable_compliance_check:
+            report = compliance_checker.check(
+                translation=translation,
+                source_text=chunk.text,
+                glossary_manager=glossary_manager,
+                chunk_location=f"Chunk {idx}",
+            )
+            if not report.compliant:
+                enable_auto_correct = getattr(self.config.glossary, "enable_auto_correction", True)
+                if enable_auto_correct:
+                    attempts = 0
+                    max_attempts = 2
+                    while not report.compliant and attempts < max_attempts:
+                        attempts += 1
+                        violations_text = "\n".join(
+                            f"- English: {v.term} -> expected Persian: {v.expected} (status: {v.status})"
+                            for v in report.violations
+                        )
+                        correction_prompt = f"""\
+The following translation violated the glossary compliance checks.
+
+English Source:
+{chunk.text}
+
+Current Translation:
+{translation}
+
+Glossary violations found:
+{violations_text}
+
+Please re-translate the text, ensuring that you use the expected glossary terms exactly as prescribed.
+Output ONLY the corrected Persian translation.
+"""
+                        translation = self.llm_client.complete(
+                            messages=[{"role": "user", "content": correction_prompt}],
+                            system_prompt=sys_prompt
+                        )
+                        report = compliance_checker.check(
+                            translation=translation,
+                            source_text=chunk.text,
+                            glossary_manager=glossary_manager,
+                            chunk_location=f"Chunk {idx}",
+                        )
+
+                if not report.compliant:
+                    for v in report.violations:
+                        warn_msg = f"Glossary violation: Term '{v.term}' expected '{v.expected}'"
+                        logger.warning("%s in %s", warn_msg, v.chunk_location)
+                        if lock:
+                            with lock:
+                                self.warnings.append(f"{v.chunk_location}: {warn_msg}")
+                        else:
+                            self.warnings.append(f"{v.chunk_location}: {warn_msg}")
+
+        # Back translation verification
+        if self.config.translation.enable_back_translation:
+            if back_translator.should_sample():
+                back_translated = self._run_async(back_translator.back_translate(translation))
+                bt_result = back_translator.compare(chunk.text, back_translated)
+                if bt_result.flagged:
+                    self.db.log_event(
+                        job_id,
+                        "WARNING",
+                        f"Back-translation flagged for Chunk {idx} (Similarity: {bt_result.similarity_score:.2f}). Differences: {bt_result.differences}",
+                    )
+
+        return translation

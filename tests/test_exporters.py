@@ -170,16 +170,26 @@ class TestExporters(unittest.TestCase):
 
         try:
             if HAS_REPORTLAB and HAS_BIDI:
-                exporter.export(self.doc, temp_path, bilingual_mode="inline")
-                self.assertTrue(temp_path.exists())
-                self.assertTrue(temp_path.stat().st_size > 0)
+                reg = exporter._resolve_font_path("Vazirmatn-Regular.ttf")
+                bold = exporter._resolve_font_path("Vazirmatn-Bold.ttf")
+                if reg and reg.is_file() and bold and bold.is_file():
+                    exporter.export(self.doc, temp_path, bilingual_mode="inline")
+                    self.assertTrue(temp_path.exists())
+                    self.assertTrue(temp_path.stat().st_size > 0)
+                else:
+                    with self.assertRaises(FileNotFoundError):
+                        exporter.export(self.doc, temp_path, bilingual_mode="inline")
             else:
                 # If mocked, check mock interaction
-                from tarjomeh.exporters.pdf_exporter import SimpleDocTemplate as TargetTemplate
-                exporter.export(self.doc, temp_path, bilingual_mode="inline")
-                TargetTemplate.assert_called()
+                from unittest.mock import patch
+                import reportlab.platypus as TargetPlatypus
+                with patch.object(exporter, "_resolve_font_path", return_value=Path("dummy.ttf")), \
+                     patch("pathlib.Path.is_file", return_value=True):
+                    exporter.export(self.doc, temp_path, bilingual_mode="inline")
+                    TargetPlatypus.SimpleDocTemplate.assert_called()
         finally:
-            temp_path.unlink()
+            if temp_path.exists():
+                temp_path.unlink()
 
 
 if __name__ == "__main__":

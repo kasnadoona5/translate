@@ -45,18 +45,23 @@ class PdfExporter(BaseExporter):
         reg_path = self._resolve_font_path("Vazirmatn-Regular.ttf")
         bold_path = self._resolve_font_path("Vazirmatn-Bold.ttf")
 
-        has_vazirmatn = False
-        if reg_path and reg_path.is_file():
-            try:
-                pdfmetrics.registerFont(TTFont("Vazirmatn", str(reg_path)))
-                if bold_path and bold_path.is_file():
-                    pdfmetrics.registerFont(TTFont("Vazirmatn-Bold", str(bold_path)))
-                has_vazirmatn = True
-            except Exception as e:
-                logger.warning("Failed to register Vazirmatn font: %s", e)
+        if not reg_path or not reg_path.is_file() or not bold_path or not bold_path.is_file():
+            raise FileNotFoundError(
+                "Vazirmatn font files (Vazirmatn-Regular.ttf and Vazirmatn-Bold.ttf) are required to render Persian text in PDF. "
+                "Please place them in src/tarjomeh/persian/fonts/."
+            )
 
-        font_family = "Vazirmatn" if has_vazirmatn else "Helvetica"
-        bold_font_family = "Vazirmatn-Bold" if has_vazirmatn else "Helvetica-Bold"
+        try:
+            pdfmetrics.registerFont(TTFont("Vazirmatn", str(reg_path)))
+            pdfmetrics.registerFont(TTFont("Vazirmatn-Bold", str(bold_path)))
+        except Exception as e:
+            raise FileNotFoundError(
+                f"Failed to register Vazirmatn font: {e}. "
+                "Ensure that valid TrueType font files are placed in src/tarjomeh/persian/fonts/."
+            ) from e
+
+        font_family = "Vazirmatn"
+        bold_font_family = "Vazirmatn-Bold"
 
         # 2. Build Document styles
         styles = getSampleStyleSheet()
