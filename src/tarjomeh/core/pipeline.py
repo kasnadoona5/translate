@@ -251,7 +251,14 @@ class TranslationPipeline:
                     response_format={"type": "json_object"}
                 )
                 ner_data = json.loads(ner_response)
-                extracted_terms = ner_data.get("terms", []) or ner_data.get("extracted_terms", []) or []
+                # The model may return either a JSON object ({"terms": [...]})
+                # or a bare JSON array of term objects — handle both shapes.
+                if isinstance(ner_data, list):
+                    extracted_terms = ner_data
+                elif isinstance(ner_data, dict):
+                    extracted_terms = ner_data.get("terms", []) or ner_data.get("extracted_terms", []) or []
+                else:
+                    extracted_terms = []
                 for item in extracted_terms:
                     term = item.get("term")
                     persian = item.get("suggested_persian")

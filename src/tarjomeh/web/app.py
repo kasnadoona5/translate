@@ -6,6 +6,7 @@ Bound to 127.0.0.1 by default for VPS security (access via SSH tunnel).
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -149,13 +150,26 @@ def _register_api(app: Flask) -> None:
         saved_path = upload_dir / f"{job_id}{file_ext}"
         file.save(str(saved_path))
 
-        # Parse config overrides
-        config_overrides = {}
+        # Build config overrides from the individual UI form fields and/or a
+        # `config` JSON blob (for API callers). The web UI sends flat fields
+        # (mode/format/bilingual_mode); map them to dotted config keys so they
+        # actually reach the pipeline. Individual fields take precedence.
+        config_overrides: dict[str, Any] = {}
         if "config" in request.form:
             try:
-                config_overrides = json.loads(request.form["config"])
+                config_overrides.update(json.loads(request.form["config"]))
             except json.JSONDecodeError:
                 return jsonify({"error": "Invalid config JSON"}), 400
+
+        _form_field_map = {
+            "mode": "translation.mode",
+            "format": "output.format",
+            "bilingual_mode": "output.bilingual_mode",
+        }
+        for form_key, dotted_key in _form_field_map.items():
+            value = request.form.get(form_key)
+            if value:
+                config_overrides[dotted_key] = value
 
         # Create progress queue for SSE
         _progress_queues[job_id] = queue.Queue()
@@ -166,7 +180,10 @@ def _register_api(app: Flask) -> None:
                 from tarjomeh.core.config import TarjomehConfig
                 from tarjomeh.core.pipeline import TranslationPipeline
 
-                config = app.config.get("TARJOMEH_CONFIG") or TarjomehConfig()
+                base_config = app.config.get("TARJOMEH_CONFIG") or TarjomehConfig()
+                # Deep-copy so per-job overrides never mutate the shared global
+                # config (which would otherwise leak settings into later jobs).
+                config = copy.deepcopy(base_config)
                 if config_overrides:
                     config.update_from_overrides(config_overrides)
 
