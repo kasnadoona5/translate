@@ -29,6 +29,15 @@ class EmptyCompletionError(Exception):
     pass
 
 
+class TruncatedCompletionError(Exception):
+    """Raised when the completion was cut off at max_tokens (finish_reason='length')."""
+    pass
+
+
+# Hard ceiling for the automatic max_tokens escalation on truncated completions.
+_MAX_TOKENS_CEILING = 32000
+
+
 class LLMClient:
     """OpenAI-compatible client for communicating with OpenRouter or Ollama.
 
@@ -239,19 +248,37 @@ class LLMClient:
                 if not choices:
                     raise ValueError(f"Empty choices in response: {res_json}")
                 
+                finish_reason = choices[0].get("finish_reason")
                 content = choices[0].get("message", {}).get("content")
                 if not content or not content.strip():
                     raise EmptyCompletionError("LLM returned an empty or null translation completion.")
+
+                # Completion cut off at max_tokens (finish_reason == "length").
+                # Raise the budget and retry so we never persist a truncated
+                # translation. Note: for reasoning models, hidden reasoning
+                # tokens also count against max_tokens.
+                if finish_reason == "length":
+                    current_max = int(payload.get("max_tokens") or self.config.llm.max_tokens)
+                    if current_max < _MAX_TOKENS_CEILING:
+                        payload["max_tokens"] = min(current_max * 2, _MAX_TOKENS_CEILING)
+                        raise TruncatedCompletionError(
+                            f"Completion truncated at max_tokens={current_max}; "
+                            f"retrying with max_tokens={payload['max_tokens']}."
+                        )
+                    logger.warning(
+                        "Completion still truncated at max_tokens=%d (ceiling); "
+                        "returning partial translation.", current_max
+                    )
                 
                 return content
 
-            except (httpx.HTTPStatusError, httpx.RequestError, EmptyCompletionError) as exc:
+            except (httpx.HTTPStatusError, httpx.RequestError, EmptyCompletionError, TruncatedCompletionError) as exc:
                 status_code = getattr(exc.response, "status_code", None) if hasattr(exc, "response") else None
                 
                 # Check if we should retry
                 should_retry = (
                     attempt < max_retries and
-                    (isinstance(exc, EmptyCompletionError) or status_code is None or status_code in (429, 500, 502, 503, 504))
+                    (isinstance(exc, (EmptyCompletionError, TruncatedCompletionError)) or status_code is None or status_code in (429, 500, 502, 503, 504))
                 )
 
                 if should_retry:
@@ -317,19 +344,37 @@ class LLMClient:
                 if not choices:
                     raise ValueError(f"Empty choices in response: {res_json}")
                 
+                finish_reason = choices[0].get("finish_reason")
                 content = choices[0].get("message", {}).get("content")
                 if not content or not content.strip():
                     raise EmptyCompletionError("LLM returned an empty or null translation completion.")
+
+                # Completion cut off at max_tokens (finish_reason == "length").
+                # Raise the budget and retry so we never persist a truncated
+                # translation. Note: for reasoning models, hidden reasoning
+                # tokens also count against max_tokens.
+                if finish_reason == "length":
+                    current_max = int(payload.get("max_tokens") or self.config.llm.max_tokens)
+                    if current_max < _MAX_TOKENS_CEILING:
+                        payload["max_tokens"] = min(current_max * 2, _MAX_TOKENS_CEILING)
+                        raise TruncatedCompletionError(
+                            f"Completion truncated at max_tokens={current_max}; "
+                            f"retrying with max_tokens={payload['max_tokens']}."
+                        )
+                    logger.warning(
+                        "Completion still truncated at max_tokens=%d (ceiling); "
+                        "returning partial translation.", current_max
+                    )
                 
                 return content
 
-            except (httpx.HTTPStatusError, httpx.RequestError, EmptyCompletionError) as exc:
+            except (httpx.HTTPStatusError, httpx.RequestError, EmptyCompletionError, TruncatedCompletionError) as exc:
                 status_code = getattr(exc.response, "status_code", None) if hasattr(exc, "response") else None
                 
                 # Check if we should retry
                 should_retry = (
                     attempt < max_retries and
-                    (isinstance(exc, EmptyCompletionError) or status_code is None or status_code in (429, 500, 502, 503, 504))
+                    (isinstance(exc, (EmptyCompletionError, TruncatedCompletionError)) or status_code is None or status_code in (429, 500, 502, 503, 504))
                 )
 
                 if should_retry:

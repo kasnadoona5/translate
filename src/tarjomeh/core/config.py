@@ -109,7 +109,7 @@ class LLMConfig:
     provider: str = "openrouter"
     model: str = "anthropic/claude-sonnet-4-5-20250514"
     temperature: float = 0.3
-    max_tokens: int = 4096
+    max_tokens: int = 8192
     openrouter: LLMOpenRouterConfig = field(default_factory=LLMOpenRouterConfig)
     ollama: LLMOllamaConfig = field(default_factory=LLMOllamaConfig)
 
