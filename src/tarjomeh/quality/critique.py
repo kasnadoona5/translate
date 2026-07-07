@@ -103,6 +103,7 @@ class TranslationCritique:
         self,
         source_text: str,
         translation: str,
+        terminology: str = "",
     ) -> CritiqueResult:
         """Run a critique of *translation* against *source_text*.
 
@@ -112,6 +113,10 @@ class TranslationCritique:
             Original English paragraph / chunk.
         translation:
             Corresponding Persian translation.
+        terminology:
+            Mandatory glossary terms + established proper-noun renderings.
+            The critic judges the "terminology" dimension against this list
+            instead of guessing blind.
 
         Returns
         -------
@@ -121,6 +126,7 @@ class TranslationCritique:
         prompt = CRITIQUE_PROMPT.format(
             source_text=source_text,
             translation=translation,
+            terminology=terminology or "(no glossary terms apply to this chunk)",
         )
 
         raw = await self._llm.chat(prompt)
@@ -172,14 +178,29 @@ class TranslationCritique:
         raw_issues = data.get("issues", [])
         issues = []
         if isinstance(raw_issues, list):
+            # Preserve severity + source segment (the refiner is instructed to
+            # fix critical issues first) and sort critical → major → minor.
+            severity_rank = {"critical": 0, "major": 1, "minor": 2}
+            parsed: list[tuple[int, str]] = []
             for issue in raw_issues:
                 if isinstance(issue, dict):
+                    severity = str(issue.get("severity", "minor")).lower()
                     category = issue.get("category", "")
+                    segment = issue.get("source_segment", "")
+                    current = issue.get("current_translation", "")
                     fix = issue.get("suggested_fix", "")
                     explanation = issue.get("explanation", "")
-                    issues.append(f"[{category}] Suggestion: {fix} (Reason: {explanation})")
+                    text = f"[{severity.upper()}/{category}]"
+                    if segment:
+                        text += f' source: "{segment}"'
+                    if current:
+                        text += f' | current: "{current}"'
+                    text += f" | fix: {fix} (Reason: {explanation})"
+                    parsed.append((severity_rank.get(severity, 2), text))
                 else:
-                    issues.append(str(issue))
+                    parsed.append((2, str(issue)))
+            parsed.sort(key=lambda t: t[0])
+            issues = [text for _, text in parsed]
         else:
             issues = [str(raw_issues)]
 

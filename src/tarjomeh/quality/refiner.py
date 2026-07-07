@@ -58,6 +58,7 @@ class TranslationRefiner:
         source_text: str,
         translation: str,
         critique: CritiqueResult,
+        terminology: str = "",
     ) -> str:
         """Produce a refined translation based on critique feedback.
 
@@ -69,6 +70,10 @@ class TranslationRefiner:
             Current Persian translation to refine.
         critique:
             Structured critique result describing the quality issues.
+            (Issues arrive pre-sorted critical → major → minor.)
+        terminology:
+            Mandatory glossary terms + established proper-noun renderings so
+            refinement never drifts off-glossary while fixing other issues.
 
         Returns
         -------
@@ -83,12 +88,11 @@ class TranslationRefiner:
             )
             return translation
 
-        issues_text = "\n".join(f"- {issue}" for issue in critique.issues)
-
         prompt = REFINE_PROMPT.format(
             source_text=source_text,
             translation=translation,
-            critique=json.dumps(critique.to_dict(), indent=2),
+            critique=json.dumps(critique.to_dict(), indent=2, ensure_ascii=False),
+            terminology=terminology or "(no glossary terms apply to this chunk)",
         )
 
         refined: str = await self._llm.chat(prompt)

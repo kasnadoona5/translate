@@ -90,6 +90,9 @@ class MemoryManager:
         """Update synchronous memory layers with a new source-translation pair."""
         self.short_term.add(chunk.text, translation)
         self.long_term.add(chunk.text, translation)
+        # Any known proper noun occurring in this chunk has now had its first
+        # appearance — later chunks must not repeat the English parenthetical.
+        self.proper_nouns.mark_seen_in_text(chunk.text)
 
     async def update_proper_nouns(self, llm_client: Any, text: str) -> None:
         """Incrementally identify new proper nouns in the text and add them."""

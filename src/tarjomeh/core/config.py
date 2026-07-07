@@ -86,11 +86,16 @@ def _expand_env_recursive(obj: Any) -> Any:
 
 @dataclass
 class LLMOpenRouterConfig:
-    """OpenRouter-specific LLM settings."""
+    """OpenRouter-compatible endpoint settings (OpenRouter, 9router, …)."""
 
     api_keys: list[str] = field(default_factory=lambda: [])
     site_url: str = "https://tarjomeh.local"
     app_name: str = "Tarjomeh"
+    # Endpoint base URL. Resolution order:
+    #   this field  →  OPENROUTER_API_BASE env var  →  https://openrouter.ai/api/v1
+    # Point it at a gateway like 9router (e.g. "http://9router:20128/v1") to
+    # route requests through it.
+    api_base: str = ""
     exclude_reasoning: bool = True
 
 
@@ -103,6 +108,31 @@ class LLMOllamaConfig:
 
 
 @dataclass
+class LLMCriticConfig:
+    """Optional independent judge model for critique & back-translation QA.
+
+    Using a separate (ideally stronger) model to grade translations removes
+    the correlated blind spots of a model judging its own output. Active when
+    ``enabled`` is true OR a ``model`` is explicitly set. Unset fields inherit
+    from the main ``[llm]`` block.
+    """
+
+    enabled: bool = False
+    provider: str = ""      # "" → inherit llm.provider
+    model: str = ""         # "" → inherit llm.model (critic effectively disabled)
+    api_keys: list[str] = field(default_factory=list)  # [] → inherit openrouter keys
+    temperature: float = 0.0  # judges should be near-deterministic
+    # "" → inherit llm.openrouter.api_base. Set to route the judge through a
+    # DIFFERENT endpoint than the translator (e.g. translator via 9router,
+    # judge via OpenRouter directly: "https://openrouter.ai/api/v1").
+    api_base: str = ""
+
+    @property
+    def is_active(self) -> bool:
+        return self.enabled or bool(self.model.strip())
+
+
+@dataclass
 class LLMConfig:
     """LLM provider settings."""
 
@@ -112,6 +142,7 @@ class LLMConfig:
     max_tokens: int = 8192
     openrouter: LLMOpenRouterConfig = field(default_factory=LLMOpenRouterConfig)
     ollama: LLMOllamaConfig = field(default_factory=LLMOllamaConfig)
+    critic: LLMCriticConfig = field(default_factory=LLMCriticConfig)
 
 
 @dataclass
@@ -167,6 +198,10 @@ class PersianConfig:
     convert_numerals: bool = True
     normalize_zwnj: bool = True
     fix_punctuation: bool = True
+    # Shield scholarly apparatus (citations, years, page numbers, footnote
+    # markers) from numeral/punctuation conversion: (Marx 1973, 408) stays
+    # exactly as-is. Essential for academic books.
+    scholarly_mode: bool = True
     font_family: str = "Vazirmatn"
 
 
@@ -334,6 +369,7 @@ class TarjomehConfig:
         _populate_dataclass(config.llm, raw.get("llm", {}))
         _populate_dataclass(config.llm.openrouter, raw.get("llm", {}).get("openrouter", {}))
         _populate_dataclass(config.llm.ollama, raw.get("llm", {}).get("ollama", {}))
+        _populate_dataclass(config.llm.critic, raw.get("llm", {}).get("critic", {}))
         _populate_dataclass(config.translation, raw.get("translation", {}))
         _populate_dataclass(config.chunking, raw.get("chunking", {}))
         _populate_dataclass(config.glossary, raw.get("glossary", {}))
@@ -447,6 +483,13 @@ class TarjomehConfig:
         if self.llm.provider not in ("openrouter", "ollama"):
             errors.append(
                 f"llm.provider must be 'openrouter' or 'ollama', got '{self.llm.provider}'"
+            )
+
+        # Critic provider (when set) must be known
+        if self.llm.critic.provider and self.llm.critic.provider not in ("openrouter", "ollama"):
+            errors.append(
+                f"llm.critic.provider must be 'openrouter' or 'ollama', "
+                f"got '{self.llm.critic.provider}'"
             )
 
         # OpenRouter requires at least one API key

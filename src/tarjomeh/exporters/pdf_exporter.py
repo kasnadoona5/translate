@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from xml.sax.saxutils import escape
+
 from tarjomeh.exporters.base import BaseExporter, TranslatedDocument, BilingualMode
 
 logger = logging.getLogger(__name__)
@@ -11,7 +13,14 @@ logger = logging.getLogger(__name__)
 try:
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.platypus import (
+        SimpleDocTemplate,
+        Paragraph,
+        XPreformatted,
+        Spacer,
+        Table,
+        TableStyle,
+    )
     from reportlab.lib import colors
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
@@ -19,11 +28,23 @@ try:
 except ImportError:
     HAS_REPORTLAB = False
 
+# Page geometry (letter = 612x792pt, 54pt margins on each side)
+_PAGE_MARGIN = 54
+_FRAME_WIDTH = 612 - 2 * _PAGE_MARGIN          # 504pt printable width
+_SIDE_BY_SIDE_CELL_WIDTH = _FRAME_WIDTH / 2 - 12  # column minus cell padding
+
 
 class PdfExporter(BaseExporter):
     """PDF exporter.
 
     Generates publication-quality RTL PDFs using ReportLab.
+
+    RTL strategy (empirically verified): Persian text is wrapped to the
+    target width FIRST (``simpleSplit`` on the reshaped string), bidi
+    reordering is applied per line, and the pre-wrapped lines are rendered
+    with ``XPreformatted`` so ReportLab never re-wraps them. Applying
+    ``get_display`` to a whole paragraph before wrapping — the previous
+    approach — reverses the visual line order (text reads bottom-to-top).
     """
 
     def export(
@@ -117,20 +138,26 @@ class PdfExporter(BaseExporter):
             alignment=0  # Left
         )
 
+        def fa_flowable(text: str, style: ParagraphStyle, avail_width: float) -> XPreformatted:
+            """Build a display-ready RTL flowable (wrap-first, bidi-per-line)."""
+            shaped = self._shape_persian_lines(
+                text, style.fontName, style.fontSize, avail_width
+            )
+            return XPreformatted(shaped, style)
+
         # 3. Assemble document story flowables
         doc_template = SimpleDocTemplate(
             str(out),
             pagesize=letter,
-            rightMargin=54,
-            leftMargin=54,
-            topMargin=54,
-            bottomMargin=54
+            rightMargin=_PAGE_MARGIN,
+            leftMargin=_PAGE_MARGIN,
+            topMargin=_PAGE_MARGIN,
+            bottomMargin=_PAGE_MARGIN
         )
         story = []
 
-        # Renders the Document Title
-        shaped_title = self._shape_persian_text(document.title)
-        story.append(Paragraph(shaped_title, title_style))
+        # Renders the Document Title (may contain Persian or Latin text)
+        story.append(fa_flowable(document.title, title_style, _FRAME_WIDTH))
         story.append(Spacer(1, 10))
 
         if bilingual_mode == "side_by_side":
@@ -139,17 +166,14 @@ class PdfExporter(BaseExporter):
                 # Add left cell (English LTR) and right cell (Persian RTL)
                 style_en = heading_style_en if p.heading_level is not None else body_style_en
                 style_fa = heading_style_fa if p.heading_level is not None else body_style_fa
-                
-                # Shape Persian translation
-                shaped_text = self._shape_persian_text(p.translated_text)
-                
-                p_en = Paragraph(p.source_text, style_en)
-                p_fa = Paragraph(shaped_text, style_fa)
-                
+
+                p_en = Paragraph(escape(p.source_text), style_en)
+                p_fa = fa_flowable(p.translated_text, style_fa, _SIDE_BY_SIDE_CELL_WIDTH)
+
                 table_data.append([p_en, p_fa])
-            
+
             # Letter page printable width is 612 - 54 * 2 = 504 points
-            col_width = 504 / 2
+            col_width = _FRAME_WIDTH / 2
             table = Table(table_data, colWidths=[col_width, col_width])
             table.setStyle(TableStyle([
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -158,24 +182,22 @@ class PdfExporter(BaseExporter):
                 ('TOPPADDING', (0, 0), (-1, -1), 6),
             ]))
             story.append(table)
-            
+
         else:
             for p in document.paragraphs:
                 if bilingual_mode == "target_only":
                     style = heading_style_fa if p.heading_level is not None else body_style_fa
-                    shaped_text = self._shape_persian_text(p.translated_text)
-                    story.append(Paragraph(shaped_text, style))
+                    story.append(fa_flowable(p.translated_text, style, _FRAME_WIDTH))
                     story.append(Spacer(1, 10))
-                    
+
                 elif bilingual_mode == "inline":
                     # English paragraph (LTR)
                     style_en = heading_style_en if p.heading_level is not None else body_style_en
-                    story.append(Paragraph(p.source_text, style_en))
-                    
+                    story.append(Paragraph(escape(p.source_text), style_en))
+
                     # Persian paragraph (RTL)
                     style_fa = heading_style_fa if p.heading_level is not None else body_style_fa
-                    shaped_text = self._shape_persian_text(p.translated_text)
-                    story.append(Paragraph(shaped_text, style_fa))
+                    story.append(fa_flowable(p.translated_text, style_fa, _FRAME_WIDTH))
                     story.append(Spacer(1, 12))
 
         doc_template.build(story)

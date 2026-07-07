@@ -34,6 +34,30 @@ _PUNCT_MAP: dict[str, str] = {
 # Note: period '.' is intentionally *not* mapped — the spec says
 # ". to ." (i.e. period stays period in Persian too).
 
+# ── Scholarly apparatus protection ───────────────────────────────────
+# Spans matched here are shielded from numeral AND punctuation conversion
+# so citations survive intact: (Marx 1973, 408) must NOT become
+# (مارکس ۱۹۷۳، ۴۰۸). Protected patterns:
+#   1. Parenthesised runs containing digits but NO Persian/Arabic letters
+#      (in-text citations: "(1973, 408)", "(Marx 1867, 92)", "(cf. 2014)")
+#   2. Bracketed markers: "[12]", "[see 3-5]"
+#   3. Page/volume references: "p. 45", "pp. 12–34", "vol. 3", "no. 7"
+#   4. Standalone Gregorian years 1500–2099 (incl. "1973a" style)
+_SCHOLARLY_PROTECTED_RE = re.compile(
+    r"\([^)؀-ۿ]*[0-9][^)؀-ۿ]*\)"
+    r"|\[[^\]]*?[0-9][^\]]*?\]"
+    r"|\b(?:pp?|vols?|nos?|chs?|fols?)\.\s*[0-9]+(?:\s*[-–—,]\s*[0-9]+)*"
+    r"|\b(?:1[5-9][0-9]{2}|20[0-9]{2})[a-z]?\b",
+    re.IGNORECASE,
+)
+
+# Digit-free Private-Use-Area sentinels: survive hazm normalisation and are
+# untouched by numeral/punctuation conversion.
+_SENTINEL_OPEN = ""
+_SENTINEL_CLOSE = ""
+_SENTINEL_BASE = 0xE100
+_SENTINEL_RE = re.compile(f"{_SENTINEL_OPEN}(.){_SENTINEL_CLOSE}")
+
 
 class PersianTypographer:
     """Applies configurable Persian typography post-processing.
@@ -57,6 +81,10 @@ class PersianTypographer:
         self._convert_numerals: bool = cfg.get("convert_numerals", True)
         self._normalize_zwnj: bool = cfg.get("normalize_zwnj", True)
         self._fix_punctuation: bool = cfg.get("fix_punctuation", True)
+        # Scholarly mode shields citations, years, page numbers, and footnote
+        # markers from numeral/punctuation conversion (default ON — required
+        # for academic books; set false for non-scholarly texts).
+        self._scholarly_mode: bool = cfg.get("scholarly_mode", True)
 
         # Lazy-init hazm normalizer on first use (avoids import cost
         # when hazm isn't available or the step is disabled).
@@ -100,6 +128,12 @@ class PersianTypographer:
         if not text:
             return text
 
+        # Shield scholarly apparatus BEFORE any transformation (hazm itself
+        # may also touch digits), restore afterwards.
+        protected_spans: list[str] = []
+        if self._scholarly_mode:
+            text = self._protect_scholarly(text, protected_spans)
+
         if self._normalize_zwnj:
             text = self.normalize_zwnj(text)
         if self._convert_numerals:
@@ -107,7 +141,34 @@ class PersianTypographer:
         if self._fix_punctuation:
             text = self.fix_punctuation(text)
 
+        if protected_spans:
+            text = self._restore_scholarly(text, protected_spans)
+
         return text
+
+    # ── scholarly apparatus protection ───────────────────────────────
+
+    @staticmethod
+    def _protect_scholarly(text: str, spans: list[str]) -> str:
+        """Replace scholarly-apparatus spans with digit-free PUA sentinels."""
+
+        def _stash(match: re.Match[str]) -> str:
+            spans.append(match.group(0))
+            return f"{_SENTINEL_OPEN}{chr(_SENTINEL_BASE + len(spans) - 1)}{_SENTINEL_CLOSE}"
+
+        return _SCHOLARLY_PROTECTED_RE.sub(_stash, text)
+
+    @staticmethod
+    def _restore_scholarly(text: str, spans: list[str]) -> str:
+        """Restore original spans stashed by :meth:`_protect_scholarly`."""
+
+        def _unstash(match: re.Match[str]) -> str:
+            index = ord(match.group(1)) - _SENTINEL_BASE
+            if 0 <= index < len(spans):
+                return spans[index]
+            return match.group(0)
+
+        return _SENTINEL_RE.sub(_unstash, text)
 
     # ── individual steps (also usable standalone) ────────────────────
 

@@ -130,7 +130,21 @@ class TestPersianTypography(unittest.TestCase):
         })
 
     def test_numeral_conversion(self) -> None:
-        self.assertEqual(self.typographer.process("Year 2026"), "Year ۲۰۲۶")
+        # Prose numbers convert to Persian digits...
+        self.assertEqual(self.typographer.process("Chapter 3"), "Chapter ۳")
+        # ...but scholarly mode (default ON) protects years and citations.
+        self.assertEqual(self.typographer.process("Year 2026"), "Year 2026")
+        self.assertIn("(Marx 1973, 408)", self.typographer.process("او (Marx 1973, 408) گفت"))
+
+    def test_numeral_conversion_scholarly_off(self) -> None:
+        typographer = PersianTypographer(config={
+            "convert_numerals": True,
+            "normalize_zwnj": False,
+            "fix_punctuation": False,
+            "scholarly_mode": False,
+        })
+        # With scholarly protection disabled, everything converts.
+        self.assertEqual(typographer.process("Year 2026"), "Year ۲۰۲۶")
 
     def test_punctuation_fixing(self) -> None:
         self.assertEqual(self.typographer.process("سلام; چطورید؟"), "سلام؛ چطورید؟")
@@ -214,8 +228,16 @@ class TestCritiqueScores(unittest.TestCase):
           "issues": [
             {
               "category": "accuracy",
+              "severity": "minor",
               "suggested_fix": "تغییر",
               "explanation": "Wrong meaning"
+            },
+            {
+              "category": "terminology",
+              "severity": "critical",
+              "source_segment": "the state",
+              "suggested_fix": "دولت",
+              "explanation": "Glossary violation"
             }
           ]
         }
@@ -226,8 +248,13 @@ class TestCritiqueScores(unittest.TestCase):
         self.assertEqual(result.terminology, 8)
         self.assertEqual(result.register, 7)
         self.assertEqual(result.average, 7.0)
-        self.assertEqual(len(result.issues), 1)
-        self.assertIn("[accuracy] Suggestion: تغییر", result.issues[0])
+        self.assertEqual(len(result.issues), 2)
+        # Issues are sorted critical -> major -> minor, preserving severity
+        # and source segment for the refiner.
+        self.assertIn("[CRITICAL/terminology]", result.issues[0])
+        self.assertIn('source: "the state"', result.issues[0])
+        self.assertIn("[MINOR/accuracy]", result.issues[1])
+        self.assertIn("fix: تغییر", result.issues[1])
         self.assertFalse(result.passes_threshold(7.5))
 
 

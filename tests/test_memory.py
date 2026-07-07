@@ -29,15 +29,29 @@ class TestProperNouns(unittest.TestCase):
         self.assertIn("- Capital -> سرمایه", context)
         self.assertIn("- State -> دولت", context)
 
-        # Test Serialization
+        # Test Serialization (v2 shape: nouns + introduced-tracking)
         serialized = pn.serialize()
-        self.assertEqual(serialized["State"], "دولت")
+        self.assertEqual(serialized["nouns"]["State"], "دولت")
+        self.assertEqual(serialized["introduced"], [])
 
         # Test Deserialization
         pn2 = ProperNouns()
         pn2.deserialize(serialized)
         self.assertEqual(len(pn2), 2)
-        self.assertEqual(pn2.serialize()["Capital"], "سرمایه")
+        self.assertEqual(pn2.serialize()["nouns"]["Capital"], "سرمایه")
+
+        # Legacy (flat-dict) checkpoints still deserialize
+        pn3 = ProperNouns()
+        pn3.deserialize({"State": "دولت"})
+        self.assertEqual(len(pn3), 1)
+
+        # First-occurrence tracking: seen nouns flip to [introduced]
+        pn.mark_seen_in_text("The State exists.")
+        self.assertTrue(pn.is_introduced("State"))
+        self.assertFalse(pn.is_introduced("Capital"))
+        ctx = pn.get_context()
+        self.assertIn("- State -> دولت  [introduced]", ctx)
+        self.assertIn("first occurrence pending", ctx)
 
 
 class TestBilingualSummary(unittest.TestCase):
@@ -138,7 +152,9 @@ class TestMemoryManager(unittest.IsolatedAsyncioTestCase):
         # 1. Test update_proper_nouns
         mock_llm.chat.return_value = '[{"term": "Hegemony", "suggested_persian": "هژمونی"}]'
         await self.manager.update_proper_nouns(mock_llm, "English text discussing Hegemony")
-        self.assertEqual(self.manager.proper_nouns.serialize().get("Hegemony"), "هژمونی")
+        self.assertEqual(
+            self.manager.proper_nouns.serialize()["nouns"].get("Hegemony"), "هژمونی"
+        )
 
         # 2. Test update_bilingual_summary
         mock_llm.chat.return_value = (

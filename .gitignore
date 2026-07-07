@@ -42,9 +42,9 @@ htmlcov/
 *.tmp
 *.bak
 
-# Font cache (downloaded at runtime)
-src/tarjomeh/persian/fonts/*.ttf
-!src/tarjomeh/persian/fonts/.gitkeep
+# Vazirmatn fonts are BUNDLED (committed) so Docker/VPS builds never depend on
+# a runtime GitHub download. Do not re-ignore *.ttf here — a missing font breaks
+# PDF export (see PdfExporter font registration).
 
 # Scratch files / debug scripts
 check_compose_mounts.py

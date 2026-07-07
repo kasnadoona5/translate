@@ -7,6 +7,7 @@ web search, translation, critique/refinement, and final output exporting.
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
 import threading
@@ -35,6 +36,7 @@ from tarjomeh.core.prompts import (
     TRANSLATE_SYSTEM_PROMPT,
     TRANSLATE_CHUNK_PROMPT,
     GLOSSARY_EXTRACT_PROMPT,
+    ACADEMIC_EXEMPLARS,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,6 +45,74 @@ logger = logging.getLogger(__name__)
 class PipelinePausedException(Exception):
     """Raised when the translation pipeline is cooperatively paused."""
     pass
+
+
+# ---------------------------------------------------------------------------
+# Paragraph redistribution helpers (intra-chunk alignment)
+# ---------------------------------------------------------------------------
+
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?؟…])\s+")
+
+
+def _split_sentences_fa(text: str) -> list[str]:
+    """Split Persian/mixed text into sentences on ., !, ?, ؟ and … boundaries."""
+    parts = _SENTENCE_SPLIT_RE.split(text.strip())
+    return [p for p in parts if p.strip()]
+
+
+def _distribute_translation(translation: str, n_parts: int, src_weights: list[int]) -> list[str]:
+    """Distribute a translation blob across *n_parts* paragraphs proportionally.
+
+    Used when the LLM returns a different number of ``\\n\\n`` paragraphs than
+    the source chunk had. Instead of dumping everything into the first
+    paragraph and blanking the rest (which visibly breaks bilingual layouts),
+    sentences are packed into parts whose target sizes are proportional to the
+    source paragraphs' lengths. No content is ever dropped: the final part
+    always receives the remaining sentences.
+    """
+    translation = translation.strip()
+    if n_parts <= 1:
+        return [translation]
+
+    sentences = _split_sentences_fa(translation)
+    if len(sentences) <= 1:
+        # A single unsplittable run of text — nothing to distribute.
+        return [translation] + [""] * (n_parts - 1)
+
+    if len(src_weights) != n_parts or sum(src_weights) <= 0:
+        src_weights = [1] * n_parts
+
+    total_weight = sum(src_weights)
+    total_len = sum(len(s) for s in sentences)
+
+    parts: list[str] = []
+    si = 0
+    for pi in range(n_parts):
+        remaining_parts = n_parts - pi
+        remaining = sentences[si:]
+        if not remaining:
+            parts.append("")
+            continue
+        if remaining_parts == 1:
+            # Last part takes everything left — guarantees no content loss.
+            parts.append(" ".join(remaining))
+            si = len(sentences)
+            continue
+
+        target_len = total_len * src_weights[pi] / total_weight
+        # Leave at least one sentence for each remaining part when possible.
+        max_take = max(1, len(remaining) - (remaining_parts - 1))
+        taken: list[str] = []
+        taken_len = 0
+        for s in remaining[:max_take]:
+            if taken and taken_len >= target_len:
+                break
+            taken.append(s)
+            taken_len += len(s)
+        parts.append(" ".join(taken))
+        si += len(taken)
+
+    return parts
 
 
 class PipelineResult:
@@ -69,8 +139,47 @@ class TranslationPipeline:
     def __init__(self, config: TarjomehConfig) -> None:
         self.config = config
         self.llm_client = LLMClient(config)
+        self.critic_client = self._build_critic_client(config)
         self.db = JobDatabase()
         self.current_job_id: str | None = None
+
+    def _build_critic_client(self, config: TarjomehConfig) -> LLMClient:
+        """Build the judge client for critique / back-translation QA.
+
+        When ``[llm.critic]`` is active, a second :class:`LLMClient` is
+        constructed against the critic model so translations are graded by an
+        independent (ideally stronger) judge instead of the model scoring its
+        own output. Unset critic fields inherit from the main ``[llm]`` block.
+        Falls back to the translator client when the critic is not configured.
+        """
+        critic = getattr(config.llm, "critic", None)
+        if critic is None or not critic.is_active:
+            return self.llm_client
+
+        import copy
+        critic_config = copy.deepcopy(config)
+        if critic.provider:
+            critic_config.llm.provider = critic.provider
+        if critic.model:
+            critic_config.llm.model = critic.model
+            # Ollama reads its model name from llm.ollama.model
+            critic_config.llm.ollama.model = critic.model
+        if any(k.strip() for k in critic.api_keys):
+            critic_config.llm.openrouter.api_keys = list(critic.api_keys)
+        if critic.api_base.strip():
+            # Judge can use a different endpoint than the translator
+            # (e.g. translator via 9router, judge via OpenRouter directly).
+            critic_config.llm.openrouter.api_base = critic.api_base.strip()
+        critic_config.llm.temperature = critic.temperature
+
+        logger.info(
+            "Critic model active: %s via %s (translator: %s)",
+            critic_config.llm.model if critic_config.llm.provider == "openrouter"
+            else critic_config.llm.ollama.model,
+            critic_config.llm.provider,
+            config.llm.model,
+        )
+        return LLMClient(critic_config)
 
     def _get_parser(self, file_path: Path) -> BaseParser:
         """Resolve and instantiate the correct parser for the file extension."""
@@ -282,9 +391,11 @@ class TranslationPipeline:
 
         web_searcher = WebContextSearcher(self.config, self.llm_client)
         compliance_checker = GlossaryComplianceChecker()
-        critique_tool = TranslationCritique(llm_client=self.llm_client)
+        # Critique and back-translation QA run on the independent judge model
+        # (critic_client); translation and refinement stay on the translator.
+        critique_tool = TranslationCritique(llm_client=self.critic_client)
         refiner_tool = TranslationRefiner(llm_client=self.llm_client, max_iterations=self.config.translation.max_refine_iterations)
-        back_translator = BackTranslator(llm_client=self.llm_client, sample_pct=self.config.translation.back_translation_sample_pct)
+        back_translator = BackTranslator(llm_client=self.critic_client, sample_pct=self.config.translation.back_translation_sample_pct)
 
         try:
             # Separate execution paths based on workers
@@ -517,22 +628,43 @@ class TranslationPipeline:
                 if len(para_indices) == len(tgt_paras):
                     aligned = list(zip(para_indices, tgt_paras))
                 else:
-                    # On mismatch, assign the whole translation blob to the first paragraph
-                    # to prevent any content loss, and blank the rest.
-                    aligned = [(para_indices[0], chunk_translation)]
-                    for pid in para_indices[1:]:
-                        aligned.append((pid, ""))
-                
+                    # Paragraph-count mismatch: redistribute the translation
+                    # across this chunk's paragraphs proportionally to the
+                    # source paragraph lengths. Never dump-into-first-and-blank
+                    # (that visibly breaks inline/side-by-side bilingual output)
+                    # and never drop content.
+                    src_paras_chunk = [p.strip() for p in chunk.text.split("\n\n") if p.strip()]
+                    weights = [len(s) for s in src_paras_chunk]
+                    parts = _distribute_translation(chunk_translation, len(para_indices), weights)
+                    aligned = list(zip(para_indices, parts))
+                    logger.warning(
+                        "Chunk %d: translation has %d paragraph(s) but source has %d; "
+                        "redistributed proportionally across source paragraphs.",
+                        idx, len(tgt_paras), len(para_indices),
+                    )
+
                 for pid, t in aligned:
                     if pid < len(original_paragraphs):
                         orig_para = original_paragraphs[pid]
-                        translated_paragraphs[pid] = TranslatedParagraph(
-                            index=pid,
-                            source_text=orig_para.text,
-                            translated_text=t,
-                            heading_level=orig_para.heading_level,
-                            metadata=orig_para.metadata,
-                        )
+                        existing = translated_paragraphs[pid]
+                        if existing is None:
+                            translated_paragraphs[pid] = TranslatedParagraph(
+                                index=pid,
+                                source_text=orig_para.text,
+                                translated_text=t,
+                                heading_level=orig_para.heading_level,
+                                metadata=orig_para.metadata,
+                            )
+                        elif t:
+                            # Same paragraph index seen again (e.g. FixedChunker
+                            # split one long paragraph into several sub-chunks):
+                            # APPEND rather than overwrite so no sub-chunk
+                            # translation is lost.
+                            existing.translated_text = (
+                                f"{existing.translated_text.rstrip()} {t}".strip()
+                                if existing.translated_text.strip()
+                                else t
+                            )
             else:
                 # Fallback to sequential mapping
                 src_paras = [p.strip() for p in chunk.text.split("\n\n") if p.strip()]
@@ -660,27 +792,45 @@ class TranslationPipeline:
             prev_trans = translations.get(idx - 1, "")
 
         matched_entries = glossary_manager.find_terms(chunk.text)
-        glossary_terms_str = "\n".join(f"- {e.source} -> {e.target}" for e in matched_entries)
+        # Context-aware glossary table: includes each term's Context column
+        # (author-specific sense, e.g. Marx's vs Bourdieu's "capital").
+        glossary_terms_str = glossary_manager.format_for_prompt(matched_entries) \
+            or "(no glossary terms matched in this chunk)"
 
         style_register = self.config.translation.style_register
         if style_register == "academic":
             from tarjomeh.core.prompts import ACADEMIC_REGISTER_MODIFIER
             style_register_value = f"{style_register}\n{ACADEMIC_REGISTER_MODIFIER}"
+            exemplars = ACADEMIC_EXEMPLARS
         else:
             style_register_value = style_register
+            exemplars = ""
 
         sys_prompt = TRANSLATE_SYSTEM_PROMPT.format(
             domain=self.config.translation.domain,
             style_register=style_register_value,
             country=self.config.translation.country,
         )
+        n_source_paras = len(chunk.metadata.get("paragraph_indices", [])) or \
+            len([p for p in chunk.text.split("\n\n") if p.strip()])
         user_content = TRANSLATE_CHUNK_PROMPT.format(
+            exemplars=exemplars,
             glossary_terms=glossary_terms_str,
             memory_context=mem_context.format(),
             web_context=web_context_str,
             previous_translation=prev_trans,
             source_text=chunk.text,
+            paragraph_count=n_source_paras,
         )
+
+        # Terminology context for the judge & refiner: matched glossary terms
+        # plus the established proper-noun renderings, so the "terminology"
+        # dimension is scored against the actual mandate instead of blind.
+        terminology_ctx = glossary_terms_str
+        if mem_context.proper_nouns:
+            terminology_ctx += (
+                "\n\n### Established proper-noun renderings\n" + mem_context.proper_nouns
+            )
 
         # Translate
         self.db.update_chunk(job_id, idx, ChunkStatus.TRANSLATING)
@@ -692,15 +842,19 @@ class TranslationPipeline:
             raise ValueError(f"LLM returned an empty or whitespace-only translation for chunk {idx}.")
         self.db.update_chunk(job_id, idx, ChunkStatus.TRANSLATED, translation)
 
-        # Critique and Refine
+        # Critique and Refine (judge scores against the terminology mandate)
         if self.config.translation.enable_critique:
             for ref_iter in range(self.config.translation.max_refine_iterations + 1):
-                critique_rep = self._run_async(critique_tool.critique(chunk.text, translation))
+                critique_rep = self._run_async(
+                    critique_tool.critique(chunk.text, translation, terminology=terminology_ctx)
+                )
                 self.db.update_chunk(job_id, idx, ChunkStatus.CRITIQUED)
                 threshold = getattr(self.config.translation, "critique_threshold", 7.0)
                 if critique_rep.passes_threshold(threshold) or ref_iter == self.config.translation.max_refine_iterations:
                     break
-                translation = self._run_async(refiner_tool.refine(chunk.text, translation, critique_rep))
+                translation = self._run_async(
+                    refiner_tool.refine(chunk.text, translation, critique_rep, terminology=terminology_ctx)
+                )
                 self.db.update_chunk(job_id, idx, ChunkStatus.REFINED, translation)
 
         # Glossary Compliance

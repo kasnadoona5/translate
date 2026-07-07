@@ -205,12 +205,16 @@ class GlossaryManager:
         lines = [
             "## Glossary — Use these exact translations",
             "",
-            "| English | Persian (فارسی) | Domain |",
-            "|---------|----------------|--------|",
+            "| English | Persian (فارسی) | Context | Domain |",
+            "|---------|----------------|---------|--------|",
         ]
         for e in entries:
+            # Context carries the author-specific sense (e.g. "Gramsci's concept
+            # of cultural dominance") — essential for disambiguating terms like
+            # "capital" (Marx) vs "capital" (Bourdieu).
+            context_str = e.context or "—"
             domain_str = e.domain or "—"
-            lines.append(f"| {e.source} | {e.target} | {domain_str} |")
+            lines.append(f"| {e.source} | {e.target} | {context_str} | {domain_str} |")
         lines.append("")
         return "\n".join(lines)
 

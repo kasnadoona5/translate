@@ -45,10 +45,12 @@ class TestWebUI(unittest.TestCase):
         response = self.client.get("/api/jobs", headers=headers)
         self.assertEqual(response.status_code, 200)
 
-    @patch("tarjomeh.web.app.JobDatabase")
+    @patch("tarjomeh.jobs.database.JobDatabase")
     def test_get_jobs_api(self, mock_db_cls: MagicMock) -> None:
+        # The route imports JobDatabase lazily from tarjomeh.jobs.database and
+        # calls list_jobs(); it returns {"jobs": [...]}.
         mock_db = mock_db_cls.return_value
-        mock_db.get_jobs.return_value = [
+        mock_db.list_jobs.return_value = [
             {
                 "id": "job-123",
                 "filename": "book.pdf",
@@ -61,32 +63,32 @@ class TestWebUI(unittest.TestCase):
         headers = {"Authorization": "Bearer test-token"}
         response = self.client.get("/api/jobs", headers=headers)
         self.assertEqual(response.status_code, 200)
-        
+
         data = json.loads(response.get_data(as_text=True))
-        self.assertEqual(len(data), 1)
-        self.assertEqual(data[0]["id"], "job-123")
+        self.assertIn("jobs", data)
+        self.assertEqual(len(data["jobs"]), 1)
+        self.assertEqual(data["jobs"][0]["id"], "job-123")
 
-    @patch("tarjomeh.web.app.JobDatabase")
     @patch("tarjomeh.web.app._executor.submit")
-    def test_translate_api_upload(self, mock_submit: MagicMock, mock_db_cls: MagicMock) -> None:
-        mock_db = mock_db_cls.return_value
-        mock_db.create_job.return_value = "job-456"
-
+    def test_translate_api_upload(self, mock_submit: MagicMock) -> None:
+        # The route returns 202 Accepted with a server-generated job_id and
+        # a stream URL, then runs the job in the background executor.
         headers = {"Authorization": "Bearer test-token"}
-        
-        # Mock file upload
+
         data = {
             "file": (open("pyproject.toml", "rb"), "book.pdf"),
             "mode": "fast",
             "format": "txt",
             "bilingual_mode": "target_only"
         }
-        
+
         response = self.client.post("/api/translate", data=data, headers=headers)
-        self.assertEqual(response.status_code, 200)
-        
+        self.assertEqual(response.status_code, 202)
+
         resp_data = json.loads(response.get_data(as_text=True))
-        self.assertEqual(resp_data["job_id"], "job-456")
+        self.assertEqual(resp_data["status"], "submitted")
+        self.assertTrue(resp_data["job_id"])
+        self.assertIn("stream_url", resp_data)
         mock_submit.assert_called_once()
 
 

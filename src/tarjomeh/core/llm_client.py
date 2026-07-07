@@ -141,7 +141,11 @@ class LLMClient:
             final_messages.insert(0, {"role": "system", "content": system_prompt})
 
         if provider == "openrouter":
-            api_base = os.getenv("OPENROUTER_API_BASE", "https://openrouter.ai/api/v1").rstrip("/")
+            # Resolution order: config api_base → env var → OpenRouter default.
+            api_base = (
+                getattr(self.config.llm.openrouter, "api_base", "")
+                or os.getenv("OPENROUTER_API_BASE", "https://openrouter.ai/api/v1")
+            ).rstrip("/")
             url = f"{api_base}/chat/completions"
             key = self._get_next_api_key()
             headers = {

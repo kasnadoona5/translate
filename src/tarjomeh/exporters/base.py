@@ -154,8 +154,13 @@ class BaseExporter(ABC):
     def _shape_persian_text(text: str) -> str:
         """Reshape and apply bidi algorithm for correct RTL rendering.
 
-        Uses ``arabic_reshaper`` + ``python-bidi`` — required for PDF
-        backends that do not natively handle RTL shaping.
+        Uses ``arabic_reshaper`` + ``python-bidi``.
+
+        .. warning::
+            Only suitable for text that renders on a SINGLE line. Applying
+            ``get_display`` to a multi-line block before the PDF engine wraps
+            it reverses the visual line order (paragraphs read bottom-to-top).
+            For wrapped paragraphs use :meth:`_shape_persian_lines` instead.
 
         Returns
         -------
@@ -174,3 +179,56 @@ class BaseExporter(ABC):
 
         reshaped = arabic_reshaper.reshape(text)
         return get_display(reshaped)
+
+    @staticmethod
+    def _shape_persian_lines(
+        text: str,
+        font_name: str,
+        font_size: float,
+        avail_width: float,
+        escape_xml: bool = True,
+    ) -> str:
+        """Wrap-first-then-bidi shaping for correct MULTI-LINE RTL in ReportLab.
+
+        The Unicode bidi algorithm is defined per rendered line, so the text
+        must be wrapped to the target width FIRST and only then visually
+        reordered line by line:
+
+        1. Reshape the whole paragraph (contextual glyph forms — word-internal,
+           unaffected by line breaks).
+        2. Wrap the shaped string with ReportLab's own ``simpleSplit`` so the
+           measured widths match exactly what will be drawn.
+        3. Apply ``get_display`` to EACH line individually.
+        4. Join with ``\\n`` for use with ``XPreformatted`` (which honours the
+           line breaks and never re-wraps — re-wrapping would push each line's
+           logical start onto an orphan line).
+
+        Verified empirically: this is the only recipe that renders Persian
+        paragraphs top-to-bottom with correct embedded Latin/number runs.
+
+        Returns
+        -------
+        str
+            Newline-joined, display-ready RTL lines (XML-escaped by default).
+        """
+        try:
+            import arabic_reshaper  # type: ignore[import-untyped]
+            from bidi.algorithm import get_display  # type: ignore[import-untyped]
+            from reportlab.lib.utils import simpleSplit  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise ImportError(
+                "arabic-reshaper, python-bidi and reportlab are required for "
+                "RTL PDF export. Install with:  "
+                "pip install arabic-reshaper python-bidi reportlab"
+            ) from exc
+
+        if not text or not text.strip():
+            return ""
+
+        shaped = arabic_reshaper.reshape(text)
+        lines = simpleSplit(shaped, font_name, font_size, avail_width)
+        visual = [get_display(line) for line in lines]
+        if escape_xml:
+            from xml.sax.saxutils import escape
+            visual = [escape(v) for v in visual]
+        return "\n".join(visual)

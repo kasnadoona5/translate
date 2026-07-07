@@ -11,10 +11,28 @@ max_tokens = 8192
 api_keys = ["${OPENROUTER_API_KEY}"]  # supports rotation via env
 site_url = "https://tarjomeh.local"
 app_name = "Tarjomeh"
+# Endpoint base URL: "" = use OPENROUTER_API_BASE env var, else OpenRouter.
+# For a 9router gateway on the same Docker network: "http://9router:20128/v1"
+api_base = ""
 
 [llm.ollama]
 host = "http://localhost:11434"
 model = "llama3.1:70b"
+
+[llm.critic]
+# Independent judge model for self-critique and back-translation QA.
+# Grading with a separate (ideally stronger) model removes the blind spots of
+# a model scoring its own output. Active when enabled=true OR model is set.
+# Unset fields inherit from [llm] / [llm.openrouter].
+enabled = false
+provider = ""                    # "" = inherit [llm] provider
+model = ""                       # e.g. "anthropic/claude-sonnet-5" (stronger judge)
+api_keys = []                    # [] = inherit [llm.openrouter] api_keys
+temperature = 0.0                # judges should be near-deterministic
+# "" = inherit [llm.openrouter] api_base. Set to judge via a DIFFERENT endpoint
+# than the translator, e.g. "https://openrouter.ai/api/v1" while the translator
+# goes through 9router.
+api_base = ""
 
 [translation]
 source_lang = "English"

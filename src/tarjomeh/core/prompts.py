@@ -32,7 +32,13 @@ Core directives:
 • Use the provided glossary terms consistently throughout.
 • Use Iranian Persian vocabulary and conventions — not Dari or Afghan Persian.
 • Output must be valid right-to-left (RTL) Persian text with correct ZWNJ placement.
-• Convert Western numerals to Persian numerals (۰۱۲۳۴۵۶۷۸۹).
+• Convert Western numerals to Persian numerals (۰۱۲۳۴۵۶۷۸۹) in running prose ONLY.
+  SCHOLARLY APPARATUS IS EXEMPT: keep citation years, page numbers, footnote markers,
+  and bibliographic references in Western digits and Latin script exactly as in the
+  source — e.g. (Marx 1867, 92) stays (Marx 1867, 92), NOT (مارکس ۱۸۶۷، ۹۲).
+• Preserve in-text citations, footnote/endnote markers, and reference callouts
+  unchanged. Translate quotations into Persian, but keep the quotation's citation
+  (author, year, page) intact in its original form.
 • Use standard Persian punctuation: «» for quotation marks, ؛ for semicolons, etc.
 • Do NOT add personal commentary, footnotes, or translator's notes unless
   explicitly instructed.
@@ -45,6 +51,25 @@ and avoid any colloquialisms, slang, or overly simplified vocabulary. The tone m
 a publication by a reputable university press (نثر فاخر و دانشگاهی).\
 """
 
+# Curated gold exemplars of publication-grade academic Persian. Injected into
+# the per-chunk prompt in the academic register only — they anchor what
+# "university-press Persian prose" concretely looks like (register, proper-noun
+# parentheticals, and scholarly-safe citation handling).
+ACADEMIC_EXEMPLARS: str = """\
+### Exemplars — match this register and these conventions exactly
+Example 1 (political theory, formal register):
+EN: The state, on this account, is not a neutral arbiter but an ensemble of institutions that crystallizes prevailing relations of power.
+FA: دولت، بنا بر این روایت، داور بی‌طرف نیست، بلکه مجموعه‌ای از نهادهاست که مناسبات مسلطِ قدرت را تثبیت می‌کند.
+
+Example 2 (philosophy, first-occurrence proper noun gets the English parenthetical):
+EN: Hegemony, as Gramsci conceives it, operates less through coercion than through the organization of consent.
+FA: هژمونی، آن‌گونه که گرامشی (Gramsci) در نظر دارد، نه چندان از راه اجبار، بلکه از طریق سازمان‌دهیِ رضایت عمل می‌کند.
+
+Example 3 (quotation translated, citation kept in Latin script and Western digits):
+EN: As Marx (1867, 92) observes, "the wealth of societies appears as an immense collection of commodities."
+FA: چنان‌که مارکس (Marx) (1867, 92) خاطرنشان می‌کند، «ثروت جامعه‌ها همچون توده‌ای عظیم از کالاها پدیدار می‌شود».
+"""
+
 
 # ---------------------------------------------------------------------------
 # 2. Per-chunk translation prompt
@@ -52,6 +77,7 @@ a publication by a reputable university press (نثر فاخر و دانشگاه
 TRANSLATE_CHUNK_PROMPT: str = """\
 Translate the following English academic text into Persian (فارسی).
 
+{exemplars}
 ### Glossary — mandatory terms (use exactly these translations)
 {glossary_terms}
 
@@ -71,11 +97,19 @@ Instructions:
 1. Translate the entire source text faithfully into academic Persian.
 2. Apply every glossary term exactly as listed above.
 3. Ensure stylistic and terminological continuity with the preceding translation.
-4. Maintain paragraph structure; do not merge or split paragraphs. Your translation MUST have the exact same number of paragraphs (separated by double newlines \n\n) as the source text.
+4. Maintain paragraph structure; do not merge or split paragraphs. The source text contains
+   exactly {paragraph_count} paragraph(s) — your translation MUST also contain exactly
+   {paragraph_count} paragraph(s), separated by double newlines (\n\n).
 5. Use ZWNJ (‌) correctly in compound verbs and affixed words (e.g. می‌خواهد).
-6. For proper nouns appearing for the first time, include the original English form in
-   parentheses after the Persian transliteration.
-7. Output ONLY the Persian translation — no commentary, preamble, or labels.
+6. Proper nouns: consult the proper-noun list in the memory context. Names marked
+   [introduced] have already appeared earlier in the book — use the established Persian
+   rendering WITHOUT repeating the English parenthetical. Names marked [first occurrence
+   pending] (or absent from the list) get the English form in parentheses after the
+   Persian transliteration on their first appearance only.
+7. Scholarly apparatus: keep in-text citations, years, page numbers, and footnote markers
+   in Latin script and Western digits exactly as in the source (e.g. (Marx 1867, 92)).
+   Translate quoted passages but leave their citations untouched.
+8. Output ONLY the Persian translation — no commentary, preamble, or labels.
 """
 
 # ---------------------------------------------------------------------------
@@ -90,6 +124,11 @@ Iranian Persian. Evaluate the translation rigorously and return a structured JSO
 
 ### Translation (Persian)
 {translation}
+
+### Mandatory terminology (glossary + established proper-noun renderings)
+Judge the "terminology" dimension against THIS list — a rendering that deviates
+from it is a terminology violation even if otherwise acceptable Persian:
+{terminology}
 
 Return a JSON object with exactly this schema:
 {{
@@ -138,11 +177,16 @@ You are refining an academic English-to-Persian translation based on editorial f
 ### Editorial critique (JSON)
 {critique}
 
+### Mandatory terminology (glossary + established proper-noun renderings)
+{terminology}
+
 Instructions:
-1. Address every issue listed in the critique, especially those marked "critical" or "major".
+1. Address issues in severity order: every "critical" issue first, then "major", then "minor".
 2. Preserve parts of the translation that were praised or have no issues.
-3. Maintain consistent terminology with the rest of the document.
-4. Ensure correct ZWNJ placement, Persian numerals, and RTL punctuation.
+3. Apply the mandatory terminology above exactly; do not introduce new renderings for
+   listed terms while fixing other issues.
+4. Ensure correct ZWNJ placement, Persian numerals in prose, and RTL punctuation — but keep
+   citations, years, and page numbers in Latin script and Western digits.
 5. Output ONLY the refined Persian translation — no commentary or JSON.
 """
 
