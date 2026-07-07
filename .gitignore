@@ -45,3 +45,11 @@ htmlcov/
 # Font cache (downloaded at runtime)
 src/tarjomeh/persian/fonts/*.ttf
 !src/tarjomeh/persian/fonts/.gitkeep
+
+# Scratch files / debug scripts
+check_compose_mounts.py
+dump_9router_request_payload.py
+extract_translated_chunks.py
+inspect_chunk_database.py
+inspect_chunk_history_log.py
+show_all_db_rows.py
