@@ -196,7 +196,8 @@ async function fetchJobs() {
         const response = await fetch(url);
         if (!response.ok) throw new Error("Failed to load jobs");
         
-        const jobs = await response.json();
+        const resData = await response.json();
+        const jobs = resData.jobs || [];
         listContainer.innerHTML = "";
         
         if (jobs.length === 0) {
