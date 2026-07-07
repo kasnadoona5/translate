@@ -171,7 +171,13 @@ class LLMClient:
                 
                 response.raise_for_status()
                 
-                res_json = response.json()
+                # Safe JSON parsing that handles trailing garbage (like "data: [DONE]")
+                res_text = response.text.strip()
+                last_brace = res_text.rfind("}")
+                if last_brace != -1:
+                    res_text = res_text[:last_brace + 1]
+                
+                res_json = json.loads(res_text)
                 self._update_usage(response, res_json)
                 
                 choices = res_json.get("choices", [])
@@ -233,7 +239,13 @@ class LLMClient:
                 
                 response.raise_for_status()
                 
-                res_json = response.json()
+                # Safe JSON parsing that handles trailing garbage (like "data: [DONE]")
+                res_text = response.text.strip()
+                last_brace = res_text.rfind("}")
+                if last_brace != -1:
+                    res_text = res_text[:last_brace + 1]
+                
+                res_json = json.loads(res_text)
                 self._update_usage(response, res_json)
                 
                 choices = res_json.get("choices", [])
