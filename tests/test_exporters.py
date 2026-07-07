@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 # This prevents ModuleNotFoundError on import in tests/exporters.
 try:
     import docx
-    HAS_DOCX = True
+    HAS_DOCX = not isinstance(docx, MagicMock)
 except ImportError:
     HAS_DOCX = False
     mock_docx = MagicMock()
@@ -24,7 +24,7 @@ except ImportError:
 
 try:
     import reportlab
-    HAS_REPORTLAB = True
+    HAS_REPORTLAB = not isinstance(reportlab, MagicMock)
 except ImportError:
     HAS_REPORTLAB = False
     mock_rl = MagicMock()
@@ -39,7 +39,7 @@ except ImportError:
 try:
     import arabic_reshaper
     from bidi.algorithm import get_display
-    HAS_BIDI = True
+    HAS_BIDI = not isinstance(arabic_reshaper, MagicMock)
 except ImportError:
     HAS_BIDI = False
     sys.modules["arabic_reshaper"] = MagicMock()
@@ -182,11 +182,11 @@ class TestExporters(unittest.TestCase):
             else:
                 # If mocked, check mock interaction
                 from unittest.mock import patch
-                import reportlab.platypus as TargetPlatypus
+                from tarjomeh.exporters.pdf_exporter import SimpleDocTemplate
                 with patch.object(exporter, "_resolve_font_path", return_value=Path("dummy.ttf")), \
                      patch("pathlib.Path.is_file", return_value=True):
                     exporter.export(self.doc, temp_path, bilingual_mode="inline")
-                    TargetPlatypus.SimpleDocTemplate.assert_called()
+                    SimpleDocTemplate.assert_called()
         finally:
             if temp_path.exists():
                 temp_path.unlink()

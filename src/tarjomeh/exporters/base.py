@@ -119,7 +119,8 @@ class BaseExporter(ABC):
         """Attempt to locate a bundled font file.
 
         Looks for the font in the ``persian/fonts/`` directory shipped
-        alongside this package.
+        alongside this package. Downloads it automatically from GitHub
+        if not found.
 
         Returns
         -------
@@ -132,6 +133,19 @@ class BaseExporter(ABC):
         )
         if bundled.is_file():
             return bundled
+
+        # Automatic download fallback
+        try:
+            bundled.parent.mkdir(parents=True, exist_ok=True)
+            url = f"https://github.com/rastikerdar/vazirmatn/raw/master/fonts/ttf/{font_name}"
+            logger.info("Font %s not found locally. Downloading from %s...", font_name, url)
+            import urllib.request
+            urllib.request.urlretrieve(url, str(bundled))
+            if bundled.is_file():
+                logger.info("Successfully downloaded %s to %s", font_name, bundled)
+                return bundled
+        except Exception as e:
+            logger.error("Failed to automatically download font %s: %s", font_name, e)
 
         logger.debug("Font %r not found at %s", font_name, bundled)
         return None

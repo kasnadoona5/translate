@@ -129,7 +129,7 @@ class PdfExporter(BaseExporter):
         story = []
 
         # Renders the Document Title
-        shaped_title = self._shape_persian_text(document.title) if has_vazirmatn else document.title
+        shaped_title = self._shape_persian_text(document.title)
         story.append(Paragraph(shaped_title, title_style))
         story.append(Spacer(1, 10))
 
