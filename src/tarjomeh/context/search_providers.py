@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 import urllib.parse
 import logging
+import html
 from dataclasses import dataclass
 from typing import Any
 
@@ -44,58 +45,92 @@ class DuckDuckGoProvider(BaseSearchProvider):
         }
         try:
             async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
-                response = await client.get(
-                    "https://html.duckduckgo.com/html/",
-                    params={"q": query},
-                    timeout=10.0
-                )
-                if response.status_code != 200:
-                    logger.warning("DuckDuckGo request failed with status code %d", response.status_code)
-                    return []
-
-                html_content = response.text
                 results = []
-
-                # 1. Try to find result__snippet blocks:
-                snippet_matches = re.finditer(
-                    r'(?:href="([^"]+)"[^>]*class="result__snippet"|class="result__snippet"[^>]*href="([^"]+)")>([\s\S]*?)</a>',
-                    html_content
-                )
-                for m in snippet_matches:
-                    url = m.group(1) or m.group(2)
-                    snippet = m.group(3)
-                    snippet_clean = re.sub(r'<[^>]+>', '', snippet).strip()
-                    if url and snippet_clean:
-                        redir_match = re.search(r'uddg=([^&]+)', url)
-                        actual_url = urllib.parse.unquote(redir_match.group(1)) if redir_match else url
-                        results.append(SearchResult(
-                            title="Search Result",
-                            url=actual_url,
-                            snippet=snippet_clean
-                        ))
-
-                # 2. Fallback check for alternate snippet tag placements
-                if not results:
-                    matches = re.findall(r'href="([^"]+)"[^>]*class="result__snippet"[^>]*>([\s\S]*?)</a>', html_content)
-                    if not matches:
-                        matches = re.findall(r'class="result__snippet"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a>', html_content)
-                    for url, snippet in matches:
-                        snippet_clean = re.sub(r'<[^>]+>', '', snippet).strip()
-                        redir_match = re.search(r'uddg=([^&]+)', url)
-                        actual_url = urllib.parse.unquote(redir_match.group(1)) if redir_match else url
-                        results.append(SearchResult(
-                            title="Search Result",
-                            url=actual_url,
-                            snippet=snippet_clean
-                        ))
+                try:
+                    response = await client.get(
+                        "https://html.duckduckgo.com/html/",
+                        params={"q": query},
+                        timeout=10.0
+                    )
+                    if response.status_code == 200:
+                        results = self._parse_html(response.text)
+                except Exception as e:
+                    logger.warning("html.duckduckgo.com search failed: %s", e)
 
                 if not results:
-                    logger.warning("DuckDuckGo parser was unable to extract any results from HTML response.")
+                    logger.info("html.duckduckgo.com returned no results; trying lite.duckduckgo.com fallback for query: %s", query)
+                    try:
+                        lite_response = await client.get(
+                            "https://lite.duckduckgo.com/lite/",
+                            params={"q": query},
+                            timeout=10.0
+                        )
+                        if lite_response.status_code == 200:
+                            results = self._parse_lite(lite_response.text)
+                    except Exception as e:
+                        logger.warning("lite.duckduckgo.com search fallback failed: %s", e)
 
+                logger.info("DuckDuckGo query '%s' returned %d results", query, len(results))
                 return results
         except Exception as e:
             logger.warning("DuckDuckGo search failed with exception: %s", e)
             return []
+
+    def _parse_html(self, html_content: str) -> list[SearchResult]:
+        results = []
+        snippet_matches = re.finditer(
+            r'(?:href="([^"]+)"[^>]*class="result__snippet"|class="result__snippet"[^>]*href="([^"]+)")>([\s\S]*?)</a>',
+            html_content
+        )
+        for m in snippet_matches:
+            url = m.group(1) or m.group(2)
+            snippet = m.group(3)
+            snippet_clean = re.sub(r'<[^>]+>', '', snippet).strip()
+            if url and snippet_clean:
+                redir_match = re.search(r'uddg=([^&]+)', url)
+                actual_url = urllib.parse.unquote(redir_match.group(1)) if redir_match else url
+                results.append(SearchResult(
+                    title="Search Result",
+                    url=actual_url,
+                    snippet=snippet_clean
+                ))
+
+        if not results:
+            matches = re.findall(r'href="([^"]+)"[^>]*class="result__snippet"[^>]*>([\s\S]*?)</a>', html_content)
+            if not matches:
+                matches = re.findall(r'class="result__snippet"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a>', html_content)
+            for url, snippet in matches:
+                snippet_clean = re.sub(r'<[^>]+>', '', snippet).strip()
+                redir_match = re.search(r'uddg=([^&]+)', url)
+                actual_url = urllib.parse.unquote(redir_match.group(1)) if redir_match else url
+                results.append(SearchResult(
+                    title="Search Result",
+                    url=actual_url,
+                    snippet=snippet_clean
+                ))
+        return results
+
+    def _parse_lite(self, html_content: str) -> list[SearchResult]:
+        results = []
+        pattern = re.compile(
+            r'<a[^>]*href=["\']([^"\']+)["\'][^>]*class=["\']result-link["\'][^>]*>(.*?)</a>[\s\S]*?class=["\']result-snippet["\'][^>]*>([\s\S]*?)</td>',
+            re.IGNORECASE
+        )
+        for m in pattern.finditer(html_content):
+            url = m.group(1)
+            if "duckduckgo.com/y.js" in url:
+                continue
+            title = re.sub(r'<[^>]+>', '', m.group(2)).strip()
+            snippet = re.sub(r'<[^>]+>', '', m.group(3)).strip()
+            title = html.unescape(title)
+            snippet = html.unescape(snippet)
+            if url and snippet:
+                results.append(SearchResult(
+                    title=title,
+                    url=url,
+                    snippet=snippet
+                ))
+        return results
 
 
 class GoogleSearchProvider(BaseSearchProvider):

@@ -156,11 +156,14 @@ class SemanticChunker:
         """
         chunks: list[Chunk] = []
         previous_sentences: list[str] = []
+        
+        para_to_idx = {id(p): i for i, p in enumerate(document.all_paragraphs)}
 
         for chapter in document.chapters:
             for section in chapter.sections:
                 buffer: list[str] = []
                 buffer_tokens = 0
+                buffer_para_indices: list[int] = []
 
                 for para in section.paragraphs:
                     para_text = para.text.strip()
@@ -178,6 +181,7 @@ class SemanticChunker:
                             chapter_title=chapter.title,
                             section_title=section.title,
                             previous_sentences=previous_sentences,
+                            para_indices=buffer_para_indices,
                         )
                         chunks.append(chunk)
                         previous_sentences = _split_sentences(chunk.text)[
@@ -185,9 +189,11 @@ class SemanticChunker:
                         ]
                         buffer = []
                         buffer_tokens = 0
+                        buffer_para_indices = []
 
                     buffer.append(para_text)
                     buffer_tokens += para_tokens
+                    buffer_para_indices.append(para_to_idx[id(para)])
 
                 # Flush remaining buffer for this section.
                 if buffer:
@@ -198,6 +204,7 @@ class SemanticChunker:
                         chapter_title=chapter.title,
                         section_title=section.title,
                         previous_sentences=previous_sentences,
+                        para_indices=buffer_para_indices,
                     )
                     chunks.append(chunk)
                     previous_sentences = _split_sentences(chunk.text)[
@@ -217,11 +224,13 @@ class SemanticChunker:
         chapter_title: str,
         section_title: str,
         previous_sentences: list[str],
+        para_indices: list[int],
     ) -> Chunk:
         combined = "\n\n".join(texts)
         metadata: dict[str, object] = {}
         if previous_sentences and self.overlap_sentences > 0:
             metadata["overlap_prefix"] = " ".join(previous_sentences)
+        metadata["paragraph_indices"] = list(para_indices)
         return Chunk(
             index=index,
             text=combined,
@@ -268,6 +277,7 @@ class FixedChunker:
         structural context.
         """
         chunks: list[Chunk] = []
+        para_to_idx = {id(p): i for i, p in enumerate(document.all_paragraphs)}
 
         for chapter in document.chapters:
             for section in chapter.sections:
@@ -275,14 +285,15 @@ class FixedChunker:
                     para_text = para.text.strip()
                     if not para_text:
                         continue
-                    chunks.extend(
-                        self._split_text(
-                            text=para_text,
-                            chapter_title=chapter.title,
-                            section_title=section.title,
-                            start_index=len(chunks),
-                        )
+                    sub_chunks = self._split_text(
+                        text=para_text,
+                        chapter_title=chapter.title,
+                        section_title=section.title,
+                        start_index=len(chunks),
                     )
+                    for c in sub_chunks:
+                        c.metadata["paragraph_indices"] = [para_to_idx[id(para)]]
+                    chunks.extend(sub_chunks)
 
         return chunks
 

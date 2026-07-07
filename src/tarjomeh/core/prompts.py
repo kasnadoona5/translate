@@ -71,7 +71,7 @@ Instructions:
 1. Translate the entire source text faithfully into academic Persian.
 2. Apply every glossary term exactly as listed above.
 3. Ensure stylistic and terminological continuity with the preceding translation.
-4. Maintain paragraph structure; do not merge or split paragraphs.
+4. Maintain paragraph structure; do not merge or split paragraphs. Your translation MUST have the exact same number of paragraphs (separated by double newlines \n\n) as the source text.
 5. Use ZWNJ (‌) correctly in compound verbs and affixed words (e.g. می‌خواهد).
 6. For proper nouns appearing for the first time, include the original English form in
    parentheses after the Persian transliteration.

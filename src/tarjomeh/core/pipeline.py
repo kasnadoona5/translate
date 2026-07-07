@@ -492,50 +492,87 @@ class TranslationPipeline:
         if progress_callback:
             progress_callback("Assembly", 0.90, "Reassembling translated paragraphs...")
 
-        translated_paragraphs: list[TranslatedParagraph] = []
         original_paragraphs = document.all_paragraphs
+        # Pre-populate translated paragraphs list
+        translated_paragraphs: list[TranslatedParagraph | None] = [None] * len(original_paragraphs)
 
-        # Align chunk texts back to paragraph objects
-        original_idx = 0
+        # Track sequential index fallback
+        fallback_idx = 0
+
         for idx in range(total_chunks):
-            chunk_source = chunks[idx].text
+            chunk = chunks[idx]
             chunk_translation = translations.get(idx, "")
-
-            # Split paragraphs in source vs target chunks
-            src_paras = [p.strip() for p in chunk_source.split("\n\n") if p.strip()]
             tgt_paras = [p.strip() for p in chunk_translation.split("\n\n") if p.strip()]
+            para_indices = chunk.metadata.get("paragraph_indices", [])
 
-            # Fallback if paragraph counts mismatch
-            if len(src_paras) != len(tgt_paras):
-                aligned_pairs = []
-                for i in range(max(len(src_paras), len(tgt_paras))):
-                    s = src_paras[i] if i < len(src_paras) else ""
-                    t = tgt_paras[i] if i < len(tgt_paras) else ""
-                    if s or t:
-                        aligned_pairs.append((s, t))
+            if para_indices:
+                # Align tgt_paras to para_indices
+                if len(para_indices) == len(tgt_paras):
+                    aligned = list(zip(para_indices, tgt_paras))
+                else:
+                    # On mismatch, assign the whole translation blob to the first paragraph
+                    # to prevent any content loss, and blank the rest.
+                    aligned = [(para_indices[0], chunk_translation)]
+                    for pid in para_indices[1:]:
+                        aligned.append((pid, ""))
+                
+                for pid, t in aligned:
+                    if pid < len(original_paragraphs):
+                        orig_para = original_paragraphs[pid]
+                        translated_paragraphs[pid] = TranslatedParagraph(
+                            index=pid,
+                            source_text=orig_para.text,
+                            translated_text=t,
+                            heading_level=orig_para.heading_level,
+                            metadata=orig_para.metadata,
+                        )
             else:
-                aligned_pairs = list(zip(src_paras, tgt_paras))
+                # Fallback to sequential mapping
+                src_paras = [p.strip() for p in chunk.text.split("\n\n") if p.strip()]
+                if len(src_paras) != len(tgt_paras):
+                    aligned_pairs = []
+                    for i in range(max(len(src_paras), len(tgt_paras))):
+                        s = src_paras[i] if i < len(src_paras) else ""
+                        t = tgt_paras[i] if i < len(tgt_paras) else ""
+                        if s or t:
+                            aligned_pairs.append((s, t))
+                else:
+                    aligned_pairs = list(zip(src_paras, tgt_paras))
 
-            for s, t in aligned_pairs:
-                orig_para = original_paragraphs[original_idx] if original_idx < len(original_paragraphs) else None
-                heading_lvl = orig_para.heading_level if orig_para else None
-                meta = orig_para.metadata if orig_para else {}
+                for s, t in aligned_pairs:
+                    if fallback_idx < len(original_paragraphs):
+                        orig_para = original_paragraphs[fallback_idx]
+                        translated_paragraphs[fallback_idx] = TranslatedParagraph(
+                            index=fallback_idx,
+                            source_text=s,
+                            translated_text=t,
+                            heading_level=orig_para.heading_level,
+                            metadata=orig_para.metadata,
+                        )
+                        fallback_idx += 1
 
-                translated_paragraphs.append(
+        # Fill any missing/skipped paragraphs with empty translations
+        final_translated_paragraphs: list[TranslatedParagraph] = []
+        for pid in range(len(original_paragraphs)):
+            pt = translated_paragraphs[pid]
+            if pt is None:
+                orig_para = original_paragraphs[pid]
+                final_translated_paragraphs.append(
                     TranslatedParagraph(
-                        index=original_idx,
-                        source_text=s,
-                        translated_text=t,
-                        heading_level=heading_lvl,
-                        metadata=meta,
+                        index=pid,
+                        source_text=orig_para.text,
+                        translated_text="",
+                        heading_level=orig_para.heading_level,
+                        metadata=orig_para.metadata,
                     )
                 )
-                original_idx += 1
+            else:
+                final_translated_paragraphs.append(pt)
 
         trans_doc = TranslatedDocument(
             title=document.title,
             author=document.author,
-            paragraphs=translated_paragraphs,
+            paragraphs=final_translated_paragraphs,
             metadata=document.metadata,
         )
 
@@ -644,6 +681,8 @@ class TranslationPipeline:
             messages=[{"role": "user", "content": user_content}],
             system_prompt=sys_prompt
         )
+        if not translation or not translation.strip():
+            raise ValueError(f"LLM returned an empty or whitespace-only translation for chunk {idx}.")
         self.db.update_chunk(job_id, idx, ChunkStatus.TRANSLATED, translation)
 
         # Critique and Refine

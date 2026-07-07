@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import random
+import threading
 import time
 from typing import Any
 
@@ -23,6 +24,11 @@ from tarjomeh.core.config import TarjomehConfig
 logger = logging.getLogger(__name__)
 
 
+class EmptyCompletionError(Exception):
+    """Raised when the LLM returns an empty completion."""
+    pass
+
+
 class LLMClient:
     """OpenAI-compatible client for communicating with OpenRouter or Ollama.
 
@@ -32,7 +38,7 @@ class LLMClient:
     def __init__(self, config: TarjomehConfig) -> None:
         self.config = config
         self._client = httpx.Client(timeout=180.0)
-        self._aclient = httpx.AsyncClient(timeout=180.0)
+        self._thread_local = threading.local()
 
         # Track usage
         self.total_prompt_tokens = 0
@@ -42,14 +48,36 @@ class LLMClient:
 
         # API key index for rotation
         self._api_key_index = 0
+        self._api_key_lock = threading.Lock()
+
+    @property
+    def _aclient(self) -> httpx.AsyncClient:
+        """Get or create an AsyncClient bound to the active event loop for the current thread."""
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        loop_id = id(loop)
+        if not hasattr(self._thread_local, "clients"):
+            self._thread_local.clients = {}
+            
+        if loop_id not in self._thread_local.clients or self._thread_local.clients[loop_id].is_closed:
+            self._thread_local.clients[loop_id] = httpx.AsyncClient(timeout=180.0)
+            
+        return self._thread_local.clients[loop_id]
 
     def close(self) -> None:
         """Close the sync HTTP client."""
         self._client.close()
 
     async def aclose(self) -> None:
-        """Close the async HTTP client."""
-        await self._aclient.close()
+        """Close all thread-local async HTTP clients."""
+        if hasattr(self._thread_local, "clients"):
+            for client in self._thread_local.clients.values():
+                if not client.is_closed:
+                    await client.aclose()
 
     def _get_next_api_key(self) -> str:
         """Retrieve the next non-empty API key from the rotation list."""
@@ -61,13 +89,15 @@ class LLMClient:
         if not valid_keys:
             return ""
         
-        key = valid_keys[self._api_key_index]
-        self._api_key_index = (self._api_key_index + 1) % len(valid_keys)
+        with self._api_key_lock:
+            key = valid_keys[self._api_key_index]
+            self._api_key_index = (self._api_key_index + 1) % len(valid_keys)
         return key
 
     def count_tokens(self, text: str) -> int:
         """Accurately count tokens in a string using tiktoken."""
         model_name = self.config.llm.model
+        is_fallback = False
         try:
             # Clean OpenRouter names like "anthropic/claude-3-5-sonnet" -> "claude-3-5-sonnet"
             cleaned_model = model_name.split("/")[-1] if "/" in model_name else model_name
@@ -75,11 +105,17 @@ class LLMClient:
                 encoding = tiktoken.encoding_for_model(cleaned_model)
             except KeyError:
                 encoding = tiktoken.get_encoding("cl100k_base")
+                is_fallback = True
         except Exception as e:
             logger.debug("Failed to load tiktoken encoding for model %s: %s", model_name, e)
             encoding = tiktoken.get_encoding("cl100k_base")
+            is_fallback = True
 
-        return len(encoding.encode(text))
+        raw_count = len(encoding.encode(text))
+        if is_fallback:
+            # Add a 5% safety margin for fallback token count
+            return int(raw_count * 1.05) + 1
+        return raw_count
 
     def _prepare_request(
         self,
@@ -111,6 +147,8 @@ class LLMClient:
                 "temperature": self.config.llm.temperature,
                 "max_tokens": self.config.llm.max_tokens,
             }
+            if getattr(self.config.llm.openrouter, "exclude_reasoning", True):
+                payload["reasoning"] = {"exclude": True}
         elif provider == "ollama":
             host = self.config.llm.ollama.host.rstrip("/")
             url = f"{host}/v1/chat/completions"
@@ -141,13 +179,22 @@ class LLMClient:
         self.total_completion_tokens += completion_tokens
         self.total_total_tokens += total_tokens
 
-        # Attempt to parse cost from OpenRouter headers
-        cost_str = response.headers.get("x-openrouter-cost")
-        if cost_str:
+        # Attempt to parse cost from response JSON or OpenRouter headers
+        cost = response_json.get("cost")
+        if cost is not None and isinstance(cost, (str, int, float)):
             try:
-                self.total_cost += float(cost_str)
-            except ValueError:
+                self.total_cost += float(cost)
+            except (ValueError, TypeError):
                 pass
+        else:
+            if hasattr(response, "headers") and hasattr(response.headers, "get"):
+                cost_str = response.headers.get("x-openrouter-cost")
+                # Ensure we don't try to parse Mock objects
+                if cost_str and isinstance(cost_str, (str, int, float)):
+                    try:
+                        self.total_cost += float(cost_str)
+                    except ValueError:
+                        pass
 
     def complete(
         self,
@@ -174,27 +221,37 @@ class LLMClient:
                 
                 # Safe JSON parsing that handles trailing garbage (like "data: [DONE]")
                 res_text = response.text.strip()
-                last_brace = res_text.rfind("}")
-                if last_brace != -1:
-                    res_text = res_text[:last_brace + 1]
+                try:
+                    res_json = json.loads(res_text)
+                except json.JSONDecodeError:
+                    last_brace = res_text.rfind("}")
+                    if last_brace != -1:
+                        try:
+                            res_json = json.loads(res_text[:last_brace + 1])
+                        except json.JSONDecodeError:
+                            raise
+                    else:
+                        raise
                 
-                res_json = json.loads(res_text)
                 self._update_usage(response, res_json)
                 
                 choices = res_json.get("choices", [])
                 if not choices:
                     raise ValueError(f"Empty choices in response: {res_json}")
                 
-                content = choices[0].get("message", {}).get("content", "")
+                content = choices[0].get("message", {}).get("content")
+                if not content or not content.strip():
+                    raise EmptyCompletionError("LLM returned an empty or null translation completion.")
+                
                 return content
 
-            except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            except (httpx.HTTPStatusError, httpx.RequestError, EmptyCompletionError) as exc:
                 status_code = getattr(exc.response, "status_code", None) if hasattr(exc, "response") else None
                 
                 # Check if we should retry
                 should_retry = (
                     attempt < max_retries and
-                    (status_code is None or status_code in (429, 500, 502, 503, 504))
+                    (isinstance(exc, EmptyCompletionError) or status_code is None or status_code in (429, 500, 502, 503, 504))
                 )
 
                 if should_retry:
@@ -242,27 +299,37 @@ class LLMClient:
                 
                 # Safe JSON parsing that handles trailing garbage (like "data: [DONE]")
                 res_text = response.text.strip()
-                last_brace = res_text.rfind("}")
-                if last_brace != -1:
-                    res_text = res_text[:last_brace + 1]
+                try:
+                    res_json = json.loads(res_text)
+                except json.JSONDecodeError:
+                    last_brace = res_text.rfind("}")
+                    if last_brace != -1:
+                        try:
+                            res_json = json.loads(res_text[:last_brace + 1])
+                        except json.JSONDecodeError:
+                            raise
+                    else:
+                        raise
                 
-                res_json = json.loads(res_text)
                 self._update_usage(response, res_json)
                 
                 choices = res_json.get("choices", [])
                 if not choices:
                     raise ValueError(f"Empty choices in response: {res_json}")
                 
-                content = choices[0].get("message", {}).get("content", "")
+                content = choices[0].get("message", {}).get("content")
+                if not content or not content.strip():
+                    raise EmptyCompletionError("LLM returned an empty or null translation completion.")
+                
                 return content
 
-            except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            except (httpx.HTTPStatusError, httpx.RequestError, EmptyCompletionError) as exc:
                 status_code = getattr(exc.response, "status_code", None) if hasattr(exc, "response") else None
                 
                 # Check if we should retry
                 should_retry = (
                     attempt < max_retries and
-                    (status_code is None or status_code in (429, 500, 502, 503, 504))
+                    (isinstance(exc, EmptyCompletionError) or status_code is None or status_code in (429, 500, 502, 503, 504))
                 )
 
                 if should_retry:

@@ -91,6 +91,7 @@ class LLMOpenRouterConfig:
     api_keys: list[str] = field(default_factory=lambda: [])
     site_url: str = "https://tarjomeh.local"
     app_name: str = "Tarjomeh"
+    exclude_reasoning: bool = True
 
 
 @dataclass

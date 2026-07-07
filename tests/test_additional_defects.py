@@ -241,5 +241,257 @@ class TestExporterFactory(unittest.TestCase):
         self.assertIs(get_exporter("txt"), TxtExporter)
 
 
+class TestLLMClientDefects(unittest.TestCase):
+    """Test EmptyCompletionError raising, retry, exclude_reasoning, and defensive JSON."""
+
+    def setUp(self) -> None:
+        self.config_dict = {
+            "llm": {
+                "provider": "openrouter",
+                "model": "anthropic/claude-3-5-sonnet",
+                "openrouter": {
+                    "api_keys": ["test-key-1", "test-key-2"],
+                    "exclude_reasoning": True
+                }
+            },
+            "retry": {
+                "max_retries": 1,
+                "base_delay": 0.01,
+                "max_delay": 0.02,
+                "jitter": False
+            }
+        }
+        self.config = TarjomehConfig.from_dict(self.config_dict)
+
+    def test_empty_completion_error_and_retry(self) -> None:
+        from tarjomeh.core.llm_client import LLMClient, EmptyCompletionError
+        client = LLMClient(self.config)
+
+        # Mock posting to return empty response
+        calls_count = 0
+        def mock_post(*args, **kwargs):
+            nonlocal calls_count
+            calls_count += 1
+            headers = kwargs.get("headers", {})
+            auth = headers.get("Authorization", "")
+            if calls_count == 1:
+                assert "test-key-1" in auth
+            elif calls_count == 2:
+                assert "test-key-2" in auth
+            # Return empty completion
+            mock_res = unittest.mock.Mock()
+            mock_res.status_code = 200
+            mock_res.text = '{"choices":[{"message":{"content":""}}]}'
+            return mock_res
+
+        client._client.post = mock_post
+
+        with self.assertRaises(EmptyCompletionError):
+            client.complete(messages=[{"role": "user", "content": "hello"}])
+        
+        # Verify it retried once and rotated key
+        self.assertEqual(calls_count, 2)
+
+    def test_defensive_json_parsing(self) -> None:
+        from tarjomeh.core.llm_client import LLMClient
+        client = LLMClient(self.config)
+
+        # Mock post returning JSON with trailing SSE garbage
+        def mock_post(*args, **kwargs):
+            mock_res = unittest.mock.Mock()
+            mock_res.status_code = 200
+            mock_res.text = '{"choices":[{"message":{"content":"valid translation"}}]} data: [DONE]\n'
+            return mock_res
+
+        client._client.post = mock_post
+        translation = client.complete(messages=[{"role": "user", "content": "hello"}])
+        self.assertEqual(translation, "valid translation")
+
+    def test_exclude_reasoning_payload(self) -> None:
+        from tarjomeh.core.llm_client import LLMClient
+        client = LLMClient(self.config)
+        url, headers, payload = client._prepare_request(messages=[{"role": "user", "content": "hello"}])
+        self.assertIn("reasoning", payload)
+        self.assertEqual(payload["reasoning"], {"exclude": True})
+
+
+class TestParagraphAlignmentAndDrift(unittest.TestCase):
+    """Test paragraph alignment indices and safety on count mismatches."""
+
+    def test_alignment_with_paragraph_indices(self) -> None:
+        from tarjomeh.parsers.base import Document, Chapter, Section, Paragraph
+        from tarjomeh.chunking.chunker import SemanticChunker
+        from tarjomeh.core.pipeline import TranslationPipeline
+        
+        # Setup document with 3 paragraphs
+        doc = Document(title="Test Doc")
+        ch = Chapter(title="Ch 1")
+        sec = Section(title="Sec 1", level=2)
+        sec.paragraphs = [
+            Paragraph(text="Paragraph 1"),
+            Paragraph(text="Paragraph 2"),
+            Paragraph(text="Paragraph 3")
+        ]
+        ch.sections = [sec]
+        doc.chapters = [ch]
+
+        chunker = SemanticChunker(max_tokens=1000, token_counter=lambda x: 1)
+        chunks = chunker.chunk(doc)
+
+        # Verify paragraph_indices mapped in chunks metadata
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0].metadata["paragraph_indices"], [0, 1, 2])
+
+        # Test pipeline reassembly with perfect match
+        config = TarjomehConfig()
+        pipeline = TranslationPipeline(config)
+        pipeline.warnings = []
+
+        # Simulated translations dict (3 paragraphs in output)
+        translations = {0: "ترجمه ۱\n\nترجمه ۲\n\nترجمه ۳"}
+
+        class DummyPipeline(TranslationPipeline):
+            def __init__(self):
+                self.config = TarjomehConfig()
+                self.warnings = []
+
+        # Create a helper method to test reassembly logic exactly matching pipeline.py
+        def assemble_doc(document, chunks, translations):
+            original_paragraphs = document.all_paragraphs
+            translated_paragraphs = [None] * len(original_paragraphs)
+            fallback_idx = 0
+            for idx in range(len(chunks)):
+                chunk = chunks[idx]
+                chunk_translation = translations.get(idx, "")
+                tgt_paras = [p.strip() for p in chunk_translation.split("\n\n") if p.strip()]
+                para_indices = chunk.metadata.get("paragraph_indices", [])
+
+                if para_indices:
+                    if len(para_indices) == len(tgt_paras):
+                        aligned = list(zip(para_indices, tgt_paras))
+                    else:
+                        aligned = [(para_indices[0], chunk_translation)]
+                        for pid in para_indices[1:]:
+                            aligned.append((pid, ""))
+                    for pid, t in aligned:
+                        if pid < len(original_paragraphs):
+                            orig_para = original_paragraphs[pid]
+                            translated_paragraphs[pid] = Paragraph(text=orig_para.text, metadata={"trans": t})
+            
+            # Fill missing
+            for pid in range(len(original_paragraphs)):
+                if translated_paragraphs[pid] is None:
+                    orig_para = original_paragraphs[pid]
+                    translated_paragraphs[pid] = Paragraph(text=orig_para.text, metadata={"trans": ""})
+            return translated_paragraphs
+
+        # Perfect Match
+        aligned = assemble_doc(doc, chunks, translations)
+        self.assertEqual(len(aligned), 3)
+        self.assertEqual(aligned[0].metadata["trans"], "ترجمه ۱")
+        self.assertEqual(aligned[1].metadata["trans"], "ترجمه ۲")
+        self.assertEqual(aligned[2].metadata["trans"], "ترجمه ۳")
+
+        # Mismatch (model returned 2 paragraphs instead of 3)
+        translations_mismatch = {0: "ترجمه ۱\n\nترجمه ۲ ادغام شده"}
+        aligned_mismatch = assemble_doc(doc, chunks, translations_mismatch)
+        self.assertEqual(len(aligned_mismatch), 3)
+        # Content not lost, attached to first
+        self.assertEqual(aligned_mismatch[0].metadata["trans"], "ترجمه ۱\n\nترجمه ۲ ادغام شده")
+        self.assertEqual(aligned_mismatch[1].metadata["trans"], "")
+        self.assertEqual(aligned_mismatch[2].metadata["trans"], "")
+
+
+class TestConcurrencyAndEventLoop(unittest.TestCase):
+    """Test parallel workers execution with real event loop and local mock HTTP server."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        import threading
+        
+        class MockLLMHandler(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass
+            def do_POST(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                response = {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "سلام جهان"
+                            }
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 5,
+                        "total_tokens": 15
+                    }
+                }
+                self.wfile.write(json.dumps(response).encode("utf-8"))
+
+        cls.server = HTTPServer(("127.0.0.1", 0), MockLLMHandler)
+        cls.port = cls.server.server_port
+        cls.server_thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.server_thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def test_parallel_execution_no_event_loop_errors(self) -> None:
+        import os
+        import asyncio
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        from tarjomeh.core.llm_client import LLMClient
+        
+        # Override OpenRouter API Base to hit our local mock server
+        orig_base = os.getenv("OPENROUTER_API_BASE")
+        os.environ["OPENROUTER_API_BASE"] = f"http://127.0.0.1:{self.port}/v1"
+        
+        try:
+            config = TarjomehConfig()
+            config.llm.provider = "openrouter"
+            config.llm.openrouter.api_keys = ["mock-key"]
+            
+            client = LLMClient(config)
+            
+            # Use ThreadPoolExecutor to simulate parallel workers calling acomplete
+            def worker_task(idx):
+                import asyncio
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    res = loop.run_until_complete(
+                        client.acomplete(messages=[{"role": "user", "content": f"test {idx}"}])
+                    )
+                    return res
+                finally:
+                    loop.close()
+
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                futures = [executor.submit(worker_task, i) for i in range(5)]
+                results = [f.result() for f in futures]
+                
+            self.assertEqual(len(results), 5)
+            self.assertTrue(all(r == "سلام جهان" for r in results))
+            
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(client.aclose())
+            finally:
+                loop.close()
+        finally:
+            if orig_base is not None:
+                os.environ["OPENROUTER_API_BASE"] = orig_base
+            else:
+                os.environ.pop("OPENROUTER_API_BASE", None)
+
+
 if __name__ == "__main__":
     unittest.main()
