@@ -4,6 +4,7 @@ Covers:
 - Phase 0.2: proportional intra-chunk translation distribution
 - Phase 0.3: duplicate paragraph-index append (FixedChunker sub-chunks)
 - Phase 1:  independent critic model client construction
+- PDF parser: line→paragraph merging, dehyphenation, continuation stitching
 """
 
 from __future__ import annotations
@@ -138,6 +139,42 @@ class TestSimpleEnvOverrides(unittest.TestCase):
             cfg.llm.critic.enabled = True
             cfg._apply_env_overrides()
         self.assertFalse(cfg.llm.critic.enabled)
+
+
+class TestPdfLineMerging(unittest.TestCase):
+    """PDF lines must merge into real paragraphs with hyphenation repaired."""
+
+    def test_join_block_lines_dehyphenation(self) -> None:
+        from tarjomeh.parsers.pdf_parser import _join_block_lines
+        SHY = "­"
+        lines = [
+            f"Looking out of the win{SHY}",   # soft hyphen → join, drop marker
+            "dow, you see a billboard.",
+            "It reads absent-",               # ASCII hyphen → join, keep hyphen
+            "minded prose.",
+            "A final line.",
+        ]
+        out = _join_block_lines(lines)
+        self.assertIn("window", out)
+        self.assertIn("absent-minded", out)
+        self.assertIn("billboard. It reads", out)   # normal lines joined by space
+        self.assertNotIn(SHY, out)
+
+    def test_continuation_paragraphs_merged_across_blocks(self) -> None:
+        from tarjomeh.parsers.pdf_parser import _merge_continuation_paragraphs
+        from tarjomeh.parsers.base import Paragraph
+        paras = [
+            Paragraph(text="And as your thoughts roll on, you contemplate the", metadata={}),
+            Paragraph(text="operations needed before value can be extracted.", metadata={}),
+            Paragraph(text="A new sentence starts a new paragraph.", metadata={}),
+            Paragraph(text="Heading Text", metadata={"heading_level": 2}),
+        ]
+        merged = _merge_continuation_paragraphs(paras)
+        self.assertEqual(len(merged), 3)
+        self.assertIn("contemplate the operations needed", merged[0].text)
+        # Complete-sentence paragraph and heading are NOT merged.
+        self.assertTrue(merged[1].text.startswith("A new sentence"))
+        self.assertEqual(merged[2].metadata.get("heading_level"), 2)
 
 
 if __name__ == "__main__":

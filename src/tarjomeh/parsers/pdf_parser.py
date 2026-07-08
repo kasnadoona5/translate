@@ -57,47 +57,133 @@ def _median_font_size(blocks: list[dict[str, Any]]) -> float:
     return statistics.median(sizes)
 
 
+_SOFT_HYPHEN = "­"
+# Edge zone (fraction of page height) where short blocks are treated as
+# running headers / page numbers and dropped.
+_EDGE_ZONE = 0.07
+_EDGE_MAX_CHARS = 40
+
+
+def _join_block_lines(lines: list[str]) -> str:
+    """Join the visual lines of one PDF text block into flowing prose.
+
+    Handles print-style hyphenation:
+    * a line ending in a SOFT HYPHEN (U+00AD) is a pure typographic break —
+      join with the next line directly and drop the marker ("win­/dow" → "window");
+    * a line ending in an ASCII "-" keeps the hyphen but joins without a
+      space ("absent-/minded" → "absent-minded");
+    * otherwise lines are joined with a single space.
+    Remaining stray soft hyphens are stripped (invisible junk that corrupts
+    words for the translator).
+    """
+    out = ""
+    for raw in lines:
+        line = raw.rstrip()
+        if not line.strip():
+            continue
+        if not out:
+            out = line
+        elif out.endswith(_SOFT_HYPHEN):
+            out = out[: -len(_SOFT_HYPHEN)] + line.lstrip()
+        elif out.endswith("-"):
+            out = out + line.lstrip()
+        else:
+            out = out + " " + line.lstrip()
+    return out.replace(_SOFT_HYPHEN, "").strip()
+
+
 def _extract_page_blocks(page: fitz.Page) -> list[dict[str, Any]]:
     """Extract text blocks with font metadata from a single PDF page.
+
+    One entry per PDF text BLOCK (visual paragraph) — the block's lines are
+    merged into flowing, dehyphenated prose. Short blocks hugging the very
+    top/bottom edge of the page (running headers, page numbers) are dropped.
 
     Returns a list of dicts, each with keys:
     ``text``, ``font_size``, ``bbox``, ``font_name``.
     """
     blocks: list[dict[str, Any]] = []
     raw_dict = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+    page_height = page.rect.height or 1.0
 
     for block in raw_dict.get("blocks", []):
         if block.get("type") != 0:  # 0 = text block
             continue
+
+        line_texts: list[str] = []
+        sizes: list[float] = []
+        font_names: list[str] = []
         for line in block.get("lines", []):
             spans = line.get("spans", [])
-            if not spans:
-                continue
-            # Merge spans in the same line
             text_parts: list[str] = []
-            sizes: list[float] = []
-            font_names: list[str] = []
             for span in spans:
                 t = span.get("text", "")
                 if t.strip():
                     text_parts.append(t)
                     sizes.append(span.get("size", 0.0))
                     font_names.append(span.get("font", ""))
+            if text_parts:
+                line_texts.append("".join(text_parts))
 
-            if not text_parts:
-                continue
+        merged_text = _join_block_lines(line_texts)
+        if not merged_text:
+            continue
 
-            merged_text = "".join(text_parts)
-            avg_size = sum(sizes) / len(sizes) if sizes else 0.0
-            blocks.append(
-                {
-                    "text": merged_text,
-                    "font_size": avg_size,
-                    "font_name": font_names[0] if font_names else "",
-                    "bbox": block["bbox"],  # (x0, y0, x1, y1)
-                }
-            )
+        # Drop running headers / page numbers: short blocks entirely within
+        # the top or bottom edge zone of the page.
+        x0, y0, x1, y1 = block["bbox"]
+        if len(merged_text) <= _EDGE_MAX_CHARS and (
+            y1 < _EDGE_ZONE * page_height or y0 > (1 - _EDGE_ZONE) * page_height
+        ):
+            continue
+
+        avg_size = sum(sizes) / len(sizes) if sizes else 0.0
+        blocks.append(
+            {
+                "text": merged_text,
+                "font_size": avg_size,
+                "font_name": font_names[0] if font_names else "",
+                "bbox": block["bbox"],  # (x0, y0, x1, y1)
+            }
+        )
     return blocks
+
+
+_SENTENCE_END_CHARS = '.?!:;"”»…'
+
+
+def _merge_continuation_paragraphs(paragraphs: list[Paragraph]) -> list[Paragraph]:
+    """Stitch body paragraphs that continue across blocks/columns/pages.
+
+    Print paragraphs frequently break at page boundaries. When a body
+    paragraph does not end with sentence-final punctuation and the next body
+    paragraph starts with a lowercase letter (or the previous ends with a
+    hyphen), they are two halves of one logical paragraph — merge them.
+    Headings and footnotes are never merged.
+    """
+    merged: list[Paragraph] = []
+    for para in paragraphs:
+        prev = merged[-1] if merged else None
+        is_body = not para.metadata.get("heading_level") and not para.metadata.get("is_footnote")
+        prev_is_body = (
+            prev is not None
+            and not prev.metadata.get("heading_level")
+            and not prev.metadata.get("is_footnote")
+        )
+        if (
+            prev is not None
+            and is_body
+            and prev_is_body
+            and prev.text
+            and para.text
+            and prev.text[-1] not in _SENTENCE_END_CHARS
+            and (para.text[0].islower() or prev.text.endswith("-"))
+        ):
+            joiner = "" if prev.text.endswith("-") else " "
+            prev.text = prev.text + joiner + para.text
+        else:
+            merged.append(para)
+    return merged
 
 
 def _is_heading(
@@ -379,6 +465,12 @@ class PyMuPDFParser(BaseParser):
                 ],
             )
         )
+
+        # Stitch cross-block/page continuations within each chapter section.
+        for chapter in chapters:
+            for section in chapter.sections:
+                section.paragraphs = _merge_continuation_paragraphs(section.paragraphs)
+
         return chapters
 
     # ------------------------------------------------------------------
@@ -418,7 +510,8 @@ class PyMuPDFParser(BaseParser):
 
                 paragraphs.append(Paragraph(text=text, metadata=meta))
 
-        return paragraphs
+        # Stitch paragraphs that continue across blocks / pages.
+        return _merge_continuation_paragraphs(paragraphs)
 
 
 # ---------------------------------------------------------------------------
