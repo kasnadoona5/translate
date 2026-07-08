@@ -258,7 +258,9 @@ def _register_api(app: Flask) -> None:
         def generate():
             q = _progress_queues.get(job_id)
             if not q:
-                yield f"data: {json.dumps({'error': 'Job not found'})}\n\n"
+                # Job already finished (queue cleaned up) — tell the client the
+                # stream is done so its EventSource stops reconnecting.
+                yield f"data: {json.dumps({'stage': 'closed'})}\n\n"
                 return
 
             while True:
@@ -267,10 +269,15 @@ def _register_api(app: Flask) -> None:
                     yield f"data: {json.dumps(data)}\n\n"
 
                     if data.get("stage") in ("complete", "error"):
+                        # Terminal event delivered — drop the queue so a
+                        # reconnecting EventSource gets 'closed' and stops,
+                        # instead of looping on keepalives forever.
+                        _progress_queues.pop(job_id, None)
                         break
                 except queue.Empty:
-                    # Send keepalive
-                    yield f"data: {json.dumps({'stage': 'keepalive'})}\n\n"
+                    # Comment-only keepalive: keeps the connection alive without
+                    # emitting a bogus "message" event to the client.
+                    yield ": keepalive\n\n"
 
         return Response(generate(), mimetype="text/event-stream")
 

@@ -128,47 +128,65 @@ function trackJobProgress(jobId) {
     currentEventSource = new EventSource(streamUrl);
     appendLog("Connecting to translation pipeline stream...", "info");
 
+    let jobFinished = false;
+
+    const finish = (stage) => {
+        jobFinished = true;
+        if (currentEventSource) {
+            currentEventSource.close();
+            currentEventSource = null;
+        }
+        const ok = stage === "complete";
+        appendLog(`Job finished: ${ok ? "COMPLETED ✅" : stage.toUpperCase()}`, ok ? "success" : "error");
+        setTimeout(() => {
+            document.getElementById("uploadSection").style.display = "block";
+            document.getElementById("progressSection").style.display = "none";
+            document.getElementById("startBtn").disabled = false;
+            document.getElementById("startBtn").innerText = "🚀 Start Translation";
+            fetchJobs();
+        }, 3000);
+    };
+
     currentEventSource.onmessage = (event) => {
         try {
             const data = JSON.parse(event.data);
-            
-            // Update progress bar
-            const pct = Math.round(data.pct * 100);
-            progressBar.style.width = `${pct}%`;
-            progressPct.innerText = `${pct}%`;
-            progressStage.innerText = `${data.stage}: ${data.message}`;
 
-            let logClass = "info";
-            if (data.stage === "Error") logClass = "error";
-            else if (data.stage === "Complete") logClass = "success";
-            else if (data.stage === "Typography") logClass = "success";
-            
-            appendLog(`[${data.stage}] ${data.message}`, logClass);
+            // Ignore keepalives and stream-closed notices (no real content).
+            if (data.stage === "keepalive") return;
+            if (data.stage === "closed") { if (!jobFinished) finish("complete"); return; }
 
-            // Check final statuses
-            if (data.status === "completed" || data.status === "failed" || data.status === "paused_error") {
-                currentEventSource.close();
-                currentEventSource = null;
-                appendLog(`Job execution finished with status: ${data.status.toUpperCase()}`, data.status === "completed" ? "success" : "error");
-                
-                // Show action buttons or reset state
-                setTimeout(() => {
-                    document.getElementById("uploadSection").style.display = "block";
-                    document.getElementById("progressSection").style.display = "none";
-                    document.getElementById("startBtn").disabled = false;
-                    document.getElementById("startBtn").innerText = "🚀 Start Translation";
-                    fetchJobs();
-                }, 4000);
+            // Progress: the server sends `progress` (0.0–1.0).
+            if (typeof data.progress === "number") {
+                const pct = Math.round(data.progress * 100);
+                progressBar.style.width = `${pct}%`;
+                progressPct.innerText = `${pct}%`;
+            }
+            if (data.message) {
+                progressStage.innerText = `${data.stage}: ${data.message}`;
             }
 
+            let logClass = "info";
+            if (data.stage === "error") logClass = "error";
+            else if (data.stage === "complete" || data.stage === "Typography") logClass = "success";
+            appendLog(`[${data.stage}] ${data.message || ""}`, logClass);
+
+            // Terminal events use `stage` (the server never sends `status` here).
+            if (data.stage === "complete" || data.stage === "error") {
+                finish(data.stage);
+            }
         } catch (e) {
             console.error("Failed to parse SSE packet", e);
         }
     };
 
-    currentEventSource.onerror = (err) => {
-        console.error("SSE connection error", err);
-        appendLog("Disconnected from server. Retrying connection...", "warning");
+    currentEventSource.onerror = () => {
+        // After completion the server closes the stream — that's expected, not
+        // an error. Only warn (and let EventSource retry) while still running.
+        if (jobFinished) {
+            if (currentEventSource) { currentEventSource.close(); currentEventSource = null; }
+            return;
+        }
+        appendLog("Reconnecting to server…", "warning");
     };
 }
 
