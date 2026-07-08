@@ -1,16 +1,23 @@
-# You can override the included template(s) by including variable overrides
-# SAST customization: https://docs.gitlab.com/user/application_security/sast/#available-cicd-variables
-# Secret Detection customization: https://docs.gitlab.com/user/application_security/secret_detection/pipeline/configure/
-# Dependency Scanning customization: https://docs.gitlab.com/user/application_security/dependency_scanning/dependency_scanning_sbom/#customizing-analyzer-behavior
-# Container Scanning customization: https://docs.gitlab.com/user/application_security/container_scanning/#customizing-analyzer-behavior
-# Note that environment variables can be set in several places
-# See https://docs.gitlab.com/ci/variables/#cicd-variable-precedence
+# Tarjomeh CI — runs the full test suite on every push.
+# (Replaces a stock template that declared a 'test' stage with no jobs,
+#  which made every pipeline fail with "0 failed jobs".)
+
 stages:
-- test
-- secret-detection
-variables:
-  SECRET_DETECTION_ENABLED: 'true'
-secret_detection:
-  stage: secret-detection
+  - test
+
+run-tests:
+  stage: test
+  image: python:3.11-slim
+  variables:
+    PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  before_script:
+    - pip install --quiet -e .[dev]
+  script:
+    - python -m compileall -q src/
+    - python -m pytest tests/ -q
+  rules:
+    - if: $CI_COMMIT_BRANCH
+
+# Optional: GitLab secret scanning (creates its own job when available).
 include:
-- template: Security/Secret-Detection.gitlab-ci.yml
+  - template: Security/Secret-Detection.gitlab-ci.yml
