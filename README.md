@@ -41,9 +41,10 @@ correct scholarly apparatus. Licensed under **AGPL-3.0**.
 git clone https://gitlab.com/personal-group4462928/translate.git
 cd translate
 
-# 1. Configuration
-cp config.example.toml config.toml    # models & behavior — pick Scenario A/B/C inside
-cp .env.example .env                  # API keys & secrets — fill in
+# 1. Configuration — ONE file to fill
+cp config.example.toml config.toml    # defaults; you normally never edit this
+cp .env.example .env
+nano .env                             # ← models + keys + token go HERE
 
 # 2a. Docker (recommended)
 docker-compose up --build -d          # web UI on port 8080
@@ -53,35 +54,39 @@ pip install -e .
 tarjomeh serve --port 8080
 ```
 
-Open `http://localhost:8080?token=YOUR_UI_SECRET_TOKEN`.
+Open `http://localhost:8080/?token=YOUR_UI_SECRET_TOKEN` (the token you set in `.env`).
 
 ## Choosing models (translator + judge)
 
-All routing lives in `config.toml`. Three ready-made scenarios are documented
-at the top of `config.example.toml`:
+Everything is set in **`.env`** — two simple blocks. Each block can point at
+OpenRouter **or** 9router (or any OpenAI-compatible gateway), independently:
 
-| Scenario | Translator | Judge | When |
-|---|---|---|---|
-| **A** | OpenRouter direct | OpenRouter direct (stronger model) | Simplest; OpenRouter handles provider fallback |
-| **B** | 9router combo | second 9router combo | You manage fallback combos in 9router |
-| **C** ⭐ | 9router (cheap/free) | OpenRouter direct (strong, paid) | Best cost/quality: bulk translation cheap, independent reliable grading |
+```bash
+# ---- TRANSLATOR (main model) ----
+TRANSLATOR_API_BASE=                  # empty = OpenRouter; or http://172.17.0.1:20128/v1 for 9router
+TRANSLATOR_API_KEY=sk-or-xxxxxxxx
+TRANSLATOR_MODEL=deepseek/deepseek-v4-flash
 
-Example (Scenario C):
-
-```toml
-[llm]
-model = "combo1"                          # translator via 9router
-[llm.openrouter]
-api_base = "http://172.17.0.1:20128/v1"
-[llm.critic]
-enabled  = true
-model    = "anthropic/claude-sonnet-5"    # judge via OpenRouter directly
-api_base = "https://openrouter.ai/api/v1"
-api_keys = ["${CRITIC_API_KEY}"]
+# ---- CRITIC / JUDGE (optional second model that grades every chunk) ----
+CRITIC_ENABLED=true
+CRITIC_API_BASE=                      # may differ from the translator's endpoint
+CRITIC_API_KEY=sk-or-xxxxxxxx
+CRITIC_MODEL=anthropic/claude-sonnet-5
 ```
+
+| Setup | Translator | Judge | When |
+|---|---|---|---|
+| **A** | OpenRouter | OpenRouter (stronger model) | Simplest; OpenRouter handles provider fallback |
+| **B** | 9router combo | second 9router combo | You manage fallback combos in 9router |
+| **C** ⭐ | 9router (cheap/free) | OpenRouter (strong, paid) | Best cost/quality: bulk translation cheap, independent reliable grading |
+
+Copy-paste blocks for all three are inside `.env.example`.
 
 > ⚠ Never use a free/congested model as the judge — the critique loop
 > multiplies calls, and an unreliable judge poisons refinement.
+>
+> Advanced users can still fine-tune modes, chunking, typography, etc. in
+> `config.toml`; `.env` values win for models/keys/endpoints.
 
 ## CLI
 
@@ -120,7 +125,8 @@ the translator and the judge.
 ssh root@YOUR_VPS
 cd /opt/translate
 git pull origin main
-nano config.toml            # config.toml & .env are NOT overwritten by git
+cp config.example.toml config.toml   # one-time: refresh defaults (your .env is never touched)
+nano .env                            # models + keys + token (see .env.example)
 docker-compose down && docker system prune -f
 docker-compose up --build -d
 ```

@@ -93,5 +93,52 @@ class TestCriticClient(unittest.TestCase):
             cfg.validate()
 
 
+class TestSimpleEnvOverrides(unittest.TestCase):
+    """Flat TRANSLATOR_* / CRITIC_* .env variables configure everything."""
+
+    _ENV = {
+        "TRANSLATOR_API_BASE": "http://172.17.0.1:20128/v1",
+        "TRANSLATOR_API_KEY": "nine-router-key",
+        "TRANSLATOR_MODEL": "combo1",
+        "TRANSLATOR_MAX_TOKENS": "16000",
+        "CRITIC_ENABLED": "true",
+        "CRITIC_API_BASE": "https://openrouter.ai/api/v1",
+        "CRITIC_API_KEY": "sk-or-judge-key",
+        "CRITIC_MODEL": "anthropic/claude-sonnet-5",
+    }
+
+    def test_env_overrides_apply(self) -> None:
+        from unittest.mock import patch
+        with patch.dict(os.environ, self._ENV, clear=False):
+            cfg = TarjomehConfig()
+            cfg._apply_env_overrides()
+        self.assertEqual(cfg.llm.model, "combo1")
+        self.assertEqual(cfg.llm.openrouter.api_keys, ["nine-router-key"])
+        self.assertEqual(cfg.llm.openrouter.api_base, "http://172.17.0.1:20128/v1")
+        self.assertEqual(cfg.llm.max_tokens, 16000)
+        self.assertTrue(cfg.llm.critic.enabled)
+        self.assertEqual(cfg.llm.critic.model, "anthropic/claude-sonnet-5")
+        self.assertEqual(cfg.llm.critic.api_keys, ["sk-or-judge-key"])
+        self.assertEqual(cfg.llm.critic.api_base, "https://openrouter.ai/api/v1")
+
+    def test_unset_env_changes_nothing(self) -> None:
+        from unittest.mock import patch
+        cleared = {k: "" for k in self._ENV}
+        with patch.dict(os.environ, cleared, clear=False):
+            cfg = TarjomehConfig()
+            before_model = cfg.llm.model
+            cfg._apply_env_overrides()
+        self.assertEqual(cfg.llm.model, before_model)
+        self.assertFalse(cfg.llm.critic.enabled)
+
+    def test_critic_enabled_false_wins(self) -> None:
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"CRITIC_ENABLED": "false"}, clear=False):
+            cfg = TarjomehConfig()
+            cfg.llm.critic.enabled = True
+            cfg._apply_env_overrides()
+        self.assertFalse(cfg.llm.critic.enabled)
+
+
 if __name__ == "__main__":
     unittest.main()

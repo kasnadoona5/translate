@@ -297,8 +297,10 @@ class TarjomehConfig:
             if not path.exists():
                 path = Path("config.example.toml")
                 if not path.exists():
-                    logger.warning("No config file found. Using defaults.")
-                    return cls()
+                    logger.warning("No config file found. Using defaults + .env overrides.")
+                    config = cls()
+                    config._apply_env_overrides()
+                    return config
         return cls.from_toml(path)
 
     @classmethod
@@ -308,11 +310,13 @@ class TarjomehConfig:
         Processing order (consistent with from_toml):
         1. Expand env variables recursively.
         2. Apply mode preset defaults.
-        3. Enforce default country.
+        3. Apply simple flat .env overrides (TRANSLATOR_* / CRITIC_*).
+        4. Enforce default country.
         """
         expanded = _expand_env_recursive(data)
         config = cls._from_raw(expanded)
         config._apply_mode_preset(expanded)
+        config._apply_env_overrides()
         if not config.translation.country:
             config.translation.country = "Iran"
         config.validate()
@@ -354,6 +358,9 @@ class TarjomehConfig:
         # Apply mode presets — only for keys that the user did NOT set
         config._apply_mode_preset(raw)
 
+        # Simple flat .env overrides (TRANSLATOR_* / CRITIC_*) win over TOML
+        config._apply_env_overrides()
+
         # Ensure country has a default
         if not config.translation.country:
             config.translation.country = "Iran"
@@ -383,6 +390,56 @@ class TarjomehConfig:
         _populate_dataclass(config.system_prompt, raw.get("system_prompt", {}))
 
         return config
+
+    def _apply_env_overrides(self) -> None:
+        """Apply simple flat .env overrides so users configure everything
+        from ONE file (.env) without touching config.toml.
+
+        Translator (main model):
+            TRANSLATOR_API_BASE   endpoint ("" = OpenRouter; 9router URL to route via it)
+            TRANSLATOR_API_KEY    API key
+            TRANSLATOR_MODEL      model id or 9router combo name
+            TRANSLATOR_MAX_TOKENS optional output budget (default 8192)
+
+        Critic / judge (optional second model):
+            CRITIC_ENABLED        true / false
+            CRITIC_API_BASE       endpoint (may differ from the translator's)
+            CRITIC_API_KEY        API key (may differ)
+            CRITIC_MODEL          model id or combo name
+
+        Legacy OPENROUTER_API_KEY / OPENROUTER_API_BASE keep working as
+        translator fallbacks (handled via ${VAR} expansion and the client's
+        endpoint resolution).
+        """
+        env = os.environ.get
+
+        value = env("TRANSLATOR_MODEL", "").strip()
+        if value:
+            self.llm.model = value
+        value = env("TRANSLATOR_API_KEY", "").strip()
+        if value:
+            self.llm.openrouter.api_keys = [value]
+        value = env("TRANSLATOR_API_BASE", "").strip()
+        if value:
+            self.llm.openrouter.api_base = value
+        value = env("TRANSLATOR_MAX_TOKENS", "").strip()
+        if value.isdigit():
+            self.llm.max_tokens = int(value)
+
+        value = env("CRITIC_ENABLED", "").strip().lower()
+        if value in ("1", "true", "yes", "on"):
+            self.llm.critic.enabled = True
+        elif value in ("0", "false", "no", "off"):
+            self.llm.critic.enabled = False
+        value = env("CRITIC_MODEL", "").strip()
+        if value:
+            self.llm.critic.model = value
+        value = env("CRITIC_API_KEY", "").strip()
+        if value:
+            self.llm.critic.api_keys = [value]
+        value = env("CRITIC_API_BASE", "").strip()
+        if value:
+            self.llm.critic.api_base = value
 
     def _apply_mode_preset(self, raw: dict[str, Any]) -> None:
         """Apply mode-specific defaults for keys not explicitly provided."""
