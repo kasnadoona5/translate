@@ -7,7 +7,7 @@ Loads, saves, and queries CSV-based glossaries whose rows contain:
 Phase-3 glossaries may add optional columns after the BabelDOC-compatible
 columns:
 
-    sense, author
+    sense, author, is_auto
 
 Term matching is case-insensitive with word-boundary awareness so that
 partial matches (e.g., "state" inside "statement") are avoided.
@@ -25,7 +25,7 @@ from typing import Iterable
 # BabelDOC-compatible base columns. Optional columns are additive so old CSVs
 # continue to work unchanged.
 BASE_FIELDNAMES = ["source", "target", "tgt_lng", "context", "domain"]
-OPTIONAL_FIELDNAMES = ["sense", "author"]
+OPTIONAL_FIELDNAMES = ["sense", "author", "is_auto"]
 FIELDNAMES = BASE_FIELDNAMES + OPTIONAL_FIELDNAMES
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9\u0600-\u06FF']+", re.UNICODE)
@@ -109,6 +109,7 @@ class GlossaryManager:
                     sense=row.get("sense", "").strip(),
                     author=row.get("author", "").strip(),
                     glossary=source_name,
+                    is_auto=str(row.get("is_auto", "")).strip().lower() in ("1", "true", "yes"),
                 )
                 if entry.source and entry.target:
                     self._add_entry(entry)
@@ -437,12 +438,13 @@ def _entry_to_row(entry: GlossaryEntry) -> dict[str, str]:
         "domain": entry.domain,
         "sense": entry.sense,
         "author": entry.author,
+        "is_auto": "true" if entry.is_auto else "",
     }
 
 
 def _fieldnames_for_entries(entries: Iterable[GlossaryEntry]) -> list[str]:
     entries_list = list(entries)
-    if any(entry.sense or entry.author for entry in entries_list):
+    if any(entry.sense or entry.author or entry.is_auto for entry in entries_list):
         return FIELDNAMES
     return BASE_FIELDNAMES
 

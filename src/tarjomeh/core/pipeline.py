@@ -958,6 +958,224 @@ class TranslationPipeline:
 
         return PipelineResult(output_path, total_chunks, duration, warnings=self.warnings)
 
+    def export_completed_job(
+        self,
+        job_id: str,
+        output_path: Path | None = None,
+        *,
+        output_format: str | None = None,
+        bilingual_mode: str | None = None,
+    ) -> Path:
+        """Re-export a completed/partially-reviewed job without LLM calls."""
+        job = self.db.get_job(job_id)
+        if not job:
+            raise ValueError(f"Job {job_id} not found.")
+
+        input_path = Path(job["input_path"])
+        if output_format:
+            self.config.output.format = output_format
+        if bilingual_mode:
+            self.config.output.bilingual_mode = bilingual_mode
+
+        fmt = self.config.output.format.lower()
+        if output_path is None:
+            output_path = input_path.parent / f"{input_path.stem}_reexported.{fmt}"
+        else:
+            output_path = Path(output_path)
+
+        document, chunks = self._parse_and_chunk(input_path)
+        translations: dict[int, str] = {}
+        for c_record in self.db.get_chunks(job_id):
+            if c_record["status"] == ChunkStatus.COMPLETED and c_record.get("translation"):
+                translations[int(c_record["chunk_index"])] = c_record["translation"]
+
+        missing = [idx for idx in range(len(chunks)) if not translations.get(idx, "").strip()]
+        if missing:
+            raise RuntimeError(
+                "Cannot re-export: missing completed translation for chunk(s) "
+                + ", ".join(str(i) for i in missing[:20])
+            )
+
+        trans_doc = self._assemble_translated_document(document, chunks, translations)
+        exporter_cls = get_exporter(fmt)
+        exporter = exporter_cls(self.config.to_dict().get(fmt))
+        exporter.export(
+            document=trans_doc,
+            output_path=output_path,
+            bilingual_mode=self.config.output.bilingual_mode,
+        )
+        self.db.update_job_status(job_id, job["status"], output_path=output_path)
+        self.db.log_event(job_id, "INFO", f"Re-exported job to {output_path}")
+        return output_path
+
+    def retranslate_chunk(self, job_id: str, chunk_index: int) -> str:
+        """Retranslate one chunk for editor review without touching others."""
+        job = self.db.get_job(job_id)
+        if not job:
+            raise ValueError(f"Job {job_id} not found.")
+
+        document, chunks = self._parse_and_chunk(Path(job["input_path"]))
+        if chunk_index < 0 or chunk_index >= len(chunks):
+            raise ValueError(f"Chunk {chunk_index} is out of range.")
+
+        translations: dict[int, str] = {}
+        for c_record in self.db.get_chunks(job_id):
+            if c_record.get("translation"):
+                translations[int(c_record["chunk_index"])] = c_record["translation"]
+
+        glossary_manager = GlossaryManager()
+        glossary_paths: list[Path] = []
+        primary_glossary = getattr(self.config.glossary, "path", "")
+        if primary_glossary:
+            glossary_paths.append(Path(primary_glossary))
+        for extra_path in getattr(self.config.glossary, "paths", []) or []:
+            p = Path(extra_path)
+            if p not in glossary_paths:
+                glossary_paths.append(p)
+        glossary_manager.load_many(glossary_paths, ignore_missing=True)
+
+        memory_manager = MemoryManager(self.config)
+        saved_mem = self.db.get_memory_state(job_id)
+        if saved_mem:
+            memory_manager.from_dict(saved_mem)
+
+        web_searcher = WebContextSearcher(self.config, self.llm_client)
+        compliance_checker = GlossaryComplianceChecker()
+        critique_tool = TranslationCritique(llm_client=self.critic_client)
+        refiner_tool = TranslationRefiner(
+            llm_client=self.llm_client,
+            max_iterations=self.config.translation.max_refine_iterations,
+        )
+        back_translator = BackTranslator(
+            llm_client=self.critic_client,
+            sample_pct=self.config.translation.back_translation_sample_pct,
+        )
+
+        translation = self._translate_single_chunk(
+            idx=chunk_index,
+            chunk=chunks[chunk_index],
+            memory_manager=memory_manager,
+            web_searcher=web_searcher,
+            glossary_manager=glossary_manager,
+            compliance_checker=compliance_checker,
+            critique_tool=critique_tool,
+            refiner_tool=refiner_tool,
+            back_translator=back_translator,
+            translations=translations,
+            job_id=job_id,
+        )
+        self.db.update_chunk(job_id, chunk_index, ChunkStatus.COMPLETED, translation)
+        memory_manager.update_after_translation(chunks[chunk_index], translation)
+        self.db.save_memory_state(job_id, memory_manager.to_dict())
+        self.db.log_event(job_id, "INFO", f"Retranslated chunk {chunk_index}.")
+        return translation
+
+    def _parse_and_chunk(self, input_path: Path) -> tuple[Document, list[Chunk]]:
+        parser = self._get_parser(input_path)
+        document = parser.parse(input_path)
+
+        def token_counter(text: str) -> int:
+            return self.llm_client.count_tokens(text)
+
+        if self.config.chunking.strategy == "semantic":
+            chunker = SemanticChunker(
+                max_tokens=self.config.chunking.max_chunk_tokens,
+                overlap_sentences=self.config.chunking.overlap_sentences,
+                token_counter=token_counter,
+            )
+        else:
+            chunker = FixedChunker(
+                max_tokens=self.config.chunking.max_chunk_tokens,
+                token_counter=token_counter,
+            )
+        return document, chunker.chunk(document)
+
+    def _assemble_translated_document(
+        self,
+        document: Document,
+        chunks: list[Chunk],
+        translations: dict[int, str],
+    ) -> TranslatedDocument:
+        """Assemble translated chunks into document paragraphs."""
+        original_paragraphs = document.all_paragraphs
+        translated_paragraphs: list[TranslatedParagraph | None] = [None] * len(original_paragraphs)
+        fallback_idx = 0
+
+        for idx, chunk in enumerate(chunks):
+            chunk_translation = translations.get(idx, "")
+            tgt_paras = [p.strip() for p in chunk_translation.split("\n\n") if p.strip()]
+            para_indices = chunk.metadata.get("paragraph_indices", [])
+
+            if para_indices:
+                aligned = _align_chunk_translation(
+                    original_paragraphs=original_paragraphs,
+                    para_indices=para_indices,
+                    tgt_paras=tgt_paras,
+                    chunk_translation=chunk_translation,
+                )
+                for pid, t in aligned:
+                    if pid < len(original_paragraphs):
+                        orig_para = original_paragraphs[pid]
+                        existing = translated_paragraphs[pid]
+                        if existing is None:
+                            translated_paragraphs[pid] = TranslatedParagraph(
+                                index=pid,
+                                source_text=orig_para.text,
+                                translated_text=t,
+                                heading_level=orig_para.heading_level,
+                                metadata=orig_para.metadata,
+                            )
+                        elif t:
+                            existing.translated_text = (
+                                f"{existing.translated_text.rstrip()} {t}".strip()
+                                if existing.translated_text.strip()
+                                else t
+                            )
+            else:
+                src_paras = [p.strip() for p in chunk.text.split("\n\n") if p.strip()]
+                aligned_pairs = list(zip(src_paras, tgt_paras)) if len(src_paras) == len(tgt_paras) else [
+                    (
+                        src_paras[i] if i < len(src_paras) else "",
+                        tgt_paras[i] if i < len(tgt_paras) else "",
+                    )
+                    for i in range(max(len(src_paras), len(tgt_paras)))
+                ]
+                for s, t in aligned_pairs:
+                    if fallback_idx < len(original_paragraphs):
+                        orig_para = original_paragraphs[fallback_idx]
+                        translated_paragraphs[fallback_idx] = TranslatedParagraph(
+                            index=fallback_idx,
+                            source_text=s,
+                            translated_text=t,
+                            heading_level=orig_para.heading_level,
+                            metadata=orig_para.metadata,
+                        )
+                        fallback_idx += 1
+
+        final_translated_paragraphs: list[TranslatedParagraph] = []
+        for pid, orig_para in enumerate(original_paragraphs):
+            pt = translated_paragraphs[pid]
+            final_translated_paragraphs.append(
+                pt if pt is not None else TranslatedParagraph(
+                    index=pid,
+                    source_text=orig_para.text,
+                    translated_text="",
+                    heading_level=orig_para.heading_level,
+                    metadata=orig_para.metadata,
+                )
+            )
+
+        typographer = PersianTypographer(self.config.to_dict().get("persian"))
+        for p in final_translated_paragraphs:
+            p.translated_text = typographer.process(p.translated_text)
+
+        return TranslatedDocument(
+            title=document.title,
+            author=document.author,
+            paragraphs=final_translated_paragraphs,
+            metadata=document.metadata,
+        )
+
     def _translate_single_chunk(
         self,
         idx: int,

@@ -2,11 +2,13 @@
 
 let selectedFile = null;
 let currentEventSource = null;
+let currentReviewJobId = null;
 
 // Initialize on page load
 document.addEventListener("DOMContentLoaded", () => {
     setupDragAndDrop();
     fetchJobs();
+    fetchGlossaryTerms();
     
     // File input change handler
     document.getElementById("fileInput").addEventListener("change", (e) => {
@@ -250,6 +252,14 @@ async function fetchJobs() {
                 actionHtml = `<button class="action-btn" title="Resume" onclick="resumeJob('${job.id}')">▶️</button>`;
             }
 
+            if (job.status === "completed") {
+                actionHtml = `
+                    <button class="action-btn" title="Review QA" onclick="openReview('${job.id}')">QA</button>
+                    <button class="action-btn" title="Download report" onclick="downloadQaReport('${job.id}')">Report</button>
+                    ${actionHtml}
+                `;
+            }
+
             div.innerHTML = `
                 <div class="job-meta">
                     <span class="job-title">${job.filename}</span>
@@ -313,4 +323,157 @@ async function resumeJob(jobId) {
     } catch (e) {
         alert("Failed to resume job");
     }
+}
+
+function authUrl(path) {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("token");
+    return token ? `${path}${path.includes("?") ? "&" : "?"}token=${token}` : path;
+}
+
+async function openReview(jobId) {
+    currentReviewJobId = jobId;
+    const section = document.getElementById("reviewSection");
+    const list = document.getElementById("reviewList");
+    document.getElementById("reviewJobTitle").innerText = `Job ${jobId}`;
+    section.style.display = "block";
+    list.innerHTML = `<p class="empty-state">Loading review data...</p>`;
+
+    try {
+        const response = await fetch(authUrl(`/api/jobs/${jobId}/review`));
+        if (!response.ok) throw new Error("Failed to load review data");
+        const data = await response.json();
+        const chunks = data.chunks || [];
+        list.innerHTML = "";
+
+        chunks.forEach(chunk => {
+            const div = document.createElement("div");
+            div.className = `review-item ${chunk.flagged ? "flagged" : ""}`;
+            const score = chunk.critique_average === null || chunk.critique_average === undefined
+                ? "n/a"
+                : Number(chunk.critique_average).toFixed(1);
+            div.innerHTML = `
+                <div class="review-head">
+                    <strong>Chunk ${chunk.chunk_index}</strong>
+                    <span>Status: ${chunk.status}</span>
+                    <span>Critique: ${score}</span>
+                    <span>Glossary: ${chunk.glossary_violations}</span>
+                    <span>Back-check: ${chunk.back_translation_flagged ? "flagged" : "ok/unsampled"}</span>
+                    <button class="btn" onclick="retranslateChunk('${jobId}', ${chunk.chunk_index})">Retranslate</button>
+                </div>
+                <div class="review-columns">
+                    <pre>${escapeHtml(chunk.source || "")}</pre>
+                    <pre dir="rtl">${escapeHtml(chunk.translation || "")}</pre>
+                </div>
+            `;
+            list.appendChild(div);
+        });
+    } catch (e) {
+        list.innerHTML = `<p class="empty-state error">${e.message}</p>`;
+    }
+}
+
+async function retranslateChunk(jobId, chunkIndex) {
+    if (!confirm(`Retranslate chunk ${chunkIndex}? This will call the LLM again for this chunk.`)) return;
+    const response = await fetch(authUrl(`/api/jobs/${jobId}/chunks/${chunkIndex}/retranslate`), { method: "POST" });
+    if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        alert(data.error || "Retranslation failed");
+        return;
+    }
+    await openReview(jobId);
+    fetchJobs();
+}
+
+async function exportReviewedJob() {
+    if (!currentReviewJobId) return;
+    const fmt = document.getElementById("exportFormat").value;
+    const response = await fetch(authUrl(`/api/jobs/${currentReviewJobId}/export`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ format: fmt })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        alert(data.error || "Export failed");
+        return;
+    }
+    alert(`Exported: ${data.output_path}`);
+    fetchJobs();
+}
+
+function downloadQaReport(jobId = null) {
+    const id = jobId || currentReviewJobId;
+    if (!id) return;
+    window.open(authUrl(`/api/jobs/${id}/qa-report`), "_blank");
+}
+
+async function fetchGlossaryTerms() {
+    const list = document.getElementById("glossaryList");
+    if (!list) return;
+    try {
+        const response = await fetch(authUrl("/api/glossary/terms"));
+        if (!response.ok) throw new Error("Failed to load glossary");
+        const data = await response.json();
+        const terms = data.terms || [];
+        list.innerHTML = "";
+        terms.slice(0, 80).forEach(term => {
+            const row = document.createElement("div");
+            row.className = `glossary-row ${term.is_auto ? "auto" : ""}`;
+            row.innerHTML = `
+                <span><strong>${escapeHtml(term.source)}</strong> -> ${escapeHtml(term.target)}</span>
+                <span>${escapeHtml(term.domain || "")}</span>
+                <button class="action-btn" onclick="deleteGlossaryTerm(${term.index})">Delete</button>
+                ${term.is_auto ? `<button class="action-btn" onclick="approveGlossaryTerm(${term.index})">Approve</button>` : ""}
+            `;
+            list.appendChild(row);
+        });
+    } catch (e) {
+        list.innerHTML = `<p class="empty-state error">${e.message}</p>`;
+    }
+}
+
+async function addGlossaryTerm() {
+    const payload = {
+        source: document.getElementById("glossSource").value,
+        target: document.getElementById("glossTarget").value,
+        domain: document.getElementById("glossDomain").value,
+        context: document.getElementById("glossContext").value
+    };
+    const response = await fetch(authUrl("/api/glossary/terms"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+    });
+    if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        alert(data.error || "Failed to add term");
+        return;
+    }
+    ["glossSource", "glossTarget", "glossDomain", "glossContext"].forEach(id => document.getElementById(id).value = "");
+    fetchGlossaryTerms();
+}
+
+async function deleteGlossaryTerm(index) {
+    if (!confirm("Delete this glossary term?")) return;
+    await fetch(authUrl(`/api/glossary/terms/${index}`), { method: "DELETE" });
+    fetchGlossaryTerms();
+}
+
+async function approveGlossaryTerm(index) {
+    await fetch(authUrl(`/api/glossary/terms/${index}/approve`), { method: "POST" });
+    fetchGlossaryTerms();
+}
+
+function downloadGlossary() {
+    window.open(authUrl("/api/glossary/download"), "_blank");
+}
+
+function escapeHtml(value) {
+    return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
 }

@@ -229,6 +229,35 @@ def cmd_jobs(args: argparse.Namespace) -> int:
             console.print(f"[yellow]No artifacts to clean for job {args.job_id}[/yellow]")
         return 0
 
+    elif args.jobs_action == "export":
+        if not args.job_id:
+            console.print("[red]Error:[/red] Job ID required.")
+            return 1
+
+        from tarjomeh.core.config import TarjomehConfig
+        from tarjomeh.core.pipeline import TranslationPipeline
+
+        job = db.get_job(args.job_id)
+        if not job:
+            console.print(f"[red]Error:[/red] Job {args.job_id} not found.")
+            return 1
+
+        config = TarjomehConfig.from_dict(job.get("config", {}))
+        pipeline = TranslationPipeline(config)
+        try:
+            output = pipeline.export_completed_job(
+                args.job_id,
+                Path(args.output) if args.output else None,
+                output_format=args.format,
+                bilingual_mode=args.bilingual,
+            )
+        except Exception as e:
+            console.print(f"[red]Export failed:[/red] {e}")
+            return 1
+
+        console.print(f"[bold green]✓ Exported without re-translating:[/bold green] {output}")
+        return 0
+
     return 1
 
 
@@ -328,6 +357,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_resume.add_argument("job_id", help="Job ID")
     p_cleanup = jobs_sub.add_parser("cleanup", help="Clean up job artifacts")
     p_cleanup.add_argument("job_id", help="Job ID")
+    p_export = jobs_sub.add_parser("export", help="Re-export a completed job without translating")
+    p_export.add_argument("job_id", help="Job ID")
+    p_export.add_argument("--format", choices=["pdf", "epub", "docx", "txt", "srt"], help="Output format")
+    p_export.add_argument("-o", "--output", help="Output file path")
+    p_export.add_argument("-b", "--bilingual", choices=["inline", "side_by_side", "target_only"], help="Bilingual mode")
 
     # glossary
     p_glossary = subparsers.add_parser("glossary", help="Glossary management")

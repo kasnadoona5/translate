@@ -55,6 +55,7 @@
                             <option value="epub">EPUB</option>
                             <option value="docx">DOCX</option>
                             <option value="txt">TXT</option>
+                            <option value="srt">SRT</option>
                         </select>
                     </div>
                     <div class="config-row">
@@ -93,6 +94,37 @@
                 <div id="jobsList" class="jobs-list">
                     <p class="empty-state">Loading jobs...</p>
                 </div>
+            </section>
+            <section class="card review-section" id="reviewSection" style="display:none;">
+                <h2>Review & QA</h2>
+                <div class="review-toolbar">
+                    <span id="reviewJobTitle" class="job-submeta"></span>
+                    <div class="toolbar-actions">
+                        <select id="exportFormat">
+                            <option value="docx">DOCX</option>
+                            <option value="epub">EPUB</option>
+                            <option value="pdf">PDF</option>
+                            <option value="txt">TXT</option>
+                            <option value="srt">SRT</option>
+                        </select>
+                        <button class="btn btn-primary" onclick="exportReviewedJob()">Re-export</button>
+                        <button class="btn" onclick="downloadQaReport()">QA report</button>
+                    </div>
+                </div>
+                <div id="reviewList" class="review-list"></div>
+            </section>
+
+            <section class="card glossary-section">
+                <h2>Glossary Editor</h2>
+                <div class="glossary-form">
+                    <input id="glossSource" placeholder="English term">
+                    <input id="glossTarget" placeholder="Persian term">
+                    <input id="glossDomain" placeholder="Domain">
+                    <input id="glossContext" placeholder="Context">
+                    <button class="btn btn-primary" onclick="addGlossaryTerm()">Add term</button>
+                    <button class="btn" onclick="downloadGlossary()">Download CSV</button>
+                </div>
+                <div id="glossaryList" class="glossary-list"></div>
             </section>
         </main>
 

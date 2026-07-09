@@ -7,6 +7,7 @@ Bound to 127.0.0.1 by default for VPS security (access via SSH tunnel).
 from __future__ import annotations
 
 import copy
+import csv
 import json
 import logging
 import os
@@ -286,6 +287,179 @@ def _register_api(app: Flask) -> None:
 
         return jsonify({"events": db.get_chunk_events(job_id, chunk_index)})
 
+    @app.route("/api/jobs/<job_id>/review")
+    @_require_auth
+    def api_job_review(job_id: str):
+        """Return chunks plus QA flags for editor review."""
+        from tarjomeh.jobs.database import JobDatabase
+        db = JobDatabase()
+        job = db.get_job(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+
+        events = db.get_chunk_events(job_id)
+        events_by_chunk: dict[int, list[dict[str, Any]]] = {}
+        for event in events:
+            events_by_chunk.setdefault(int(event["chunk_index"]), []).append(event)
+
+        review_chunks = []
+        for chunk in db.get_chunks(job_id):
+            idx = int(chunk["chunk_index"])
+            chunk_events = events_by_chunk.get(idx, [])
+            scores = [
+                e["payload"].get("scores", {}).get("average")
+                for e in chunk_events
+                if e["event_type"] == "critique_completed"
+            ]
+            scores = [float(s) for s in scores if s is not None]
+            final_glossary_events = [
+                e for e in chunk_events
+                if e["event_type"] == "glossary_compliance_final"
+            ]
+            glossary_events = final_glossary_events or [
+                e for e in chunk_events
+                if e["event_type"] == "glossary_compliance_checked"
+            ]
+            glossary_violations = sum(
+                int(e["payload"].get("violation_count", 0))
+                for e in glossary_events
+            )
+            bt_flagged = any(
+                bool(e["payload"].get("flagged"))
+                for e in chunk_events
+                if e["event_type"] == "back_translation_completed"
+            )
+            low_score = bool(scores and min(scores) < 7.0)
+            flagged = chunk["status"] != "completed" or low_score or glossary_violations > 0 or bt_flagged
+            review_chunks.append({
+                "chunk_index": idx,
+                "status": chunk["status"],
+                "source": chunk.get("text") or "",
+                "translation": chunk.get("translation") or "",
+                "critique_average": min(scores) if scores else None,
+                "glossary_violations": glossary_violations,
+                "back_translation_flagged": bt_flagged,
+                "flagged": flagged,
+                "events": chunk_events,
+            })
+
+        return jsonify({"job": job, "chunks": review_chunks})
+
+    @app.route("/api/jobs/<job_id>/qa-report")
+    @_require_auth
+    def api_job_qa_report(job_id: str):
+        """Download a text QA scorecard for a job."""
+        from tarjomeh.jobs.database import JobDatabase
+        db = JobDatabase()
+        job = db.get_job(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+
+        lines = [
+            f"Tarjomeh QA Report",
+            f"Job: {job_id}",
+            f"Input: {job.get('input_path')}",
+            f"Status: {job.get('status')}",
+            "",
+        ]
+        events_by_chunk: dict[int, list[dict[str, Any]]] = {}
+        for event in db.get_chunk_events(job_id):
+            events_by_chunk.setdefault(int(event["chunk_index"]), []).append(event)
+
+        for chunk in db.get_chunks(job_id):
+            idx = int(chunk["chunk_index"])
+            chunk_events = events_by_chunk.get(idx, [])
+            lines.append(f"Chunk {idx} [{chunk['status']}]")
+            for event in chunk_events:
+                payload = event["payload"]
+                if event["event_type"] == "critique_completed":
+                    scores = payload.get("scores", {})
+                    lines.append(
+                        "  Critique: avg={average} accuracy={accuracy} fluency={fluency} "
+                        "terminology={terminology} register={register} issues={issues}".format(
+                            average=scores.get("average"),
+                            accuracy=scores.get("accuracy"),
+                            fluency=scores.get("fluency"),
+                            terminology=scores.get("terminology"),
+                            register=scores.get("register"),
+                            issues=payload.get("issue_count"),
+                        )
+                    )
+                elif event["event_type"] == "refinement_completed":
+                    lines.append(
+                        f"  Refinement: iteration={payload.get('iteration')} "
+                        f"before={payload.get('before_chars')} after={payload.get('after_chars')}"
+                    )
+                elif event["event_type"] == "glossary_compliance_final":
+                    lines.append(
+                        f"  Glossary: compliant={payload.get('compliant')} "
+                        f"violations={payload.get('violation_count')}"
+                    )
+                elif event["event_type"] == "back_translation_completed":
+                    lines.append(
+                        f"  Back-translation: score={payload.get('similarity_score')} "
+                        f"flagged={payload.get('flagged')}"
+                    )
+            lines.append("")
+
+        report = "\n".join(lines)
+        return Response(
+            report,
+            mimetype="text/plain; charset=utf-8",
+            headers={"Content-Disposition": f"attachment; filename={job_id}_qa_report.txt"},
+        )
+
+    @app.route("/api/jobs/<job_id>/chunks/<int:chunk_index>/retranslate", methods=["POST"])
+    @_require_auth
+    def api_retranslate_chunk(job_id: str, chunk_index: int):
+        """Retranslate a single chunk and update its DB translation."""
+        from tarjomeh.core.config import TarjomehConfig
+        from tarjomeh.core.pipeline import TranslationPipeline
+        from tarjomeh.jobs.database import JobDatabase
+
+        db = JobDatabase()
+        job = db.get_job(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+
+        config = TarjomehConfig.from_dict(job.get("config", {}))
+        pipeline = TranslationPipeline(config)
+        translation = pipeline.retranslate_chunk(job_id, chunk_index)
+        return jsonify({
+            "status": "retranslated",
+            "job_id": job_id,
+            "chunk_index": chunk_index,
+            "translation": translation,
+        })
+
+    @app.route("/api/jobs/<job_id>/export", methods=["POST"])
+    @_require_auth
+    def api_export_job(job_id: str):
+        """Re-export a job from completed chunks without translating."""
+        from tarjomeh.core.config import TarjomehConfig
+        from tarjomeh.core.pipeline import TranslationPipeline
+        from tarjomeh.jobs.database import JobDatabase
+
+        db = JobDatabase()
+        job = db.get_job(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+
+        data = request.get_json(silent=True) or {}
+        fmt = data.get("format") or job.get("config", {}).get("output", {}).get("format", "docx")
+        bilingual = data.get("bilingual_mode") or job.get("config", {}).get("output", {}).get("bilingual_mode")
+        config = TarjomehConfig.from_dict(job.get("config", {}))
+        pipeline = TranslationPipeline(config)
+        input_path = Path(job["input_path"])
+        output_path = input_path.parent / f"{input_path.stem}_reviewed.{fmt}"
+        exported = pipeline.export_completed_job(
+            job_id,
+            output_path,
+            output_format=fmt,
+            bilingual_mode=bilingual,
+        )
+        return jsonify({"status": "exported", "output_path": str(exported)})
+
     @app.route("/api/jobs/<job_id>/stream")
     @_require_auth
     def api_job_stream(job_id: str):
@@ -465,6 +639,153 @@ def _register_api(app: Flask) -> None:
         except Exception as e:
             save_path.unlink(missing_ok=True)
             return jsonify({"error": f"Invalid glossary: {e}"}), 400
+
+    @app.route("/api/glossary/terms", methods=["GET", "POST"])
+    @_require_auth
+    def api_glossary_terms():
+        """List or add terms in the working glossary."""
+        from tarjomeh.glossary.manager import GlossaryEntry, GlossaryManager
+
+        path = _working_glossary_path(app.config.get("TARJOMEH_CONFIG"))
+        gm = GlossaryManager()
+        if path.exists():
+            gm.load(path)
+
+        if request.method == "GET":
+            return jsonify({
+                "path": str(path),
+                "terms": [_glossary_entry_payload(i, e) for i, e in enumerate(gm.entries)],
+            })
+
+        data = request.get_json(silent=True) or {}
+        entry = GlossaryEntry(
+            source=str(data.get("source", "")).strip(),
+            target=str(data.get("target", "")).strip(),
+            tgt_lng=str(data.get("tgt_lng", "fa")).strip() or "fa",
+            context=str(data.get("context", "")).strip(),
+            domain=str(data.get("domain", "")).strip(),
+            sense=str(data.get("sense", "")).strip(),
+            author=str(data.get("author", "")).strip(),
+            is_auto=bool(data.get("is_auto", False)),
+        )
+        if not entry.source or not entry.target:
+            return jsonify({"error": "source and target are required"}), 400
+        entries = gm.entries + [entry]
+        _save_glossary_entries(path, entries)
+        return jsonify({"status": "created", "term": _glossary_entry_payload(len(entries) - 1, entry)}), 201
+
+    @app.route("/api/glossary/terms/<int:index>", methods=["PUT", "DELETE"])
+    @_require_auth
+    def api_glossary_term(index: int):
+        """Update or delete a working glossary term by row index."""
+        from tarjomeh.glossary.manager import GlossaryEntry, GlossaryManager
+
+        path = _working_glossary_path(app.config.get("TARJOMEH_CONFIG"))
+        gm = GlossaryManager()
+        if path.exists():
+            gm.load(path)
+        entries = gm.entries
+        if index < 0 or index >= len(entries):
+            return jsonify({"error": "term index not found"}), 404
+
+        if request.method == "DELETE":
+            removed = entries.pop(index)
+            _save_glossary_entries(path, entries)
+            return jsonify({"status": "deleted", "term": _glossary_entry_payload(index, removed)})
+
+        data = request.get_json(silent=True) or {}
+        current = entries[index]
+        entries[index] = GlossaryEntry(
+            source=str(data.get("source", current.source)).strip(),
+            target=str(data.get("target", current.target)).strip(),
+            tgt_lng=str(data.get("tgt_lng", current.tgt_lng)).strip() or "fa",
+            context=str(data.get("context", current.context)).strip(),
+            domain=str(data.get("domain", current.domain)).strip(),
+            sense=str(data.get("sense", current.sense)).strip(),
+            author=str(data.get("author", current.author)).strip(),
+            glossary=current.glossary,
+            is_auto=bool(data.get("is_auto", current.is_auto)),
+        )
+        if not entries[index].source or not entries[index].target:
+            return jsonify({"error": "source and target are required"}), 400
+        _save_glossary_entries(path, entries)
+        return jsonify({"status": "updated", "term": _glossary_entry_payload(index, entries[index])})
+
+    @app.route("/api/glossary/terms/<int:index>/approve", methods=["POST"])
+    @_require_auth
+    def api_glossary_approve(index: int):
+        """Approve an auto-extracted glossary term."""
+        from tarjomeh.glossary.manager import GlossaryEntry, GlossaryManager
+
+        path = _working_glossary_path(app.config.get("TARJOMEH_CONFIG"))
+        gm = GlossaryManager()
+        if path.exists():
+            gm.load(path)
+        entries = gm.entries
+        if index < 0 or index >= len(entries):
+            return jsonify({"error": "term index not found"}), 404
+
+        e = entries[index]
+        entries[index] = GlossaryEntry(
+            source=e.source,
+            target=e.target,
+            tgt_lng=e.tgt_lng,
+            context=e.context,
+            domain=e.domain,
+            sense=e.sense,
+            author=e.author,
+            glossary=e.glossary,
+            is_auto=False,
+        )
+        _save_glossary_entries(path, entries)
+        return jsonify({"status": "approved", "term": _glossary_entry_payload(index, entries[index])})
+
+    @app.route("/api/glossary/download")
+    @_require_auth
+    def api_glossary_download():
+        """Download the working glossary CSV."""
+        path = _working_glossary_path(app.config.get("TARJOMEH_CONFIG"))
+        if not path.exists():
+            return jsonify({"error": "Working glossary not found"}), 404
+        return send_file(str(path.resolve()), as_attachment=True)
+
+
+def _working_glossary_path(config: Any) -> Path:
+    if config is not None and hasattr(config, "glossary"):
+        path = getattr(config.glossary, "path", "")
+        if path:
+            return Path(path)
+    return Path("glossary") / "academic_political_theory.csv"
+
+
+def _glossary_entry_payload(index: int, entry: Any) -> dict[str, Any]:
+    return {
+        "index": index,
+        "source": entry.source,
+        "target": entry.target,
+        "tgt_lng": entry.tgt_lng,
+        "context": entry.context,
+        "domain": entry.domain,
+        "sense": entry.sense,
+        "author": entry.author,
+        "glossary": entry.glossary,
+        "is_auto": entry.is_auto,
+    }
+
+
+def _save_glossary_entries(path: Path, entries: list[Any]) -> None:
+    from tarjomeh.glossary.manager import _entry_to_row, _fieldnames_for_entries
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(
+            fh,
+            fieldnames=_fieldnames_for_entries(entries),
+            extrasaction="ignore",
+        )
+        writer.writeheader()
+        for entry in entries:
+            writer.writerow(_entry_to_row(entry))
 
 
 def _send_webhook(config: Any, job_id: str, status: str, error: str = "") -> None:
