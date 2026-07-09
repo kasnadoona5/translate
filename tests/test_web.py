@@ -91,6 +91,43 @@ class TestWebUI(unittest.TestCase):
         self.assertIn("stream_url", resp_data)
         mock_submit.assert_called_once()
 
+    @patch("tarjomeh.web.app._executor.submit")
+    @patch("tarjomeh.jobs.database.JobDatabase")
+    def test_resume_rejects_when_existing_worker_is_alive(
+        self,
+        mock_db_cls: MagicMock,
+        mock_submit: MagicMock,
+    ) -> None:
+        from tarjomeh.web.app import _active_jobs
+
+        class RunningFuture:
+            def done(self) -> bool:
+                return False
+
+        mock_db = mock_db_cls.return_value
+        mock_db.get_job.return_value = {
+            "id": "job-123",
+            "input_path": "jobs/uploads/job-123.pdf",
+            "config": {},
+        }
+        _active_jobs["job-123"] = RunningFuture()
+
+        try:
+            headers = {"Authorization": "Bearer test-token"}
+            response = self.client.post("/api/jobs/job-123/resume", headers=headers)
+
+            self.assertEqual(response.status_code, 409)
+            data = json.loads(response.get_data(as_text=True))
+            self.assertEqual(data["status"], "pausing")
+            mock_submit.assert_not_called()
+            mock_db.log_event.assert_called_with(
+                "job-123",
+                "WARNING",
+                "Resume requested while an existing worker was still running.",
+            )
+        finally:
+            _active_jobs.pop("job-123", None)
+
 
 if __name__ == "__main__":
     unittest.main()

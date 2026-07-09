@@ -137,7 +137,8 @@ function trackJobProgress(jobId) {
             currentEventSource = null;
         }
         const ok = stage === "complete";
-        appendLog(`Job finished: ${ok ? "COMPLETED ✅" : stage.toUpperCase()}`, ok ? "success" : "error");
+        const paused = stage === "paused";
+        appendLog(`Job finished: ${ok ? "COMPLETED ✅" : stage.toUpperCase()}`, ok ? "success" : (paused ? "warning" : "error"));
         setTimeout(() => {
             document.getElementById("uploadSection").style.display = "block";
             document.getElementById("progressSection").style.display = "none";
@@ -171,7 +172,7 @@ function trackJobProgress(jobId) {
             appendLog(`[${data.stage}] ${data.message || ""}`, logClass);
 
             // Terminal events use `stage` (the server never sends `status` here).
-            if (data.stage === "complete" || data.stage === "error") {
+            if (data.stage === "complete" || data.stage === "error" || data.stage === "paused") {
                 finish(data.stage);
             }
         } catch (e) {

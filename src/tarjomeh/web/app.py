@@ -179,6 +179,7 @@ def _register_api(app: Flask) -> None:
             try:
                 from tarjomeh.core.config import TarjomehConfig
                 from tarjomeh.core.pipeline import TranslationPipeline
+                from tarjomeh.jobs.database import JobDatabase, JobStatus
 
                 base_config = app.config.get("TARJOMEH_CONFIG") or TarjomehConfig()
                 # Deep-copy so per-job overrides never mutate the shared global
@@ -200,6 +201,18 @@ def _register_api(app: Flask) -> None:
                     progress_callback=progress_callback,
                 )
 
+                db = JobDatabase()
+                current_job = db.get_job(job_id)
+                if current_job and current_job.get("status") == JobStatus.PAUSED:
+                    q = _progress_queues.get(job_id)
+                    if q:
+                        q.put({
+                            "stage": "paused",
+                            "progress": current_job.get("pct", 0),
+                            "message": "Job paused. Resume when ready.",
+                        })
+                    return
+
                 # Signal completion
                 q = _progress_queues.get(job_id)
                 if q:
@@ -219,6 +232,8 @@ def _register_api(app: Flask) -> None:
                 if q:
                     q.put({"stage": "error", "progress": 0, "message": str(e)})
                 _send_webhook(app.config.get("TARJOMEH_CONFIG"), job_id, "failed", str(e))
+            finally:
+                _active_jobs.pop(job_id, None)
 
         future = _executor.submit(run_job)
         _active_jobs[job_id] = future
@@ -268,7 +283,7 @@ def _register_api(app: Flask) -> None:
                     data = q.get(timeout=30)
                     yield f"data: {json.dumps(data)}\n\n"
 
-                    if data.get("stage") in ("complete", "error"):
+                    if data.get("stage") in ("complete", "error", "paused"):
                         # Terminal event delivered — drop the queue so a
                         # reconnecting EventSource gets 'closed' and stops,
                         # instead of looping on keepalives forever.
@@ -293,11 +308,16 @@ def _register_api(app: Flask) -> None:
 
         # Update DB status to PAUSED
         db.update_job_status(job_id, JobStatus.PAUSED)
+        db.log_event(job_id, "INFO", "Pause requested by user.")
 
         future = _active_jobs.get(job_id)
         if future and not future.done():
             future.cancel()
-            return jsonify({"status": "paused", "job_id": job_id})
+            return jsonify({
+                "status": "pausing",
+                "job_id": job_id,
+                "message": "Pause requested. Current LLM call may finish before the job stops.",
+            })
         return jsonify({"status": "paused", "job_id": job_id})
 
     @app.route("/api/jobs/<job_id>/resume", methods=["POST"])
@@ -310,8 +330,19 @@ def _register_api(app: Flask) -> None:
         if not job:
             return jsonify({"error": "Job not found"}), 404
 
+        future = _active_jobs.get(job_id)
+        if future and not future.done():
+            db.log_event(job_id, "WARNING", "Resume requested while an existing worker was still running.")
+            return jsonify({
+                "error": "Job is still pausing",
+                "status": "pausing",
+                "job_id": job_id,
+                "message": "Wait until the current LLM call finishes, then resume again.",
+            }), 409
+
         # Update DB status to RUNNING
         db.update_job_status(job_id, JobStatus.RUNNING)
+        db.log_event(job_id, "INFO", "Resume requested by user.")
 
         # Re-submit to executor
         _progress_queues[job_id] = queue.Queue()
@@ -335,6 +366,18 @@ def _register_api(app: Flask) -> None:
                     progress_callback=progress_callback,
                 )
 
+                db_after = JobDatabase()
+                current_job = db_after.get_job(job_id)
+                if current_job and current_job.get("status") == JobStatus.PAUSED:
+                    q = _progress_queues.get(job_id)
+                    if q:
+                        q.put({
+                            "stage": "paused",
+                            "progress": current_job.get("pct", 0),
+                            "message": "Job paused. Resume when ready.",
+                        })
+                    return
+
                 q = _progress_queues.get(job_id)
                 if q:
                     q.put({
@@ -344,6 +387,11 @@ def _register_api(app: Flask) -> None:
                     })
             except Exception as e:
                 logger.exception(f"Resume job {job_id} failed: {e}")
+                q = _progress_queues.get(job_id)
+                if q:
+                    q.put({"stage": "error", "progress": 0, "message": str(e)})
+            finally:
+                _active_jobs.pop(job_id, None)
 
         future = _executor.submit(run_resume)
         _active_jobs[job_id] = future

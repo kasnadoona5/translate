@@ -14,10 +14,12 @@ import unittest
 
 from tarjomeh.core.pipeline import (
     TranslationPipeline,
+    _align_chunk_translation,
     _distribute_translation,
     _split_sentences_fa,
 )
 from tarjomeh.core.config import TarjomehConfig
+from tarjomeh.parsers.base import Paragraph
 
 
 _BLOB = (
@@ -54,6 +56,39 @@ class TestTranslationDistribution(unittest.TestCase):
         parts = _distribute_translation(_BLOB, 3, [0, 0])  # wrong length + zero sum
         self.assertEqual(len(parts), 3)
         self.assertTrue(all(p.strip() for p in parts))
+
+    def test_heading_omission_does_not_shift_body_into_heading(self) -> None:
+        paragraphs = [
+            Paragraph("Introduction", metadata={"heading_level": 3}),
+            Paragraph("First body paragraph."),
+            Paragraph("Second body paragraph."),
+        ]
+
+        aligned = _align_chunk_translation(
+            original_paragraphs=paragraphs,
+            para_indices=[0, 1, 2],
+            tgt_paras=["ترجمه بدنه اول.", "ترجمه بدنه دوم."],
+            chunk_translation="ترجمه بدنه اول.\n\nترجمه بدنه دوم.",
+        )
+
+        self.assertEqual(aligned[0], (0, "مقدمه"))
+        self.assertEqual(aligned[1], (1, "ترجمه بدنه اول."))
+        self.assertEqual(aligned[2], (2, "ترجمه بدنه دوم."))
+
+    def test_heading_candidate_is_used_when_model_translates_it(self) -> None:
+        paragraphs = [
+            Paragraph("Introduction", metadata={"heading_level": 3}),
+            Paragraph("Body paragraph."),
+        ]
+
+        aligned = _align_chunk_translation(
+            original_paragraphs=paragraphs,
+            para_indices=[0, 1],
+            tgt_paras=["درآمد", "ترجمه بدنه."],
+            chunk_translation="درآمد\n\nترجمه بدنه.",
+        )
+
+        self.assertEqual(aligned, [(0, "درآمد"), (1, "ترجمه بدنه.")])
 
 
 class TestCriticClient(unittest.TestCase):

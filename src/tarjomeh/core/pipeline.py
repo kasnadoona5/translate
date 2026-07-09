@@ -115,6 +115,121 @@ def _distribute_translation(translation: str, n_parts: int, src_weights: list[in
     return parts
 
 
+_COMMON_HEADING_TRANSLATIONS = {
+    "abstract": "چکیده",
+    "acknowledgements": "سپاسگزاری",
+    "acknowledgments": "سپاسگزاری",
+    "appendix": "پیوست",
+    "bibliography": "کتاب‌نامه",
+    "chapter": "فصل",
+    "conclusion": "نتیجه‌گیری",
+    "contents": "فهرست",
+    "epilogue": "پس‌گفتار",
+    "foreword": "پیش‌گفتار",
+    "index": "نمایه",
+    "introduction": "مقدمه",
+    "notes": "یادداشت‌ها",
+    "preface": "دیباچه",
+    "prologue": "پیش‌درآمد",
+    "references": "منابع",
+}
+
+
+def _fallback_heading_translation(source_heading: str) -> str:
+    """Return a conservative heading translation when the model omitted one."""
+    cleaned = " ".join(source_heading.split()).strip()
+    key = re.sub(r"[^a-z0-9 ]+", "", cleaned.lower()).strip()
+    return _COMMON_HEADING_TRANSLATIONS.get(key, cleaned)
+
+
+def _looks_like_heading_translation(candidate: str, source_heading: str) -> bool:
+    """Heuristic guard so body text is never assigned to a heading slot."""
+    text = candidate.strip()
+    if not text:
+        return False
+    # Headings can be longer than their English source, but not whole pages.
+    max_len = max(120, len(source_heading.strip()) * 12)
+    if len(text) > max_len:
+        return False
+    sentence_marks = sum(text.count(mark) for mark in ".!?؟؛…")
+    source_sentence_marks = sum(source_heading.count(mark) for mark in ".!?؟؛…")
+    if source_sentence_marks == 0 and sentence_marks > 0:
+        return False
+    return sentence_marks <= 1
+
+
+def _align_chunk_translation(
+    *,
+    original_paragraphs: list[Any],
+    para_indices: list[int],
+    tgt_paras: list[str],
+    chunk_translation: str,
+) -> list[tuple[int, str]]:
+    """Align translated paragraphs to source paragraph ids, protecting headings.
+
+    LLMs sometimes obey the paragraph count but omit a short heading at the
+    start of a chunk. Without this guard, the first body paragraph becomes a
+    DOCX heading and the real heading disappears.
+    """
+    has_heading = any(
+        pid < len(original_paragraphs)
+        and original_paragraphs[pid].heading_level is not None
+        for pid in para_indices
+    )
+    if not has_heading:
+        if len(para_indices) == len(tgt_paras):
+            return list(zip(para_indices, tgt_paras))
+
+        src_paras_chunk = [
+            original_paragraphs[pid].text.strip()
+            for pid in para_indices
+            if pid < len(original_paragraphs)
+        ]
+        weights = [len(s) for s in src_paras_chunk]
+        parts = _distribute_translation(chunk_translation, len(para_indices), weights)
+        return list(zip(para_indices, parts))
+
+    aligned: list[tuple[int, str]] = []
+    body_indices: list[int] = []
+    target_pos = 0
+
+    for pid in para_indices:
+        if pid >= len(original_paragraphs):
+            continue
+        orig_para = original_paragraphs[pid]
+        if orig_para.heading_level is None:
+            body_indices.append(pid)
+            continue
+
+        candidate = tgt_paras[target_pos] if target_pos < len(tgt_paras) else ""
+        if _looks_like_heading_translation(candidate, orig_para.text):
+            aligned.append((pid, candidate))
+            target_pos += 1
+        else:
+            aligned.append((pid, _fallback_heading_translation(orig_para.text)))
+
+    remaining_targets = tgt_paras[target_pos:]
+    if body_indices:
+        if len(remaining_targets) == len(body_indices):
+            body_parts = remaining_targets
+        else:
+            body_text = "\n\n".join(remaining_targets).strip()
+            body_weights = [
+                len(original_paragraphs[pid].text.strip())
+                for pid in body_indices
+                if pid < len(original_paragraphs)
+            ]
+            body_parts = _distribute_translation(body_text, len(body_indices), body_weights)
+        aligned.extend(zip(body_indices, body_parts))
+    elif remaining_targets and aligned:
+        pid, current = aligned[-1]
+        aligned[-1] = (pid, f"{current}\n\n" + "\n\n".join(remaining_targets))
+
+    order = {pid: i for i, pid in enumerate(para_indices)}
+    aligned.sort(key=lambda item: order.get(item[0], 10**9))
+    return aligned
+
+
 class PipelineResult:
     """The result returned upon successful pipeline completion."""
 
@@ -658,19 +773,13 @@ class TranslationPipeline:
             para_indices = chunk.metadata.get("paragraph_indices", [])
 
             if para_indices:
-                # Align tgt_paras to para_indices
-                if len(para_indices) == len(tgt_paras):
-                    aligned = list(zip(para_indices, tgt_paras))
-                else:
-                    # Paragraph-count mismatch: redistribute the translation
-                    # across this chunk's paragraphs proportionally to the
-                    # source paragraph lengths. Never dump-into-first-and-blank
-                    # (that visibly breaks inline/side-by-side bilingual output)
-                    # and never drop content.
-                    src_paras_chunk = [p.strip() for p in chunk.text.split("\n\n") if p.strip()]
-                    weights = [len(s) for s in src_paras_chunk]
-                    parts = _distribute_translation(chunk_translation, len(para_indices), weights)
-                    aligned = list(zip(para_indices, parts))
+                aligned = _align_chunk_translation(
+                    original_paragraphs=original_paragraphs,
+                    para_indices=para_indices,
+                    tgt_paras=tgt_paras,
+                    chunk_translation=chunk_translation,
+                )
+                if len(para_indices) != len(tgt_paras):
                     logger.warning(
                         "Chunk %d: translation has %d paragraph(s) but source has %d; "
                         "redistributed proportionally across source paragraphs.",

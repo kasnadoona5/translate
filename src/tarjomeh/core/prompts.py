@@ -100,6 +100,8 @@ Instructions:
 4. Maintain paragraph structure; do not merge or split paragraphs. The source text contains
    exactly {paragraph_count} paragraph(s) — your translation MUST also contain exactly
    {paragraph_count} paragraph(s), separated by double newlines (\n\n).
+   If a paragraph is a short heading or title, translate it as its own short heading
+   paragraph; never merge it into the following body paragraph and never omit it.
 5. Use ZWNJ (‌) correctly in compound verbs and affixed words (e.g. می‌خواهد).
 6. Proper nouns: consult the proper-noun list in the memory context. Names marked
    [introduced] have already appeared earlier in the book — use the established Persian
