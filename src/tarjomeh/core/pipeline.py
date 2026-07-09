@@ -158,6 +158,70 @@ def _looks_like_heading_translation(candidate: str, source_heading: str) -> bool
     return sentence_marks <= 1
 
 
+def _truncate_for_event(value: str, limit: int = 2000) -> str:
+    """Keep structured QA events useful without letting the DB grow wildly."""
+    text = value or ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"... [truncated {len(text) - limit} chars]"
+
+
+def _paragraph_count(text: str) -> int:
+    return len([p for p in (text or "").split("\n\n") if p.strip()])
+
+
+def _glossary_entries_for_event(entries: list[Any]) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for entry in entries:
+        payload.append({
+            "source": getattr(entry, "source", ""),
+            "target": getattr(entry, "target", ""),
+            "domain": getattr(entry, "domain", ""),
+            "context": _truncate_for_event(getattr(entry, "context", ""), 500),
+            "sense": getattr(entry, "sense", None),
+            "author": getattr(entry, "author", None),
+            "glossary": getattr(entry, "glossary", None),
+            "is_auto": bool(getattr(entry, "is_auto", False)),
+        })
+    return payload
+
+
+def _critique_for_event(critique: Any, threshold: float, iteration: int) -> dict[str, Any]:
+    return {
+        "iteration": iteration,
+        "threshold": threshold,
+        "passes_threshold": bool(critique.passes_threshold(threshold)),
+        "scores": {
+            "accuracy": critique.accuracy,
+            "fluency": critique.fluency,
+            "terminology": critique.terminology,
+            "register": critique.register,
+            "average": critique.average,
+        },
+        "issue_count": len(critique.issues),
+        "issues": [_truncate_for_event(str(issue), 1000) for issue in critique.issues],
+        "raw_response_preview": _truncate_for_event(critique.raw_response, 3000),
+    }
+
+
+def _compliance_report_for_event(report: Any) -> dict[str, Any]:
+    violations = []
+    for violation in getattr(report, "violations", []):
+        violations.append({
+            "term": getattr(violation, "term", ""),
+            "expected": getattr(violation, "expected", ""),
+            "actual": getattr(violation, "actual", ""),
+            "status": getattr(violation, "status", ""),
+            "chunk_location": getattr(violation, "chunk_location", ""),
+        })
+    return {
+        "compliant": bool(getattr(report, "compliant", False)),
+        "total_checked": int(getattr(report, "total_checked", 0)),
+        "violation_count": len(violations),
+        "violations": violations,
+    }
+
+
 def _align_chunk_translation(
     *,
     original_paragraphs: list[Any],
@@ -915,17 +979,44 @@ class TranslationPipeline:
             logger.info("Pipeline paused cooperatively for job %s", job_id)
             raise PipelinePausedException("Job paused cooperatively")
 
+        self.db.log_chunk_event(job_id, idx, "chunk_started", {
+            "source_chars": len(chunk.text),
+            "source_paragraphs": _paragraph_count(chunk.text),
+            "paragraph_indices": chunk.metadata.get("paragraph_indices", []),
+            "chapter_title": chunk.chapter_title,
+            "section_title": chunk.section_title,
+            "token_count": chunk.token_count,
+        })
+
         # 4-Layer memory retrieval
         if lock:
             with lock:
                 mem_context = memory_manager.get_context_for_chunk(chunk)
         else:
             mem_context = memory_manager.get_context_for_chunk(chunk)
+        self.db.log_chunk_event(job_id, idx, "memory_context", {
+            "has_proper_nouns": bool(mem_context.proper_nouns),
+            "has_long_term": bool(mem_context.long_term),
+            "has_short_term": bool(mem_context.short_term),
+            "has_bilingual_summary": bool(mem_context.bilingual_summary),
+            "proper_nouns_preview": _truncate_for_event(mem_context.proper_nouns, 1000),
+            "long_term_preview": _truncate_for_event(mem_context.long_term, 1000),
+            "short_term_preview": _truncate_for_event(mem_context.short_term, 1000),
+            "bilingual_summary_preview": _truncate_for_event(mem_context.bilingual_summary, 1000),
+        })
 
         # Web context (Aphra-style)
         web_context_str = ""
         if self.config.translation.enable_web_context:
             web_context_str = self._run_async(web_searcher.get_context_for_chunk(chunk, mem_context.format()))
+            self.db.log_chunk_event(job_id, idx, "web_context", {
+                "enabled": True,
+                "has_context": bool(web_context_str.strip()),
+                "chars": len(web_context_str),
+                "preview": _truncate_for_event(web_context_str, 2000),
+            })
+        else:
+            self.db.log_chunk_event(job_id, idx, "web_context", {"enabled": False})
 
         # Prep prompts
         if lock:
@@ -939,6 +1030,10 @@ class TranslationPipeline:
             context=f"{chunk.chapter_title}\n{chunk.section_title}",
             domain=self.config.translation.domain,
         )
+        self.db.log_chunk_event(job_id, idx, "glossary_matches", {
+            "matched_count": len(matched_entries),
+            "entries": _glossary_entries_for_event(matched_entries),
+        })
         # Context-aware glossary table: includes each term's Context column
         # (author-specific sense, e.g. Marx's vs Bourdieu's "capital").
         glossary_terms_str = glossary_manager.format_for_prompt(matched_entries) \
@@ -978,6 +1073,10 @@ class TranslationPipeline:
             terminology_ctx += (
                 "\n\n### Established proper-noun renderings\n" + mem_context.proper_nouns
             )
+        self.db.log_chunk_event(job_id, idx, "terminology_context", {
+            "chars": len(terminology_ctx),
+            "preview": _truncate_for_event(terminology_ctx, 2000),
+        })
 
         # Translate
         self.db.update_chunk(job_id, idx, ChunkStatus.TRANSLATING)
@@ -988,21 +1087,43 @@ class TranslationPipeline:
         if not translation or not translation.strip():
             raise ValueError(f"LLM returned an empty or whitespace-only translation for chunk {idx}.")
         self.db.update_chunk(job_id, idx, ChunkStatus.TRANSLATED, translation)
+        self.db.log_chunk_event(job_id, idx, "translation_completed", {
+            "translation_chars": len(translation),
+            "translation_paragraphs": _paragraph_count(translation),
+            "expected_paragraphs": n_source_paras,
+        })
 
         # Critique and Refine (judge scores against the terminology mandate)
         if self.config.translation.enable_critique:
+            threshold = getattr(self.config.translation, "critique_threshold", 7.0)
             for ref_iter in range(self.config.translation.max_refine_iterations + 1):
                 critique_rep = self._run_async(
                     critique_tool.critique(chunk.text, translation, terminology=terminology_ctx)
                 )
                 self.db.update_chunk(job_id, idx, ChunkStatus.CRITIQUED)
-                threshold = getattr(self.config.translation, "critique_threshold", 7.0)
+                self.db.log_chunk_event(
+                    job_id,
+                    idx,
+                    "critique_completed",
+                    _critique_for_event(critique_rep, threshold, ref_iter),
+                )
                 if critique_rep.passes_threshold(threshold) or ref_iter == self.config.translation.max_refine_iterations:
                     break
+                before_chars = len(translation)
                 translation = self._run_async(
                     refiner_tool.refine(chunk.text, translation, critique_rep, terminology=terminology_ctx)
                 )
                 self.db.update_chunk(job_id, idx, ChunkStatus.REFINED, translation)
+                self.db.log_chunk_event(job_id, idx, "refinement_completed", {
+                    "iteration": ref_iter + 1,
+                    "critique_average": critique_rep.average,
+                    "critique_issue_count": len(critique_rep.issues),
+                    "before_chars": before_chars,
+                    "after_chars": len(translation),
+                    "paragraphs_after": _paragraph_count(translation),
+                })
+        else:
+            self.db.log_chunk_event(job_id, idx, "critique_skipped", {"enabled": False})
 
         # Glossary Compliance
         if self.config.glossary.enable_compliance_check:
@@ -1011,6 +1132,12 @@ class TranslationPipeline:
                 source_text=chunk.text,
                 glossary_manager=glossary_manager,
                 chunk_location=f"Chunk {idx}",
+            )
+            self.db.log_chunk_event(
+                job_id,
+                idx,
+                "glossary_compliance_checked",
+                _compliance_report_for_event(report),
             )
             if not report.compliant:
                 enable_auto_correct = getattr(self.config.glossary, "enable_auto_correction", True)
@@ -1048,6 +1175,11 @@ Output ONLY the corrected Persian translation.
                             glossary_manager=glossary_manager,
                             chunk_location=f"Chunk {idx}",
                         )
+                        self.db.log_chunk_event(job_id, idx, "glossary_auto_correct_attempt", {
+                            "attempt": attempts,
+                            "translation_chars": len(translation),
+                            **_compliance_report_for_event(report),
+                        })
 
                 if not report.compliant:
                     for v in report.violations:
@@ -1058,17 +1190,46 @@ Output ONLY the corrected Persian translation.
                                 self.warnings.append(f"{v.chunk_location}: {warn_msg}")
                         else:
                             self.warnings.append(f"{v.chunk_location}: {warn_msg}")
+            self.db.log_chunk_event(
+                job_id,
+                idx,
+                "glossary_compliance_final",
+                _compliance_report_for_event(report),
+            )
+        else:
+            self.db.log_chunk_event(job_id, idx, "glossary_compliance_skipped", {"enabled": False})
 
         # Back translation verification
         if self.config.translation.enable_back_translation:
             if back_translator.should_sample():
+                self.db.log_chunk_event(job_id, idx, "back_translation_sampled", {"sampled": True})
                 back_translated = self._run_async(back_translator.back_translate(translation))
                 bt_result = back_translator.compare(chunk.text, back_translated)
+                self.db.log_chunk_event(job_id, idx, "back_translation_completed", {
+                    "similarity_score": bt_result.similarity_score,
+                    "flagged": bt_result.flagged,
+                    "difference_count": len(bt_result.differences),
+                    "differences_preview": bt_result.differences[:50],
+                    "back_translated_preview": _truncate_for_event(bt_result.back_translated, 2000),
+                })
                 if bt_result.flagged:
                     self.db.log_event(
                         job_id,
                         "WARNING",
                         f"Back-translation flagged for Chunk {idx} (Similarity: {bt_result.similarity_score:.2f}). Differences: {bt_result.differences}",
                     )
+            else:
+                self.db.log_chunk_event(job_id, idx, "back_translation_skipped", {
+                    "enabled": True,
+                    "sampled": False,
+                    "sample_pct": self.config.translation.back_translation_sample_pct,
+                })
+        else:
+            self.db.log_chunk_event(job_id, idx, "back_translation_skipped", {"enabled": False})
+
+        self.db.log_chunk_event(job_id, idx, "chunk_completed", {
+            "final_translation_chars": len(translation),
+            "final_translation_paragraphs": _paragraph_count(translation),
+        })
 
         return translation

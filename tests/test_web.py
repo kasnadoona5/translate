@@ -69,6 +69,27 @@ class TestWebUI(unittest.TestCase):
         self.assertEqual(len(data["jobs"]), 1)
         self.assertEqual(data["jobs"][0]["id"], "job-123")
 
+    @patch("tarjomeh.jobs.database.JobDatabase")
+    def test_get_job_events_api(self, mock_db_cls: MagicMock) -> None:
+        mock_db = mock_db_cls.return_value
+        mock_db.get_job.return_value = {"id": "job-123", "config": {}, "input_path": "book.pdf"}
+        mock_db.get_chunk_events.return_value = [
+            {
+                "job_id": "job-123",
+                "chunk_index": 0,
+                "event_type": "critique_completed",
+                "payload": {"scores": {"average": 8}},
+            }
+        ]
+
+        headers = {"Authorization": "Bearer test-token"}
+        response = self.client.get("/api/jobs/job-123/events?chunk=0", headers=headers)
+        self.assertEqual(response.status_code, 200)
+
+        data = json.loads(response.get_data(as_text=True))
+        self.assertEqual(data["events"][0]["event_type"], "critique_completed")
+        mock_db.get_chunk_events.assert_called_once_with("job-123", 0)
+
     @patch("tarjomeh.web.app._executor.submit")
     def test_translate_api_upload(self, mock_submit: MagicMock) -> None:
         # The route returns 202 Accepted with a server-generated job_id and

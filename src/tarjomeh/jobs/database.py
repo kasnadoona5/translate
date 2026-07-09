@@ -94,6 +94,19 @@ class JobDatabase:
                     message TEXT NOT NULL
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS chunk_events (
+                    job_id TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_chunk_events_job_chunk
+                ON chunk_events (job_id, chunk_index, timestamp)
+            """)
             conn.commit()
 
     def create_job(self, job_id: str, input_path: str | Path, config_dict: dict[str, Any]) -> None:
@@ -184,6 +197,59 @@ class JobDatabase:
                 (job_id, timestamp, level, message)
             )
             conn.commit()
+
+    def log_chunk_event(
+        self,
+        job_id: str,
+        chunk_index: int,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Append structured per-chunk QA/progress evidence."""
+        timestamp = datetime.utcnow().isoformat()
+        payload_str = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO chunk_events
+                    (job_id, chunk_index, timestamp, event_type, payload)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (job_id, chunk_index, timestamp, event_type, payload_str),
+            )
+            conn.commit()
+
+    def get_chunk_events(self, job_id: str, chunk_index: int | None = None) -> list[dict[str, Any]]:
+        """Retrieve structured per-chunk event records for a job."""
+        with self._get_connection() as conn:
+            if chunk_index is None:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM chunk_events
+                    WHERE job_id = ?
+                    ORDER BY chunk_index ASC, timestamp ASC
+                    """,
+                    (job_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM chunk_events
+                    WHERE job_id = ? AND chunk_index = ?
+                    ORDER BY timestamp ASC
+                    """,
+                    (job_id, chunk_index),
+                ).fetchall()
+
+        events: list[dict[str, Any]] = []
+        for row in rows:
+            event = dict(row)
+            try:
+                event["payload"] = json.loads(event["payload"])
+            except json.JSONDecodeError:
+                event["payload"] = {}
+            events.append(event)
+        return events
 
     def save_chunks(self, job_id: str, chunks: list[Chunk]) -> None:
         """Insert or ignore initial list of chunks for a job."""

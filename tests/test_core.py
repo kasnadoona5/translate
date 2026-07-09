@@ -139,6 +139,16 @@ class TestTranslationPipeline(unittest.TestCase):
             self.assertIsInstance(result, PipelineResult)
             self.assertEqual(result.total_chunks, 1)
             self.assertTrue(output_file.exists())
+            event_types = [
+                call.args[2]
+                for call in mock_db.log_chunk_event.call_args_list
+                if len(call.args) >= 3
+            ]
+            self.assertIn("chunk_started", event_types)
+            self.assertIn("translation_completed", event_types)
+            self.assertIn("critique_skipped", event_types)
+            self.assertIn("back_translation_skipped", event_types)
+            self.assertIn("chunk_completed", event_types)
             
             # Check content of output
             with output_file.open("r", encoding="utf-8") as f:

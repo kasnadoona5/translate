@@ -86,6 +86,31 @@ class TestDatabaseFixes(unittest.TestCase):
         self.assertEqual(summary["completed"], 1)
         self.assertEqual(summary["pending"], 1)
 
+    def test_chunk_events_round_trip(self) -> None:
+        job_id = "test-job-events"
+        self.db.create_job(job_id, "dummy_input.txt", {})
+        self.db.log_chunk_event(
+            job_id,
+            2,
+            "critique_completed",
+            {
+                "scores": {"average": 8.5},
+                "issues": ["minor issue"],
+                "passes_threshold": True,
+            },
+        )
+
+        events = self.db.get_chunk_events(job_id)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["chunk_index"], 2)
+        self.assertEqual(events[0]["event_type"], "critique_completed")
+        self.assertEqual(events[0]["payload"]["scores"]["average"], 8.5)
+        self.assertTrue(events[0]["payload"]["passes_threshold"])
+
+        filtered = self.db.get_chunk_events(job_id, chunk_index=2)
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["payload"]["issues"], ["minor issue"])
+
     def test_cleanup_preserves_db(self) -> None:
         job_id = "test-job-456"
         self.db.create_job(job_id, "dummy_input.txt", {})

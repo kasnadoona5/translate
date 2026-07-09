@@ -266,6 +266,26 @@ def _register_api(app: Flask) -> None:
         chunks = db.get_chunk_summary(job_id)
         return jsonify({"job": job, "chunks": chunks})
 
+    @app.route("/api/jobs/<job_id>/events")
+    @_require_auth
+    def api_job_events(job_id: str):
+        """Get structured per-chunk QA/progress events for a job."""
+        from tarjomeh.jobs.database import JobDatabase
+        db = JobDatabase()
+        job = db.get_job(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+
+        chunk_index_raw = request.args.get("chunk")
+        chunk_index = None
+        if chunk_index_raw not in (None, ""):
+            try:
+                chunk_index = int(chunk_index_raw)
+            except ValueError:
+                return jsonify({"error": "chunk must be an integer"}), 400
+
+        return jsonify({"events": db.get_chunk_events(job_id, chunk_index)})
+
     @app.route("/api/jobs/<job_id>/stream")
     @_require_auth
     def api_job_stream(job_id: str):
