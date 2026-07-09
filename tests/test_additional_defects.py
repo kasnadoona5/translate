@@ -410,6 +410,29 @@ class TestLLMClientDefects(unittest.TestCase):
         translation = client.complete(messages=[{"role": "user", "content": "hello"}])
         self.assertEqual(translation, "valid translation")
 
+    def test_malformed_provider_json_is_retried(self) -> None:
+        from tarjomeh.core.llm_client import LLMClient
+        client = LLMClient(self.config)
+
+        calls_count = 0
+
+        def mock_post(*args, **kwargs):
+            nonlocal calls_count
+            calls_count += 1
+            mock_res = unittest.mock.Mock()
+            mock_res.status_code = 200
+            if calls_count == 1:
+                mock_res.text = '{"choices":'
+            else:
+                mock_res.text = '{"choices":[{"message":{"content":"recovered translation"}}]}'
+            return mock_res
+
+        client._client.post = mock_post
+        translation = client.complete(messages=[{"role": "user", "content": "hello"}])
+
+        self.assertEqual(translation, "recovered translation")
+        self.assertEqual(calls_count, 2)
+
     def test_exclude_reasoning_payload(self) -> None:
         from tarjomeh.core.llm_client import LLMClient
         client = LLMClient(self.config)

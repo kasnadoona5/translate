@@ -500,6 +500,7 @@ class TranslationPipeline:
                                 raise PipelinePausedException("Job paused cooperatively")
                             
                             logger.error("Failed to translate chunk %d: %s", idx, e)
+                            self.db.log_event(job_id, "ERROR", f"Chunk {idx} failed: {type(e).__name__}: {e}")
                             self.db.update_chunk(job_id, idx, ChunkStatus.ERROR)
                             consecutive_errors += 1
                             
@@ -592,6 +593,7 @@ class TranslationPipeline:
                         raise e
                     except Exception as e:
                         logger.error("Failed to translate chunk %d: %s", idx, e)
+                        self.db.log_event(job_id, "ERROR", f"Chunk {idx} failed: {type(e).__name__}: {e}")
                         self.db.update_chunk(job_id, idx, ChunkStatus.ERROR)
                         consecutive_errors += 1
 
@@ -612,6 +614,31 @@ class TranslationPipeline:
                 progress_callback("Paused", len(translations) / total_chunks, "Job paused cooperatively.")
             duration = time.monotonic() - t0
             return PipelineResult(output_path, len(translations), duration, warnings=["Job paused"])
+
+        missing_indices = [
+            idx for idx in range(total_chunks)
+            if not translations.get(idx, "").strip()
+        ]
+        if missing_indices:
+            preview = ", ".join(str(idx) for idx in missing_indices[:10])
+            if len(missing_indices) > 10:
+                preview += ", ..."
+            message = (
+                f"Translation incomplete: {len(missing_indices)}/{total_chunks} chunk(s) "
+                f"have no completed translation. Missing chunk indices: {preview}. "
+                "Output was not exported; resume the job after fixing the failed chunks."
+            )
+            logger.error(message)
+            self.db.log_event(job_id, "ERROR", message)
+            self.db.update_job_status(job_id, JobStatus.PAUSED_ERROR, message)
+            self._send_webhook(
+                "tarjomeh.job.paused_error",
+                message,
+                JobStatus.PAUSED_ERROR,
+            )
+            if progress_callback:
+                progress_callback("Paused", len(translations) / total_chunks, message)
+            raise RuntimeError(message)
 
         # 7. Assemble Document
         if progress_callback:

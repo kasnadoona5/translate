@@ -34,6 +34,11 @@ class TruncatedCompletionError(Exception):
     pass
 
 
+class MalformedLLMResponseError(Exception):
+    """Raised when an OpenAI-compatible endpoint returns malformed response JSON."""
+    pass
+
+
 # Hard ceiling for the automatic max_tokens escalation on truncated completions.
 _MAX_TOKENS_CEILING = 32000
 
@@ -209,6 +214,25 @@ class LLMClient:
                     except ValueError:
                         pass
 
+    @staticmethod
+    def _parse_response_json(response_text: str) -> dict[str, Any]:
+        """Parse a provider response, tolerating trailing SSE-style garbage."""
+        res_text = response_text.strip()
+        try:
+            return json.loads(res_text)
+        except json.JSONDecodeError as first_error:
+            last_brace = res_text.rfind("}")
+            if last_brace != -1:
+                try:
+                    return json.loads(res_text[:last_brace + 1])
+                except json.JSONDecodeError:
+                    pass
+
+            snippet = res_text[:300].replace("\n", "\\n")
+            raise MalformedLLMResponseError(
+                f"LLM endpoint returned malformed JSON response: {snippet!r}"
+            ) from first_error
+
     def complete(
         self,
         messages: list[dict[str, str]],
@@ -233,24 +257,13 @@ class LLMClient:
                 response.raise_for_status()
                 
                 # Safe JSON parsing that handles trailing garbage (like "data: [DONE]")
-                res_text = response.text.strip()
-                try:
-                    res_json = json.loads(res_text)
-                except json.JSONDecodeError:
-                    last_brace = res_text.rfind("}")
-                    if last_brace != -1:
-                        try:
-                            res_json = json.loads(res_text[:last_brace + 1])
-                        except json.JSONDecodeError:
-                            raise
-                    else:
-                        raise
+                res_json = self._parse_response_json(response.text)
                 
                 self._update_usage(response, res_json)
                 
                 choices = res_json.get("choices", [])
                 if not choices:
-                    raise ValueError(f"Empty choices in response: {res_json}")
+                    raise MalformedLLMResponseError(f"Empty choices in response: {res_json}")
                 
                 finish_reason = choices[0].get("finish_reason")
                 content = choices[0].get("message", {}).get("content")
@@ -276,13 +289,19 @@ class LLMClient:
                 
                 return content
 
-            except (httpx.HTTPStatusError, httpx.RequestError, EmptyCompletionError, TruncatedCompletionError) as exc:
+            except (
+                httpx.HTTPStatusError,
+                httpx.RequestError,
+                EmptyCompletionError,
+                TruncatedCompletionError,
+                MalformedLLMResponseError,
+            ) as exc:
                 status_code = getattr(exc.response, "status_code", None) if hasattr(exc, "response") else None
                 
                 # Check if we should retry
                 should_retry = (
                     attempt < max_retries and
-                    (isinstance(exc, (EmptyCompletionError, TruncatedCompletionError)) or status_code is None or status_code in (429, 500, 502, 503, 504))
+                    (isinstance(exc, (EmptyCompletionError, TruncatedCompletionError, MalformedLLMResponseError)) or status_code is None or status_code in (429, 500, 502, 503, 504))
                 )
 
                 if should_retry:
@@ -329,24 +348,13 @@ class LLMClient:
                 response.raise_for_status()
                 
                 # Safe JSON parsing that handles trailing garbage (like "data: [DONE]")
-                res_text = response.text.strip()
-                try:
-                    res_json = json.loads(res_text)
-                except json.JSONDecodeError:
-                    last_brace = res_text.rfind("}")
-                    if last_brace != -1:
-                        try:
-                            res_json = json.loads(res_text[:last_brace + 1])
-                        except json.JSONDecodeError:
-                            raise
-                    else:
-                        raise
+                res_json = self._parse_response_json(response.text)
                 
                 self._update_usage(response, res_json)
                 
                 choices = res_json.get("choices", [])
                 if not choices:
-                    raise ValueError(f"Empty choices in response: {res_json}")
+                    raise MalformedLLMResponseError(f"Empty choices in response: {res_json}")
                 
                 finish_reason = choices[0].get("finish_reason")
                 content = choices[0].get("message", {}).get("content")
@@ -372,13 +380,19 @@ class LLMClient:
                 
                 return content
 
-            except (httpx.HTTPStatusError, httpx.RequestError, EmptyCompletionError, TruncatedCompletionError) as exc:
+            except (
+                httpx.HTTPStatusError,
+                httpx.RequestError,
+                EmptyCompletionError,
+                TruncatedCompletionError,
+                MalformedLLMResponseError,
+            ) as exc:
                 status_code = getattr(exc.response, "status_code", None) if hasattr(exc, "response") else None
                 
                 # Check if we should retry
                 should_retry = (
                     attempt < max_retries and
-                    (isinstance(exc, (EmptyCompletionError, TruncatedCompletionError)) or status_code is None or status_code in (429, 500, 502, 503, 504))
+                    (isinstance(exc, (EmptyCompletionError, TruncatedCompletionError, MalformedLLMResponseError)) or status_code is None or status_code in (429, 500, 502, 503, 504))
                 )
 
                 if should_retry:

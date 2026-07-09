@@ -366,7 +366,7 @@ def _register_api(app: Flask) -> None:
         if not output_path.exists():
             return jsonify({"error": "Output file missing"}), 404
 
-        return send_file(str(output_path), as_attachment=True)
+        return send_file(str(output_path.resolve()), as_attachment=True)
 
     @app.route("/api/glossary/upload", methods=["POST"])
     @_require_auth

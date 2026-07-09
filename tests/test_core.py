@@ -152,6 +152,64 @@ class TestTranslationPipeline(unittest.TestCase):
             if output_file.exists():
                 output_file.unlink()
 
+    @patch("tarjomeh.core.pipeline.JobDatabase")
+    @patch("tarjomeh.core.pipeline.LLMClient")
+    def test_pipeline_does_not_export_when_any_chunk_fails(
+        self,
+        mock_llm_cls: MagicMock,
+        mock_db_cls: MagicMock,
+    ) -> None:
+        mock_db = mock_db_cls.return_value
+        mock_db.get_job.return_value = None
+        mock_db.get_chunk_summary.return_value = {"total": 0, "completed": 0, "pending": 0, "errors": 0}
+
+        mock_llm = mock_llm_cls.return_value
+        mock_llm.count_tokens.side_effect = lambda text: len(text.split())
+        mock_llm.complete.side_effect = ["ترجمه اول", RuntimeError("malformed router response")]
+
+        temp_file = Path("tests_two_chunk_source.txt")
+        temp_file.write_text(
+            "alpha beta gamma delta epsilon zeta eta theta iota kappa",
+            encoding="utf-8",
+        )
+
+        output_file = Path("tests_should_not_exist.txt")
+        config = TarjomehConfig()
+        config.chunking.strategy = "fixed"
+        config.chunking.max_chunk_tokens = 5
+        config.translation.enable_critique = False
+        config.translation.enable_web_context = False
+        config.translation.enable_back_translation = False
+        config.glossary.enable_auto_extraction = False
+        config.output.format = "txt"
+
+        pipeline = TranslationPipeline(config)
+        pipeline.llm_client = mock_llm
+        pipeline.db = mock_db
+
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                pipeline.run(input_path=temp_file, output_path=output_file)
+
+            self.assertIn("Translation incomplete", str(ctx.exception))
+            self.assertFalse(output_file.exists())
+            self.assertTrue(
+                any(
+                    call.args and call.args[1] == JobStatus.PAUSED_ERROR
+                    for call in mock_db.update_job_status.call_args_list
+                )
+            )
+            mock_db.log_event.assert_any_call(
+                pipeline.current_job_id,
+                "ERROR",
+                "Chunk 1 failed: RuntimeError: malformed router response",
+            )
+        finally:
+            if temp_file.exists():
+                temp_file.unlink()
+            if output_file.exists():
+                output_file.unlink()
+
 
 if __name__ == "__main__":
     unittest.main()
