@@ -178,6 +178,9 @@ class GlossaryConfig:
     """Glossary settings."""
 
     path: str = "glossary/academic_political_theory.csv"
+    # Optional extra glossary CSVs. The primary ``path`` is loaded first so
+    # existing projects keep their precedence and behaviour.
+    paths: list[str] = field(default_factory=list)
     enable_auto_extraction: bool = True
     enable_compliance_check: bool = True
     enable_auto_correction: bool = True

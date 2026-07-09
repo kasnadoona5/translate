@@ -119,6 +119,17 @@ discourse,گفتمان,fa,Foucault's concept,philosophy
 The `context` column disambiguates author-specific senses and is shown to both
 the translator and the judge.
 
+Phase 3 adds optional namespacing columns after the BabelDOC-compatible fields:
+
+```csv
+source,target,tgt_lng,context,domain,sense,author
+capital,سرمایه,fa,Marx's economic category,political economy,economic,Marx
+capital,سرمایه فرهنگی,fa,Bourdieu's cultural/social capital,sociology,cultural,Bourdieu
+```
+
+Use `[glossary].paths` in `config.toml` to load extra domain glossaries while
+keeping `[glossary].path` as the primary, highest-precedence glossary.
+
 ## Deploying / updating a VPS
 
 ```bash

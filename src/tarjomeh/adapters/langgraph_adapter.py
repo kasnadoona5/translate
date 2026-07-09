@@ -104,11 +104,16 @@ class LangGraphTranslationAdapter:
         
         # Load glossary
         glossary_manager = GlossaryManager()
-        if self.config.glossary.path:
-            try:
-                glossary_manager.load(self.config.glossary.path)
-            except Exception as e:
-                logger.warning("Could not load glossary: %s", e)
+        try:
+            glossary_paths = []
+            if self.config.glossary.path:
+                glossary_paths.append(self.config.glossary.path)
+            for extra_path in getattr(self.config.glossary, "paths", []) or []:
+                if extra_path not in glossary_paths:
+                    glossary_paths.append(extra_path)
+            glossary_manager.load_many(glossary_paths, ignore_missing=True)
+        except Exception as e:
+            logger.warning("Could not load glossary: %s", e)
 
         # Load or create memory state
         memory_manager = MemoryManager(self.config)

@@ -200,6 +200,82 @@ class TestGlossaryFeatures(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_namespaced_context_selection(self) -> None:
+        manager = GlossaryManager()
+        manager.add_term(
+            "capital",
+            "سرمایه",
+            context="Marx's economic category in critique of political economy",
+            domain="political economy",
+            sense="economic",
+            author="Marx",
+        )
+        manager.add_term(
+            "capital",
+            "سرمایه فرهنگی",
+            context="Bourdieu's cultural, social, and symbolic capital",
+            domain="sociology",
+            sense="cultural",
+            author="Bourdieu",
+        )
+
+        terms = manager.find_terms(
+            "Bourdieu argues that capital is accumulated across fields.",
+            context="Chapter on Bourdieu and habitus",
+            domain="sociology",
+        )
+
+        self.assertEqual(len(terms), 1)
+        self.assertEqual(terms[0].target, "سرمایه فرهنگی")
+        self.assertEqual(terms[0].author, "Bourdieu")
+
+        prompt_table = manager.format_for_prompt(terms)
+        self.assertIn("Sense", prompt_table)
+        self.assertIn("Author/School", prompt_table)
+
+    def test_load_many_with_optional_columns(self) -> None:
+        temp_dir = tempfile.mkdtemp()
+        try:
+            base = Path(temp_dir) / "base.csv"
+            extra = Path(temp_dir) / "extra.csv"
+            base.write_text(
+                "source,target,tgt_lng,context,domain\n"
+                "hegemony,هژمونی,fa,Gramsci,political theory\n",
+                encoding="utf-8",
+            )
+            extra.write_text(
+                "source,target,tgt_lng,context,domain,sense,author\n"
+                "capital,سرمایه فرهنگی,fa,Bourdieu's term,sociology,cultural,Bourdieu\n",
+                encoding="utf-8",
+            )
+
+            manager = GlossaryManager()
+            manager.load_many([base, extra])
+
+            self.assertEqual(len(manager.entries), 2)
+            selected = manager.find_terms(
+                "Bourdieu discusses capital.",
+                context="sociology chapter",
+                domain="sociology",
+            )
+            self.assertEqual(selected[0].target, "سرمایه فرهنگی")
+            self.assertEqual(selected[0].sense, "cultural")
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_compliance_accepts_zwnj_spacing_variants(self) -> None:
+        manager = GlossaryManager()
+        manager.add_term("biopolitics", "زیست‌سیاست")
+
+        checker = GlossaryComplianceChecker()
+        report = checker.check(
+            "فوکو زیست سیاست را صورت‌بندی می‌کند.",
+            "Foucault theorizes biopolitics.",
+            manager,
+        )
+
+        self.assertTrue(report.compliant)
+
 
 class TestCritiqueScores(unittest.TestCase):
     """Test critique score parsing for flat vs nested schemas, threshold checks."""

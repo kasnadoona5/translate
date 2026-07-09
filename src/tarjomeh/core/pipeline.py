@@ -336,8 +336,15 @@ class TranslationPipeline:
 
         # 3. Setup Glossary
         glossary_manager = GlossaryManager()
-        if Path(self.config.glossary.path).exists():
-            glossary_manager.load(Path(self.config.glossary.path))
+        glossary_paths: list[Path] = []
+        primary_glossary = getattr(self.config.glossary, "path", "")
+        if primary_glossary:
+            glossary_paths.append(Path(primary_glossary))
+        for extra_path in getattr(self.config.glossary, "paths", []) or []:
+            p = Path(extra_path)
+            if p not in glossary_paths:
+                glossary_paths.append(p)
+        glossary_manager.load_many(glossary_paths, ignore_missing=True)
 
         # 4. Setup Memory Manager
         memory_manager = MemoryManager(self.config)
@@ -791,7 +798,11 @@ class TranslationPipeline:
         else:
             prev_trans = translations.get(idx - 1, "")
 
-        matched_entries = glossary_manager.find_terms(chunk.text)
+        matched_entries = glossary_manager.find_terms(
+            chunk.text,
+            context=f"{chunk.chapter_title}\n{chunk.section_title}",
+            domain=self.config.translation.domain,
+        )
         # Context-aware glossary table: includes each term's Context column
         # (author-specific sense, e.g. Marx's vs Bourdieu's "capital").
         glossary_terms_str = glossary_manager.format_for_prompt(matched_entries) \

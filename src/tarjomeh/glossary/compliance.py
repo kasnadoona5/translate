@@ -116,12 +116,7 @@ class GlossaryComplianceChecker:
                 if re.search(rf"\b{escaped_source}\b", translation, re.IGNORECASE):
                     status = "wrong"
                 else:
-                    target_norm = _normalise_persian(entry.target)
-                    translation_norm = _normalise_persian(translation)
-                    if len(target_norm) >= 4 and target_norm[:3] in translation_norm:
-                        status = "wrong"
-                    else:
-                        status = "missing"
+                    status = "missing"
 
                 violations.append(
                     Violation(
@@ -144,16 +139,24 @@ class GlossaryComplianceChecker:
         """Check if the Persian *target* term exists in *translation*.
 
         Uses a permissive match that accounts for:
-        * Zero-width non-joiner (ZWNJ, ``\\u200c``) variations
-        * Optional whitespace around the term
+        * Hazm-normalized Persian spelling/spacing
+        * Arabic/Persian ي/ی and ك/ک variants
+        * Zero-width non-joiner (ZWNJ, ``\\u200c``) versus whitespace variants
+        * Common affixed forms such as plurals attached with ZWNJ
 
         For Persian text we do **not** use ``\\b`` because word-boundary
-        semantics are unreliable with the Arabic script.  Instead we check
-        plain substring presence after normalising ZWNJ.
+        semantics are unreliable with the Arabic script.
         """
         normalised_target = _normalise_persian(target)
         normalised_text = _normalise_persian(translation)
-        return normalised_target in normalised_text
+        if not normalised_target:
+            return False
+        if normalised_target in normalised_text:
+            return True
+
+        compact_target = _compact_persian(normalised_target)
+        compact_text = _compact_persian(normalised_text)
+        return len(compact_target) >= 3 and compact_target in compact_text
 
 
 # ---------------------------------------------------------------------------
@@ -167,15 +170,31 @@ _ZWJ = "\u200d"   # zero-width joiner
 def _normalise_persian(text: str) -> str:
     """Normalise Persian text for comparison.
 
+    * Applies hazm normalisation when available
     * Strips diacritics (tashkeel / اعراب)
     * Normalises Arabic ي / ك to Persian ی / ک
-    * Collapses multiple spaces
+    * Collapses multiple spaces around ZWNJ
     """
+    try:
+        from hazm import Normalizer  # type: ignore[import-untyped]
+        text = Normalizer().normalize(text)
+    except Exception:
+        pass
+
     # Arabic → Persian letter normalisation
     text = text.replace("\u064a", "\u06cc")   # ي → ی
     text = text.replace("\u0643", "\u06a9")   # ك → ک
+    text = text.replace(_ZWJ, _ZWNJ)
     # Remove Arabic tashkeel
     text = re.sub(r"[\u064b-\u065f\u0670]", "", text)
+    # Remove spaces around ZWNJ and collapse repeated ZWNJs.
+    text = re.sub(rf"\s*{_ZWNJ}\s*", _ZWNJ, text)
+    text = re.sub(rf"{_ZWNJ}+", _ZWNJ, text)
     # Collapse whitespace
     text = re.sub(r"\s+", " ", text)
     return text.strip()
+
+
+def _compact_persian(text: str) -> str:
+    """Return text without whitespace/joiner distinctions for term matching."""
+    return re.sub(rf"[\s{_ZWNJ}{_ZWJ}]+", "", text)

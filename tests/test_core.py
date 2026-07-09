@@ -46,6 +46,18 @@ class TestTarjomehConfig(unittest.TestCase):
         config.update_from_overrides({})
         self.assertEqual(config.translation.parallel_workers, 1)
 
+    def test_glossary_paths_from_dict(self) -> None:
+        config = TarjomehConfig.from_dict({
+            "llm": {"openrouter": {"api_keys": ["dummy"]}},
+            "glossary": {
+                "path": "glossary/base.csv",
+                "paths": ["glossary/extra.csv"],
+            },
+        })
+
+        self.assertEqual(config.glossary.path, "glossary/base.csv")
+        self.assertEqual(config.glossary.paths, ["glossary/extra.csv"])
+
 
 class TestLLMClient(unittest.TestCase):
     """Test LLM Client token counting, key rotation, and request formatting."""
