@@ -186,11 +186,31 @@ def _glossary_entries_for_event(entries: list[Any]) -> list[dict[str, Any]]:
     return payload
 
 
+_BLOCKING_CRITIQUE_RE = re.compile(r"^\[(?:CRITICAL|MAJOR)/(?:accuracy|terminology)\]", re.IGNORECASE)
+
+
+def _blocking_critique_issues(critique: Any) -> list[str]:
+    """Return critique issues that must force refinement, regardless of average."""
+    return [
+        str(issue)
+        for issue in getattr(critique, "issues", []) or []
+        if _BLOCKING_CRITIQUE_RE.match(str(issue).strip())
+    ]
+
+
+def _critique_passes_quality_gate(critique: Any, threshold: float) -> bool:
+    """Average score must pass and no major conceptual/terminology issue may remain."""
+    return bool(critique.passes_threshold(threshold) and not _blocking_critique_issues(critique))
+
+
 def _critique_for_event(critique: Any, threshold: float, iteration: int) -> dict[str, Any]:
+    blocking_issues = _blocking_critique_issues(critique)
     return {
         "iteration": iteration,
         "threshold": threshold,
-        "passes_threshold": bool(critique.passes_threshold(threshold)),
+        "passes_average_threshold": bool(critique.passes_threshold(threshold)),
+        "passes_threshold": bool(critique.passes_threshold(threshold) and not blocking_issues),
+        "force_refinement": bool(blocking_issues),
         "scores": {
             "accuracy": critique.accuracy,
             "fluency": critique.fluency,
@@ -199,6 +219,8 @@ def _critique_for_event(critique: Any, threshold: float, iteration: int) -> dict
             "average": critique.average,
         },
         "issue_count": len(critique.issues),
+        "blocking_issue_count": len(blocking_issues),
+        "blocking_issues": [_truncate_for_event(str(issue), 1000) for issue in blocking_issues],
         "issues": [_truncate_for_event(str(issue), 1000) for issue in critique.issues],
         "raw_response_preview": _truncate_for_event(critique.raw_response, 3000),
     }
@@ -1325,7 +1347,7 @@ class TranslationPipeline:
                     "critique_completed",
                     _critique_for_event(critique_rep, threshold, ref_iter),
                 )
-                if critique_rep.passes_threshold(threshold) or ref_iter == self.config.translation.max_refine_iterations:
+                if _critique_passes_quality_gate(critique_rep, threshold) or ref_iter == self.config.translation.max_refine_iterations:
                     break
                 before_chars = len(translation)
                 translation = self._run_async(

@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 from tarjomeh.core.config import TarjomehConfig
+from tarjomeh.core.pipeline import _critique_for_event, _critique_passes_quality_gate
 from tarjomeh.jobs.database import JobDatabase, ChunkStatus, JobStatus
 from tarjomeh.persian.typography import PersianTypographer
 from tarjomeh.glossary.manager import GlossaryManager, GlossaryEntry
@@ -357,6 +358,28 @@ class TestCritiqueScores(unittest.TestCase):
         self.assertIn("[MINOR/accuracy]", result.issues[1])
         self.assertIn("fix: تغییر", result.issues[1])
         self.assertFalse(result.passes_threshold(7.5))
+
+
+    def test_major_accuracy_issue_forces_refinement_even_with_high_average(self) -> None:
+        critique = CritiqueResult(
+            accuracy=8,
+            fluency=9,
+            terminology=10,
+            register=9,
+            average=8.5,
+            issues=[
+                '[MAJOR/accuracy] source: "prospective" | current: "inductive" | fix: anticipated',
+            ],
+        )
+
+        self.assertTrue(critique.passes_threshold(7.0))
+        self.assertFalse(_critique_passes_quality_gate(critique, 7.0))
+
+        event = _critique_for_event(critique, threshold=7.0, iteration=0)
+        self.assertTrue(event["passes_average_threshold"])
+        self.assertFalse(event["passes_threshold"])
+        self.assertTrue(event["force_refinement"])
+        self.assertEqual(event["blocking_issue_count"], 1)
 
 
 class TestExporterFactory(unittest.TestCase):

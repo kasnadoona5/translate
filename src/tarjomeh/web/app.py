@@ -312,6 +312,12 @@ def _register_api(app: Flask) -> None:
                 if e["event_type"] == "critique_completed"
             ]
             scores = [float(s) for s in scores if s is not None]
+            blocking_critique_issues = [
+                issue
+                for e in chunk_events
+                if e["event_type"] == "critique_completed"
+                for issue in _blocking_critique_issues(e.get("payload", {}))
+            ]
             final_glossary_events = [
                 e for e in chunk_events
                 if e["event_type"] == "glossary_compliance_final"
@@ -330,13 +336,20 @@ def _register_api(app: Flask) -> None:
                 if e["event_type"] == "back_translation_completed"
             )
             low_score = bool(scores and min(scores) < 7.0)
-            flagged = chunk["status"] != "completed" or low_score or glossary_violations > 0 or bt_flagged
+            flagged = (
+                chunk["status"] != "completed"
+                or low_score
+                or bool(blocking_critique_issues)
+                or glossary_violations > 0
+                or bt_flagged
+            )
             review_chunks.append({
                 "chunk_index": idx,
                 "status": chunk["status"],
                 "source": chunk.get("text") or "",
                 "translation": chunk.get("translation") or "",
                 "critique_average": min(scores) if scores else None,
+                "blocking_critique_issues": blocking_critique_issues,
                 "glossary_violations": glossary_violations,
                 "back_translation_flagged": bt_flagged,
                 "flagged": flagged,
@@ -376,13 +389,15 @@ def _register_api(app: Flask) -> None:
                     scores = payload.get("scores", {})
                     lines.append(
                         "  Critique: avg={average} accuracy={accuracy} fluency={fluency} "
-                        "terminology={terminology} register={register} issues={issues}".format(
+                        "terminology={terminology} register={register} issues={issues} "
+                        "blocking={blocking}".format(
                             average=scores.get("average"),
                             accuracy=scores.get("accuracy"),
                             fluency=scores.get("fluency"),
                             terminology=scores.get("terminology"),
                             register=scores.get("register"),
                             issues=payload.get("issue_count"),
+                            blocking=payload.get("blocking_issue_count", 0),
                         )
                     )
                 elif event["event_type"] == "refinement_completed":
@@ -771,6 +786,25 @@ def _glossary_entry_payload(index: int, entry: Any) -> dict[str, Any]:
         "glossary": entry.glossary,
         "is_auto": entry.is_auto,
     }
+
+
+def _blocking_critique_issues(payload: dict[str, Any]) -> list[str]:
+    if payload.get("force_refinement"):
+        issues = [str(issue) for issue in payload.get("blocking_issues", [])]
+        return issues or ["Critique forced refinement."]
+
+    issues = payload.get("issues", []) or []
+    blocking_prefixes = (
+        "[MAJOR/accuracy]",
+        "[CRITICAL/accuracy]",
+        "[MAJOR/terminology]",
+        "[CRITICAL/terminology]",
+    )
+    return [
+        str(issue)
+        for issue in issues
+        if str(issue).strip().lower().startswith(tuple(p.lower() for p in blocking_prefixes))
+    ]
 
 
 def _save_glossary_entries(path: Path, entries: list[Any]) -> None:

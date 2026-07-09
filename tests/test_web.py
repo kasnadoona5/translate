@@ -90,6 +90,42 @@ class TestWebUI(unittest.TestCase):
         self.assertEqual(data["events"][0]["event_type"], "critique_completed")
         mock_db.get_chunk_events.assert_called_once_with("job-123", 0)
 
+    @patch("tarjomeh.jobs.database.JobDatabase")
+    def test_job_review_flags_blocking_critique_issue(self, mock_db_cls: MagicMock) -> None:
+        mock_db = mock_db_cls.return_value
+        mock_db.get_job.return_value = {"id": "job-123", "config": {}, "input_path": "book.pdf"}
+        mock_db.get_chunks.return_value = [
+            {
+                "chunk_index": 0,
+                "status": "completed",
+                "text": "prospectively constructed",
+                "translation": "inductively constructed",
+            }
+        ]
+        mock_db.get_chunk_events.return_value = [
+            {
+                "job_id": "job-123",
+                "chunk_index": 0,
+                "event_type": "critique_completed",
+                "payload": {
+                    "scores": {"average": 8},
+                    "force_refinement": True,
+                    "blocking_issues": [
+                        '[MAJOR/accuracy] source: "prospective" | current: "inductive"',
+                    ],
+                },
+            }
+        ]
+
+        headers = {"Authorization": "Bearer test-token"}
+        response = self.client.get("/api/jobs/job-123/review", headers=headers)
+        self.assertEqual(response.status_code, 200)
+
+        data = json.loads(response.get_data(as_text=True))
+        chunk = data["chunks"][0]
+        self.assertTrue(chunk["flagged"])
+        self.assertEqual(len(chunk["blocking_critique_issues"]), 1)
+
     @patch("tarjomeh.web.app._executor.submit")
     def test_translate_api_upload(self, mock_submit: MagicMock) -> None:
         # The route returns 202 Accepted with a server-generated job_id and
