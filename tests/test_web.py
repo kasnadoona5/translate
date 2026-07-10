@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import queue
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 import os
@@ -125,6 +127,58 @@ class TestWebUI(unittest.TestCase):
         chunk = data["chunks"][0]
         self.assertTrue(chunk["flagged"])
         self.assertEqual(len(chunk["blocking_critique_issues"]), 1)
+
+    @patch("tarjomeh.jobs.database.JobDatabase")
+    def test_job_review_uses_configured_critique_threshold(self, mock_db_cls: MagicMock) -> None:
+        mock_db = mock_db_cls.return_value
+        mock_db.get_job.return_value = {
+            "id": "job-123",
+            "config": {"translation": {"critique_threshold": 9.0}},
+            "input_path": "book.pdf",
+        }
+        mock_db.get_chunks.return_value = [
+            {
+                "chunk_index": 0,
+                "status": "completed",
+                "text": "source",
+                "translation": "translation",
+            }
+        ]
+        mock_db.get_chunk_events.return_value = [
+            {
+                "job_id": "job-123",
+                "chunk_index": 0,
+                "event_type": "critique_completed",
+                "payload": {"scores": {"average": 8}},
+            }
+        ]
+
+        headers = {"Authorization": "Bearer test-token"}
+        response = self.client.get("/api/jobs/job-123/review", headers=headers)
+        self.assertEqual(response.status_code, 200)
+
+        data = json.loads(response.get_data(as_text=True))
+        self.assertEqual(data["critique_threshold"], 9.0)
+        self.assertTrue(data["chunks"][0]["flagged"])
+
+    def test_safe_glossary_upload_path_sanitizes_filename(self) -> None:
+        from tarjomeh.web.app import _safe_glossary_upload_path
+
+        path = _safe_glossary_upload_path("../../evil.csv")
+
+        self.assertEqual(path.name, "evil.csv")
+        self.assertEqual(path.parent.name, "glossary")
+
+    def test_progress_queue_cleanup_drops_finished_queue(self) -> None:
+        from tarjomeh.web.app import _progress_queues, _schedule_progress_queue_cleanup
+
+        _progress_queues["cleanup-test"] = queue.Queue()
+        try:
+            _schedule_progress_queue_cleanup("cleanup-test", delay=0.01)
+            time.sleep(0.05)
+            self.assertNotIn("cleanup-test", _progress_queues)
+        finally:
+            _progress_queues.pop("cleanup-test", None)
 
     @patch("tarjomeh.web.app._executor.submit")
     def test_translate_api_upload(self, mock_submit: MagicMock) -> None:

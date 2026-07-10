@@ -589,11 +589,19 @@ class TranslationPipeline:
                     extracted_terms = ner_data.get("terms", []) or ner_data.get("extracted_terms", []) or []
                 else:
                     extracted_terms = []
+                auto_terms: dict[str, dict[str, str]] = {}
                 for item in extracted_terms:
                     term = item.get("term")
                     persian = item.get("suggested_persian")
                     if term and persian:
-                        glossary_manager.add_term(source=term, target=persian, tgt_lng="fa", context=item.get("context", ""), domain=self.config.translation.domain, is_auto=True)
+                        auto_terms[term] = {
+                            "target": persian,
+                            "context": item.get("context", ""),
+                            "domain": item.get("domain", "") or self.config.translation.domain,
+                            "sense": item.get("sense", ""),
+                            "author": item.get("author", ""),
+                        }
+                glossary_manager.merge_auto_extracted(auto_terms)
             except Exception as e:
                 logger.warning("Automatic term extraction failed: %s", e)
 
@@ -1049,7 +1057,11 @@ class TranslationPipeline:
             output_path=output_path,
             bilingual_mode=self.config.output.bilingual_mode,
         )
-        self.db.update_job_status(job_id, job["status"], output_path=output_path)
+        self.db.update_job_status(
+            job_id,
+            job.get("raw_status", job["status"]),
+            output_path=output_path,
+        )
         self.db.log_event(job_id, "INFO", f"Re-exported job to {output_path}")
         return output_path
 

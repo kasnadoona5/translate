@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
+from threading import Timer
 from typing import Any
 
 from flask import (
@@ -28,6 +29,7 @@ from flask import (
     session,
     send_file,
 )
+from werkzeug.utils import secure_filename
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,37 @@ logger = logging.getLogger(__name__)
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tarjomeh-job")
 _active_jobs: dict[str, Future] = {}
 _progress_queues: dict[str, queue.Queue] = {}
+_PROGRESS_QUEUE_TTL_SECONDS = 300.0
+
+
+def _schedule_progress_queue_cleanup(job_id: str, delay: float = _PROGRESS_QUEUE_TTL_SECONDS) -> None:
+    """Drop finished-job SSE queues even if the browser never consumed them."""
+    timer = Timer(delay, lambda: _progress_queues.pop(job_id, None))
+    timer.daemon = True
+    timer.start()
+
+
+def _safe_glossary_upload_path(filename: str) -> Path:
+    """Return a safe glossary upload path restricted to the glossary folder."""
+    safe_name = secure_filename(filename)
+    if not safe_name or not safe_name.lower().endswith(".csv"):
+        raise ValueError("Must be a CSV file")
+
+    glossary_dir = Path("glossary")
+    glossary_dir.mkdir(exist_ok=True)
+    root = glossary_dir.resolve()
+    save_path = (glossary_dir / safe_name).resolve()
+    if save_path.parent != root:
+        raise ValueError("Invalid glossary filename")
+    return save_path
+
+
+def _job_critique_threshold(job: dict[str, Any]) -> float:
+    """Read the configured critique threshold for review UI flagging."""
+    try:
+        return float(job.get("config", {}).get("translation", {}).get("critique_threshold", 7.0))
+    except (TypeError, ValueError):
+        return 7.0
 
 
 def create_app(config: Any = None) -> Flask:
@@ -235,6 +268,7 @@ def _register_api(app: Flask) -> None:
                 _send_webhook(app.config.get("TARJOMEH_CONFIG"), job_id, "failed", str(e))
             finally:
                 _active_jobs.pop(job_id, None)
+                _schedule_progress_queue_cleanup(job_id)
 
         future = _executor.submit(run_job)
         _active_jobs[job_id] = future
@@ -302,6 +336,7 @@ def _register_api(app: Flask) -> None:
         for event in events:
             events_by_chunk.setdefault(int(event["chunk_index"]), []).append(event)
 
+        critique_threshold = _job_critique_threshold(job)
         review_chunks = []
         for chunk in db.get_chunks(job_id):
             idx = int(chunk["chunk_index"])
@@ -347,7 +382,7 @@ def _register_api(app: Flask) -> None:
                 for e in chunk_events
                 if e["event_type"] == "back_translation_completed"
             )
-            low_score = bool(scores and min(scores) < 7.0)
+            low_score = bool(scores and min(scores) < critique_threshold)
             flagged = (
                 chunk["status"] != "completed"
                 or low_score
@@ -362,6 +397,7 @@ def _register_api(app: Flask) -> None:
                 "source": chunk.get("text") or "",
                 "translation": chunk.get("translation") or "",
                 "critique_average": min(scores) if scores else None,
+                "critique_threshold": critique_threshold,
                 "blocking_critique_issues": blocking_critique_issues,
                 "needs_review": bool(needs_review_events),
                 "glossary_violations": glossary_violations,
@@ -370,7 +406,7 @@ def _register_api(app: Flask) -> None:
                 "events": chunk_events,
             })
 
-        return jsonify({"job": job, "chunks": review_chunks})
+        return jsonify({"job": job, "critique_threshold": critique_threshold, "chunks": review_chunks})
 
     @app.route("/api/jobs/<job_id>/qa-report")
     @_require_auth
@@ -623,6 +659,7 @@ def _register_api(app: Flask) -> None:
                     q.put({"stage": "error", "progress": 0, "message": str(e)})
             finally:
                 _active_jobs.pop(job_id, None)
+                _schedule_progress_queue_cleanup(job_id)
 
         future = _executor.submit(run_resume)
         _active_jobs[job_id] = future
@@ -655,12 +692,14 @@ def _register_api(app: Flask) -> None:
             return jsonify({"error": "No file provided"}), 400
 
         file = request.files["file"]
-        if not file.filename or not file.filename.endswith(".csv"):
+        if not file.filename:
             return jsonify({"error": "Must be a CSV file"}), 400
 
-        glossary_dir = Path("glossary")
-        glossary_dir.mkdir(exist_ok=True)
-        save_path = glossary_dir / file.filename
+        try:
+            save_path = _safe_glossary_upload_path(file.filename)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+
         file.save(str(save_path))
 
         # Validate

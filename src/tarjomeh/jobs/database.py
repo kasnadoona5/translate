@@ -139,10 +139,12 @@ class JobDatabase:
             job["progress"] = (completed / total * 100) if total > 0 else 0.0
             
             # Map properties for frontend compatibility
+            raw_status = job["status"]
+            job["raw_status"] = raw_status
             job["filename"] = Path(job["input_path"]).name
             job["mode"] = job["config"].get("translation", {}).get("mode", "academic")
             job["pct"] = job["progress"] / 100.0
-            if job["status"] in ("running", "pending"):
+            if raw_status in ("running", "pending"):
                 job["status"] = "processing"
                 
             return job
@@ -165,10 +167,12 @@ class JobDatabase:
                     config_dict = {}
                 
                 # Map properties for frontend compatibility
+                raw_status = job["status"]
+                job["raw_status"] = raw_status
                 job["filename"] = Path(job["input_path"]).name
                 job["mode"] = config_dict.get("translation", {}).get("mode", "academic")
                 job["pct"] = job["progress"] / 100.0
-                if job["status"] in ("running", "pending"):
+                if raw_status in ("running", "pending"):
                     job["status"] = "processing"
                     
                 jobs.append(job)

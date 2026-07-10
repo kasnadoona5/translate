@@ -90,6 +90,16 @@ class TestDatabaseFixes(unittest.TestCase):
         self.assertEqual(summary["completed"], 1)
         self.assertEqual(summary["pending"], 1)
 
+    def test_get_job_preserves_raw_status_for_backend_updates(self) -> None:
+        job_id = "status-job-123"
+        self.db.create_job(job_id, "dummy_input.txt", {})
+        self.db.update_job_status(job_id, JobStatus.RUNNING)
+
+        job = self.db.get_job(job_id)
+
+        self.assertEqual(job["status"], "processing")
+        self.assertEqual(job["raw_status"], JobStatus.RUNNING)
+
     def test_chunk_events_round_trip(self) -> None:
         job_id = "test-job-events"
         self.db.create_job(job_id, "dummy_input.txt", {})
@@ -228,6 +238,30 @@ class TestGlossaryFeatures(unittest.TestCase):
                 self.assertEqual(reader[0]["target"], "عدالت")
         finally:
             shutil.rmtree(temp_dir)
+
+    def test_auto_extracted_terms_do_not_override_curated_terms(self) -> None:
+        manager = GlossaryManager()
+        manager.add_term("capital", "سرمایه", context="curated Marx term")
+
+        manager.merge_auto_extracted({
+            "capital": {
+                "target": "پایتخت",
+                "context": "auto guess",
+                "domain": "geography",
+            },
+            "assemblage": {
+                "target": "هم‌آرایی",
+                "context": "auto extracted concept",
+            },
+        })
+
+        capital_terms = [e for e in manager.entries if e.source == "capital"]
+        assemblage_terms = [e for e in manager.entries if e.source == "assemblage"]
+        self.assertEqual(len(capital_terms), 1)
+        self.assertEqual(capital_terms[0].target, "سرمایه")
+        self.assertFalse(capital_terms[0].is_auto)
+        self.assertEqual(len(assemblage_terms), 1)
+        self.assertTrue(assemblage_terms[0].is_auto)
 
     def test_namespaced_context_selection(self) -> None:
         manager = GlossaryManager()

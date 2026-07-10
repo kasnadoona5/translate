@@ -19,7 +19,7 @@ import csv
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 
 # BabelDOC-compatible base columns. Optional columns are additive so old CSVs
@@ -231,19 +231,47 @@ class GlossaryManager:
         )
         self._add_entry(entry)
 
-    def merge_auto_extracted(self, extracted_terms: dict[str, str]) -> None:
+    def merge_auto_extracted(self, extracted_terms: dict[str, str | dict[str, Any]]) -> None:
         """Merge LLM-extracted terms into the glossary.
 
         Existing (user-supplied) terms take priority and are never
         overwritten by auto-extracted ones.
 
         Args:
-            extracted_terms: ``{english_term: persian_translation}``
+            extracted_terms: ``{english_term: persian_translation}``, or a
+                dict payload containing ``target``, ``context``, ``domain``,
+                ``sense``, and ``author``.
         """
-        existing_keys = {e.source.lower() for e in self._entries}
-        for source, target in extracted_terms.items():
-            if source.strip().lower() not in existing_keys:
-                self.add_term(source=source, target=target)
+        curated_sources = {e.source.lower() for e in self._entries if not e.is_auto}
+        for source, payload in extracted_terms.items():
+            source_clean = source.strip()
+            if not source_clean or source_clean.lower() in curated_sources:
+                continue
+
+            if isinstance(payload, dict):
+                target = str(payload.get("target", "")).strip()
+                context = str(payload.get("context", "")).strip()
+                domain = str(payload.get("domain", "")).strip()
+                sense = str(payload.get("sense", "")).strip()
+                author = str(payload.get("author", "")).strip()
+            else:
+                target = str(payload).strip()
+                context = ""
+                domain = ""
+                sense = ""
+                author = ""
+
+            if target:
+                self.add_term(
+                    source=source_clean,
+                    target=target,
+                    context=context,
+                    domain=domain,
+                    sense=sense,
+                    author=author,
+                    glossary="auto_extracted",
+                    is_auto=True,
+                )
 
     # -- query --------------------------------------------------------------
 
