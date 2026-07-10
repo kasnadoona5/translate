@@ -305,18 +305,30 @@ def _register_api(app: Flask) -> None:
         review_chunks = []
         for chunk in db.get_chunks(job_id):
             idx = int(chunk["chunk_index"])
-            chunk_events = events_by_chunk.get(idx, [])
+            all_chunk_events = events_by_chunk.get(idx, [])
+            last_start = 0
+            for i, event in enumerate(all_chunk_events):
+                if event.get("event_type") == "chunk_started":
+                    last_start = i
+            chunk_events = all_chunk_events[last_start:]
+            critique_events = [
+                e for e in chunk_events
+                if e["event_type"] == "critique_completed"
+            ]
+            latest_critique = critique_events[-1] if critique_events else None
             scores = [
                 e["payload"].get("scores", {}).get("average")
-                for e in chunk_events
-                if e["event_type"] == "critique_completed"
+                for e in critique_events
             ]
             scores = [float(s) for s in scores if s is not None]
             blocking_critique_issues = [
                 issue
-                for e in chunk_events
-                if e["event_type"] == "critique_completed"
+                for e in ([latest_critique] if latest_critique else [])
                 for issue in _blocking_critique_issues(e.get("payload", {}))
+            ]
+            needs_review_events = [
+                e for e in chunk_events
+                if e["event_type"] == "critique_needs_review"
             ]
             final_glossary_events = [
                 e for e in chunk_events
@@ -340,6 +352,7 @@ def _register_api(app: Flask) -> None:
                 chunk["status"] != "completed"
                 or low_score
                 or bool(blocking_critique_issues)
+                or bool(needs_review_events)
                 or glossary_violations > 0
                 or bt_flagged
             )
@@ -350,6 +363,7 @@ def _register_api(app: Flask) -> None:
                 "translation": chunk.get("translation") or "",
                 "critique_average": min(scores) if scores else None,
                 "blocking_critique_issues": blocking_critique_issues,
+                "needs_review": bool(needs_review_events),
                 "glossary_violations": glossary_violations,
                 "back_translation_flagged": bt_flagged,
                 "flagged": flagged,
@@ -403,7 +417,15 @@ def _register_api(app: Flask) -> None:
                 elif event["event_type"] == "refinement_completed":
                     lines.append(
                         f"  Refinement: iteration={payload.get('iteration')} "
+                        f"decision={payload.get('decision')} "
                         f"before={payload.get('before_chars')} after={payload.get('after_chars')}"
+                    )
+                    if payload.get("rationale"):
+                        lines.append(f"    Rationale: {payload.get('rationale')}")
+                elif event["event_type"] == "critique_needs_review":
+                    lines.append(
+                        f"  NEEDS REVIEW: unresolved blocking={payload.get('blocking_issue_count')} "
+                        f"after iteration={payload.get('iteration')}"
                     )
                 elif event["event_type"] == "glossary_compliance_final":
                     lines.append(

@@ -7,6 +7,7 @@ improved version by feeding the critique feedback back to the LLM.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from tarjomeh.quality.critique import CritiqueResult
@@ -22,6 +23,16 @@ _MODE_MAX_ITERATIONS: dict[str, int] = {
     "quality": 1,
     "fast": 0,
 }
+
+
+@dataclass
+class RefinementResult:
+    """Structured result from a balanced refinement pass."""
+
+    translation: str
+    decision: str = "unknown"
+    rationale: str = ""
+    raw_response: str = ""
 
 
 class TranslationRefiner:
@@ -60,6 +71,23 @@ class TranslationRefiner:
         critique: CritiqueResult,
         terminology: str = "",
     ) -> str:
+        """Return only the refined translation text for backward compatibility."""
+        return (
+            await self.refine_with_decision(
+                source_text=source_text,
+                translation=translation,
+                critique=critique,
+                terminology=terminology,
+            )
+        ).translation
+
+    async def refine_with_decision(
+        self,
+        source_text: str,
+        translation: str,
+        critique: CritiqueResult,
+        terminology: str = "",
+    ) -> RefinementResult:
         """Produce a refined translation based on critique feedback.
 
         Parameters
@@ -86,7 +114,11 @@ class TranslationRefiner:
                 "No issues in critique (avg=%.1f); skipping refinement.",
                 critique.average,
             )
-            return translation
+            return RefinementResult(
+                translation=translation,
+                decision="preserved",
+                rationale="No critique issues were provided.",
+            )
 
         prompt = REFINE_PROMPT.format(
             source_text=source_text,
@@ -95,17 +127,37 @@ class TranslationRefiner:
             terminology=terminology or "(no glossary terms apply to this chunk)",
         )
 
-        refined: str = await self._llm.chat(prompt)
+        raw: str = await self._llm.chat(prompt)
 
         # Strip any accidental markdown fences the LLM might include.
-        refined = refined.strip()
-        if refined.startswith("```"):
-            lines = refined.splitlines()
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
             lines = [ln for ln in lines if not ln.strip().startswith("```")]
-            refined = "\n".join(lines).strip()
+            cleaned = "\n".join(lines).strip()
+
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError:
+            data = None
+
+        if isinstance(data, dict) and str(data.get("translation", "")).strip():
+            refined = str(data["translation"]).strip()
+            decision = str(data.get("decision", "unknown")).strip().lower() or "unknown"
+            rationale = str(data.get("rationale", "")).strip()
+        else:
+            refined = cleaned
+            decision = "unknown"
+            rationale = "Refiner returned plain text instead of structured JSON."
 
         logger.info(
-            "Refined translation (critique avg was %.1f).",
+            "Refined translation (critique avg was %.1f, decision=%s).",
             critique.average,
+            decision,
         )
-        return refined
+        return RefinementResult(
+            translation=refined,
+            decision=decision,
+            rationale=rationale,
+            raw_response=raw,
+        )

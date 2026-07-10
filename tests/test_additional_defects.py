@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import asyncio
 import json
 import os
 import shutil
@@ -11,12 +12,14 @@ import unittest
 from pathlib import Path
 
 from tarjomeh.core.config import TarjomehConfig
-from tarjomeh.core.pipeline import _critique_for_event, _critique_passes_quality_gate
+from tarjomeh.core.pipeline import _chunk_needs_review, _critique_for_event, _critique_passes_quality_gate
 from tarjomeh.jobs.database import JobDatabase, ChunkStatus, JobStatus
+from tarjomeh.memory.manager import MemoryManager
 from tarjomeh.persian.typography import PersianTypographer
 from tarjomeh.glossary.manager import GlossaryManager, GlossaryEntry
 from tarjomeh.glossary.compliance import GlossaryComplianceChecker
 from tarjomeh.quality.critique import TranslationCritique, CritiqueResult
+from tarjomeh.quality.refiner import TranslationRefiner
 from tarjomeh.exporters import get_exporter
 from tarjomeh.exporters.pdf_exporter import PdfExporter
 from tarjomeh.exporters.epub_exporter import EpubExporter
@@ -380,6 +383,71 @@ class TestCritiqueScores(unittest.TestCase):
         self.assertFalse(event["passes_threshold"])
         self.assertTrue(event["force_refinement"])
         self.assertEqual(event["blocking_issue_count"], 1)
+
+
+class TestBalancedRefinementPolicy(unittest.TestCase):
+    """Test balanced critique/refiner decisions and non-fatal review state."""
+
+    def test_refiner_parses_structured_decision(self) -> None:
+        class FakeLLM:
+            async def chat(self, prompt: str) -> str:
+                return json.dumps({
+                    "translation": "ترجمه حفظ شد",
+                    "decision": "preserved",
+                    "rationale": "The critic's suggested term was less accurate in context.",
+                }, ensure_ascii=False)
+
+        refiner = TranslationRefiner(FakeLLM())
+        critique = CritiqueResult(
+            average=8,
+            issues=['[MAJOR/accuracy] source: "term" | current: "rendering"'],
+        )
+
+        result = asyncio.run(refiner.refine_with_decision("source", "old", critique))
+
+        self.assertEqual(result.translation, "ترجمه حفظ شد")
+        self.assertEqual(result.decision, "preserved")
+        self.assertIn("less accurate", result.rationale)
+
+    def test_chunk_needs_review_uses_latest_attempt_only(self) -> None:
+        temp_dir = tempfile.mkdtemp()
+        db = JobDatabase(db_path=Path(temp_dir) / "jobs.db")
+        job_id = "needs-review-job"
+        try:
+            db.create_job(job_id, "input.txt", {})
+            db.log_chunk_event(job_id, 0, "chunk_started", {})
+            db.log_chunk_event(job_id, 0, "critique_needs_review", {"blocking_issue_count": 1})
+            self.assertTrue(_chunk_needs_review(db, job_id, 0))
+
+            db.log_chunk_event(job_id, 0, "chunk_started", {})
+            db.log_chunk_event(job_id, 0, "critique_completed", {"passes_threshold": True})
+            self.assertFalse(_chunk_needs_review(db, job_id, 0))
+        finally:
+            import gc
+            del db
+            gc.collect()
+            shutil.rmtree(temp_dir)
+
+    def test_memory_style_profile_preserves_existing_layers(self) -> None:
+        manager = MemoryManager(TarjomehConfig())
+        chunk = Chunk(
+            index=0,
+            text="The state is not neutral.",
+            chapter_title="Chapter 1",
+            section_title="",
+            token_count=6,
+        )
+
+        manager.update_after_translation(chunk, "دولت بی طرف نیست.")
+        context = manager.get_context_for_chunk(chunk)
+        state = manager.to_dict()
+
+        self.assertTrue(context.style_profile)
+        self.assertIn("style_profile", state)
+        self.assertIn("proper_nouns", state)
+        self.assertIn("bilingual_summary", state)
+        self.assertIn("past_translations", state)
+        self.assertIn("short_term_context", state)
 
 
 class TestExporterFactory(unittest.TestCase):

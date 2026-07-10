@@ -168,7 +168,8 @@ Return ONLY valid JSON — no markdown fences, no commentary outside the JSON.
 # 4. Refinement prompt (applies critique feedback)
 # ---------------------------------------------------------------------------
 REFINE_PROMPT: str = """\
-You are refining an academic English-to-Persian translation based on editorial feedback.
+You are refining an academic English-to-Persian translation after an editorial critique.
+The critique identifies high-risk passages; it is not automatically authoritative.
 
 ### Source (English)
 {source_text}
@@ -183,13 +184,21 @@ You are refining an academic English-to-Persian translation based on editorial f
 {terminology}
 
 Instructions:
-1. Address issues in severity order: every "critical" issue first, then "major", then "minor".
-2. Preserve parts of the translation that were praised or have no issues.
-3. Apply the mandatory terminology above exactly; do not introduce new renderings for
+1. Evaluate each critique issue in severity order: "critical", then "major", then "minor".
+2. If the critique is correct, revise the translation to fix the issue.
+3. If the current translation is more accurate in context, preserve it; do not change a
+   correct rendering merely because the critic suggested an alternative.
+4. Preserve parts of the translation that were praised or have no issues.
+5. Apply the mandatory terminology above exactly; do not introduce new renderings for
    listed terms while fixing other issues.
-4. Ensure correct ZWNJ placement, Persian numerals in prose, and RTL punctuation — but keep
+6. Ensure correct ZWNJ placement, Persian numerals in prose, and RTL punctuation — but keep
    citations, years, and page numbers in Latin script and Western digits.
-5. Output ONLY the refined Persian translation — no commentary or JSON.
+7. Return ONLY valid JSON with this schema:
+{{
+  "translation": "<the final Persian translation only>",
+  "decision": "revised" | "preserved" | "mixed",
+  "rationale": "<brief English note explaining whether critique was applied or rejected>"
+}}
 """
 
 # ---------------------------------------------------------------------------

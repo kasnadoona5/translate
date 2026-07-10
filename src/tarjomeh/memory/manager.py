@@ -1,7 +1,7 @@
-"""Memory manager coordinating the four-layer translation memory system.
+"""Memory manager coordinating the translation memory system.
 
-Integrates proper noun records, bilingual summary, long-term, and short-term
-memory layers for cohesive book-length translation context.
+Integrates a book-level style profile, proper noun records, bilingual summary,
+long-term memory, and short-term memory for cohesive book-length translation.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 class MemoryContext:
     """Consolidated context from all four memory layers."""
 
+    style_profile: str = ""
     proper_nouns: str = ""
     bilingual_summary: str = ""
     long_term: str = ""
@@ -33,6 +34,8 @@ class MemoryContext:
     def format(self) -> str:
         """Format the memory layers into a single prompt-ready string."""
         parts = []
+        if self.style_profile:
+            parts.append(f"--- Style Profile: Book-Level Voice Guide ---\n{self.style_profile}")
         if self.proper_nouns:
             parts.append(f"--- Layer 1: Proper Nouns & Transliterations ---\n{self.proper_nouns}")
         if self.bilingual_summary:
@@ -45,12 +48,14 @@ class MemoryContext:
 
 
 class MemoryManager:
-    """Coordinates proper nouns, bilingual summary, long-term, and short-term memory."""
+    """Coordinates style profile, proper nouns, summaries, and translation memory."""
 
     def __init__(self, config: TarjomehConfig) -> None:
         self.config = config
         self.proper_nouns = ProperNouns()
         self.bilingual_summary = BilingualSummary()
+        self.style_profile = ""
+        self.style_samples: list[str] = []
         
         # Pull retrieval_k and window_size from config
         retrieval_k = config.to_dict().get("memory", {}).get("long_term_retrieval_k", 5)
@@ -80,6 +85,7 @@ class MemoryManager:
             )
 
         return MemoryContext(
+            style_profile=self.style_profile,
             proper_nouns=proper_nouns_str,
             bilingual_summary=bilingual_summary_str,
             long_term=long_term_str,
@@ -90,9 +96,31 @@ class MemoryManager:
         """Update synchronous memory layers with a new source-translation pair."""
         self.short_term.add(chunk.text, translation)
         self.long_term.add(chunk.text, translation)
+        self._update_style_profile(translation)
         # Any known proper noun occurring in this chunk has now had its first
         # appearance — later chunks must not repeat the English parenthetical.
         self.proper_nouns.mark_seen_in_text(chunk.text)
+
+    def _update_style_profile(self, translation: str) -> None:
+        """Maintain a compact book-level style guide from early translations."""
+        text = " ".join((translation or "").split())
+        if not text:
+            return
+
+        if len(self.style_samples) < 5:
+            self.style_samples.append(text[:500])
+
+        samples = "\n".join(
+            f"{i + 1}. {sample}"
+            for i, sample in enumerate(self.style_samples)
+        )
+        self.style_profile = (
+            "Maintain one coherent scholarly Iranian-Persian voice across the book. "
+            "Prefer formal academic diction, precise conceptual renderings, stable "
+            "citation handling, and the sentence rhythm established in the samples below. "
+            "Do not simplify later chapters into a different register.\n\n"
+            f"Representative early translation samples:\n{samples}"
+        )
 
     async def update_proper_nouns(self, llm_client: Any, text: str) -> None:
         """Incrementally identify new proper nouns in the text and add them."""
@@ -152,6 +180,8 @@ class MemoryManager:
     def to_dict(self) -> dict[str, Any]:
         """Serialize memory state for database checkpointing."""
         return {
+            "style_profile": self.style_profile,
+            "style_samples": self.style_samples,
             "proper_nouns": self.proper_nouns.serialize(),
             "bilingual_summary": self.bilingual_summary.serialize(),
             "past_translations": self.long_term.serialize(),
@@ -160,6 +190,8 @@ class MemoryManager:
 
     def from_dict(self, data: dict[str, Any]) -> None:
         """Restore memory state from a checkpoint dictionary."""
+        self.style_profile = str(data.get("style_profile", ""))
+        self.style_samples = list(data.get("style_samples", []))
         self.proper_nouns.deserialize(data.get("proper_nouns", {}))
         self.bilingual_summary.deserialize(data.get("bilingual_summary", {}))
         self.long_term.deserialize(data.get("past_translations", []))

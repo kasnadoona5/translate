@@ -358,6 +358,7 @@ async function openReview(jobId) {
                     <span>Status: ${chunk.status}</span>
                     <span>Critique: ${score}</span>
                     <span>Blocking: ${(chunk.blocking_critique_issues || []).length}</span>
+                    <span>Review: ${chunk.needs_review ? "needed" : "clear"}</span>
                     <span>Glossary: ${chunk.glossary_violations}</span>
                     <span>Back-check: ${chunk.back_translation_flagged ? "flagged" : "ok/unsampled"}</span>
                     <button class="btn" onclick="retranslateChunk('${jobId}', ${chunk.chunk_index})">Retranslate</button>

@@ -226,6 +226,19 @@ def _critique_for_event(critique: Any, threshold: float, iteration: int) -> dict
     }
 
 
+def _chunk_needs_review(db: Any, job_id: str, chunk_index: int) -> bool:
+    """Return True when QA recorded an unresolved critic/translator disagreement."""
+    events = db.get_chunk_events(job_id, chunk_index)
+    last_start = 0
+    for i, event in enumerate(events):
+        if event.get("event_type") == "chunk_started":
+            last_start = i
+    return any(
+        event.get("event_type") == "critique_needs_review"
+        for event in events[last_start:]
+    )
+
+
 def _compliance_report_for_event(report: Any) -> dict[str, Any]:
     violations = []
     for violation in getattr(report, "violations", []):
@@ -590,7 +603,7 @@ class TranslationPipeline:
         # Load existing translations if resuming
         if is_resume:
             for c_record in self.db.get_chunks(job_id):
-                if c_record["status"] == ChunkStatus.COMPLETED:
+                if c_record["status"] in (ChunkStatus.COMPLETED, ChunkStatus.NEEDS_REVIEW):
                     translations[c_record["chunk_index"]] = c_record["translation"]
 
         # Run translation loop
@@ -669,7 +682,12 @@ class TranslationPipeline:
                                 except Exception as e:
                                     logger.warning("Bilingual summary update failed: %s", e)
 
-                        self.db.update_chunk(job_id, idx, ChunkStatus.COMPLETED, translation)
+                        final_status = (
+                            ChunkStatus.NEEDS_REVIEW
+                            if _chunk_needs_review(self.db, job_id, idx)
+                            else ChunkStatus.COMPLETED
+                        )
+                        self.db.update_chunk(job_id, idx, final_status, translation)
                         self.db.save_memory_state(job_id, memory_manager.to_dict())
                     
                     return idx, translation
@@ -787,7 +805,12 @@ class TranslationPipeline:
                                 except Exception as e:
                                     logger.warning("Bilingual summary update failed: %s", e)
 
-                        self.db.update_chunk(job_id, idx, ChunkStatus.COMPLETED, translation)
+                        final_status = (
+                            ChunkStatus.NEEDS_REVIEW
+                            if _chunk_needs_review(self.db, job_id, idx)
+                            else ChunkStatus.COMPLETED
+                        )
+                        self.db.update_chunk(job_id, idx, final_status, translation)
                         self.db.save_memory_state(job_id, memory_manager.to_dict())
 
                     except PipelinePausedException as e:
@@ -1008,7 +1031,7 @@ class TranslationPipeline:
         document, chunks = self._parse_and_chunk(input_path)
         translations: dict[int, str] = {}
         for c_record in self.db.get_chunks(job_id):
-            if c_record["status"] == ChunkStatus.COMPLETED and c_record.get("translation"):
+            if c_record["status"] in (ChunkStatus.COMPLETED, ChunkStatus.NEEDS_REVIEW) and c_record.get("translation"):
                 translations[int(c_record["chunk_index"])] = c_record["translation"]
 
         missing = [idx for idx in range(len(chunks)) if not translations.get(idx, "").strip()]
@@ -1086,7 +1109,12 @@ class TranslationPipeline:
             translations=translations,
             job_id=job_id,
         )
-        self.db.update_chunk(job_id, chunk_index, ChunkStatus.COMPLETED, translation)
+        final_status = (
+            ChunkStatus.NEEDS_REVIEW
+            if _chunk_needs_review(self.db, job_id, chunk_index)
+            else ChunkStatus.COMPLETED
+        )
+        self.db.update_chunk(job_id, chunk_index, final_status, translation)
         memory_manager.update_after_translation(chunks[chunk_index], translation)
         self.db.save_memory_state(job_id, memory_manager.to_dict())
         self.db.log_event(job_id, "INFO", f"Retranslated chunk {chunk_index}.")
@@ -1228,17 +1256,19 @@ class TranslationPipeline:
             "token_count": chunk.token_count,
         })
 
-        # 4-Layer memory retrieval
+        # Translation memory retrieval
         if lock:
             with lock:
                 mem_context = memory_manager.get_context_for_chunk(chunk)
         else:
             mem_context = memory_manager.get_context_for_chunk(chunk)
         self.db.log_chunk_event(job_id, idx, "memory_context", {
+            "has_style_profile": bool(mem_context.style_profile),
             "has_proper_nouns": bool(mem_context.proper_nouns),
             "has_long_term": bool(mem_context.long_term),
             "has_short_term": bool(mem_context.short_term),
             "has_bilingual_summary": bool(mem_context.bilingual_summary),
+            "style_profile_preview": _truncate_for_event(mem_context.style_profile, 1000),
             "proper_nouns_preview": _truncate_for_event(mem_context.proper_nouns, 1000),
             "long_term_preview": _truncate_for_event(mem_context.long_term, 1000),
             "short_term_preview": _truncate_for_event(mem_context.short_term, 1000),
@@ -1347,17 +1377,42 @@ class TranslationPipeline:
                     "critique_completed",
                     _critique_for_event(critique_rep, threshold, ref_iter),
                 )
-                if _critique_passes_quality_gate(critique_rep, threshold) or ref_iter == self.config.translation.max_refine_iterations:
+                if _critique_passes_quality_gate(critique_rep, threshold):
+                    break
+                if ref_iter == self.config.translation.max_refine_iterations:
+                    blocking_issues = _blocking_critique_issues(critique_rep)
+                    self.db.log_chunk_event(job_id, idx, "critique_needs_review", {
+                        "iteration": ref_iter,
+                        "critique_average": critique_rep.average,
+                        "blocking_issue_count": len(blocking_issues),
+                        "blocking_issues": [
+                            _truncate_for_event(str(issue), 1000)
+                            for issue in blocking_issues
+                        ],
+                        "message": (
+                            "Unresolved major critique disagreement after maximum "
+                            "refinement attempts; output kept but chunk needs human review."
+                        ),
+                    })
                     break
                 before_chars = len(translation)
-                translation = self._run_async(
-                    refiner_tool.refine(chunk.text, translation, critique_rep, terminology=terminology_ctx)
+                refinement = self._run_async(
+                    refiner_tool.refine_with_decision(
+                        chunk.text,
+                        translation,
+                        critique_rep,
+                        terminology=terminology_ctx,
+                    )
                 )
+                translation = refinement.translation
                 self.db.update_chunk(job_id, idx, ChunkStatus.REFINED, translation)
                 self.db.log_chunk_event(job_id, idx, "refinement_completed", {
                     "iteration": ref_iter + 1,
                     "critique_average": critique_rep.average,
                     "critique_issue_count": len(critique_rep.issues),
+                    "blocking_issue_count": len(_blocking_critique_issues(critique_rep)),
+                    "decision": refinement.decision,
+                    "rationale": _truncate_for_event(refinement.rationale, 1000),
                     "before_chars": before_chars,
                     "after_chars": len(translation),
                     "paragraphs_after": _paragraph_count(translation),

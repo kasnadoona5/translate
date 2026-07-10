@@ -33,6 +33,7 @@ class ChunkStatus:
     CRITIQUED = "critiqued"
     REFINED = "refined"
     COMPLETED = "completed"
+    NEEDS_REVIEW = "needs_review"
     ERROR = "error"
 
 
@@ -294,7 +295,7 @@ class JobDatabase:
                 status = row["status"]
                 cnt = row["cnt"]
                 summary["total"] += cnt
-                if status == ChunkStatus.COMPLETED:
+                if status in (ChunkStatus.COMPLETED, ChunkStatus.NEEDS_REVIEW):
                     summary["completed"] += cnt
                 elif status == ChunkStatus.ERROR:
                     summary["errors"] += cnt
