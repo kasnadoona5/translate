@@ -26,7 +26,11 @@ from tarjomeh.context.web_searcher import WebContextSearcher
 from tarjomeh.glossary.manager import GlossaryManager
 from tarjomeh.glossary.compliance import GlossaryComplianceChecker
 from tarjomeh.persian.typography import PersianTypographer
-from tarjomeh.core.term_notes import apply_term_notes
+from tarjomeh.core.term_notes import (
+    apply_term_notes,
+    effective_term_notes_mode,
+    ensure_inline_proper_noun_originals,
+)
 from tarjomeh.exporters import get_exporter
 from tarjomeh.exporters.base import TranslatedDocument, TranslatedParagraph
 from tarjomeh.jobs.database import JobDatabase, JobStatus, ChunkStatus
@@ -213,7 +217,12 @@ def _research_context_for_memory(artifact: dict[str, Any] | None) -> str:
         source = str(item.get("source", "")).strip()
         target = str(item.get("target", "")).strip()
         if source and target:
-            suggestions.append(f"- {source} -> {target}")
+            confidence = str(item.get("confidence", "unknown"))
+            evidence = str(item.get("evidence_type", "unspecified"))
+            suggestions.append(
+                f"- {source} -> {target} "
+                f"[confidence={confidence}; evidence={evidence}; unapproved]"
+            )
     if suggestions:
         parts.extend([
             "Unapproved research suggestions follow. They are contextual hints, "
@@ -1143,14 +1152,27 @@ class TranslationPipeline:
         for p in trans_doc.paragraphs:
             p.translated_text = typographer.process(p.translated_text)
 
-        note_mode = self.config.output.term_notes
+        requested_note_mode = self.config.output.term_notes
+        note_mode = effective_term_notes_mode(
+            requested_note_mode, self.config.output.format
+        )
         note_formats = {"docx", "epub", "markdown"}
+        noun_state = memory_manager.proper_nouns.serialize()
+        proper_nouns = dict(noun_state.get("nouns", {}))
+        if note_mode in {"inline", "both"}:
+            restored = ensure_inline_proper_noun_originals(
+                trans_doc, proper_nouns, typographer
+            )
+            if restored:
+                self.db.log_event(
+                    job_id, "INFO",
+                    f"Restored {restored} first-occurrence English original(s).",
+                )
         if note_mode != "inline" and self.config.output.format in note_formats:
-            noun_state = memory_manager.proper_nouns.serialize()
             notes = apply_term_notes(
                 trans_doc,
                 glossary_manager,
-                dict(noun_state.get("nouns", {})),
+                proper_nouns,
                 typographer,
                 domain=self.config.translation.domain,
                 mode=note_mode,
@@ -1164,10 +1186,10 @@ class TranslationPipeline:
                 "INFO",
                 f"Generated {len(notes)} first-occurrence term note(s).",
             )
-        elif note_mode != "inline":
+        if requested_note_mode != note_mode:
             warning = (
                 f"Term notes are not rendered for {self.config.output.format}; "
-                "DOCX, EPUB, and Markdown are supported."
+                "English originals were preserved inline instead."
             )
             self.warnings.append(warning)
             self.db.log_event(job_id, "WARNING", warning)
@@ -1240,7 +1262,17 @@ class TranslationPipeline:
             )
 
         trans_doc = self._assemble_translated_document(document, chunks, translations)
-        note_mode = self.config.output.term_notes
+        note_mode = effective_term_notes_mode(self.config.output.term_notes, fmt)
+        memory_state = self.db.get_memory_state(job_id) or {}
+        noun_state = memory_state.get("proper_nouns", {})
+        proper_nouns = (
+            noun_state.get("nouns", {}) if isinstance(noun_state, dict) else {}
+        )
+        typographer = PersianTypographer(self.config.to_dict().get("persian"))
+        if note_mode in {"inline", "both"}:
+            ensure_inline_proper_noun_originals(
+                trans_doc, dict(proper_nouns), typographer
+            )
         if note_mode != "inline" and fmt in {"docx", "epub", "markdown"}:
             glossary_manager = GlossaryManager()
             glossary_paths = []
@@ -1251,12 +1283,7 @@ class TranslationPipeline:
                 if Path(path) not in glossary_paths
             )
             glossary_manager.load_many(glossary_paths, ignore_missing=True)
-            memory_state = self.db.get_memory_state(job_id) or {}
-            noun_state = memory_state.get("proper_nouns", {})
-            proper_nouns = (
-                noun_state.get("nouns", {})
-                if isinstance(noun_state, dict) else {}
-            )
+
             note_artifact = self.db.get_job_artifact(job_id, "term_notes") or {}
             persisted_terms = {
                 str(note.get("original", "")): str(
@@ -1271,7 +1298,7 @@ class TranslationPipeline:
                 trans_doc,
                 glossary_manager,
                 dict(proper_nouns),
-                PersianTypographer(self.config.to_dict().get("persian")),
+                typographer,
                 domain=self.config.translation.domain,
                 mode=note_mode,
                 extra_terms=persisted_terms,
@@ -1568,7 +1595,10 @@ class TranslationPipeline:
             exemplars = ""
 
         term_notes_instruction = _term_notes_instruction(
-            self.config.output.term_notes
+            effective_term_notes_mode(
+                self.config.output.term_notes,
+                self.config.output.format,
+            )
         )
         sys_prompt = TRANSLATE_SYSTEM_PROMPT.format(
             domain=self.config.translation.domain,
@@ -1597,6 +1627,12 @@ class TranslationPipeline:
             terminology_ctx += (
                 "\n\n### Established proper-noun renderings\n" + mem_context.proper_nouns
             )
+        terminology_ctx += (
+            "\n\n### First-occurrence English-original policy\n"
+            + term_notes_instruction
+            + " During critique and refinement, preserve any required English "
+              "original already present unless it is factually incorrect."
+        )
         self.db.log_chunk_event(job_id, idx, "terminology_context", {
             "chars": len(terminology_ctx),
             "preview": _truncate_for_event(terminology_ctx, 2000),
@@ -1635,6 +1671,17 @@ class TranslationPipeline:
                     break
                 if ref_iter == self.config.translation.max_refine_iterations:
                     blocking_issues = _blocking_critique_issues(critique_rep)
+                    review_reason = (
+                        "blocking_critique_disagreement"
+                        if blocking_issues else "quality_threshold_unmet"
+                    )
+                    message = (
+                        "Unresolved blocking critique disagreement after maximum "
+                        "refinement attempts; output kept but chunk needs human review."
+                        if blocking_issues else
+                        "Configured quality threshold remained unmet after maximum "
+                        "refinement attempts; output kept but chunk needs human review."
+                    )
                     self.db.log_chunk_event(job_id, idx, "critique_needs_review", {
                         "iteration": ref_iter,
                         "critique_average": critique_rep.average,
@@ -1643,10 +1690,8 @@ class TranslationPipeline:
                             _truncate_for_event(str(issue), 1000)
                             for issue in blocking_issues
                         ],
-                        "message": (
-                            "Unresolved major critique disagreement after maximum "
-                            "refinement attempts; output kept but chunk needs human review."
-                        ),
+                        "review_reason": review_reason,
+                        "message": message,
                     })
                     break
                 before_chars = len(translation)

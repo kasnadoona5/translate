@@ -51,6 +51,11 @@ class DuckDuckGoProvider(BaseSearchProvider):
     Does not require API keys or credentials. Parses results from the HTML endpoint.
     """
 
+    name = "duckduckgo"
+
+    def __init__(self) -> None:
+        super().__init__()
+
     async def search(self, query: str) -> list[SearchResult]:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"

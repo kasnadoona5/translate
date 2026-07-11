@@ -18,7 +18,11 @@ from tarjomeh.context.search_providers import (
 )
 from tarjomeh.core.config import TarjomehConfig
 from tarjomeh.core.pipeline import _research_context_for_memory
-from tarjomeh.core.term_notes import apply_term_notes
+from tarjomeh.core.term_notes import (
+    apply_term_notes,
+    effective_term_notes_mode,
+    ensure_inline_proper_noun_originals,
+)
 from tarjomeh.exporters.base import TranslatedDocument, TranslatedParagraph
 from tarjomeh.exporters.markdown_exporter import MarkdownExporter
 from tarjomeh.exporters.docx_exporter import DocxExporter, HAS_DOCX
@@ -70,9 +74,38 @@ class TestPhase6TermNotes(unittest.TestCase):
         )
         self.assertNotIn("term_notes", self.document.metadata)
 
+    def test_unsupported_note_format_falls_back_to_inline(self) -> None:
+        self.assertEqual(effective_term_notes_mode("footnote", "pdf"), "inline")
+        self.assertEqual(effective_term_notes_mode("footnote", "docx"), "footnote")
+
+    def test_refinement_cannot_remove_inline_proper_noun_original(self) -> None:
+        document = TranslatedDocument(
+            title="Test",
+            paragraphs=[TranslatedParagraph(
+                index=0,
+                source_text="Intacta rr2 Pro is discussed.",
+                translated_text="«اینتکتا آرآر ۲ پرو» مطرح می‌شود.",
+            )],
+        )
+        restored = ensure_inline_proper_noun_originals(
+            document,
+            {"Intacta rr2 Pro": "اینتکتا آرآر ۲ پرو"},
+            self.typographer,
+        )
+        self.assertEqual(restored, 1)
+        self.assertIn("» (Intacta rr2 Pro)", document.paragraphs[0].translated_text)
+        self.assertEqual(
+            ensure_inline_proper_noun_originals(
+                document,
+                {"Intacta rr2 Pro": "اینتکتا آرآر ۲ پرو"},
+                self.typographer,
+            ),
+            0,
+        )
     def test_note_mode_removes_inline_parenthetical_memory_instruction(self) -> None:
         config = TarjomehConfig()
         config.output.term_notes = "footnote"
+        config.output.format = "docx"
         memory = MemoryManager(config)
         memory.proper_nouns.add_noun("Gramsci", "گرامشی")
         context = memory.get_context_for_chunk(

@@ -623,12 +623,25 @@ class TarjomehConfig:
                 f"got '{self.output.term_notes}'"
             )
 
+        valid_bilingual_modes = ("inline", "side_by_side", "target_only")
+        if self.output.bilingual_mode not in valid_bilingual_modes:
+            errors.append(
+                f"output.bilingual_mode must be one of {valid_bilingual_modes}, "
+                f"got '{self.output.bilingual_mode}'"
+            )
+
         # Numeric bounds
         if self.chunking.max_chunk_tokens < 100:
             errors.append("chunking.max_chunk_tokens must be >= 100")
 
         if self.translation.parallel_workers < 1:
             errors.append("translation.parallel_workers must be >= 1")
+
+        if not 0 <= self.translation.max_refine_iterations <= 5:
+            errors.append("translation.max_refine_iterations must be 0-5")
+
+        if not 1 <= self.translation.critique_threshold <= 10:
+            errors.append("translation.critique_threshold must be 1-10")
 
         if self.retry.max_retries < 0:
             errors.append("retry.max_retries must be >= 0")

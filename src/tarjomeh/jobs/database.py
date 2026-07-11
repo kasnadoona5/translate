@@ -152,6 +152,11 @@ class JobDatabase:
             job["raw_status"] = raw_status
             job["filename"] = Path(job["input_path"]).name
             job["mode"] = job["config"].get("translation", {}).get("mode", "academic")
+            job["output_format"] = job["config"].get("output", {}).get("format", "")
+            job["output_filename"] = (
+                Path(job["output_path"]).name
+                if job.get("output_path") else ""
+            )
             job["pct"] = job["progress"] / 100.0
             if raw_status in ("running", "pending"):
                 job["status"] = "processing"
@@ -180,6 +185,11 @@ class JobDatabase:
                 job["raw_status"] = raw_status
                 job["filename"] = Path(job["input_path"]).name
                 job["mode"] = config_dict.get("translation", {}).get("mode", "academic")
+                job["output_format"] = config_dict.get("output", {}).get("format", "")
+                job["output_filename"] = (
+                    Path(job["output_path"]).name
+                    if job.get("output_path") else ""
+                )
                 job["pct"] = job["progress"] / 100.0
                 if raw_status in ("running", "pending"):
                     job["status"] = "processing"

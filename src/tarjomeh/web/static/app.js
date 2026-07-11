@@ -296,6 +296,17 @@ function appendLog(message, type = "info") {
     logContainer.scrollTop = logContainer.scrollHeight;
 }
 
+function formatJobDate(value) {
+    if (!value) return "Unknown time";
+    const normalized = /(?:Z|[+-]\d\d:\d\d)$/.test(value)
+        ? value : value + "Z";
+    const date = new Date(normalized);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleString(undefined, {
+        dateStyle: "medium", timeStyle: "short"
+    });
+}
+
 // Fetch all jobs in history
 async function fetchJobs() {
     const listContainer = document.getElementById("jobsList");
@@ -331,6 +342,9 @@ async function fetchJobs() {
             else if (job.status === "paused") badgeClass = "paused";
 
             const progressPct = Math.round(job.pct * 100);
+            const outputName = job.output_filename || job.filename;
+            const outputFormat = (job.output_format || "unknown").toUpperCase();
+            const createdAt = formatJobDate(job.created_at);
 
             // Action buttons
             let actionHtml = "";
@@ -355,8 +369,9 @@ async function fetchJobs() {
 
             div.innerHTML = `
                 <div class="job-meta">
-                    <span class="job-title">${escapeHtml(job.filename)}</span>
-                    <span class="job-submeta">ID: ${job.id} | Mode: ${job.mode.toUpperCase()} | Progress: ${progressPct}%</span>
+                    <span class="job-title">${escapeHtml(outputName)}</span>
+                    <span class="job-submeta">Source: ${escapeHtml(job.filename)} | Format: ${escapeHtml(outputFormat)}</span>
+                    <span class="job-submeta">Created: ${escapeHtml(createdAt)} | ID: ${job.id} | Mode: ${job.mode.toUpperCase()} | Progress: ${progressPct}%</span>
                 </div>
                 <div class="job-actions">
                     <span class="badge ${badgeClass}">${job.status.toUpperCase()}</span>

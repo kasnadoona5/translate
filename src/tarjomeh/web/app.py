@@ -527,9 +527,12 @@ def _register_api(app: Flask) -> None:
                         lines.append(f"    Rationale: {payload.get('rationale')}")
                 elif event["event_type"] == "critique_needs_review":
                     lines.append(
-                        f"  NEEDS REVIEW: unresolved blocking={payload.get('blocking_issue_count')} "
+                        f"  NEEDS REVIEW: reason={payload.get('review_reason', 'legacy_unresolved')} "
+                        f"blocking={payload.get('blocking_issue_count')} "
                         f"after iteration={payload.get('iteration')}"
                     )
+                    if payload.get("message"):
+                        lines.append(f"    {payload.get('message')}")
                 elif event["event_type"] == "glossary_compliance_final":
                     lines.append(
                         f"  Glossary: compliant={payload.get('compliant')} "

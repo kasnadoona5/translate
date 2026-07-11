@@ -36,11 +36,14 @@ class EpubExporter(BaseExporter):
                 rendered.append(html.escape(segment))
                 if ref is not None:
                     number = int(ref["number"])
+                    display_number = html.escape(
+                        str(ref.get("display_number", number))
+                    )
                     ref_id = f"term-note-ref-{number}"
                     note_backlinks[number] = f"chapter_{chapter_index}.xhtml#{ref_id}"
                     rendered.append(
                         f'<a id="{ref_id}" href="notes.xhtml#term-note-{number}" '
-                        f'epub:type="noteref" role="doc-noteref">{number}</a>'
+                        f'epub:type="noteref" role="doc-noteref">{display_number}</a>'
                     )
             return "".join(rendered)
 
@@ -228,6 +231,9 @@ h1, h2, h3, h4 {
                 note_items = []
                 for note in term_notes:
                     number = int(note["number"])
+                    display_number = html.escape(
+                        str(note.get("display_number", number))
+                    )
                     backlink = html.escape(note_backlinks.get(number, ""))
                     back_link = (
                         f' <a href="{backlink}" role="doc-backlink">back</a>'
@@ -235,7 +241,7 @@ h1, h2, h3, h4 {
                     )
                     note_items.append(
                         f'<aside id="term-note-{number}" epub:type="footnote" '
-                        f'role="doc-footnote"><p>{number}. '
+                        f'role="doc-footnote"><p>{display_number}. '
                         f'{html.escape(str(note["original"]))} '
                         f'({html.escape(str(note["transliteration"]))})'
                         f'{back_link}</p></aside>'

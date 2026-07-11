@@ -9,6 +9,58 @@ from tarjomeh.glossary.manager import GlossaryManager
 from tarjomeh.persian.typography import PersianTypographer
 
 
+NOTE_CAPABLE_FORMATS = {"docx", "epub", "markdown"}
+
+
+def effective_term_notes_mode(mode: str, output_format: str) -> str:
+    """Fall back to inline originals when an exporter cannot render notes."""
+    if mode != "inline" and output_format.lower() not in NOTE_CAPABLE_FORMATS:
+        return "inline"
+    return mode
+
+
+def ensure_inline_proper_noun_originals(
+    document: TranslatedDocument,
+    proper_nouns: dict[str, str],
+    typographer: PersianTypographer,
+) -> int:
+    """Deterministically retain first-occurrence English proper nouns."""
+    inserted = 0
+    seen: set[str] = set()
+    for paragraph in document.paragraphs:
+        source_folded = paragraph.source_text.casefold()
+        candidates = []
+        for source, raw_target in proper_nouns.items():
+            key = source.casefold().strip()
+            position = source_folded.find(key)
+            if not key or key in seen or position < 0:
+                continue
+            target = typographer.process(raw_target).strip()
+            if target:
+                candidates.append((position, source, target, key))
+
+        text = paragraph.translated_text
+        for _, source, target, key in sorted(candidates):
+            target_offset = text.find(target)
+            if target_offset < 0:
+                continue
+            target_end = target_offset + len(target)
+            insertion_at = target_end
+            if insertion_at < len(text) and text[insertion_at] in "»”":
+                insertion_at += 1
+            nearby = text[insertion_at:insertion_at + len(source) + 8]
+            if source.casefold() not in nearby.casefold():
+                text = (
+                    text[:insertion_at]
+                    + f" ({source})"
+                    + text[insertion_at:]
+                )
+                inserted += 1
+            seen.add(key)
+        paragraph.translated_text = text
+    return inserted
+
+
 def apply_term_notes(
     document: TranslatedDocument,
     glossary_manager: GlossaryManager,
@@ -106,6 +158,31 @@ def apply_term_notes(
             refs.sort(key=lambda ref: int(ref.get("offset", 0)))
             paragraph.metadata = dict(paragraph.metadata)
             paragraph.metadata["term_note_refs"] = refs
+
+    # Source and Persian word order can differ. Renumber by final marker order.
+    ordered_refs = []
+    for paragraph in document.paragraphs:
+        ordered_refs.extend(paragraph.metadata.get("term_note_refs", []))
+    old_to_new = {
+        int(ref["number"]): number
+        for number, ref in enumerate(ordered_refs, 1)
+    }
+    for ref in ordered_refs:
+        ref["number"] = old_to_new[int(ref["number"])]
+    for note in notes:
+        note["number"] = old_to_new[int(note["number"])]
+    notes.sort(key=lambda note: int(note["number"]))
+    convert_numbers = bool(getattr(typographer, "_convert_numerals", True))
+    for ref in ordered_refs:
+        ref["display_number"] = (
+            typographer.convert_numerals(str(ref["number"]))
+            if convert_numbers else str(ref["number"])
+        )
+    for note in notes:
+        note["display_number"] = next(
+            ref["display_number"] for ref in ordered_refs
+            if int(ref["number"]) == int(note["number"])
+        )
 
     if notes:
         document.metadata = dict(document.metadata)

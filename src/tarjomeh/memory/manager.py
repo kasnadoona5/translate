@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from tarjomeh.core.config import TarjomehConfig
+from tarjomeh.core.term_notes import effective_term_notes_mode
 from tarjomeh.chunking.chunker import Chunk
 from tarjomeh.memory.proper_nouns import ProperNouns
 from tarjomeh.memory.bilingual_summary import BilingualSummary
@@ -75,7 +76,11 @@ class MemoryManager:
     def get_context_for_chunk(self, chunk: Chunk) -> MemoryContext:
         """Retrieve relevant context for translating the given chunk."""
         # Layer 1: Proper Nouns
-        include_inline_originals = self.config.output.term_notes in (
+        note_mode = effective_term_notes_mode(
+            self.config.output.term_notes,
+            self.config.output.format,
+        )
+        include_inline_originals = note_mode in (
             "inline",
             "both",
         )
@@ -141,7 +146,11 @@ class MemoryManager:
         """Incrementally identify new proper nouns in the text and add them."""
         from tarjomeh.core.prompts import INCREMENTAL_NER_PROMPT, GLOSSARY_EXTRACT_PROMPT
 
-        include_inline_originals = self.config.output.term_notes in (
+        note_mode = effective_term_notes_mode(
+            self.config.output.term_notes,
+            self.config.output.format,
+        )
+        include_inline_originals = note_mode in (
             "inline",
             "both",
         )

@@ -78,7 +78,7 @@ class DocxExporter(BaseExporter):
                     run = p_obj.add_run(segment)
                     make_run_rtl(run)
                 if ref is not None:
-                    marker = p_obj.add_run(str(ref["number"]))
+                    marker = p_obj.add_run(str(ref.get("display_number", ref["number"])))
                     marker.font.superscript = True
                     make_run_rtl(marker)
 
@@ -139,7 +139,7 @@ class DocxExporter(BaseExporter):
             for note in notes:
                 note_para = doc.add_paragraph()
                 note_run = note_para.add_run(
-                    f"{note['number']}. {note['original']} "
+                    f"{note.get('display_number', note['number'])}. {note['original']} "
                     f"({note['transliteration']})"
                 )
                 make_paragraph_rtl(note_para)

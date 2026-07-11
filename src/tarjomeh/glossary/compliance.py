@@ -151,12 +151,19 @@ class GlossaryComplianceChecker:
         normalised_text = _normalise_persian(translation)
         if not normalised_target:
             return False
-        if normalised_target in normalised_text:
-            return True
-
-        compact_target = _compact_persian(normalised_target)
-        compact_text = _compact_persian(normalised_text)
-        return len(compact_target) >= 3 and compact_target in compact_text
+        parts = [
+            re.escape(part)
+            for part in re.split(rf"[\s{_ZWNJ}{_ZWJ}]+", normalised_target)
+            if part
+        ]
+        if not parts:
+            return False
+        flexible_target = rf"[\s{_ZWNJ}{_ZWJ}]*".join(parts)
+        persian_word = r"\u0600-\u06ff"
+        return re.search(
+            rf"(?<![{persian_word}]){flexible_target}(?![{persian_word}])",
+            normalised_text,
+        ) is not None
 
 
 # ---------------------------------------------------------------------------
