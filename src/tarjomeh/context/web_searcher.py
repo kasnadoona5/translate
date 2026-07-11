@@ -8,15 +8,14 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Any
 
 from tarjomeh.core.config import TarjomehConfig
 from tarjomeh.chunking.chunker import Chunk
 from tarjomeh.context.search_providers import (
     BaseSearchProvider,
-    DuckDuckGoProvider,
-    GoogleSearchProvider,
+    SearchProviderChain,
+    build_search_provider,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,16 +32,20 @@ class WebContextSearcher:
         self.llm_client = llm_client
         self.cache: dict[str, str] = {}  # term_lower -> definition_str
 
-        # Resolve search provider (Google if api key + cx are present, else DuckDuckGo)
-        google_key = os.environ.get("GOOGLE_API_KEY")
-        google_cx = os.environ.get("GOOGLE_CX")
-        
-        if google_key and google_cx:
-            logger.info("Web search using GoogleSearchProvider")
-            self.provider: BaseSearchProvider = GoogleSearchProvider(google_key, google_cx)
-        else:
-            logger.info("Web search using DuckDuckGoProvider")
-            self.provider = DuckDuckGoProvider()
+        phase7_reserve = (
+            config.web_search.phase7_max_queries
+            if config.translation.enable_book_research else 0
+        )
+        remaining_budget = max(
+            0,
+            config.web_search.max_queries_per_book
+            - phase7_reserve,
+        )
+        self.provider: BaseSearchProvider = build_search_provider(
+            config,
+            query_budget=remaining_budget,
+        )
+        self.last_report: dict[str, Any] = {}
 
     async def get_context_for_chunk(self, chunk: Chunk, memory_context_str: str = "") -> str:
         """Analyze chunk, search for ambiguous terms, and return definitions."""
@@ -67,6 +70,11 @@ class WebContextSearcher:
             if not isinstance(items, list):
                 return ""
 
+            query_count = 0
+            diagnostic_start = len(
+                self.provider.diagnostics
+                if isinstance(self.provider, SearchProviderChain) else []
+            )
             for item in items:
                 term = item.get("term", "").strip()
                 search_query = item.get("search_query", "").strip()
@@ -77,8 +85,11 @@ class WebContextSearcher:
                 term_lower = term.lower()
                 if term_lower in self.cache:
                     continue
+                if query_count >= self.config.web_search.max_queries_per_chunk:
+                    continue
 
                 # Run search query
+                query_count += 1
                 results = await self.provider.search(search_query)
                 if results:
                     def_str = "\n".join(f"- {r.snippet} (source: {r.url})" for r in results[:3])
@@ -86,8 +97,21 @@ class WebContextSearcher:
                 else:
                     self.cache[term_lower] = ""
 
+            diagnostics = (
+                self.provider.diagnostics[diagnostic_start:]
+                if isinstance(self.provider, SearchProviderChain) else []
+            )
+            self.last_report = {
+                "candidate_count": len(items),
+                "new_query_count": query_count,
+                "diagnostics": diagnostics,
+                "budget_used": getattr(self.provider, "queries_used", None),
+                "budget_limit": getattr(self.provider, "query_budget", None),
+            }
+
         except Exception as exc:
             logger.warning("Web context term search/extraction failed: %s", exc)
+            self.last_report = {"error": f"{type(exc).__name__}: {exc}"}
 
         # Match cached terms in the current chunk text
         matched_definitions = []
@@ -108,3 +132,22 @@ class WebContextSearcher:
             return "### Web Context Definitions (for term disambiguation):\n\n" + "\n\n".join(matched_definitions)
         
         return ""
+
+    def export_state(self) -> dict[str, Any]:
+        """Return resume-safe context and provider caches."""
+        return {
+            "term_cache": dict(self.cache),
+            "provider": (
+                self.provider.export_state()
+                if isinstance(self.provider, SearchProviderChain) else {}
+            ),
+        }
+
+    def import_state(self, state: dict[str, Any]) -> None:
+        """Restore persisted caches without repeating paid searches."""
+        self.cache = {
+            str(key): str(value)
+            for key, value in state.get("term_cache", {}).items()
+        }
+        if isinstance(self.provider, SearchProviderChain):
+            self.provider.import_state(state.get("provider", {}))

@@ -1,25 +1,32 @@
 """Context sub-package — web search for term disambiguation.
 
-Provides :class:`WebContextSearcher` and concrete search providers
-(:class:`DuckDuckGoProvider`, :class:`GoogleSearchProvider`).
+Provides :class:`WebContextSearcher` and configurable API-backed providers.
 """
 
 from __future__ import annotations
 
 from tarjomeh.context.search_providers import (
     BaseSearchProvider,
+    BraveSearchProvider,
     DuckDuckGoProvider,
     GoogleSearchProvider,
+    SearchProviderChain,
     SearchResult,
+    TavilySearchProvider,
+    build_search_provider,
 )
 __all__ = [
     "BookResearchResult",
     "BookResearcher",
     "BaseSearchProvider",
+    "BraveSearchProvider",
     "DuckDuckGoProvider",
     "GoogleSearchProvider",
+    "SearchProviderChain",
     "SearchResult",
+    "TavilySearchProvider",
     "WebContextSearcher",
+    "build_search_provider",
 ]
 
 

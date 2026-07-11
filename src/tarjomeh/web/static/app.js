@@ -155,6 +155,10 @@ async function startTranslation() {
     formData.append("max_refine_iterations", document.getElementById("cfgRefineIterations").value);
     formData.append("critique_threshold", document.getElementById("cfgCritiqueThreshold").value);
     formData.append("back_translation_sample_pct", document.getElementById("cfgBackSample").value);
+    formData.append("search_provider", document.getElementById("cfgSearchProvider").value);
+    formData.append("phase7_max_queries", document.getElementById("cfgResearchQueries").value);
+    formData.append("max_queries_per_chunk", document.getElementById("cfgChunkQueries").value);
+    formData.append("max_queries_per_book", document.getElementById("cfgBookQueryBudget").value);
 
     // Get Auth token if set
     const params = new URLSearchParams(window.location.search);
@@ -516,7 +520,7 @@ async function fetchResearchSuggestions(jobId) {
     const suggested = terms
         .map((term, index) => ({ term: term, index: index }))
         .filter(item => item.term.status === "suggested");
-    if (!research || (!research.book_context && !suggested.length)) {
+    if (!research) {
         block.hidden = true;
         list.innerHTML = "";
         return;
@@ -524,12 +528,31 @@ async function fetchResearchSuggestions(jobId) {
     block.hidden = false;
     title.innerText = "Research suggestions - Job " + jobId;
     list.innerHTML = "";
+    const metadata = document.createElement("div");
+    metadata.className = "research-meta";
+    const providers = Array.isArray(research.providers_used)
+        ? research.providers_used.join(", ") : "";
+    metadata.innerHTML =
+        "<span>Status: <strong>" + escapeHtml(research.status || "unknown") +
+        "</strong></span><span>Sources: <strong>" +
+        escapeHtml((research.sources || []).length) +
+        "</strong></span><span>Queries: <strong>" +
+        escapeHtml((research.queries || []).length) +
+        "</strong></span><span>Providers: <strong>" +
+        escapeHtml(providers || "none") + "</strong></span>";
+    list.appendChild(metadata);
     if (research.book_context) {
         const contextRow = document.createElement("div");
         contextRow.className = "research-context";
         contextRow.innerHTML = "<strong>Book context</strong><p>" +
             escapeHtml(research.book_context) + "</p>";
         list.appendChild(contextRow);
+    }
+    if (research.error) {
+        const errorRow = document.createElement("p");
+        errorRow.className = "empty-state error";
+        errorRow.textContent = research.error;
+        list.appendChild(errorRow);
     }
     suggested.forEach(item => {
         const row = document.createElement("div");

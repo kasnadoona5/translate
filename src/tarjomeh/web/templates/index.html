@@ -115,6 +115,31 @@
                                         <input id="cfgBookResearch" type="checkbox">
                                         <span class="toggle" aria-hidden="true"></span>
                                     </label>
+                                    <label class="field compact-field">
+                                        <span>Search provider</span>
+                                        <select id="cfgSearchProvider">
+                                            <option value="auto" selected>Automatic fallback</option>
+                                            <option value="tavily">Tavily first</option>
+                                            <option value="brave">Brave first</option>
+                                            <option value="google">Google first</option>
+                                            <option value="duckduckgo">DuckDuckGo first</option>
+                                        </select>
+                                    </label>
+                                    <label class="field compact-field">
+                                        <span>Research queries</span>
+                                        <input id="cfgResearchQueries" type="number"
+                                               min="5" max="12" step="1" value="8">
+                                    </label>
+                                    <label class="field compact-field">
+                                        <span>Queries per chunk</span>
+                                        <input id="cfgChunkQueries" type="number"
+                                               min="0" max="5" step="1" value="2">
+                                    </label>
+                                    <label class="field compact-field">
+                                        <span>Whole-book query budget</span>
+                                        <input id="cfgBookQueryBudget" type="number"
+                                               min="8" max="500" step="1" value="100">
+                                    </label>
                                     <label class="toggle-field">
                                         <span>
                                             <strong>Auto term extraction</strong>

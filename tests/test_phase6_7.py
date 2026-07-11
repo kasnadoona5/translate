@@ -6,10 +6,16 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from tarjomeh.context.book_researcher import BookResearcher
-from tarjomeh.context.search_providers import SearchResult
+from tarjomeh.context.search_providers import (
+    BaseSearchProvider,
+    BraveSearchProvider,
+    SearchProviderChain,
+    SearchResult,
+    TavilySearchProvider,
+)
 from tarjomeh.core.config import TarjomehConfig
 from tarjomeh.core.pipeline import _research_context_for_memory
 from tarjomeh.core.term_notes import apply_term_notes
@@ -250,4 +256,182 @@ class TestBookResearcher(unittest.IsolatedAsyncioTestCase):
             result.terms[0]["source_urls"],
             ["https://example.test/book"],
         )
-        self.assertEqual(researcher.provider.search.await_count, 3)
+        self.assertEqual(researcher.provider.search.await_count, 5)
+
+    async def test_research_uses_bounded_adaptive_follow_up_queries(self) -> None:
+        config = TarjomehConfig()
+        config.web_search.phase7_max_queries = 8
+        llm = MagicMock()
+        llm.chat = AsyncMock(side_effect=[
+            json.dumps({
+                "book_context": "Initial",
+                "terms": [],
+                "follow_up_queries": [
+                    '"operative surface" author-specific meaning',
+                    '"hitting the ground" political economy',
+                    '"operative surface" author-specific meaning',
+                    "variegation capital geography",
+                    "ignored fourth query",
+                ],
+            }),
+            json.dumps({
+                "book_context": "Final evidence-grounded context",
+                "terms": [],
+                "follow_up_queries": [],
+            }),
+        ])
+        researcher = BookResearcher(config, llm)
+        researcher.provider = MagicMock()
+        researcher.provider.search = AsyncMock(return_value=[
+            SearchResult("Result", "https://example.test/result", "Evidence")
+        ])
+        document = type("DocumentStub", (), {
+            "title": "Book",
+            "author": "Author",
+            "raw_toc": [],
+            "all_paragraphs": [
+                type("ParagraphStub", (), {"text": "Book excerpt."})()
+            ],
+        })()
+
+        result = await researcher.research(document)
+
+        self.assertEqual(len(result.queries), 8)
+        self.assertEqual(researcher.provider.search.await_count, 8)
+        self.assertEqual(llm.chat.await_count, 2)
+        self.assertEqual(
+            result.book_context,
+            "Final evidence-grounded context",
+        )
+
+    async def test_research_without_external_sources_is_degraded(self) -> None:
+        config = TarjomehConfig()
+        llm = MagicMock()
+        llm.chat = AsyncMock(return_value=json.dumps({
+            "book_context": "Excerpt-only context",
+            "terms": [],
+            "follow_up_queries": [],
+        }))
+        researcher = BookResearcher(config, llm)
+        researcher.provider = MagicMock()
+        researcher.provider.search = AsyncMock(return_value=[])
+        document = type("DocumentStub", (), {
+            "title": "Book",
+            "author": "",
+            "raw_toc": [],
+            "all_paragraphs": [
+                type("ParagraphStub", (), {"text": "Book excerpt."})()
+            ],
+        })()
+
+        result = await researcher.research(document)
+
+        self.assertEqual(result.status, "degraded")
+        self.assertEqual(result.book_context, "Excerpt-only context")
+
+
+class TestSearchProviderChain(unittest.IsolatedAsyncioTestCase):
+    async def test_tavily_parses_official_json_response(self) -> None:
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "results": [{
+                "title": "Academic source",
+                "url": "https://example.test/source",
+                "content": "Relevant research evidence",
+            }]
+        }
+        client = AsyncMock()
+        client.post.return_value = response
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=client)
+        context.__aexit__ = AsyncMock(return_value=False)
+
+        with patch(
+            "tarjomeh.context.search_providers.httpx.AsyncClient",
+            return_value=context,
+        ):
+            results = await TavilySearchProvider("secret").search("query")
+
+        self.assertEqual(results[0].title, "Academic source")
+        self.assertEqual(results[0].snippet, "Relevant research evidence")
+        request = client.post.await_args
+        self.assertNotIn("secret", str(request.kwargs["json"]))
+
+    async def test_brave_parses_official_json_response(self) -> None:
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "web": {"results": [{
+                "title": "Book review",
+                "url": "https://example.test/review",
+                "description": "A scholarly review",
+            }]}
+        }
+        client = AsyncMock()
+        client.get.return_value = response
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=client)
+        context.__aexit__ = AsyncMock(return_value=False)
+
+        with patch(
+            "tarjomeh.context.search_providers.httpx.AsyncClient",
+            return_value=context,
+        ):
+            results = await BraveSearchProvider("secret").search("query")
+
+        self.assertEqual(results[0].url, "https://example.test/review")
+        self.assertEqual(results[0].snippet, "A scholarly review")
+
+    async def test_fallback_cache_and_budget(self) -> None:
+        empty = MagicMock(spec=BaseSearchProvider)
+        empty.name = "primary"
+        empty.available = True
+        empty.last_status = 503
+        empty.last_error = "temporary"
+        empty.search = AsyncMock(return_value=[])
+
+        fallback = MagicMock(spec=BaseSearchProvider)
+        fallback.name = "fallback"
+        fallback.available = True
+        fallback.last_status = 200
+        fallback.last_error = ""
+        fallback.search = AsyncMock(return_value=[
+            SearchResult("Title", "https://example.test", "Snippet")
+        ])
+
+        chain = SearchProviderChain(
+            [empty, fallback],
+            max_retries=0,
+            query_budget=1,
+        )
+        first = await chain.search("academic term")
+        cached = await chain.search("  ACADEMIC   TERM ")
+        blocked = await chain.search("second term")
+
+        self.assertEqual(len(first), 1)
+        self.assertEqual(cached, first)
+        self.assertEqual(blocked, [])
+        self.assertEqual(chain.queries_used, 1)
+        fallback.search.assert_awaited_once()
+        self.assertEqual(chain.diagnostics[-1]["status"], "budget_exhausted")
+
+    async def test_state_round_trip_preserves_paid_query_cache(self) -> None:
+        provider = MagicMock(spec=BaseSearchProvider)
+        provider.name = "provider"
+        provider.available = True
+        provider.last_status = 200
+        provider.last_error = ""
+        provider.search = AsyncMock(return_value=[
+            SearchResult("Title", "https://example.test", "Snippet")
+        ])
+        original = SearchProviderChain([provider], query_budget=3)
+        await original.search("query")
+
+        restored = SearchProviderChain([provider], query_budget=3)
+        restored.import_state(original.export_state())
+        results = await restored.search("query")
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(restored.queries_used, 1)
+        provider.search.assert_awaited_once()

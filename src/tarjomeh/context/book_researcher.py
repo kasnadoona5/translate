@@ -7,7 +7,6 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from tarjomeh.context.web_searcher import WebContextSearcher
 from tarjomeh.core.config import TarjomehConfig
 from tarjomeh.parsers.base import Document
 
@@ -22,6 +21,8 @@ class BookResearchResult:
     terms: list[dict[str, Any]] = field(default_factory=list)
     sources: list[dict[str, str]] = field(default_factory=list)
     queries: list[str] = field(default_factory=list)
+    search_diagnostics: list[dict[str, Any]] = field(default_factory=list)
+    providers_used: list[str] = field(default_factory=list)
     status: str = "completed"
     error: str = ""
 
@@ -31,6 +32,8 @@ class BookResearchResult:
             "terms": self.terms,
             "sources": self.sources,
             "queries": self.queries,
+            "search_diagnostics": self.search_diagnostics,
+            "providers_used": self.providers_used,
             "status": self.status,
             "error": self.error,
         }
@@ -42,53 +45,145 @@ class BookResearcher:
     def __init__(self, config: TarjomehConfig, llm_client: Any) -> None:
         self.config = config
         self.llm_client = llm_client
-        self.provider = WebContextSearcher(config, llm_client).provider
+        from tarjomeh.context.search_providers import build_search_provider
+        self.provider = build_search_provider(
+            config,
+            query_budget=config.web_search.phase7_max_queries,
+        )
 
     async def research(self, document: Document) -> BookResearchResult:
         title = (document.title or "Unknown title").strip()
         author = (document.author or "").strip()
-        identity = " ".join(part for part in (title, author) if part).strip()
+        domain = self.config.translation.domain
         queries = [
-            f'"{identity}" Persian translation',
-            f'"{identity}" key concepts terminology',
-            f'"{identity}" Persian academic scholarship',
+            f'"{title}" {author}'.strip(),
+            f'"{title}" review summary key concepts',
+            f'{author} concepts terminology scholarship'.strip(),
+            f'"{title}" {domain} terminology',
+            f'{title} {author} Persian scholarship ترجمه فارسی'.strip(),
         ]
 
         sources: list[dict[str, str]] = []
         try:
-            for query in queries:
-                results = await self.provider.search(query)
-                for result in results[:3]:
-                    sources.append({
-                        "query": query,
-                        "title": result.title[:300],
-                        "url": result.url[:1000],
-                        "snippet": result.snippet[:700],
-                    })
-
             excerpt = self._book_excerpt(document)
-            evidence = chr(10).join(
-                f"- {item['title']}: {item['snippet']} ({item['url']})"
-                for item in sources
-            ) or "(No web results were available.)"
+            await self._search_queries(queries, sources)
+            evidence = self._evidence_text(sources)
             response = await self.llm_client.chat(
-                self._prompt(title, author, excerpt, evidence)
+                self._prompt(
+                    title,
+                    author,
+                    excerpt,
+                    evidence,
+                    allow_follow_ups=True,
+                )
             )
             data = self._parse_json(response)
+
+            remaining = max(
+                0,
+                self.config.web_search.phase7_max_queries - len(queries),
+            )
+            follow_ups = self._normalise_follow_ups(
+                data.get("follow_up_queries", []),
+                existing=queries,
+                limit=remaining,
+            )
+            if follow_ups:
+                queries.extend(follow_ups)
+                await self._search_queries(follow_ups, sources)
+                evidence = self._evidence_text(sources)
+                response = await self.llm_client.chat(
+                    self._prompt(
+                        title,
+                        author,
+                        excerpt,
+                        evidence,
+                        allow_follow_ups=False,
+                    )
+                )
+                data = self._parse_json(response)
+
+            terms = self._normalise_terms(data.get("terms", []), sources)
+            if not sources:
+                status = "degraded"
+            elif not terms:
+                status = "completed_without_suggestions"
+            else:
+                status = "completed"
+            diagnostics = list(getattr(self.provider, "diagnostics", []))
+            providers_used = list(dict.fromkeys(
+                item.get("provider", "")
+                for item in diagnostics
+                if item.get("status") == "success"
+            ))
             return BookResearchResult(
                 book_context=str(data.get("book_context", "")).strip()[:4000],
-                terms=self._normalise_terms(data.get("terms", []), sources),
+                terms=terms,
                 sources=sources,
                 queries=queries,
+                search_diagnostics=diagnostics,
+                providers_used=[name for name in providers_used if name],
+                status=status,
             )
         except Exception as exc:
             logger.warning("Book research seed pass failed: %s", exc)
             return BookResearchResult(
                 sources=sources,
                 queries=queries,
+                search_diagnostics=list(
+                    getattr(self.provider, "diagnostics", [])
+                ),
                 status="failed",
                 error=f"{type(exc).__name__}: {exc}",
             )
+
+    async def _search_queries(
+        self,
+        queries: list[str],
+        sources: list[dict[str, str]],
+    ) -> None:
+        known_urls = {item["url"] for item in sources}
+        for query in queries:
+            results = await self.provider.search(query)
+            for result in results[:self.config.web_search.max_results]:
+                if not result.url or result.url in known_urls:
+                    continue
+                known_urls.add(result.url)
+                sources.append({
+                    "query": query,
+                    "title": result.title[:300],
+                    "url": result.url[:1000],
+                    "snippet": result.snippet[:700],
+                })
+
+    @staticmethod
+    def _evidence_text(sources: list[dict[str, str]]) -> str:
+        return chr(10).join(
+            f"- {item['title']}: {item['snippet']} ({item['url']})"
+            for item in sources
+        ) or "(No web results were available.)"
+
+    @staticmethod
+    def _normalise_follow_ups(
+        raw_queries: Any,
+        *,
+        existing: list[str],
+        limit: int,
+    ) -> list[str]:
+        if not isinstance(raw_queries, list) or limit <= 0:
+            return []
+        seen = {" ".join(query.casefold().split()) for query in existing}
+        follow_ups: list[str] = []
+        for value in raw_queries:
+            query = " ".join(str(value).split()).strip()[:300]
+            key = query.casefold()
+            if not query or key in seen:
+                continue
+            seen.add(key)
+            follow_ups.append(query)
+            if len(follow_ups) >= limit:
+                break
+        return follow_ups
 
     @staticmethod
     def _book_excerpt(document: Document) -> str:
@@ -136,6 +231,9 @@ class BookResearcher:
                 "reason": str(item.get("reason", "")).strip()[:1200],
                 "confidence": str(item.get("confidence", "low")).strip().lower(),
                 "source_urls": cited,
+                "evidence_type": (
+                    "source_supported" if cited else "book_excerpt_inference"
+                ),
                 "is_auto": True,
                 "status": "suggested",
             })
@@ -156,7 +254,20 @@ class BookResearcher:
         return data
 
     @staticmethod
-    def _prompt(title: str, author: str, excerpt: str, evidence: str) -> str:
+    def _prompt(
+        title: str,
+        author: str,
+        excerpt: str,
+        evidence: str,
+        *,
+        allow_follow_ups: bool,
+    ) -> str:
+        follow_up_instruction = (
+            "- follow_up_queries: at most 3 focused searches that resolve "
+            "important remaining author-specific or conceptual uncertainty"
+            if allow_follow_ups else
+            "- follow_up_queries: an empty array"
+        )
         return f"""You are preparing review-only terminology research for an
 English-to-Persian academic book translation.
 
@@ -173,10 +284,14 @@ Return one JSON object with:
 - book_context: a short factual domain note for the translator
 - terms: at most 30 objects with source, target, context, domain, sense,
   author, reason, confidence (low/medium/high), and source_urls
+{follow_up_instruction}
 
 Rules:
 - Suggestions are not authoritative. Be conservative.
-- Do not invent an existing Persian translation.
+- Never assume a Persian translation exists. State it only when supported by
+  a supplied source.
 - Cite only URLs present in the evidence.
 - Include a term only when it is likely important across the book.
+- Research the book, author, concepts, and domain even when no translation
+  or prior Persian scholarship exists.
 - Output JSON only."""

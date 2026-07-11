@@ -59,6 +59,10 @@ class TestWebUI(unittest.TestCase):
             "cfgRefineIterations",
             "cfgCritiqueThreshold",
             "cfgBackSample",
+            "cfgSearchProvider",
+            "cfgResearchQueries",
+            "cfgChunkQueries",
+            "cfgBookQueryBudget",
         ):
             self.assertIn(f'id="{control_id}"', html)
 

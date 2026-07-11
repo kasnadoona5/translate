@@ -97,6 +97,18 @@ enable_book_research = false     # opt-in one-time book/topic research seed pass
 parallel_workers = 1             # >1 only in fast/quality; academic is always 1
 critique_threshold = 7.0         # refine chunks scoring below this (1-10)
 
+[web_search]
+# "auto" uses the first configured API provider: Tavily, Brave, Google, then
+# DuckDuckGo. API keys stay in .env: TAVILY_API_KEY / BRAVE_SEARCH_API_KEY.
+provider = "auto"
+fallback_providers = ["brave", "google", "duckduckgo"]
+max_results = 5
+timeout_seconds = 15
+max_retries = 2
+phase7_max_queries = 8           # five core + up to three adaptive follow-ups
+max_queries_per_chunk = 2        # only unresolved ambiguous terms
+max_queries_per_book = 100       # difficult-book ceiling across research/context
+
 [chunking]
 strategy = "semantic"            # "semantic" | "fixed"
 max_chunk_tokens = 1000          # auto-set by mode: fast=3000, quality=1500, academic=1000

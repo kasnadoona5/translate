@@ -200,6 +200,7 @@ def _register_api(app: Flask) -> None:
             "format": "output.format",
             "bilingual_mode": "output.bilingual_mode",
             "term_notes": "output.term_notes",
+            "search_provider": "web_search.provider",
         }
         for form_key, dotted_key in _form_field_map.items():
             value = request.form.get(form_key)
@@ -228,6 +229,15 @@ def _register_api(app: Flask) -> None:
             "critique_threshold": ("translation.critique_threshold", float),
             "back_translation_sample_pct": (
                 "translation.back_translation_sample_pct",
+                int,
+            ),
+            "phase7_max_queries": ("web_search.phase7_max_queries", int),
+            "max_queries_per_chunk": (
+                "web_search.max_queries_per_chunk",
+                int,
+            ),
+            "max_queries_per_book": (
+                "web_search.max_queries_per_book",
                 int,
             ),
         }
@@ -475,6 +485,9 @@ def _register_api(app: Flask) -> None:
                 "Book Research:",
                 f"  status={research.get('status')}",
                 f"  sources={len(research.get('sources', []))}",
+                f"  queries={len(research.get('queries', []))}",
+                "  providers="
+                + ", ".join(research.get("providers_used", [])),
                 f"  suggestions={len(suggested)} approved={len(approved)}",
                 f"  context={research.get('book_context', '')}",
                 "",

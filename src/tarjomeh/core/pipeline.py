@@ -200,7 +200,10 @@ def _term_notes_instruction(mode: str) -> str:
 
 def _research_context_for_memory(artifact: dict[str, Any] | None) -> str:
     """Format unapproved research as non-authoritative prompt context."""
-    if not artifact or artifact.get("status") != "completed":
+    usable_statuses = {
+        "completed", "completed_without_suggestions", "degraded"
+    }
+    if not artifact or artifact.get("status") not in usable_statuses:
         return ""
     parts = [str(artifact.get("book_context", "")).strip()]
     suggestions = []
@@ -523,11 +526,14 @@ class TranslationPipeline:
         )
         artifact = result.to_dict()
         self.db.save_job_artifact(job_id, "book_research", artifact)
-        if artifact.get("status") == "completed":
+        if artifact.get("status") in {
+            "completed", "completed_without_suggestions", "degraded"
+        }:
+            status = artifact.get("status")
             self.db.log_event(
                 job_id,
-                "INFO",
-                "Book research completed with "
+                "WARNING" if status == "degraded" else "INFO",
+                f"Book research {status} with "
                 f"{len(artifact.get('terms', []))} reviewable suggestion(s) "
                 f"and {len(artifact.get('sources', []))} source result(s).",
             )
@@ -651,6 +657,13 @@ class TranslationPipeline:
             if p not in glossary_paths:
                 glossary_paths.append(p)
         glossary_manager.load_many(glossary_paths, ignore_missing=True)
+        if is_resume:
+            extracted_artifact = self.db.get_job_artifact(
+                job_id, "auto_extracted_terms"
+            ) or {}
+            persisted_terms = extracted_artifact.get("terms", {})
+            if isinstance(persisted_terms, dict):
+                glossary_manager.merge_auto_extracted(persisted_terms)
 
         # 4. Setup Memory Manager
         memory_manager = MemoryManager(self.config)
@@ -664,6 +677,11 @@ class TranslationPipeline:
             if progress_callback:
                 progress_callback("Glossary", 0.10, "Extracting specialized terms...")
             try:
+                self.db.log_chunk_event(
+                    job_id, 0, "auto_extraction_started", {
+                        "source_chars": len(chunks[0].text),
+                    }
+                )
                 # Run NER extraction on first chunk as a proxy for TOC / Ch 1
                 first_text = chunks[0].text
                 sys_prompt = "You are a terminology extraction assistant."
@@ -694,15 +712,45 @@ class TranslationPipeline:
                             "author": item.get("author", ""),
                         }
                 glossary_manager.merge_auto_extracted(auto_terms)
+                self.db.save_job_artifact(
+                    job_id,
+                    "auto_extracted_terms",
+                    {"terms": auto_terms, "count": len(auto_terms)},
+                )
+                self.db.log_chunk_event(
+                    job_id, 0, "auto_extraction_completed", {
+                        "model_candidates": len(extracted_terms),
+                        "accepted_terms": len(auto_terms),
+                        "terms": [
+                            {
+                                "source": source,
+                                "target": value["target"],
+                                "domain": value["domain"],
+                            }
+                            for source, value in list(auto_terms.items())[:50]
+                        ],
+                    }
+                )
             except Exception as e:
                 logger.warning("Automatic term extraction failed: %s", e)
+                self.db.log_chunk_event(
+                    job_id, 0, "auto_extraction_failed", {
+                        "error": f"{type(e).__name__}: {e}",
+                    }
+                )
+        elif not is_resume:
+            self.db.log_chunk_event(
+                job_id, 0, "auto_extraction_skipped", {"enabled": False}
+            )
 
         research_artifact = self._prepare_book_research(
             job_id,
             document,
             progress_callback,
         )
-        if research_artifact and research_artifact.get("status") == "completed":
+        if research_artifact and research_artifact.get("status") in {
+            "completed", "completed_without_suggestions", "degraded"
+        }:
             memory_manager.book_context = _research_context_for_memory(
                 research_artifact
             )
@@ -799,6 +847,11 @@ class TranslationPipeline:
                         )
                         self.db.update_chunk(job_id, idx, final_status, translation)
                         self.db.save_memory_state(job_id, memory_manager.to_dict())
+                        self.db.save_job_artifact(
+                            job_id,
+                            "web_search_state",
+                            web_searcher.export_state(),
+                        )
                     
                     return idx, translation
 
@@ -922,6 +975,11 @@ class TranslationPipeline:
                         )
                         self.db.update_chunk(job_id, idx, final_status, translation)
                         self.db.save_memory_state(job_id, memory_manager.to_dict())
+                        self.db.save_job_artifact(
+                            job_id,
+                            "web_search_state",
+                            web_searcher.export_state(),
+                        )
 
                     except PipelinePausedException as e:
                         raise e
@@ -1270,6 +1328,11 @@ class TranslationPipeline:
             )
 
         web_searcher = WebContextSearcher(self.config, self.llm_client)
+        saved_search_state = self.db.get_job_artifact(
+            job_id, "web_search_state"
+        )
+        if saved_search_state:
+            web_searcher.import_state(saved_search_state)
         compliance_checker = GlossaryComplianceChecker()
         critique_tool = TranslationCritique(llm_client=self.critic_client)
         refiner_tool = TranslationRefiner(
@@ -1469,6 +1532,7 @@ class TranslationPipeline:
                 "has_context": bool(web_context_str.strip()),
                 "chars": len(web_context_str),
                 "preview": _truncate_for_event(web_context_str, 2000),
+                "search_report": web_searcher.last_report,
             })
         else:
             self.db.log_chunk_event(job_id, idx, "web_context", {"enabled": False})

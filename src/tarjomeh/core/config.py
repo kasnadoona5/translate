@@ -168,6 +168,22 @@ class TranslationConfig:
 
 
 @dataclass
+class WebSearchConfig:
+    """External search providers, budgets, and reliability controls."""
+
+    provider: str = "auto"
+    fallback_providers: list[str] = field(
+        default_factory=lambda: ["brave", "google", "duckduckgo"]
+    )
+    max_results: int = 5
+    timeout_seconds: float = 15.0
+    max_retries: int = 2
+    phase7_max_queries: int = 8
+    max_queries_per_chunk: int = 2
+    max_queries_per_book: int = 100
+
+
+@dataclass
 class ChunkingConfig:
     """Text chunking settings."""
 
@@ -280,6 +296,7 @@ class TarjomehConfig:
 
     llm: LLMConfig = field(default_factory=LLMConfig)
     translation: TranslationConfig = field(default_factory=TranslationConfig)
+    web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
     chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
     glossary: GlossaryConfig = field(default_factory=GlossaryConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
@@ -386,6 +403,7 @@ class TarjomehConfig:
         _populate_dataclass(config.llm.ollama, raw.get("llm", {}).get("ollama", {}))
         _populate_dataclass(config.llm.critic, raw.get("llm", {}).get("critic", {}))
         _populate_dataclass(config.translation, raw.get("translation", {}))
+        _populate_dataclass(config.web_search, raw.get("web_search", {}))
         _populate_dataclass(config.chunking, raw.get("chunking", {}))
         _populate_dataclass(config.glossary, raw.get("glossary", {}))
         _populate_dataclass(config.output, raw.get("output", {}))
@@ -618,6 +636,37 @@ class TarjomehConfig:
         if self.translation.back_translation_sample_pct < 0 or \
            self.translation.back_translation_sample_pct > 100:
             errors.append("translation.back_translation_sample_pct must be 0-100")
+
+        valid_search_providers = {
+            "auto", "tavily", "brave", "google", "duckduckgo"
+        }
+        if self.web_search.provider not in valid_search_providers:
+            errors.append(
+                "web_search.provider must be one of "
+                f"{sorted(valid_search_providers)}"
+            )
+        invalid_fallbacks = set(self.web_search.fallback_providers) - (
+            valid_search_providers - {"auto"}
+        )
+        if invalid_fallbacks:
+            errors.append(
+                "web_search.fallback_providers contains unknown providers: "
+                + ", ".join(sorted(invalid_fallbacks))
+            )
+        if self.web_search.phase7_max_queries < 5:
+            errors.append("web_search.phase7_max_queries must be >= 5")
+        if self.web_search.max_results < 1 or self.web_search.max_results > 20:
+            errors.append("web_search.max_results must be 1-20")
+        if self.web_search.timeout_seconds <= 0:
+            errors.append("web_search.timeout_seconds must be > 0")
+        if self.web_search.max_retries < 0 or self.web_search.max_retries > 5:
+            errors.append("web_search.max_retries must be 0-5")
+        if self.web_search.max_queries_per_chunk < 0:
+            errors.append("web_search.max_queries_per_chunk must be >= 0")
+        if self.web_search.max_queries_per_book < self.web_search.phase7_max_queries:
+            errors.append(
+                "web_search.max_queries_per_book must be >= phase7_max_queries"
+            )
 
         if errors:
             combined = "\n  • ".join(errors)

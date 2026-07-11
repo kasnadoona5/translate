@@ -6,6 +6,8 @@ for ambiguous academic terms.
 
 from __future__ import annotations
 
+import asyncio
+import os
 import re
 import urllib.parse
 import logging
@@ -27,6 +29,16 @@ class SearchResult:
 
 class BaseSearchProvider:
     """Abstract base class for web search providers."""
+
+    name = "base"
+
+    def __init__(self) -> None:
+        self.last_error = ""
+        self.last_status: int | None = None
+
+    @property
+    def available(self) -> bool:
+        return True
 
     async def search(self, query: str) -> list[SearchResult]:
         """Perform a web search and return a list of SearchResult objects."""
@@ -52,8 +64,11 @@ class DuckDuckGoProvider(BaseSearchProvider):
                         params={"q": query},
                         timeout=10.0
                     )
+                    self.last_status = response.status_code
                     if response.status_code == 200:
                         results = self._parse_html(response.text)
+                    elif response.status_code == 202:
+                        self.last_error = "challenge response (HTTP 202)"
                 except Exception as e:
                     logger.warning("html.duckduckgo.com search failed: %s", e)
 
@@ -65,8 +80,11 @@ class DuckDuckGoProvider(BaseSearchProvider):
                             params={"q": query},
                             timeout=10.0
                         )
+                        self.last_status = lite_response.status_code
                         if lite_response.status_code == 200:
                             results = self._parse_lite(lite_response.text)
+                        elif lite_response.status_code == 202:
+                            self.last_error = "challenge response (HTTP 202)"
                     except Exception as e:
                         logger.warning("lite.duckduckgo.com search fallback failed: %s", e)
 
@@ -139,9 +157,16 @@ class GoogleSearchProvider(BaseSearchProvider):
     Requires Google API Key and Custom Search Engine ID (cx).
     """
 
+    name = "google"
+
     def __init__(self, api_key: str | None = None, cx: str | None = None) -> None:
+        super().__init__()
         self.api_key = api_key
         self.cx = cx
+
+    @property
+    def available(self) -> bool:
+        return bool(self.api_key and self.cx)
 
     async def search(self, query: str) -> list[SearchResult]:
         if not self.api_key or not self.cx:
@@ -157,7 +182,9 @@ class GoogleSearchProvider(BaseSearchProvider):
                     },
                     timeout=10.0
                 )
+                self.last_status = response.status_code
                 if response.status_code != 200:
+                    self.last_error = f"HTTP {response.status_code}"
                     return []
                 data = response.json()
                 results = []
@@ -168,5 +195,268 @@ class GoogleSearchProvider(BaseSearchProvider):
                         snippet=item.get("snippet", "")
                       ))
                 return results
-        except Exception:
+        except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
             return []
+
+
+class TavilySearchProvider(BaseSearchProvider):
+    """Official Tavily JSON search API provider."""
+
+    name = "tavily"
+
+    def __init__(
+        self,
+        api_key: str | None,
+        *,
+        max_results: int = 5,
+        timeout: float = 15.0,
+    ) -> None:
+        super().__init__()
+        self.api_key = api_key
+        self.max_results = max_results
+        self.timeout = timeout
+
+    @property
+    def available(self) -> bool:
+        return bool(self.api_key)
+
+    async def search(self, query: str) -> list[SearchResult]:
+        if not self.api_key:
+            self.last_error = "TAVILY_API_KEY is not configured"
+            return []
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(
+                    "https://api.tavily.com/search",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json={
+                        "query": query,
+                        "search_depth": "basic",
+                        "max_results": self.max_results,
+                        "include_answer": False,
+                        "include_raw_content": False,
+                    },
+                )
+            self.last_status = response.status_code
+            if response.status_code != 200:
+                self.last_error = f"HTTP {response.status_code}"
+                return []
+            data = response.json()
+            return [
+                SearchResult(
+                    title=str(item.get("title", "")),
+                    url=str(item.get("url", "")),
+                    snippet=str(item.get("content", "")),
+                )
+                for item in data.get("results", [])[:self.max_results]
+                if item.get("url") and item.get("content")
+            ]
+        except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            return []
+
+
+class BraveSearchProvider(BaseSearchProvider):
+    """Official Brave Search JSON API provider."""
+
+    name = "brave"
+
+    def __init__(
+        self,
+        api_key: str | None,
+        *,
+        max_results: int = 5,
+        timeout: float = 15.0,
+    ) -> None:
+        super().__init__()
+        self.api_key = api_key
+        self.max_results = max_results
+        self.timeout = timeout
+
+    @property
+    def available(self) -> bool:
+        return bool(self.api_key)
+
+    async def search(self, query: str) -> list[SearchResult]:
+        if not self.api_key:
+            self.last_error = "BRAVE_SEARCH_API_KEY is not configured"
+            return []
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(
+                    "https://api.search.brave.com/res/v1/web/search",
+                    headers={
+                        "Accept": "application/json",
+                        "X-Subscription-Token": self.api_key,
+                    },
+                    params={
+                        "q": query,
+                        "count": self.max_results,
+                        "safesearch": "moderate",
+                    },
+                )
+            self.last_status = response.status_code
+            if response.status_code != 200:
+                self.last_error = f"HTTP {response.status_code}"
+                return []
+            items = response.json().get("web", {}).get("results", [])
+            return [
+                SearchResult(
+                    title=str(item.get("title", "")),
+                    url=str(item.get("url", "")),
+                    snippet=str(item.get("description", "")),
+                )
+                for item in items[:self.max_results]
+                if item.get("url") and item.get("description")
+            ]
+        except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            return []
+
+
+class SearchProviderChain(BaseSearchProvider):
+    """Try configured providers in order with caching and a hard query budget."""
+
+    name = "chain"
+
+    def __init__(
+        self,
+        providers: list[BaseSearchProvider],
+        *,
+        max_retries: int = 2,
+        query_budget: int = 50,
+    ) -> None:
+        super().__init__()
+        self.providers = providers
+        self.max_retries = max(0, max_retries)
+        self.query_budget = max(0, query_budget)
+        self.queries_used = 0
+        self.cache: dict[str, list[SearchResult]] = {}
+        self.diagnostics: list[dict[str, Any]] = []
+
+    async def search(self, query: str) -> list[SearchResult]:
+        cache_key = " ".join(query.casefold().split())
+        if cache_key in self.cache:
+            self.diagnostics.append({
+                "query": query,
+                "provider": "cache",
+                "status": "hit",
+                "result_count": len(self.cache[cache_key]),
+            })
+            return self.cache[cache_key]
+        if self.queries_used >= self.query_budget:
+            self.last_error = "query budget exhausted"
+            self.diagnostics.append({
+                "query": query,
+                "provider": "none",
+                "status": "budget_exhausted",
+                "result_count": 0,
+            })
+            return []
+
+        self.queries_used += 1
+        for provider in self.providers:
+            if not provider.available:
+                self.diagnostics.append({
+                    "query": query,
+                    "provider": provider.name,
+                    "status": "unavailable",
+                    "error": provider.last_error or "API key not configured",
+                    "result_count": 0,
+                })
+                continue
+            for attempt in range(self.max_retries + 1):
+                provider.last_error = ""
+                provider.last_status = None
+                results = await provider.search(query)
+                status = "success" if results else "empty"
+                self.diagnostics.append({
+                    "query": query,
+                    "provider": provider.name,
+                    "status": status,
+                    "http_status": provider.last_status,
+                    "attempt": attempt + 1,
+                    "error": provider.last_error,
+                    "result_count": len(results),
+                })
+                if results:
+                    self.cache[cache_key] = results
+                    return results
+                if provider.last_status not in (429, 500, 502, 503, 504):
+                    break
+                await asyncio.sleep(min(0.5 * (2 ** attempt), 2.0))
+
+        self.cache[cache_key] = []
+        return []
+
+    def export_state(self) -> dict[str, Any]:
+        return {
+            "queries_used": self.queries_used,
+            "cache": {
+                key: [
+                    {"title": r.title, "url": r.url, "snippet": r.snippet}
+                    for r in results
+                ]
+                for key, results in self.cache.items()
+            },
+        }
+
+    def import_state(self, state: dict[str, Any]) -> None:
+        self.queries_used = max(0, int(state.get("queries_used", 0)))
+        self.cache = {
+            str(key): [
+                SearchResult(
+                    title=str(item.get("title", "")),
+                    url=str(item.get("url", "")),
+                    snippet=str(item.get("snippet", "")),
+                )
+                for item in items if isinstance(item, dict)
+            ]
+            for key, items in state.get("cache", {}).items()
+            if isinstance(items, list)
+        }
+
+
+def build_search_provider(
+    config: Any,
+    *,
+    query_budget: int | None = None,
+) -> SearchProviderChain:
+    """Build a key-aware provider chain without exposing credentials."""
+    cfg = config.web_search
+    factories = {
+        "tavily": lambda: TavilySearchProvider(
+            os.environ.get("TAVILY_API_KEY"),
+            max_results=cfg.max_results,
+            timeout=cfg.timeout_seconds,
+        ),
+        "brave": lambda: BraveSearchProvider(
+            os.environ.get("BRAVE_SEARCH_API_KEY"),
+            max_results=cfg.max_results,
+            timeout=cfg.timeout_seconds,
+        ),
+        "google": lambda: GoogleSearchProvider(
+            os.environ.get("GOOGLE_API_KEY"),
+            os.environ.get("GOOGLE_CX"),
+        ),
+        "duckduckgo": DuckDuckGoProvider,
+    }
+    if cfg.provider == "auto":
+        preferred = ["tavily", "brave", "google", "duckduckgo"]
+    else:
+        preferred = [cfg.provider, *cfg.fallback_providers]
+    names = list(dict.fromkeys(preferred))
+    providers = [factories[name]() for name in names]
+    return SearchProviderChain(
+        providers,
+        max_retries=cfg.max_retries,
+        query_budget=(
+            cfg.max_queries_per_book
+            if query_budget is None else query_budget
+        ),
+    )
+    name = "duckduckgo"
+
+    def __init__(self) -> None:
+        super().__init__()
