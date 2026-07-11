@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import queue
 import time
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 import os
 
@@ -41,6 +43,24 @@ class TestWebUI(unittest.TestCase):
     def test_query_token_auth(self) -> None:
         response = self.client.get("/?token=test-token")
         self.assertEqual(response.status_code, 200)
+
+    def test_ui_exposes_phase_6_7_and_quality_controls(self) -> None:
+        response = self.client.get("/?token=test-token")
+        html = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        for control_id in (
+            "cfgTermNotes",
+            "cfgBookResearch",
+            "cfgAutoExtraction",
+            "cfgCritique",
+            "cfgBackTranslation",
+            "cfgWebContext",
+            "cfgRefineIterations",
+            "cfgCritiqueThreshold",
+            "cfgBackSample",
+        ):
+            self.assertIn(f'id="{control_id}"', html)
 
     def test_bearer_header_auth(self) -> None:
         headers = {"Authorization": "Bearer test-token"}
@@ -238,6 +258,44 @@ class TestWebUI(unittest.TestCase):
             )
         finally:
             _active_jobs.pop("job-123", None)
+
+    @patch("tarjomeh.jobs.database.JobDatabase")
+    def test_research_approval_never_overwrites_curated_term(
+        self,
+        mock_db_cls: MagicMock,
+    ) -> None:
+        from tarjomeh.glossary.manager import GlossaryManager
+
+        artifact = {
+            "status": "completed",
+            "terms": [{
+                "source": "capital",
+                "target": "پایتخت",
+                "status": "suggested",
+            }],
+        }
+        mock_db = mock_db_cls.return_value
+        mock_db.get_job_artifact.return_value = artifact
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "working.csv"
+            glossary = GlossaryManager()
+            glossary.add_term("capital", "سرمایه", is_auto=False)
+            glossary.save(path)
+            with patch(
+                "tarjomeh.web.app._working_glossary_path",
+                return_value=path,
+            ):
+                response = self.client.post(
+                    "/api/jobs/job-123/research/terms/0/approve",
+                    headers={"Authorization": "Bearer test-token"},
+                )
+            reloaded = GlossaryManager()
+            reloaded.load(path)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(reloaded.entries[0].target, "سرمایه")
+        mock_db.save_job_artifact.assert_not_called()
 
 
 if __name__ == "__main__":

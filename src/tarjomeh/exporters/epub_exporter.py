@@ -8,6 +8,7 @@ import html
 from datetime import datetime
 from pathlib import Path
 from tarjomeh.exporters.base import BaseExporter, TranslatedDocument, BilingualMode
+from tarjomeh.exporters.term_notes import document_term_notes, paragraph_note_parts
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,22 @@ class EpubExporter(BaseExporter):
     ) -> Path:
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
+        term_notes = document_term_notes(document)
+        note_backlinks: dict[int, str] = {}
+
+        def render_target(text: str, metadata: dict, chapter_index: int) -> str:
+            rendered = []
+            for segment, ref in paragraph_note_parts(text, metadata):
+                rendered.append(html.escape(segment))
+                if ref is not None:
+                    number = int(ref["number"])
+                    ref_id = f"term-note-ref-{number}"
+                    note_backlinks[number] = f"chapter_{chapter_index}.xhtml#{ref_id}"
+                    rendered.append(
+                        f'<a id="{ref_id}" href="notes.xhtml#term-note-{number}" '
+                        f'epub:type="noteref" role="doc-noteref">{number}</a>'
+                    )
+            return "".join(rendered)
 
         # 1. Group paragraphs into chapters based on heading_level == 1
         chapters: list[dict[str, any]] = []
@@ -162,7 +179,11 @@ h1, h2, h3, h4 {
                         p_tag = f"h{min(p.heading_level, 6)}"
 
                     escaped_source = html.escape(p.source_text)
-                    escaped_translated = html.escape(p.translated_text)
+                    escaped_translated = render_target(
+                        p.translated_text,
+                        p.metadata,
+                        idx,
+                    )
 
                     if bilingual_mode == "target_only":
                         xhtml_parts.append(f"<{p_tag} class='target'>{escaped_translated}</{p_tag}>")
@@ -202,6 +223,35 @@ h1, h2, h3, h4 {
 
                 manifest_items.append(f'<item id="chapter_{idx}" href="{filename}" media-type="application/xhtml+xml"/>')
                 spine_items.append(f'<itemref idref="chapter_{idx}"/>')
+
+            if term_notes:
+                note_items = []
+                for note in term_notes:
+                    number = int(note["number"])
+                    backlink = html.escape(note_backlinks.get(number, ""))
+                    back_link = (
+                        f' <a href="{backlink}" role="doc-backlink">back</a>'
+                        if backlink else ""
+                    )
+                    note_items.append(
+                        f'<aside id="term-note-{number}" epub:type="footnote" '
+                        f'role="doc-footnote"><p>{number}. '
+                        f'{html.escape(str(note["original"]))} '
+                        f'({html.escape(str(note["transliteration"]))})'
+                        f'{back_link}</p></aside>'
+                    )
+                notes_xhtml = f"""<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="fa" dir="rtl">
+<head><title>یادداشت‌ها</title><link rel="stylesheet" href="style.css" type="text/css"/></head>
+<body><section epub:type="footnotes"><h1>یادداشت‌ها</h1>{''.join(note_items)}</section></body>
+</html>"""
+                zf.writestr("OEBPS/notes.xhtml", notes_xhtml)
+                manifest_items.append(
+                    '<item id="term-notes" href="notes.xhtml" '
+                    'media-type="application/xhtml+xml"/>'
+                )
+                spine_items.append('<itemref idref="term-notes"/>')
 
             # EPUB3 Navigation Page (nav.xhtml)
             nav_links = []

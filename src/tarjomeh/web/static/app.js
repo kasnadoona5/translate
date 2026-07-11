@@ -7,6 +7,7 @@ let currentReviewJobId = null;
 // Initialize on page load
 document.addEventListener("DOMContentLoaded", () => {
     setupDragAndDrop();
+    setupSettingsControls();
     fetchJobs();
     fetchGlossaryTerms();
     
@@ -50,8 +51,83 @@ function setupDragAndDrop() {
 // Handle selected file details
 function handleFileSelect(file) {
     selectedFile = file;
-    document.getElementById("selectedFileName").innerText = `Selected: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`;
-    document.getElementById("configPanel").style.display = "flex";
+    document.getElementById("selectedFileName").innerText = file.name;
+    document.getElementById("selectedFileMeta").innerText =
+        formatFileSize(file.size) + " · " +
+        file.name.split(".").pop().toUpperCase();
+    document.querySelector(".file-indicator").innerText =
+        file.name.split(".").pop().slice(0, 3).toUpperCase();
+    document.getElementById("configPanel").hidden = false;
+    updateRunSummary();
+}
+
+function setupSettingsControls() {
+    const mode = document.getElementById("cfgMode");
+    const format = document.getElementById("cfgFormat");
+    const bilingual = document.getElementById("cfgBilingual");
+    const termNotes = document.getElementById("cfgTermNotes");
+
+    mode.addEventListener("change", () => {
+        const presets = {
+            fast: {
+                critique: false, backTranslation: false, webContext: false,
+                refinements: 0, threshold: 7, sample: 0
+            },
+            quality: {
+                critique: true, backTranslation: true, webContext: true,
+                refinements: 1, threshold: 7, sample: 5
+            },
+            academic: {
+                critique: true, backTranslation: true, webContext: true,
+                refinements: 2, threshold: 7, sample: 20
+            }
+        };
+        const preset = presets[mode.value];
+        document.getElementById("cfgCritique").checked = preset.critique;
+        document.getElementById("cfgBackTranslation").checked = preset.backTranslation;
+        document.getElementById("cfgWebContext").checked = preset.webContext;
+        document.getElementById("cfgRefineIterations").value = preset.refinements;
+        document.getElementById("cfgCritiqueThreshold").value = preset.threshold;
+        document.getElementById("cfgBackSample").value = preset.sample;
+        updateRunSummary();
+    });
+
+    format.addEventListener("change", () => {
+        syncTermNoteAvailability();
+        updateRunSummary();
+    });
+    bilingual.addEventListener("change", updateRunSummary);
+    termNotes.addEventListener("change", updateRunSummary);
+    syncTermNoteAvailability();
+    updateRunSummary();
+}
+
+function syncTermNoteAvailability() {
+    const format = document.getElementById("cfgFormat").value;
+    const termNotes = document.getElementById("cfgTermNotes");
+    const supported = ["docx", "epub", "markdown"].includes(format);
+    if (!supported) termNotes.value = "inline";
+    termNotes.disabled = !supported;
+}
+
+function updateRunSummary() {
+    const summary = document.getElementById("runSummary");
+    if (!summary) return;
+    const mode = document.getElementById("cfgMode");
+    const format = document.getElementById("cfgFormat");
+    const bilingual = document.getElementById("cfgBilingual");
+    summary.innerText = [
+        mode.options[mode.selectedIndex].text,
+        format.options[format.selectedIndex].text,
+        bilingual.options[bilingual.selectedIndex].text
+    ].join(" · ");
+}
+
+function formatFileSize(bytes) {
+    if (bytes < 1024 * 1024) {
+        return Math.max(1, Math.round(bytes / 1024)) + " KB";
+    }
+    return (bytes / 1024 / 1024).toFixed(1) + " MB";
 }
 
 // Start translation pipeline job
@@ -67,6 +143,18 @@ async function startTranslation() {
     formData.append("mode", document.getElementById("cfgMode").value);
     formData.append("format", document.getElementById("cfgFormat").value);
     formData.append("bilingual_mode", document.getElementById("cfgBilingual").value);
+    formData.append("term_notes", document.getElementById("cfgTermNotes").value);
+    formData.append("enable_book_research", String(document.getElementById("cfgBookResearch").checked));
+    formData.append("enable_critique", String(document.getElementById("cfgCritique").checked));
+    formData.append("enable_back_translation", String(document.getElementById("cfgBackTranslation").checked));
+    formData.append("enable_web_context", String(document.getElementById("cfgWebContext").checked));
+    formData.append("enable_auto_extraction", String(document.getElementById("cfgAutoExtraction").checked));
+    formData.append("enable_compliance_check", String(document.getElementById("cfgCompliance").checked));
+    formData.append("enable_auto_correction", String(document.getElementById("cfgAutoCorrection").checked));
+    formData.append("scholarly_mode", String(document.getElementById("cfgScholarly").checked));
+    formData.append("max_refine_iterations", document.getElementById("cfgRefineIterations").value);
+    formData.append("critique_threshold", document.getElementById("cfgCritiqueThreshold").value);
+    formData.append("back_translation_sample_pct", document.getElementById("cfgBackSample").value);
 
     // Get Auth token if set
     const params = new URLSearchParams(window.location.search);
@@ -91,15 +179,15 @@ async function startTranslation() {
         const jobId = data.job_id;
         
         // Hide upload form and show progress window
-        document.getElementById("uploadSection").style.display = "none";
-        document.getElementById("progressSection").style.display = "block";
+        document.getElementById("uploadSection").hidden = true;
+        document.getElementById("progressSection").hidden = false;
         
         trackJobProgress(jobId);
 
     } catch (err) {
         alert(`Error: ${err.message}`);
         startBtn.disabled = false;
-        startBtn.innerText = "🚀 Start Translation";
+        startBtn.innerHTML = "Start translation <span aria-hidden='true'>→</span>";
     }
 }
 
@@ -142,10 +230,11 @@ function trackJobProgress(jobId) {
         const paused = stage === "paused";
         appendLog(`Job finished: ${ok ? "COMPLETED ✅" : stage.toUpperCase()}`, ok ? "success" : (paused ? "warning" : "error"));
         setTimeout(() => {
-            document.getElementById("uploadSection").style.display = "block";
-            document.getElementById("progressSection").style.display = "none";
+            document.getElementById("uploadSection").hidden = false;
+            document.getElementById("progressSection").hidden = true;
             document.getElementById("startBtn").disabled = false;
-            document.getElementById("startBtn").innerText = "🚀 Start Translation";
+            document.getElementById("startBtn").innerHTML =
+                "Start translation <span aria-hidden='true'>→</span>";
             fetchJobs();
         }, 3000);
     };
@@ -242,27 +331,27 @@ async function fetchJobs() {
             // Action buttons
             let actionHtml = "";
             if (job.status === "completed") {
-                actionHtml = `<button class="action-btn" title="Download output" onclick="downloadJob('${job.id}')">💾</button>`;
+                actionHtml = `<button class="action-btn" title="Download output" onclick="downloadJob('${job.id}')">Download</button>`;
             } else if (job.status === "processing") {
                 actionHtml = `
-                    <button class="action-btn" title="Track Progress" onclick="trackJobProgress('${job.id}')">👁️</button>
-                    <button class="action-btn" title="Pause" onclick="pauseJob('${job.id}')">⏸️</button>
+                    <button class="action-btn" title="Track progress" onclick="trackJobProgress('${job.id}')">Track</button>
+                    <button class="action-btn" title="Pause job" onclick="pauseJob('${job.id}')">Pause</button>
                 `;
             } else if (job.status === "paused" || job.status === "paused_error") {
-                actionHtml = `<button class="action-btn" title="Resume" onclick="resumeJob('${job.id}')">▶️</button>`;
+                actionHtml = `<button class="action-btn" title="Resume job" onclick="resumeJob('${job.id}')">Resume</button>`;
             }
 
             if (job.status === "completed") {
                 actionHtml = `
-                    <button class="action-btn" title="Review QA" onclick="openReview('${job.id}')">QA</button>
-                    <button class="action-btn" title="Download report" onclick="downloadQaReport('${job.id}')">Report</button>
+                    <button class="action-btn" title="Review translation" onclick="openReview('${job.id}')">Review</button>
+                    <button class="action-btn" title="Download QA report" onclick="downloadQaReport('${job.id}')">QA report</button>
                     ${actionHtml}
                 `;
             }
 
             div.innerHTML = `
                 <div class="job-meta">
-                    <span class="job-title">${job.filename}</span>
+                    <span class="job-title">${escapeHtml(job.filename)}</span>
                     <span class="job-submeta">ID: ${job.id} | Mode: ${job.mode.toUpperCase()} | Progress: ${progressPct}%</span>
                 </div>
                 <div class="job-actions">
@@ -317,8 +406,8 @@ async function resumeJob(jobId) {
 
     try {
         await fetch(url, { method: "POST" });
-        document.getElementById("uploadSection").style.display = "none";
-        document.getElementById("progressSection").style.display = "block";
+        document.getElementById("uploadSection").hidden = true;
+        document.getElementById("progressSection").hidden = false;
         trackJobProgress(jobId);
     } catch (e) {
         alert("Failed to resume job");
@@ -333,10 +422,11 @@ function authUrl(path) {
 
 async function openReview(jobId) {
     currentReviewJobId = jobId;
+    fetchResearchSuggestions(jobId);
     const section = document.getElementById("reviewSection");
     const list = document.getElementById("reviewList");
     document.getElementById("reviewJobTitle").innerText = `Job ${jobId}`;
-    section.style.display = "block";
+    section.hidden = false;
     list.innerHTML = `<p class="empty-state">Loading review data...</p>`;
 
     try {
@@ -410,27 +500,100 @@ function downloadQaReport(jobId = null) {
     window.open(authUrl(`/api/jobs/${id}/qa-report`), "_blank");
 }
 
+async function fetchResearchSuggestions(jobId) {
+    const block = document.getElementById("researchBlock");
+    const title = document.getElementById("researchSuggestionTitle");
+    const list = document.getElementById("researchSuggestionList");
+    if (!block || !title || !list) return;
+    const response = await fetch(authUrl(
+        "/api/jobs/" + jobId + "/research"
+    ));
+    if (!response.ok) return;
+    const data = await response.json();
+    const research = data.research;
+    const terms = research && Array.isArray(research.terms)
+        ? research.terms : [];
+    const suggested = terms
+        .map((term, index) => ({ term: term, index: index }))
+        .filter(item => item.term.status === "suggested");
+    if (!research || (!research.book_context && !suggested.length)) {
+        block.hidden = true;
+        list.innerHTML = "";
+        return;
+    }
+    block.hidden = false;
+    title.innerText = "Research suggestions - Job " + jobId;
+    list.innerHTML = "";
+    if (research.book_context) {
+        const contextRow = document.createElement("div");
+        contextRow.className = "research-context";
+        contextRow.innerHTML = "<strong>Book context</strong><p>" +
+            escapeHtml(research.book_context) + "</p>";
+        list.appendChild(contextRow);
+    }
+    suggested.forEach(item => {
+        const row = document.createElement("div");
+        row.className = "glossary-row auto";
+        row.innerHTML =
+            "<span><strong>" + escapeHtml(item.term.source) +
+            "</strong> to " + escapeHtml(item.term.target) + "</span>" +
+            "<span>" + escapeHtml(item.term.confidence || "low") +
+            " | " + escapeHtml(item.term.reason || "") + "</span>" +
+            "<span class='glossary-actions'><button class='action-btn' data-index='" + item.index +
+            "' data-action='approve' onclick='reviewResearchTerm(" +
+            "this.dataset.index, this.dataset.action)'>Approve</button>" +
+            "<button class='action-btn danger' data-index='" + item.index +
+            "' data-action='reject' onclick='reviewResearchTerm(" +
+            "this.dataset.index, this.dataset.action)'>Reject</button></span>";
+        list.appendChild(row);
+    });
+}
+
+async function reviewResearchTerm(index, action) {
+    if (!currentReviewJobId) return;
+    const response = await fetch(authUrl(
+        "/api/jobs/" + currentReviewJobId + "/research/terms/" +
+        index + "/" + action
+    ), { method: "POST" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        alert(data.error || "Research term update failed");
+        return;
+    }
+    fetchResearchSuggestions(currentReviewJobId);
+    fetchGlossaryTerms();
+}
+
 async function fetchGlossaryTerms() {
     const list = document.getElementById("glossaryList");
+    const count = document.getElementById("glossaryCount");
     if (!list) return;
     try {
         const response = await fetch(authUrl("/api/glossary/terms"));
         if (!response.ok) throw new Error("Failed to load glossary");
         const data = await response.json();
         const terms = data.terms || [];
+        if (count) count.textContent = `${terms.length} term${terms.length === 1 ? "" : "s"}`;
         list.innerHTML = "";
+        if (!terms.length) {
+            list.innerHTML = '<p class="empty-state">No glossary terms yet.</p>';
+            return;
+        }
         terms.slice(0, 80).forEach(term => {
             const row = document.createElement("div");
             row.className = `glossary-row ${term.is_auto ? "auto" : ""}`;
             row.innerHTML = `
-                <span><strong>${escapeHtml(term.source)}</strong> -> ${escapeHtml(term.target)}</span>
+                <span><strong>${escapeHtml(term.source)}</strong> to ${escapeHtml(term.target)}</span>
                 <span>${escapeHtml(term.domain || "")}</span>
-                <button class="action-btn" onclick="deleteGlossaryTerm(${term.index})">Delete</button>
-                ${term.is_auto ? `<button class="action-btn" onclick="approveGlossaryTerm(${term.index})">Approve</button>` : ""}
+                <span class="glossary-actions">
+                    ${term.is_auto ? `<button class="action-btn" onclick="approveGlossaryTerm(${term.index})">Approve</button>` : ""}
+                    <button class="action-btn danger" onclick="deleteGlossaryTerm(${term.index})">Delete</button>
+                </span>
             `;
             list.appendChild(row);
         });
     } catch (e) {
+        if (count) count.textContent = "Unavailable";
         list.innerHTML = `<p class="empty-state error">${e.message}</p>`;
     }
 }

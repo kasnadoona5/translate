@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from tarjomeh.exporters.base import BaseExporter, TranslatedDocument, BilingualMode
+from tarjomeh.exporters.term_notes import document_term_notes, paragraph_note_parts
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,16 @@ class DocxExporter(BaseExporter):
                 rFonts.set(qn('w:cs'), 'Vazirmatn')
             r_obj.font.name = 'Vazirmatn'
 
+        def add_target_runs(p_obj, text: str, metadata: dict) -> None:
+            for segment, ref in paragraph_note_parts(text, metadata):
+                if segment:
+                    run = p_obj.add_run(segment)
+                    make_run_rtl(run)
+                if ref is not None:
+                    marker = p_obj.add_run(str(ref["number"]))
+                    marker.font.superscript = True
+                    make_run_rtl(marker)
+
         if bilingual_mode == "side_by_side":
             table = doc.add_table(rows=0, cols=2)
             table.autofit = False
@@ -89,10 +100,9 @@ class DocxExporter(BaseExporter):
                 p_fa = cell_fa.paragraphs[0]
                 if p.heading_level is not None:
                     p_fa.style = doc.styles[f'Heading {min(p.heading_level, 9)}']
-                run_fa = p_fa.add_run(p.translated_text)
+                add_target_runs(p_fa, p.translated_text, p.metadata)
                 
                 make_paragraph_rtl(p_fa)
-                make_run_rtl(run_fa)
                 
         else:
             for p in document.paragraphs:
@@ -103,9 +113,8 @@ class DocxExporter(BaseExporter):
                     else:
                         p_fa = doc.add_paragraph()
                     
-                    run_fa = p_fa.add_run(p.translated_text)
+                    add_target_runs(p_fa, p.translated_text, p.metadata)
                     make_paragraph_rtl(p_fa)
-                    make_run_rtl(run_fa)
                     
                 elif bilingual_mode == "inline":
                     # English paragraph (LTR)
@@ -120,9 +129,21 @@ class DocxExporter(BaseExporter):
                         p_fa = doc.add_heading(level=min(p.heading_level, 9))
                     else:
                         p_fa = doc.add_paragraph()
-                    run_fa = p_fa.add_run(p.translated_text)
+                    add_target_runs(p_fa, p.translated_text, p.metadata)
                     make_paragraph_rtl(p_fa)
-                    make_run_rtl(run_fa)
+
+        notes = document_term_notes(document)
+        if notes:
+            heading = doc.add_heading("یادداشت‌ها", level=1)
+            make_paragraph_rtl(heading)
+            for note in notes:
+                note_para = doc.add_paragraph()
+                note_run = note_para.add_run(
+                    f"{note['number']}. {note['original']} "
+                    f"({note['transliteration']})"
+                )
+                make_paragraph_rtl(note_para)
+                make_run_rtl(note_run)
 
         doc.save(str(out))
         return out

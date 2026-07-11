@@ -162,6 +162,9 @@ class TranslationConfig:
     parallel_workers: int = 1
     max_refine_iterations: int = 2
     critique_threshold: float = 7.0
+    # Optional one-time research pass before chunk translation. Disabled by
+    # default because it adds web searches and one LLM call.
+    enable_book_research: bool = False
 
 
 @dataclass
@@ -192,6 +195,8 @@ class OutputConfig:
 
     format: str = "pdf"
     bilingual_mode: str = "inline"
+    # "inline" keeps the historical Persian (English) behaviour unchanged.
+    term_notes: str = "inline"
 
 
 @dataclass
@@ -587,10 +592,17 @@ class TarjomehConfig:
             )
 
         # Output format
-        valid_formats = ("pdf", "epub", "docx", "txt", "srt")
+        valid_formats = ("pdf", "epub", "docx", "txt", "srt", "markdown")
         if self.output.format not in valid_formats:
             errors.append(
                 f"output.format must be one of {valid_formats}, got '{self.output.format}'"
+            )
+
+        valid_term_notes = ("inline", "footnote", "endnote", "both")
+        if self.output.term_notes not in valid_term_notes:
+            errors.append(
+                f"output.term_notes must be one of {valid_term_notes}, "
+                f"got '{self.output.term_notes}'"
             )
 
         # Numeric bounds

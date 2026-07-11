@@ -65,7 +65,7 @@ class ProperNouns:
         """Return True if the noun's first occurrence has already happened."""
         return english.strip() in self._introduced
 
-    def get_context(self) -> str:
+    def get_context(self, include_inline_originals: bool = True) -> str:
         """Return a formatted string representing the proper nouns dictionary.
 
         Each entry carries an introduction marker the translation prompt is
@@ -85,6 +85,11 @@ class ProperNouns:
         for en, fa in sorted(self._nouns.items()):
             if en in self._introduced:
                 marker = "[introduced]"
+            elif not include_inline_originals:
+                marker = (
+                    "[first occurrence pending — use the established Persian "
+                    "rendering; the exporter adds the English-original note]"
+                )
             else:
                 marker = f"[first occurrence pending — add ({en}) after the Persian]"
             lines.append(f"- {en} -> {fa}  {marker}")

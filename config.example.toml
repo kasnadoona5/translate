@@ -93,6 +93,7 @@ enable_critique = true           # auto-set by mode, overridable
 enable_back_translation = true   # auto-set by mode, overridable
 back_translation_sample_pct = 20 # auto-set by mode: fast=0, quality=5, academic=20
 enable_web_context = true        # web search for ambiguous-term disambiguation
+enable_book_research = false     # opt-in one-time book/topic research seed pass
 parallel_workers = 1             # >1 only in fast/quality; academic is always 1
 critique_threshold = 7.0         # refine chunks scoring below this (1-10)
 
@@ -118,8 +119,10 @@ enable_compliance_check = true
 enable_auto_correction = true
 
 [output]
-format = "docx"                  # "pdf" | "epub" | "docx" | "txt" | "srt"
+format = "docx"                  # "pdf" | "epub" | "docx" | "markdown" | "txt" | "srt"
 bilingual_mode = "inline"        # "inline" (EN+FA) | "side_by_side" | "target_only"
+# First-occurrence English originals. "inline" preserves current behaviour.
+term_notes = "inline"            # "inline" | "footnote" | "endnote" | "both"
 
 [persian]
 convert_numerals = true

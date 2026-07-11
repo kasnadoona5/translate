@@ -199,11 +199,47 @@ def _register_api(app: Flask) -> None:
             "mode": "translation.mode",
             "format": "output.format",
             "bilingual_mode": "output.bilingual_mode",
+            "term_notes": "output.term_notes",
         }
         for form_key, dotted_key in _form_field_map.items():
             value = request.form.get(form_key)
             if value:
                 config_overrides[dotted_key] = value
+        _boolean_field_map = {
+            "enable_book_research": "translation.enable_book_research",
+            "enable_critique": "translation.enable_critique",
+            "enable_back_translation": "translation.enable_back_translation",
+            "enable_web_context": "translation.enable_web_context",
+            "enable_auto_extraction": "glossary.enable_auto_extraction",
+            "enable_compliance_check": "glossary.enable_compliance_check",
+            "enable_auto_correction": "glossary.enable_auto_correction",
+            "scholarly_mode": "persian.scholarly_mode",
+        }
+        for form_key, dotted_key in _boolean_field_map.items():
+            value = request.form.get(form_key, "").lower()
+            if value in ("true", "false"):
+                config_overrides[dotted_key] = value == "true"
+
+        _numeric_field_map = {
+            "max_refine_iterations": (
+                "translation.max_refine_iterations",
+                int,
+            ),
+            "critique_threshold": ("translation.critique_threshold", float),
+            "back_translation_sample_pct": (
+                "translation.back_translation_sample_pct",
+                int,
+            ),
+        }
+        for form_key, (dotted_key, converter) in _numeric_field_map.items():
+            value = request.form.get(form_key)
+            if value not in (None, ""):
+                try:
+                    config_overrides[dotted_key] = converter(value)
+                except ValueError:
+                    return jsonify({
+                        "error": f"Invalid numeric setting: {form_key}"
+                    }), 400
 
         # Create progress queue for SSE
         _progress_queues[job_id] = queue.Queue()
@@ -425,6 +461,24 @@ def _register_api(app: Flask) -> None:
             f"Status: {job.get('status')}",
             "",
         ]
+        research = db.get_job_artifact(job_id, "book_research")
+        if research is not None:
+            suggested = [
+                term for term in research.get("terms", [])
+                if isinstance(term, dict) and term.get("status") == "suggested"
+            ]
+            approved = [
+                term for term in research.get("terms", [])
+                if isinstance(term, dict) and term.get("status") == "approved"
+            ]
+            lines.extend([
+                "Book Research:",
+                f"  status={research.get('status')}",
+                f"  sources={len(research.get('sources', []))}",
+                f"  suggestions={len(suggested)} approved={len(approved)}",
+                f"  context={research.get('book_context', '')}",
+                "",
+            ])
         events_by_chunk: dict[int, list[dict[str, Any]]] = {}
         for event in db.get_chunk_events(job_id):
             events_by_chunk.setdefault(int(event["chunk_index"]), []).append(event)
@@ -524,7 +578,8 @@ def _register_api(app: Flask) -> None:
         config = TarjomehConfig.from_dict(job.get("config", {}))
         pipeline = TranslationPipeline(config)
         input_path = Path(job["input_path"])
-        output_path = input_path.parent / f"{input_path.stem}_reviewed.{fmt}"
+        extension = "md" if fmt == "markdown" else fmt
+        output_path = input_path.parent / f"{input_path.stem}_reviewed.{extension}"
         exported = pipeline.export_completed_job(
             job_id,
             output_path,
@@ -683,6 +738,85 @@ def _register_api(app: Flask) -> None:
             return jsonify({"error": "Output file missing"}), 404
 
         return send_file(str(output_path.resolve()), as_attachment=True)
+
+    @app.route("/api/jobs/<job_id>/research")
+    @_require_auth
+    def api_job_research(job_id: str):
+        """Return the persisted, review-only book research artifact."""
+        from tarjomeh.jobs.database import JobDatabase
+
+        db = JobDatabase()
+        if not db.get_job(job_id):
+            return jsonify({"error": "Job not found"}), 404
+        artifact = db.get_job_artifact(job_id, "book_research")
+        return jsonify({
+            "job_id": job_id,
+            "research": artifact,
+        })
+
+    @app.route(
+        "/api/jobs/<job_id>/research/terms/<int:index>/<action>",
+        methods=["POST"],
+    )
+    @_require_auth
+    def api_job_research_term(job_id: str, index: int, action: str):
+        """Approve or reject one job-scoped research suggestion."""
+        from tarjomeh.glossary.manager import GlossaryEntry, GlossaryManager
+        from tarjomeh.jobs.database import JobDatabase
+
+        if action not in ("approve", "reject"):
+            return jsonify({"error": "action must be approve or reject"}), 400
+        db = JobDatabase()
+        artifact = db.get_job_artifact(job_id, "book_research")
+        if artifact is None:
+            return jsonify({"error": "Research artifact not found"}), 404
+        terms = artifact.get("terms", [])
+        if not isinstance(terms, list) or index < 0 or index >= len(terms):
+            return jsonify({"error": "Research term not found"}), 404
+        term = terms[index]
+        if not isinstance(term, dict):
+            return jsonify({"error": "Invalid research term"}), 400
+
+        if action == "approve":
+            path = _working_glossary_path(app.config.get("TARJOMEH_CONFIG"))
+            gm = GlossaryManager()
+            if path.exists():
+                gm.load(path)
+            source_key = str(term.get("source", "")).strip().casefold()
+            curated = [
+                entry for entry in gm.entries
+                if entry.source.casefold() == source_key and not entry.is_auto
+            ]
+            if curated:
+                return jsonify({
+                    "error": "A curated glossary term already exists; it was not overwritten.",
+                    "existing": _glossary_entry_payload(0, curated[0]),
+                }), 409
+            entries = [
+                entry for entry in gm.entries
+                if entry.source.casefold() != source_key
+            ]
+            entries.append(GlossaryEntry(
+                source=str(term.get("source", "")).strip(),
+                target=str(term.get("target", "")).strip(),
+                context=str(term.get("context", "")).strip(),
+                domain=str(term.get("domain", "")).strip(),
+                sense=str(term.get("sense", "")).strip(),
+                author=str(term.get("author", "")).strip(),
+                glossary="book_research_approved",
+                is_auto=False,
+            ))
+            _save_glossary_entries(path, entries)
+
+        term["status"] = "approved" if action == "approve" else "rejected"
+        db.save_job_artifact(job_id, "book_research", artifact)
+        db.log_event(
+            job_id,
+            "INFO",
+            f"Research term {index} {term['status']}: "
+            + str(term.get("source", "")),
+        )
+        return jsonify({"status": term["status"], "term": term})
 
     @app.route("/api/glossary/upload", methods=["POST"])
     @_require_auth

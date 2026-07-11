@@ -26,8 +26,7 @@ Core directives:
 • Use formal academic Persian appropriate for scholarly publication in {country}.
 • Follow established Persian academic conventions for transliteration of proper nouns.
   - For transliteration, use the accepted Iranian academic standard.
-  - On first occurrence of a transliterated proper noun, include the original English
-    form in parentheses, e.g. هابرماس (Habermas).
+  - {term_notes_instruction}
 • Preserve the author's argumentative structure and rhetorical style.
 • Use the provided glossary terms consistently throughout.
 • Use Iranian Persian vocabulary and conventions — not Dari or Afghan Persian.
@@ -103,11 +102,8 @@ Instructions:
    If a paragraph is a short heading or title, translate it as its own short heading
    paragraph; never merge it into the following body paragraph and never omit it.
 5. Use ZWNJ (‌) correctly in compound verbs and affixed words (e.g. می‌خواهد).
-6. Proper nouns: consult the proper-noun list in the memory context. Names marked
-   [introduced] have already appeared earlier in the book — use the established Persian
-   rendering WITHOUT repeating the English parenthetical. Names marked [first occurrence
-   pending] (or absent from the list) get the English form in parentheses after the
-   Persian transliteration on their first appearance only.
+6. Proper nouns and first-occurrence originals:
+   {term_notes_instruction}
 7. Scholarly apparatus: keep in-text citations, years, page numbers, and footnote markers
    in Latin script and Western digits exactly as in the source (e.g. (Marx 1867, 92)).
    Translate quoted passages but leave their citations untouched.

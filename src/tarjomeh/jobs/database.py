@@ -105,6 +105,15 @@ class JobDatabase:
                 )
             """)
             conn.execute("""
+                CREATE TABLE IF NOT EXISTS job_artifacts (
+                    job_id TEXT NOT NULL,
+                    artifact_key TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (job_id, artifact_key)
+                )
+            """)
+            conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_chunk_events_job_chunk
                 ON chunk_events (job_id, chunk_index, timestamp)
             """)
@@ -202,6 +211,43 @@ class JobDatabase:
                 (job_id, timestamp, level, message)
             )
             conn.commit()
+
+    def save_job_artifact(
+        self,
+        job_id: str,
+        artifact_key: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Persist job-scoped structured metadata such as research results."""
+        timestamp = datetime.utcnow().isoformat()
+        payload_str = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO job_artifacts (job_id, artifact_key, payload, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(job_id, artifact_key) DO UPDATE SET
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (job_id, artifact_key, payload_str, timestamp),
+            )
+            conn.commit()
+
+    def get_job_artifact(self, job_id: str, artifact_key: str) -> dict[str, Any] | None:
+        """Return one structured job artifact, or None when absent."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT payload FROM job_artifacts WHERE job_id = ? AND artifact_key = ?",
+                (job_id, artifact_key),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            value = json.loads(row["payload"])
+        except json.JSONDecodeError:
+            return None
+        return value if isinstance(value, dict) else None
 
     def log_chunk_event(
         self,

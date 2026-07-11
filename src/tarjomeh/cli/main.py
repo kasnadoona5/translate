@@ -65,6 +65,10 @@ def cmd_translate(args: argparse.Namespace) -> int:
         overrides["output.format"] = args.output_format
     if args.bilingual:
         overrides["output.bilingual_mode"] = args.bilingual
+    if getattr(args, "term_notes", None):
+        overrides["output.term_notes"] = args.term_notes
+    if getattr(args, "book_research", False):
+        overrides["translation.enable_book_research"] = True
     if args.provider:
         overrides["llm.provider"] = args.provider
     if args.model:
@@ -337,11 +341,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_translate.add_argument("-c", "--config", help="Config file path (default: config.toml)")
     p_translate.add_argument("-m", "--mode", choices=["fast", "quality", "academic"],
                              help="Translation mode")
-    p_translate.add_argument("-f", "--output-format", choices=["pdf", "epub", "docx", "txt", "srt"],
+    p_translate.add_argument("-f", "--output-format", choices=["pdf", "epub", "docx", "markdown", "txt", "srt"],
                              help="Output format")
     p_translate.add_argument("-o", "--output", help="Output file path")
     p_translate.add_argument("-b", "--bilingual", choices=["inline", "side_by_side", "target_only"],
                              help="Bilingual mode")
+    p_translate.add_argument(
+        "--term-notes",
+        choices=["inline", "footnote", "endnote", "both"],
+        help="First-occurrence English-original presentation",
+    )
+    p_translate.add_argument(
+        "--book-research",
+        action="store_true",
+        help="Run the optional pre-translation research seed pass",
+    )
     p_translate.add_argument("--provider", choices=["openrouter", "ollama"],
                              help="LLM provider")
     p_translate.add_argument("--model", help="LLM model name")
@@ -359,7 +373,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_cleanup.add_argument("job_id", help="Job ID")
     p_export = jobs_sub.add_parser("export", help="Re-export a completed job without translating")
     p_export.add_argument("job_id", help="Job ID")
-    p_export.add_argument("--format", choices=["pdf", "epub", "docx", "txt", "srt"], help="Output format")
+    p_export.add_argument("--format", choices=["pdf", "epub", "docx", "markdown", "txt", "srt"], help="Output format")
     p_export.add_argument("-o", "--output", help="Output file path")
     p_export.add_argument("-b", "--bilingual", choices=["inline", "side_by_side", "target_only"], help="Bilingual mode")
 

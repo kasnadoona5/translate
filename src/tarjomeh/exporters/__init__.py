@@ -20,6 +20,7 @@ _EXPORTER_REGISTRY: dict[str, tuple[str, str]] = {
     "docx": ("tarjomeh.exporters.docx_exporter", "DocxExporter"),
     "txt":  ("tarjomeh.exporters.txt_exporter",  "TxtExporter"),
     "srt":  ("tarjomeh.exporters.srt_exporter",  "SrtExporter"),
+    "markdown": ("tarjomeh.exporters.markdown_exporter", "MarkdownExporter"),
 }
 
 

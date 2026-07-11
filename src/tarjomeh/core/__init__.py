@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from tarjomeh.core.config import TarjomehConfig
 from tarjomeh.core.llm_client import LLMClient
-from tarjomeh.core.pipeline import TranslationPipeline
 from tarjomeh.core.state_machine import StateMachine
 
 __all__ = [
@@ -17,3 +16,11 @@ __all__ = [
     "StateMachine",
     "TranslationPipeline",
 ]
+
+
+def __getattr__(name: str):
+    """Load the pipeline lazily so leaf core modules remain independently importable."""
+    if name == "TranslationPipeline":
+        from tarjomeh.core.pipeline import TranslationPipeline
+        return TranslationPipeline
+    raise AttributeError(name)

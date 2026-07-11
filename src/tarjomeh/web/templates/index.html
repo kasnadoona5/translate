@@ -1,136 +1,309 @@
 <!DOCTYPE html>
-<html lang="fa" dir="rtl">
+<html lang="en" dir="ltr">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ترجمه — Tarjomeh Translation System</title>
-    <meta name="description" content="Professional academic book translation system — English to Persian">
+    <title>Tarjomeh</title>
+    <meta name="description" content="Academic English to Persian translation workspace">
     <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <div class="app-container">
-        <!-- Header -->
+    <div class="app-shell">
         <header class="app-header">
-            <div class="header-brand">
-                <h1 class="logo">ترجمه</h1>
-                <span class="logo-subtitle">Tarjomeh Translation System</span>
+            <div class="brand-lockup">
+                <div class="brand-mark" aria-hidden="true">ت</div>
+                <div>
+                    <h1>Tarjomeh</h1>
+                    <p>Academic translation workspace</p>
+                </div>
             </div>
             <div class="header-status">
                 <span class="status-indicator" id="statusDot"></span>
-                <span id="statusText">Ready</span>
+                <span id="statusText">System ready</span>
             </div>
         </header>
 
-        <!-- Main Content -->
         <main class="app-main">
-            <!-- Upload Section -->
-            <section class="card upload-section" id="uploadSection">
-                <h2>📄 Translate Document</h2>
+            <section class="workspace-panel upload-section" id="uploadSection">
+                <div class="section-heading">
+                    <div>
+                        <p class="section-kicker">New translation</p>
+                        <h2>Source document</h2>
+                    </div>
+                    <span class="format-list">PDF · EPUB · DOCX · TXT · SRT · MD</span>
+                </div>
+
                 <div class="upload-zone" id="dropZone">
-                    <div class="upload-icon">📁</div>
-                    <p>Drag & drop your document here</p>
-                    <p class="upload-hint">PDF, EPUB, DOCX, TXT, SRT, or Markdown</p>
-                    <input type="file" id="fileInput" accept=".pdf,.epub,.docx,.txt,.srt,.md" hidden>
-                    <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">
-                        Choose File
+                    <div class="upload-symbol" aria-hidden="true">↑</div>
+                    <div class="upload-copy">
+                        <strong>Drop a document here</strong>
+                        <span>or select it from this device</span>
+                    </div>
+                    <input type="file" id="fileInput" accept=".pdf,.epub,.docx,.txt,.text,.srt,.md,.markdown" hidden>
+                    <button class="btn btn-secondary" type="button"
+                            onclick="document.getElementById('fileInput').click()">
+                        Choose file
                     </button>
                 </div>
 
-                <!-- Config Panel -->
-                <div class="config-panel" id="configPanel" style="display:none;">
-                    <div class="config-row">
-                        <label>Mode</label>
-                        <select id="cfgMode">
-                            <option value="academic" selected>Academic (highest quality)</option>
-                            <option value="quality">Quality (balanced)</option>
-                            <option value="fast">Fast (draft)</option>
-                        </select>
+                <div class="config-panel" id="configPanel" hidden>
+                    <div class="selected-file">
+                        <span class="file-indicator" aria-hidden="true">EN</span>
+                        <div>
+                            <strong id="selectedFileName">Selected document</strong>
+                            <span id="selectedFileMeta"></span>
+                        </div>
+                        <button class="icon-btn" type="button" title="Choose another file"
+                                onclick="document.getElementById('fileInput').click()">↻</button>
                     </div>
-                    <div class="config-row">
-                        <label>Output Format</label>
-                        <select id="cfgFormat">
-                            <option value="pdf">PDF</option>
-                            <option value="epub">EPUB</option>
-                            <option value="docx">DOCX</option>
-                            <option value="txt">TXT</option>
-                            <option value="srt">SRT</option>
-                        </select>
+
+                    <div class="settings-grid primary-settings">
+                        <label class="field">
+                            <span>Translation mode</span>
+                            <select id="cfgMode">
+                                <option value="academic" selected>Academic</option>
+                                <option value="quality">Quality</option>
+                                <option value="fast">Fast draft</option>
+                            </select>
+                        </label>
+                        <label class="field">
+                            <span>Output format</span>
+                            <select id="cfgFormat">
+                                <option value="docx" selected>DOCX</option>
+                                <option value="epub">EPUB</option>
+                                <option value="markdown">Markdown</option>
+                                <option value="pdf">PDF</option>
+                                <option value="txt">TXT</option>
+                                <option value="srt">SRT</option>
+                            </select>
+                        </label>
+                        <label class="field">
+                            <span>Document layout</span>
+                            <select id="cfgBilingual">
+                                <option value="target_only" selected>Persian only</option>
+                                <option value="inline">English + Persian</option>
+                                <option value="side_by_side">Side by side</option>
+                            </select>
+                        </label>
                     </div>
-                    <div class="config-row">
-                        <label>Bilingual Mode</label>
-                        <select id="cfgBilingual">
-                            <option value="inline">Inline (EN + FA)</option>
-                            <option value="side_by_side">Side by Side</option>
-                            <option value="target_only">Persian Only</option>
-                        </select>
-                    </div>
-                    <div class="config-row">
-                        <label id="selectedFileName"></label>
-                        <button class="btn btn-primary btn-lg" id="startBtn" onclick="startTranslation()">
-                            🚀 Start Translation
+
+                    <details class="advanced-settings">
+                        <summary>
+                            <span>Advanced settings</span>
+                            <span class="summary-state">Quality, terminology and research</span>
+                        </summary>
+                        <div class="advanced-body">
+                            <div class="settings-group">
+                                <h3>Terminology</h3>
+                                <div class="settings-grid">
+                                    <label class="field">
+                                        <span>First-occurrence original</span>
+                                        <select id="cfgTermNotes">
+                                            <option value="inline" selected>Inline English</option>
+                                            <option value="footnote">Footnote</option>
+                                            <option value="endnote">Endnote</option>
+                                            <option value="both">Inline + note</option>
+                                        </select>
+                                    </label>
+                                    <label class="toggle-field">
+                                        <span>
+                                            <strong>Book research</strong>
+                                            <small>Pre-translation seed pass</small>
+                                        </span>
+                                        <input id="cfgBookResearch" type="checkbox">
+                                        <span class="toggle" aria-hidden="true"></span>
+                                    </label>
+                                    <label class="toggle-field">
+                                        <span>
+                                            <strong>Auto term extraction</strong>
+                                            <small>Discover candidate terminology</small>
+                                        </span>
+                                        <input id="cfgAutoExtraction" type="checkbox" checked>
+                                        <span class="toggle" aria-hidden="true"></span>
+                                    </label>
+                                    <label class="toggle-field">
+                                        <span>
+                                            <strong>Glossary compliance</strong>
+                                            <small>Check mandatory terminology</small>
+                                        </span>
+                                        <input id="cfgCompliance" type="checkbox" checked>
+                                        <span class="toggle" aria-hidden="true"></span>
+                                    </label>
+                                    <label class="toggle-field">
+                                        <span>
+                                            <strong>Auto correction</strong>
+                                            <small>Repair glossary violations</small>
+                                        </span>
+                                        <input id="cfgAutoCorrection" type="checkbox" checked>
+                                        <span class="toggle" aria-hidden="true"></span>
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div class="settings-group">
+                                <h3>Quality review</h3>
+                                <div class="settings-grid">
+                                    <label class="toggle-field">
+                                        <span><strong>Critique</strong><small>Independent quality review</small></span>
+                                        <input id="cfgCritique" type="checkbox" checked>
+                                        <span class="toggle" aria-hidden="true"></span>
+                                    </label>
+                                    <label class="toggle-field">
+                                        <span><strong>Back-translation</strong><small>Sample semantic drift</small></span>
+                                        <input id="cfgBackTranslation" type="checkbox" checked>
+                                        <span class="toggle" aria-hidden="true"></span>
+                                    </label>
+                                    <label class="toggle-field">
+                                        <span><strong>Web context</strong><small>Resolve ambiguous terms</small></span>
+                                        <input id="cfgWebContext" type="checkbox" checked>
+                                        <span class="toggle" aria-hidden="true"></span>
+                                    </label>
+                                    <label class="toggle-field">
+                                        <span><strong>Scholarly apparatus</strong><small>Protect citations and numbering</small></span>
+                                        <input id="cfgScholarly" type="checkbox" checked>
+                                        <span class="toggle" aria-hidden="true"></span>
+                                    </label>
+                                    <label class="field compact-field">
+                                        <span>Refinement attempts</span>
+                                        <input id="cfgRefineIterations" type="number" min="0" max="5" step="1" value="2">
+                                    </label>
+                                    <label class="field compact-field">
+                                        <span>Critique threshold</span>
+                                        <input id="cfgCritiqueThreshold" type="number" min="1" max="10" step="0.5" value="7">
+                                    </label>
+                                    <label class="field compact-field">
+                                        <span>Back-check sample %</span>
+                                        <input id="cfgBackSample" type="number" min="0" max="100" step="5" value="20">
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                    </details>
+
+                    <div class="start-row">
+                        <div class="run-summary" id="runSummary">Academic · DOCX · Persian only</div>
+                        <button class="btn btn-primary" id="startBtn" type="button"
+                                onclick="startTranslation()">
+                            Start translation
+                            <span aria-hidden="true">→</span>
                         </button>
                     </div>
                 </div>
             </section>
 
-            <!-- Progress Section -->
-            <section class="card progress-section" id="progressSection" style="display:none;">
-                <h2>⏳ Translation Progress</h2>
+            <section class="workspace-panel progress-section" id="progressSection" hidden>
+                <div class="section-heading">
+                    <div>
+                        <p class="section-kicker">Active job</p>
+                        <h2>Translation progress</h2>
+                    </div>
+                    <strong id="progressPct">0%</strong>
+                </div>
                 <div class="progress-bar-container">
                     <div class="progress-bar" id="progressBar" style="width: 0%"></div>
                 </div>
                 <div class="progress-info">
-                    <span id="progressPct">0%</span>
                     <span id="progressStage">Initializing...</span>
                 </div>
                 <div class="progress-log" id="progressLog"></div>
             </section>
 
-            <!-- Jobs List -->
-            <section class="card jobs-section">
-                <h2>📋 Translation History</h2>
+            <section class="workspace-panel jobs-section">
+                <div class="section-heading">
+                    <div>
+                        <p class="section-kicker">Workspace</p>
+                        <h2>Translation history</h2>
+                    </div>
+                    <button class="icon-btn" type="button" title="Refresh jobs"
+                            onclick="fetchJobs()">↻</button>
+                </div>
                 <div id="jobsList" class="jobs-list">
                     <p class="empty-state">Loading jobs...</p>
                 </div>
             </section>
-            <section class="card review-section" id="reviewSection" style="display:none;">
-                <h2>Review & QA</h2>
-                <div class="review-toolbar">
-                    <span id="reviewJobTitle" class="job-submeta"></span>
+
+            <section class="workspace-panel review-section" id="reviewSection" hidden>
+                <div class="section-heading review-toolbar">
+                    <div>
+                        <p class="section-kicker">Editor review</p>
+                        <h2>Quality assurance</h2>
+                        <span id="reviewJobTitle" class="job-submeta"></span>
+                    </div>
                     <div class="toolbar-actions">
-                        <select id="exportFormat">
-                            <option value="docx">DOCX</option>
-                            <option value="epub">EPUB</option>
-                            <option value="pdf">PDF</option>
-                            <option value="txt">TXT</option>
-                            <option value="srt">SRT</option>
-                        </select>
-                        <button class="btn btn-primary" onclick="exportReviewedJob()">Re-export</button>
-                        <button class="btn" onclick="downloadQaReport()">QA report</button>
+                        <label class="compact-select">
+                            <span>Export as</span>
+                            <select id="exportFormat">
+                                <option value="docx">DOCX</option>
+                                <option value="epub">EPUB</option>
+                                <option value="markdown">Markdown</option>
+                                <option value="pdf">PDF</option>
+                                <option value="txt">TXT</option>
+                                <option value="srt">SRT</option>
+                            </select>
+                        </label>
+                        <button class="btn btn-secondary" type="button"
+                                onclick="downloadQaReport()">QA report</button>
+                        <button class="btn btn-primary btn-compact" type="button"
+                                onclick="exportReviewedJob()">Re-export</button>
                     </div>
                 </div>
                 <div id="reviewList" class="review-list"></div>
             </section>
 
-            <section class="card glossary-section">
-                <h2>Glossary Editor</h2>
-                <div class="glossary-form">
-                    <input id="glossSource" placeholder="English term">
-                    <input id="glossTarget" placeholder="Persian term">
-                    <input id="glossDomain" placeholder="Domain">
-                    <input id="glossContext" placeholder="Context">
-                    <button class="btn btn-primary" onclick="addGlossaryTerm()">Add term</button>
-                    <button class="btn" onclick="downloadGlossary()">Download CSV</button>
+            <section class="workspace-panel glossary-section">
+                <div class="section-heading">
+                    <div>
+                        <p class="section-kicker">Terminology</p>
+                        <h2>Working glossary</h2>
+                    </div>
+                    <button class="btn btn-secondary btn-compact" type="button"
+                            onclick="downloadGlossary()">Download CSV</button>
+                </div>
+
+                <form class="glossary-form" onsubmit="event.preventDefault(); addGlossaryTerm();">
+                    <label class="field">
+                        <span>English term</span>
+                        <input id="glossSource" required autocomplete="off">
+                    </label>
+                    <label class="field">
+                        <span>Persian rendering</span>
+                        <input id="glossTarget" required dir="rtl" autocomplete="off">
+                    </label>
+                    <label class="field">
+                        <span>Domain</span>
+                        <input id="glossDomain" autocomplete="off">
+                    </label>
+                    <label class="field">
+                        <span>Context</span>
+                        <input id="glossContext" autocomplete="off">
+                    </label>
+                    <button class="btn btn-primary btn-compact" type="submit">Add term</button>
+                </form>
+
+                <div class="research-block" id="researchBlock" hidden>
+                    <div class="subsection-heading">
+                        <div>
+                            <p class="section-kicker">Phase 7</p>
+                            <h3 id="researchSuggestionTitle">Research suggestions</h3>
+                        </div>
+                        <span class="auto-label">Review required</span>
+                    </div>
+                    <div id="researchSuggestionList" class="glossary-list"></div>
+                </div>
+
+                <div class="subsection-heading glossary-heading">
+                    <h3>Curated terms</h3>
+                    <span id="glossaryCount" class="count-label"></span>
                 </div>
                 <div id="glossaryList" class="glossary-list"></div>
             </section>
         </main>
 
-        <!-- Footer -->
         <footer class="app-footer">
-            <p>Tarjomeh v0.1.0 — Licensed under AGPL-3.0</p>
+            <span>Tarjomeh</span>
+            <span>English → Persian academic translation</span>
         </footer>
     </div>
     <script src="/static/app.js"></script>

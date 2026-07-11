@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 class MemoryContext:
     """Consolidated context from all four memory layers."""
 
+    book_context: str = ""
     style_profile: str = ""
     proper_nouns: str = ""
     bilingual_summary: str = ""
@@ -34,6 +35,12 @@ class MemoryContext:
     def format(self) -> str:
         """Format the memory layers into a single prompt-ready string."""
         parts = []
+        if self.book_context:
+            parts.append(
+                "--- Reviewable Book Research Context ---"
+                + chr(10)
+                + self.book_context
+            )
         if self.style_profile:
             parts.append(f"--- Style Profile: Book-Level Voice Guide ---\n{self.style_profile}")
         if self.proper_nouns:
@@ -54,6 +61,7 @@ class MemoryManager:
         self.config = config
         self.proper_nouns = ProperNouns()
         self.bilingual_summary = BilingualSummary()
+        self.book_context = ""
         self.style_profile = ""
         self.style_samples: list[str] = []
         
@@ -67,7 +75,13 @@ class MemoryManager:
     def get_context_for_chunk(self, chunk: Chunk) -> MemoryContext:
         """Retrieve relevant context for translating the given chunk."""
         # Layer 1: Proper Nouns
-        proper_nouns_str = self.proper_nouns.get_context()
+        include_inline_originals = self.config.output.term_notes in (
+            "inline",
+            "both",
+        )
+        proper_nouns_str = self.proper_nouns.get_context(
+            include_inline_originals=include_inline_originals
+        )
 
         # Layer 2: Bilingual Summary
         bilingual_summary_str = self.bilingual_summary.get_context()
@@ -85,6 +99,7 @@ class MemoryManager:
             )
 
         return MemoryContext(
+            book_context=self.book_context,
             style_profile=self.style_profile,
             proper_nouns=proper_nouns_str,
             bilingual_summary=bilingual_summary_str,
@@ -126,7 +141,13 @@ class MemoryManager:
         """Incrementally identify new proper nouns in the text and add them."""
         from tarjomeh.core.prompts import INCREMENTAL_NER_PROMPT, GLOSSARY_EXTRACT_PROMPT
 
-        known = self.proper_nouns.get_context()
+        include_inline_originals = self.config.output.term_notes in (
+            "inline",
+            "both",
+        )
+        known = self.proper_nouns.get_context(
+            include_inline_originals=include_inline_originals
+        )
         if not known:
             # First chapter/TOC extract
             prompt = GLOSSARY_EXTRACT_PROMPT.format(text=text)
@@ -180,6 +201,7 @@ class MemoryManager:
     def to_dict(self) -> dict[str, Any]:
         """Serialize memory state for database checkpointing."""
         return {
+            "book_context": self.book_context,
             "style_profile": self.style_profile,
             "style_samples": self.style_samples,
             "proper_nouns": self.proper_nouns.serialize(),
@@ -190,6 +212,7 @@ class MemoryManager:
 
     def from_dict(self, data: dict[str, Any]) -> None:
         """Restore memory state from a checkpoint dictionary."""
+        self.book_context = str(data.get("book_context", ""))
         self.style_profile = str(data.get("style_profile", ""))
         self.style_samples = list(data.get("style_samples", []))
         self.proper_nouns.deserialize(data.get("proper_nouns", {}))

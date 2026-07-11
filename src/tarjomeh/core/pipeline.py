@@ -26,6 +26,7 @@ from tarjomeh.context.web_searcher import WebContextSearcher
 from tarjomeh.glossary.manager import GlossaryManager
 from tarjomeh.glossary.compliance import GlossaryComplianceChecker
 from tarjomeh.persian.typography import PersianTypographer
+from tarjomeh.core.term_notes import apply_term_notes
 from tarjomeh.exporters import get_exporter
 from tarjomeh.exporters.base import TranslatedDocument, TranslatedParagraph
 from tarjomeh.jobs.database import JobDatabase, JobStatus, ChunkStatus
@@ -168,6 +169,55 @@ def _truncate_for_event(value: str, limit: int = 2000) -> str:
 
 def _paragraph_count(text: str) -> int:
     return len([p for p in (text or "").split("\n\n") if p.strip()])
+
+
+def _output_extension(fmt: str) -> str:
+    return "md" if fmt.lower() == "markdown" else fmt.lower()
+
+
+def _term_notes_instruction(mode: str) -> str:
+    """Return prompt policy without letting the model invent note numbering."""
+    if mode in ("footnote", "endnote"):
+        return (
+            "Use the established Persian rendering consistently. Do not add an "
+            "English parenthetical solely because this is the first occurrence; "
+            "the application will add a numbered note after translation. This "
+            "instruction overrides inline-parenthetical examples."
+        )
+    if mode == "both":
+        return (
+            "For a proper noun's first occurrence, include the English original "
+            "in parentheses after the Persian rendering. The application will "
+            "also add a numbered note; never invent note numbers yourself."
+        )
+    return (
+        "Consult the proper-noun list in memory. Names marked [introduced] use "
+        "the established Persian rendering without another parenthetical. Names "
+        "marked [first occurrence pending] get the English original in "
+        "parentheses after the Persian rendering exactly once."
+    )
+
+
+def _research_context_for_memory(artifact: dict[str, Any] | None) -> str:
+    """Format unapproved research as non-authoritative prompt context."""
+    if not artifact or artifact.get("status") != "completed":
+        return ""
+    parts = [str(artifact.get("book_context", "")).strip()]
+    suggestions = []
+    for item in artifact.get("terms", []):
+        if not isinstance(item, dict) or item.get("status") != "suggested":
+            continue
+        source = str(item.get("source", "")).strip()
+        target = str(item.get("target", "")).strip()
+        if source and target:
+            suggestions.append(f"- {source} -> {target}")
+    if suggestions:
+        parts.extend([
+            "Unapproved research suggestions follow. They are contextual hints, "
+            "not mandatory terminology. Never override the curated glossary with them.",
+            chr(10).join(suggestions),
+        ])
+    return (chr(10) * 2).join(part for part in parts if part)
 
 
 def _glossary_entries_for_event(entries: list[Any]) -> list[dict[str, Any]]:
@@ -449,6 +499,47 @@ class TranslationPipeline:
         else:
             return loop.run_until_complete(coro)
 
+    def _prepare_book_research(
+        self,
+        job_id: str,
+        document: Document,
+        progress_callback: Callable[[str, float, str], None] | None = None,
+    ) -> dict[str, Any] | None:
+        """Load or run the opt-in, one-time review-only research pass."""
+        artifact = self.db.get_job_artifact(job_id, "book_research")
+        if artifact is not None or not self.config.translation.enable_book_research:
+            return artifact
+
+        if progress_callback:
+            progress_callback(
+                "Research",
+                0.08,
+                "Researching book context and terminology suggestions...",
+            )
+        from tarjomeh.context.book_researcher import BookResearcher
+
+        result = self._run_async(
+            BookResearcher(self.config, self.llm_client).research(document)
+        )
+        artifact = result.to_dict()
+        self.db.save_job_artifact(job_id, "book_research", artifact)
+        if artifact.get("status") == "completed":
+            self.db.log_event(
+                job_id,
+                "INFO",
+                "Book research completed with "
+                f"{len(artifact.get('terms', []))} reviewable suggestion(s) "
+                f"and {len(artifact.get('sources', []))} source result(s).",
+            )
+        else:
+            self.db.log_event(
+                job_id,
+                "WARNING",
+                "Book research failed; translation will continue without a seed. "
+                + str(artifact.get("error", "")),
+            )
+        return artifact
+
     def run(
         self,
         input_path: Path,
@@ -490,7 +581,8 @@ class TranslationPipeline:
         # Determine default output path if not provided
         if output_path is None:
             fmt = self.config.output.format.lower()
-            output_path = input_path.parent / f"{input_path.stem}_translated.{fmt}"
+            extension = _output_extension(fmt)
+            output_path = input_path.parent / f"{input_path.stem}_translated.{extension}"
         else:
             output_path = Path(output_path)
 
@@ -604,6 +696,16 @@ class TranslationPipeline:
                 glossary_manager.merge_auto_extracted(auto_terms)
             except Exception as e:
                 logger.warning("Automatic term extraction failed: %s", e)
+
+        research_artifact = self._prepare_book_research(
+            job_id,
+            document,
+            progress_callback,
+        )
+        if research_artifact and research_artifact.get("status") == "completed":
+            memory_manager.book_context = _research_context_for_memory(
+                research_artifact
+            )
 
         # 6. Translate Chunks (Sequential or Concurrent)
         translations: dict[int, str] = {}
@@ -983,6 +1085,35 @@ class TranslationPipeline:
         for p in trans_doc.paragraphs:
             p.translated_text = typographer.process(p.translated_text)
 
+        note_mode = self.config.output.term_notes
+        note_formats = {"docx", "epub", "markdown"}
+        if note_mode != "inline" and self.config.output.format in note_formats:
+            noun_state = memory_manager.proper_nouns.serialize()
+            notes = apply_term_notes(
+                trans_doc,
+                glossary_manager,
+                dict(noun_state.get("nouns", {})),
+                typographer,
+                domain=self.config.translation.domain,
+                mode=note_mode,
+            )
+            self.db.save_job_artifact(job_id, "term_notes", {
+                "mode": note_mode,
+                "notes": notes,
+            })
+            self.db.log_event(
+                job_id,
+                "INFO",
+                f"Generated {len(notes)} first-occurrence term note(s).",
+            )
+        elif note_mode != "inline":
+            warning = (
+                f"Term notes are not rendered for {self.config.output.format}; "
+                "DOCX, EPUB, and Markdown are supported."
+            )
+            self.warnings.append(warning)
+            self.db.log_event(job_id, "WARNING", warning)
+
         # 9. Export
         if progress_callback:
             progress_callback("Export", 0.98, f"Exporting to {self.config.output.format.upper()}...")
@@ -1032,7 +1163,8 @@ class TranslationPipeline:
 
         fmt = self.config.output.format.lower()
         if output_path is None:
-            output_path = input_path.parent / f"{input_path.stem}_reexported.{fmt}"
+            extension = _output_extension(fmt)
+            output_path = input_path.parent / f"{input_path.stem}_reexported.{extension}"
         else:
             output_path = Path(output_path)
 
@@ -1050,6 +1182,42 @@ class TranslationPipeline:
             )
 
         trans_doc = self._assemble_translated_document(document, chunks, translations)
+        note_mode = self.config.output.term_notes
+        if note_mode != "inline" and fmt in {"docx", "epub", "markdown"}:
+            glossary_manager = GlossaryManager()
+            glossary_paths = []
+            if self.config.glossary.path:
+                glossary_paths.append(Path(self.config.glossary.path))
+            glossary_paths.extend(
+                Path(path) for path in (self.config.glossary.paths or [])
+                if Path(path) not in glossary_paths
+            )
+            glossary_manager.load_many(glossary_paths, ignore_missing=True)
+            memory_state = self.db.get_memory_state(job_id) or {}
+            noun_state = memory_state.get("proper_nouns", {})
+            proper_nouns = (
+                noun_state.get("nouns", {})
+                if isinstance(noun_state, dict) else {}
+            )
+            note_artifact = self.db.get_job_artifact(job_id, "term_notes") or {}
+            persisted_terms = {
+                str(note.get("original", "")): str(
+                    note.get("transliteration", "")
+                )
+                for note in note_artifact.get("notes", [])
+                if isinstance(note, dict)
+                and note.get("original")
+                and note.get("transliteration")
+            }
+            apply_term_notes(
+                trans_doc,
+                glossary_manager,
+                dict(proper_nouns),
+                PersianTypographer(self.config.to_dict().get("persian")),
+                domain=self.config.translation.domain,
+                mode=note_mode,
+                extra_terms=persisted_terms,
+            )
         exporter_cls = get_exporter(fmt)
         exporter = exporter_cls(self.config.to_dict().get(fmt))
         exporter.export(
@@ -1095,6 +1263,11 @@ class TranslationPipeline:
         saved_mem = self.db.get_memory_state(job_id)
         if saved_mem:
             memory_manager.from_dict(saved_mem)
+        research_artifact = self.db.get_job_artifact(job_id, "book_research")
+        if research_artifact is not None:
+            memory_manager.book_context = _research_context_for_memory(
+                research_artifact
+            )
 
         web_searcher = WebContextSearcher(self.config, self.llm_client)
         compliance_checker = GlossaryComplianceChecker()
@@ -1330,10 +1503,14 @@ class TranslationPipeline:
             style_register_value = style_register
             exemplars = ""
 
+        term_notes_instruction = _term_notes_instruction(
+            self.config.output.term_notes
+        )
         sys_prompt = TRANSLATE_SYSTEM_PROMPT.format(
             domain=self.config.translation.domain,
             style_register=style_register_value,
             country=self.config.translation.country,
+            term_notes_instruction=term_notes_instruction,
         )
         n_source_paras = len(chunk.metadata.get("paragraph_indices", [])) or \
             len([p for p in chunk.text.split("\n\n") if p.strip()])
@@ -1345,6 +1522,7 @@ class TranslationPipeline:
             previous_translation=prev_trans,
             source_text=chunk.text,
             paragraph_count=n_source_paras,
+            term_notes_instruction=term_notes_instruction,
         )
 
         # Terminology context for the judge & refiner: matched glossary terms
