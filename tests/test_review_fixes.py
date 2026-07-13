@@ -37,6 +37,14 @@ def test_new_server_side_bounds_are_validated(field: str, value: object) -> None
         config.validate()
 
 
+def test_glossary_compliance_accepts_conservative_persian_inflections() -> None:
+    present = GlossaryComplianceChecker._target_present
+    assert present("\u0645\u06cc\u062f\u0627\u0646", "\u0645\u06cc\u062f\u0627\u0646\u06cc \u0627\u0632 \u062a\u0646\u0634\u200c\u0647\u0627")
+    assert present("\u062f\u0648\u0644\u062a", "\u062f\u0648\u0644\u062a\u200c\u0647\u0627 \u0648 \u0646\u0647\u0627\u062f\u0647\u0627")
+    assert present("\u0633\u0631\u0645\u0627\u06cc\u0647", "\u0633\u0631\u0645\u0627\u06cc\u0647\u200c\u0647\u0627\u06cc \u0645\u0627\u0644\u06cc")
+    assert not present("\u06a9\u0627\u0631", "\u0627\u06cc\u0646 \u06a9\u0627\u0631\u062e\u0627\u0646\u0647 \u062a\u0639\u0637\u06cc\u0644 \u0627\u0633\u062a")
+
+
 def test_job_history_reports_real_output_name_and_format() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db = JobDatabase(Path(tmp) / "jobs.db")

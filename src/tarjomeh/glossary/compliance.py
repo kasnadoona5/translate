@@ -151,8 +151,9 @@ class GlossaryComplianceChecker:
         normalised_text = _normalise_persian(translation)
         if not normalised_target:
             return False
+        intra_word_joiner = rf"[{_ZWNJ}{_ZWJ}]*"
         parts = [
-            re.escape(part)
+            intra_word_joiner.join(re.escape(char) for char in part)
             for part in re.split(rf"[\s{_ZWNJ}{_ZWJ}]+", normalised_target)
             if part
         ]
@@ -160,8 +161,18 @@ class GlossaryComplianceChecker:
             return False
         flexible_target = rf"[\s{_ZWNJ}{_ZWJ}]*".join(parts)
         persian_word = r"\u0600-\u06ff"
+        # Persian targets can take productive suffixes without a word boundary
+        # (for example, a noun becoming an adjective or plural). Keep the
+        # leading boundary so embedded substrings in unrelated words still fail.
+        joiner = rf"[\s{_ZWNJ}{_ZWJ}]*"
+        suffix = (
+            rf"(?:{joiner}(?:"
+            r"\u0647\u0627(?:\u06cc(?:\u06cc|\u0645|\u062a|\u0634|\u0645\u0627\u0646|\u062a\u0627\u0646|\u0634\u0627\u0646)?)?"
+            r"|\u06cc|\u0627\u0646|\u0627\u062a|\u062a\u0631(?:\u06cc\u0646)?|\u0627\u0645|\u0627\u0634|\u0645\u0627\u0646|\u062a\u0627\u0646|\u0634\u0627\u0646"
+            r"))?"
+        )
         return re.search(
-            rf"(?<![{persian_word}]){flexible_target}(?![{persian_word}])",
+            rf"(?<![{persian_word}]){flexible_target}{suffix}(?![{persian_word}])",
             normalised_text,
         ) is not None
 

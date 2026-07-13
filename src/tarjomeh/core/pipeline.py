@@ -37,7 +37,10 @@ from tarjomeh.jobs.database import JobDatabase, JobStatus, ChunkStatus
 from tarjomeh.quality.critique import TranslationCritique
 from tarjomeh.quality.refiner import TranslationRefiner
 from tarjomeh.quality.back_translator import BackTranslator
-from tarjomeh.quality.integrity import PostEditIntegrityGate
+from tarjomeh.quality.integrity import (
+    PostEditIntegrityGate,
+    protected_english_originals,
+)
 from tarjomeh.core.prompts import (
     TRANSLATE_SYSTEM_PROMPT,
     TRANSLATE_CHUNK_PROMPT,
@@ -600,7 +603,7 @@ class TranslationPipeline:
                 logger.info("Resuming existing job: %s", job_id)
                 self.db.update_job_status(job_id, JobStatus.RUNNING)
             else:
-                logger.warning("Job ID %s not found in DB. Starting fresh.", job_id)
+                logger.info("Starting new job with supplied ID: %s", job_id)
                 self.db.create_job(job_id, input_path, self.config.to_dict())
         else:
             self.current_job_id = uuid.uuid4().hex[:12]
@@ -1712,7 +1715,10 @@ class TranslationPipeline:
             "\n\n### First-occurrence English-original policy\n"
             + term_notes_instruction
             + " During critique and refinement, preserve any required English "
-              "original already present unless it is factually incorrect."
+              "original already present unless it is factually incorrect. Do "
+              "not infer that every ordinary glossary concept requires an "
+              "English parenthetical; follow the proper-noun state and the "
+              "configured policy above exactly."
         )
         self.db.log_chunk_event(job_id, idx, "terminology_context", {
             "chars": len(terminology_ctx),
@@ -1934,11 +1940,20 @@ class TranslationPipeline:
                 if enable_auto_correct:
                     attempts = 0
                     max_attempts = 2
+                    correction_feedback = ""
                     while not report.compliant and attempts < max_attempts:
                         attempts += 1
                         violations_text = "\n".join(
                             f"- English: {v.term} -> expected Persian: {v.expected} (status: {v.status})"
                             for v in report.violations
+                        )
+                        protected_originals = (
+                            protected_english_originals(chunk.text, translation)
+                            if protect_inline_english else []
+                        )
+                        protected_originals_text = (
+                            ", ".join(f"({value})" for value in protected_originals)
+                            or "(none)"
                         )
                         correction_prompt = f"""\
 The following translation violated the glossary compliance checks.
@@ -1952,7 +1967,14 @@ Current Translation:
 Glossary violations found:
 {violations_text}
 
+Protected first-occurrence English originals already present:
+{protected_originals_text}
+
 Please re-translate the text, ensuring that you use the expected glossary terms exactly as prescribed.
+Preserve every protected English original above exactly once. Do not remove or relocate
+those parentheticals while correcting glossary terminology. Preserve paragraph structure,
+citations, numbers, names, and all text unrelated to the listed violations.
+{correction_feedback}
 Output ONLY the corrected Persian translation.
 """
                         before_correction = translation
@@ -1982,6 +2004,18 @@ Output ONLY the corrected Persian translation.
                                 self.db.log_chunk_event(
                                     job_id, idx, "integrity_edit_rejected",
                                     correction_integrity,
+                                )
+                                blocking_checks = [
+                                    finding.get("check_id", "")
+                                    for finding in correction_integrity.get("findings", [])
+                                    if finding.get("severity") == "blocking"
+                                ]
+                                correction_feedback = (
+                                    "The previous correction candidate was rejected by "
+                                    "deterministic integrity checks: "
+                                    + ", ".join(blocking_checks)
+                                    + ". Produce a minimally edited correction that "
+                                      "retains all protected content."
                                 )
                         if correction_accepted:
                             translation = proposed_correction
