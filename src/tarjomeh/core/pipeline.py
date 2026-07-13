@@ -22,6 +22,7 @@ from tarjomeh.core.llm_client import LLMClient
 from tarjomeh.parsers.base import BaseParser, Document, EXTENSION_PARSER_MAP
 from tarjomeh.chunking.chunker import SemanticChunker, FixedChunker, Chunk
 from tarjomeh.memory.manager import MemoryManager, MemoryContext
+from tarjomeh.memory.proper_nouns import INLINE_ORIGINAL_CATEGORIES
 from tarjomeh.context.web_searcher import WebContextSearcher
 from tarjomeh.glossary.manager import GlossaryManager
 from tarjomeh.glossary.compliance import GlossaryComplianceChecker
@@ -248,6 +249,7 @@ def _glossary_entries_for_event(entries: list[Any]) -> list[dict[str, Any]]:
             "author": getattr(entry, "author", None),
             "glossary": getattr(entry, "glossary", None),
             "is_auto": bool(getattr(entry, "is_auto", False)),
+            "include_original": bool(getattr(entry, "include_original", False)),
         })
     return payload
 
@@ -265,6 +267,80 @@ def _blocking_critique_issues(critique: Any) -> list[str]:
         for issue in getattr(critique, "issues", []) or []
         if _BLOCKING_CRITIQUE_RE.match(str(issue).strip())
     ]
+
+
+def _filter_critique_policy_conflicts(
+    critique: Any,
+    source_text: str,
+    allowed_originals: list[str],
+) -> list[dict[str, Any]]:
+    """Remove only critic issues that contradict deterministic inline policy."""
+    details = list(getattr(critique, "issue_details", []) or [])
+    if not details:
+        return []
+
+    allowed = {value.casefold() for value in allowed_originals}
+    kept_details: list[dict[str, Any]] = []
+    conflicts: list[dict[str, Any]] = []
+    for detail in details:
+        current = str(detail.get("current_translation", ""))
+        suggested = str(detail.get("suggested_fix", ""))
+        current_originals = {
+            value.casefold(): value
+            for value in protected_english_originals(source_text, current)
+        }
+        suggested_originals = {
+            value.casefold(): value
+            for value in protected_english_originals(source_text, suggested)
+        }
+        removed = set(current_originals) - set(suggested_originals)
+        added = set(suggested_originals) - set(current_originals)
+        removed_authorized = sorted(
+            current_originals[value] for value in removed if value in allowed
+        )
+        added_unauthorized = sorted(
+            suggested_originals[value] for value in added
+            if value not in allowed and not any(char.isdigit() for char in value)
+        )
+        removed_citations = sorted(
+            current_originals[value] for value in removed
+            if any(char.isdigit() for char in value)
+        )
+        if removed_authorized or added_unauthorized or removed_citations:
+            conflicts.append({
+                "issue": detail.get("formatted", ""),
+                "removed_authorized": removed_authorized,
+                "added_unauthorized": added_unauthorized,
+                "removed_citations": removed_citations,
+            })
+        else:
+            kept_details.append(detail)
+
+    if conflicts:
+        critique.issue_details = kept_details
+        critique.issues = [
+            str(detail.get("formatted", ""))
+            for detail in kept_details
+            if str(detail.get("formatted", "")).strip()
+        ]
+    return conflicts
+
+
+def _inline_eligible_nouns_from_state(noun_state: Any) -> dict[str, str]:
+    """Read eligible noun mappings from current or legacy memory checkpoints."""
+    if not isinstance(noun_state, dict):
+        return {}
+    nouns = noun_state.get("nouns", {})
+    if not isinstance(nouns, dict):
+        return {}
+    categories = noun_state.get("categories", {})
+    if not isinstance(categories, dict):
+        categories = {}
+    return {
+        source: target
+        for source, target in nouns.items()
+        if str(categories.get(source, "proper_noun")) in INLINE_ORIGINAL_CATEGORIES
+    }
 
 
 def _critique_passes_quality_gate(critique: Any, threshold: float) -> bool:
@@ -731,13 +807,18 @@ class TranslationPipeline:
                     term = item.get("term")
                     persian = item.get("suggested_persian")
                     if term and persian:
+                        category = str(item.get("category", "term"))
                         auto_terms[term] = {
                             "target": persian,
                             "context": item.get("context", ""),
                             "domain": item.get("domain", "") or self.config.translation.domain,
                             "sense": item.get("sense", ""),
                             "author": item.get("author", ""),
+                            "category": category,
                         }
+                        memory_manager.proper_nouns.add_noun(
+                            term, persian, category=category
+                        )
                 glossary_manager.merge_auto_extracted(auto_terms)
                 self.db.save_job_artifact(
                     job_id,
@@ -769,6 +850,13 @@ class TranslationPipeline:
             self.db.log_chunk_event(
                 job_id, 0, "auto_extraction_skipped", {"enabled": False}
             )
+
+        # Curated glossary terms opt into English originals only explicitly.
+        for entry in glossary_manager.entries:
+            if bool(getattr(entry, "include_original", False)):
+                memory_manager.proper_nouns.add_noun(
+                    entry.source, entry.target, category="approved_term"
+                )
 
         research_artifact = self._prepare_book_research(
             job_id,
@@ -843,6 +931,7 @@ class TranslationPipeline:
                         if self.config.memory.enable_4layer:
                             try:
                                 self._run_async(memory_manager.update_proper_nouns(self.llm_client, chunk.text))
+                                memory_manager.proper_nouns.mark_seen_in_text(chunk.text)
                             except Exception as e:
                                 logger.warning("Incremental proper noun extraction failed: %s", e)
 
@@ -971,6 +1060,7 @@ class TranslationPipeline:
                         if self.config.memory.enable_4layer:
                             try:
                                 self._run_async(memory_manager.update_proper_nouns(self.llm_client, chunk.text))
+                                memory_manager.proper_nouns.mark_seen_in_text(chunk.text)
                             except Exception as e:
                                 logger.warning("Incremental proper noun extraction failed: %s", e)
 
@@ -1183,7 +1273,7 @@ class TranslationPipeline:
         )
         note_formats = {"docx", "epub", "markdown"}
         noun_state = memory_manager.proper_nouns.serialize()
-        proper_nouns = dict(noun_state.get("nouns", {}))
+        proper_nouns = memory_manager.proper_nouns.inline_eligible_nouns()
         if note_mode in {"inline", "both"}:
             restored = ensure_inline_proper_noun_originals(
                 trans_doc, proper_nouns, typographer
@@ -1290,9 +1380,8 @@ class TranslationPipeline:
         note_mode = effective_term_notes_mode(self.config.output.term_notes, fmt)
         memory_state = self.db.get_memory_state(job_id) or {}
         noun_state = memory_state.get("proper_nouns", {})
-        proper_nouns = (
-            noun_state.get("nouns", {}) if isinstance(noun_state, dict) else {}
-        )
+        proper_nouns = _inline_eligible_nouns_from_state(noun_state)
+
         typographer = PersianTypographer(self.config.to_dict().get("persian"))
         if note_mode in {"inline", "both"}:
             ensure_inline_proper_noun_originals(
@@ -1373,6 +1462,11 @@ class TranslationPipeline:
         saved_mem = self.db.get_memory_state(job_id)
         if saved_mem:
             memory_manager.from_dict(saved_mem)
+        for entry in glossary_manager.entries:
+            if bool(getattr(entry, "include_original", False)):
+                memory_manager.proper_nouns.add_noun(
+                    entry.source, entry.target, category="approved_term"
+                )
         research_artifact = self.db.get_job_artifact(job_id, "book_research")
         if research_artifact is not None:
             memory_manager.book_context = _research_context_for_memory(
@@ -1426,6 +1520,16 @@ class TranslationPipeline:
                     self.config.translation, "integrity_max_growth_ratio", 1.75
                 ),
             )
+            eligible_originals = {
+                value.casefold()
+                for value in memory_manager.proper_nouns.inline_eligible_nouns()
+            }
+            manual_allowed_originals = [
+                value for value in protected_english_originals(
+                    chunks[chunk_index].text, previous_translation
+                )
+                if value.casefold() in eligible_originals
+            ]
             manual_result = manual_gate.evaluate(
                 chunks[chunk_index].text,
                 translation,
@@ -1435,6 +1539,7 @@ class TranslationPipeline:
                     self.config.output.term_notes,
                     self.config.output.format,
                 ) in {"inline", "both"},
+                allowed_inline_originals=manual_allowed_originals,
             )
             self.db.log_chunk_event(
                 job_id, chunk_index, "integrity_check_completed",
@@ -1684,6 +1789,38 @@ class TranslationPipeline:
             self.config.output.format,
         )
         protect_inline_english = effective_notes_mode in {"inline", "both"}
+        if lock:
+            with lock:
+                pending_originals = memory_manager.proper_nouns.pending_inline_originals(
+                    chunk.text
+                )
+        else:
+            pending_originals = memory_manager.proper_nouns.pending_inline_originals(
+                chunk.text
+            )
+        allowed_inline_originals = (
+            sorted(pending_originals, key=str.casefold)
+            if protect_inline_english else []
+        )
+        allowed_originals_text = (
+            ", ".join(f"({value})" for value in allowed_inline_originals)
+            or "(none)"
+        )
+        inline_policy_context = (
+            "\n\n### Deterministic English-original allowlist for this chunk\n"
+            f"Authorized first-occurrence originals: {allowed_originals_text}\n"
+            "Only these listed originals may be added as English parentheticals. "
+            "Ordinary concepts and all unlisted terms must remain Persian-only. "
+            "Source citations are separate and must be preserved."
+        )
+        self.db.log_chunk_event(job_id, idx, "inline_original_policy", {
+            "enabled": protect_inline_english,
+            "allowed_originals": allowed_inline_originals,
+            "categories": {
+                source: memory_manager.proper_nouns.category_for(source)
+                for source in allowed_inline_originals
+            },
+        })
         sys_prompt = TRANSLATE_SYSTEM_PROMPT.format(
             domain=self.config.translation.domain,
             style_register=style_register_value,
@@ -1695,7 +1832,7 @@ class TranslationPipeline:
         user_content = TRANSLATE_CHUNK_PROMPT.format(
             exemplars=exemplars,
             glossary_terms=glossary_terms_str,
-            memory_context=mem_context.format(),
+            memory_context=mem_context.format() + inline_policy_context,
             web_context=web_context_str,
             previous_translation=prev_trans,
             source_text=chunk.text,
@@ -1719,6 +1856,7 @@ class TranslationPipeline:
               "not infer that every ordinary glossary concept requires an "
               "English parenthetical; follow the proper-noun state and the "
               "configured policy above exactly."
+            + inline_policy_context
         )
         self.db.log_chunk_event(job_id, idx, "terminology_context", {
             "chars": len(terminology_ctx),
@@ -1744,6 +1882,8 @@ class TranslationPipeline:
                 chunk.text,
                 translation,
                 stage="initial_translation",
+                protect_inline_english=protect_inline_english,
+                allowed_inline_originals=allowed_inline_originals,
             )
             self.db.log_chunk_event(
                 job_id, idx, "integrity_check_completed", initial_integrity.to_dict()
@@ -1774,6 +1914,24 @@ class TranslationPipeline:
                     )
                     self.db.log_chunk_event(
                         job_id, idx, "critic_response_retried", retry_payload
+                    )
+                policy_conflicts = []
+                if getattr(critique_rep, "valid", True):
+                    policy_conflicts = _filter_critique_policy_conflicts(
+                        critique_rep, chunk.text, allowed_inline_originals
+                    )
+                if policy_conflicts:
+                    self.db.log_chunk_event(
+                        job_id, idx, "critique_policy_conflicts_filtered", {
+                            "iteration": ref_iter,
+                            "count": len(policy_conflicts),
+                            "allowed_originals": allowed_inline_originals,
+                            "conflicts": policy_conflicts,
+                            "message": (
+                                "Only critic instructions contradicting the deterministic "
+                                "English-original policy were withheld from refinement."
+                            ),
+                        }
                     )
                 self.db.log_chunk_event(
                     job_id,
@@ -1892,6 +2050,7 @@ class TranslationPipeline:
                         stage="refinement",
                         protected_terms=protected_targets,
                         protect_inline_english=protect_inline_english,
+                        allowed_inline_originals=allowed_inline_originals,
                     )
                     integrity_payload = edit_integrity.to_dict()
                     self.db.log_chunk_event(
@@ -1947,8 +2106,17 @@ class TranslationPipeline:
                             f"- English: {v.term} -> expected Persian: {v.expected} (status: {v.status})"
                             for v in report.violations
                         )
+                        allowed_originals_folded = {
+                            value.casefold() for value in allowed_inline_originals
+                        }
                         protected_originals = (
-                            protected_english_originals(chunk.text, translation)
+                            [
+                                value
+                                for value in protected_english_originals(
+                                    chunk.text, translation
+                                )
+                                if value.casefold() in allowed_originals_folded
+                            ]
                             if protect_inline_english else []
                         )
                         protected_originals_text = (
@@ -1967,8 +2135,10 @@ Current Translation:
 Glossary violations found:
 {violations_text}
 
-Protected first-occurrence English originals already present:
+Authorized first-occurrence English originals already present:
 {protected_originals_text}
+
+Do not add English parentheticals for any other term.
 
 Please re-translate the text, ensuring that you use the expected glossary terms exactly as prescribed.
 Preserve every protected English original above exactly once. Do not remove or relocate
@@ -1992,6 +2162,7 @@ Output ONLY the corrected Persian translation.
                                 stage="glossary_auto_correction",
                                 protected_terms=protected_targets,
                                 protect_inline_english=protect_inline_english,
+                                allowed_inline_originals=allowed_inline_originals,
                                 enforce_all_terms=True,
                             )
                             correction_integrity = correction_result.to_dict()
@@ -2058,6 +2229,8 @@ Output ONLY the corrected Persian translation.
                 translation,
                 stage="final_translation",
                 protected_terms=protected_targets,
+                protect_inline_english=protect_inline_english,
+                allowed_inline_originals=allowed_inline_originals,
                 enforce_all_terms=bool(self.config.glossary.enable_compliance_check),
             )
             final_integrity_payload = final_integrity.to_dict()

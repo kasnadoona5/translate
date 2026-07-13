@@ -236,7 +236,7 @@ Return a JSON array where each element has this schema:
 [
   {{
     "term": "<English term as it appears in text>",
-    "category": "person" | "place" | "institution" | "publication" | "theory" | "term",
+    "category": "person" | "place" | "institution" | "organization" | "publication" | "product" | "theory" | "term",
     "context": "<short phrase showing how the term is used>",
     "suggested_persian": "<suggested Persian transliteration or translation, or null>"
   }}
@@ -269,7 +269,7 @@ Each element must have this schema:
 [
   {{
     "term": "<English term>",
-    "category": "person" | "place" | "institution" | "publication" | "theory" | "term",
+    "category": "person" | "place" | "institution" | "organization" | "publication" | "product" | "theory" | "term",
     "context": "<short phrase showing how the term is used>",
     "suggested_persian": "<suggested Persian transliteration or translation, or null>"
   }}

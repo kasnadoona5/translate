@@ -799,13 +799,23 @@ select {
 
 .glossary-form {
     display: grid;
-    grid-template-columns: 1fr 1fr 0.8fr 1.2fr auto;
+    grid-template-columns: 1fr 1fr 0.8fr 1.2fr auto auto;
     align-items: end;
     gap: 9px;
     padding: 14px;
     border: 1px solid var(--line);
     border-radius: 5px;
     background: var(--surface-muted);
+}
+
+.glossary-inline-option {
+    min-height: 34px;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--muted);
+    font-size: 11px;
+    white-space: nowrap;
 }
 
 .research-block {

@@ -45,6 +45,7 @@ class CritiqueResult:
     register: float = 0.0
     average: float = 0.0
     issues: list[str] = field(default_factory=list)
+    issue_details: list[dict[str, Any]] = field(default_factory=list)
     raw_response: str = ""
     valid: bool = True
     validation_errors: list[str] = field(default_factory=list)
@@ -63,6 +64,7 @@ class CritiqueResult:
             "register": self.register,
             "average": self.average,
             "issues": self.issues,
+            "issue_details": self.issue_details,
             "raw_response": self.raw_response,
             "valid": self.valid,
             "validation_errors": self.validation_errors,
@@ -79,6 +81,7 @@ class CritiqueResult:
             register=float(data.get("register", 0)),
             average=float(data.get("average", 0.0)),
             issues=list(data.get("issues", [])),
+            issue_details=list(data.get("issue_details", [])),
             raw_response=str(data.get("raw_response", "")),
             valid=bool(data.get("valid", True)),
             validation_errors=list(data.get("validation_errors", [])),
@@ -230,28 +233,33 @@ issues array. Do not add markdown fences or commentary."""
             # Preserve severity + source segment (the refiner is instructed to
             # fix critical issues first) and sort critical → major → minor.
             severity_rank = {"critical": 0, "major": 1, "minor": 2}
-            parsed: list[tuple[int, str]] = []
+            parsed: list[tuple[int, str, dict[str, Any]]] = []
             for issue in raw_issues:
                 if isinstance(issue, dict):
-                    severity = str(issue.get("severity", "minor")).lower()
-                    category = issue.get("category", "")
-                    segment = issue.get("source_segment", "")
-                    current = issue.get("current_translation", "")
-                    fix = issue.get("suggested_fix", "")
-                    explanation = issue.get("explanation", "")
+                    detail = dict(issue)
+                    severity = str(detail.get("severity", "minor")).lower()
+                    category = detail.get("category", "")
+                    segment = detail.get("source_segment", "")
+                    current = detail.get("current_translation", "")
+                    fix = detail.get("suggested_fix", "")
+                    explanation = detail.get("explanation", "")
                     text = f"[{severity.upper()}/{category}]"
                     if segment:
                         text += f' source: "{segment}"'
                     if current:
                         text += f' | current: "{current}"'
                     text += f" | fix: {fix} (Reason: {explanation})"
-                    parsed.append((severity_rank.get(severity, 2), text))
+                    detail["formatted"] = text
+                    parsed.append((severity_rank.get(severity, 2), text, detail))
                 else:
-                    parsed.append((2, str(issue)))
-            parsed.sort(key=lambda t: t[0])
-            issues = [text for _, text in parsed]
+                    text = str(issue)
+                    parsed.append((2, text, {"formatted": text}))
+            parsed.sort(key=lambda item: item[0])
+            issues = [text for _, text, _ in parsed]
+            issue_details = [detail for _, _, detail in parsed]
         else:
             issues = []
+            issue_details = []
             errors.append("issues_must_be_array")
 
         return CritiqueResult(
@@ -261,6 +269,7 @@ issues array. Do not add markdown fences or commentary."""
             register=register,
             average=average,
             issues=issues,
+            issue_details=issue_details,
             raw_response=raw,
             valid=not errors,
             validation_errors=errors,

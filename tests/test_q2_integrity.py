@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 from tarjomeh.chunking.chunker import Chunk
 from tarjomeh.core.config import TarjomehConfig
-from tarjomeh.core.pipeline import TranslationPipeline
+from tarjomeh.core.pipeline import TranslationPipeline, _filter_critique_policy_conflicts
 from tarjomeh.quality.back_translator import BackTranslator
 from tarjomeh.quality.critique import CritiqueResult, TranslationCritique
 from tarjomeh.quality.integrity import PostEditIntegrityGate
@@ -145,6 +145,110 @@ def test_back_translation_uses_structured_risks_not_overlap_alone() -> None:
     assert "numbers_missing_or_changed" in drift.diagnostics["risk_flags"]
     assert "numbers_added_or_changed" in drift.diagnostics["risk_flags"]
     assert "negation_mismatch" in drift.diagnostics["risk_flags"]
+
+
+def test_integrity_uses_authorized_original_allowlist() -> None:
+    gate = PostEditIntegrityGate()
+    source = "capital Monsanto field"
+    previous = "sarmaye (capital), monsanto (Monsanto), meydan."
+    cleaned = "sarmaye, monsanto (Monsanto), meydan."
+
+    accepted = gate.evaluate(
+        source,
+        cleaned,
+        previous=previous,
+        protect_inline_english=True,
+        allowed_inline_originals=["Monsanto"],
+    )
+    assert accepted.accepted
+
+    missing_name = gate.evaluate(
+        source,
+        "sarmaye, monsanto, meydan.",
+        previous=previous,
+        protect_inline_english=True,
+        allowed_inline_originals=["Monsanto"],
+    )
+    assert "english_original_removed" in {
+        finding.check_id for finding in missing_name.blocking
+    }
+
+    unauthorized = gate.evaluate(
+        source,
+        "sarmaye, monsanto (Monsanto), meydan (field).",
+        previous=cleaned,
+        protect_inline_english=True,
+        allowed_inline_originals=["Monsanto"],
+    )
+    assert "unauthorized_english_original_added" in {
+        finding.check_id for finding in unauthorized.blocking
+    }
+
+
+def test_source_citations_are_separate_from_inline_original_policy() -> None:
+    gate = PostEditIntegrityGate()
+    source = "Marx discusses this point (Marx, 1973)."
+    previous = "Marx says so (Marx, 1973)."
+
+    accepted = gate.evaluate(
+        source,
+        previous,
+        protect_inline_english=True,
+        allowed_inline_originals=[],
+    )
+    assert accepted.accepted
+    assert not {
+        finding.check_id for finding in accepted.findings
+    } & {"unauthorized_english_original_present"}
+
+    removed = gate.evaluate(
+        source,
+        "Marx says so.",
+        previous=previous,
+        protect_inline_english=True,
+        allowed_inline_originals=[],
+    )
+    assert "source_citation_removed" in {
+        finding.check_id for finding in removed.blocking
+    }
+
+
+def test_policy_filter_withholds_only_impossible_critic_instructions() -> None:
+    issues = [
+        {
+            "formatted": "add capital",
+            "current_translation": "sarmaye",
+            "suggested_fix": "sarmaye (capital)",
+        },
+        {
+            "formatted": "remove Monsanto",
+            "current_translation": "monsanto (Monsanto)",
+            "suggested_fix": "monsanto",
+        },
+        {
+            "formatted": "accuracy fix",
+            "current_translation": "wrong rendering",
+            "suggested_fix": "better rendering",
+        },
+    ]
+    critique = CritiqueResult(
+        accuracy=8,
+        fluency=9,
+        terminology=7,
+        register=9,
+        average=8.25,
+        issues=[item["formatted"] for item in issues],
+        issue_details=issues,
+    )
+
+    conflicts = _filter_critique_policy_conflicts(
+        critique, "capital Monsanto", ["Monsanto"]
+    )
+
+    assert len(conflicts) == 2
+    assert critique.issues == ["accuracy fix"]
+    assert critique.accuracy == 8
+    assert critique.average == 8.25
 
 
 def test_q2_config_bounds_are_validated() -> None:

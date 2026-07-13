@@ -239,6 +239,27 @@ class TestGlossaryFeatures(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_include_original_csv_opt_in_round_trip(self) -> None:
+        manager = GlossaryManager()
+        manager.add_term(
+            "aggregate capital",
+            "sarmaye koll",
+            include_original=True,
+        )
+        manager.add_term("capital", "sarmaye")
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            csv_path = Path(temp_dir) / "glossary.csv"
+            manager.save(csv_path)
+            restored = GlossaryManager()
+            restored.load(csv_path)
+            by_source = {entry.source: entry for entry in restored.entries}
+            self.assertTrue(by_source["aggregate capital"].include_original)
+            self.assertFalse(by_source["capital"].include_original)
+        finally:
+            shutil.rmtree(temp_dir)
+
     def test_auto_extracted_terms_do_not_override_curated_terms(self) -> None:
         manager = GlossaryManager()
         manager.add_term("capital", "سرمایه", context="curated Marx term")

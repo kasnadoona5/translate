@@ -178,7 +178,11 @@ class MemoryManager:
                     term = item.get("term")
                     persian = item.get("suggested_persian")
                     if term and persian:
-                        self.proper_nouns.add_noun(term, persian)
+                        self.proper_nouns.add_noun(
+                            term,
+                            persian,
+                            category=str(item.get("category", "term")),
+                        )
             elif isinstance(items, dict):
                 # Handle unexpected single dict object wrapping the list
                 terms_list = items.get("terms", []) or items.get("extracted_terms", []) or []
@@ -186,7 +190,11 @@ class MemoryManager:
                     term = item.get("term")
                     persian = item.get("suggested_persian")
                     if term and persian:
-                        self.proper_nouns.add_noun(term, persian)
+                        self.proper_nouns.add_noun(
+                            term,
+                            persian,
+                            category=str(item.get("category", "term")),
+                        )
         except Exception as exc:
             logger.warning("Failed to extract proper nouns incrementally: %s", exc)
 

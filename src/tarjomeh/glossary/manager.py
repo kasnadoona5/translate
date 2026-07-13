@@ -7,7 +7,7 @@ Loads, saves, and queries CSV-based glossaries whose rows contain:
 Phase-3 glossaries may add optional columns after the BabelDOC-compatible
 columns:
 
-    sense, author, is_auto
+    sense, author, is_auto, include_original
 
 Term matching is case-insensitive with word-boundary awareness so that
 partial matches (e.g., "state" inside "statement") are avoided.
@@ -25,7 +25,7 @@ from typing import Any, Iterable
 # BabelDOC-compatible base columns. Optional columns are additive so old CSVs
 # continue to work unchanged.
 BASE_FIELDNAMES = ["source", "target", "tgt_lng", "context", "domain"]
-OPTIONAL_FIELDNAMES = ["sense", "author", "is_auto"]
+OPTIONAL_FIELDNAMES = ["sense", "author", "is_auto", "include_original"]
 FIELDNAMES = BASE_FIELDNAMES + OPTIONAL_FIELDNAMES
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9\u0600-\u06FF']+", re.UNICODE)
@@ -59,6 +59,7 @@ class GlossaryEntry:
     author: str = ""
     glossary: str = ""
     is_auto: bool = False
+    include_original: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +111,7 @@ class GlossaryManager:
                     author=row.get("author", "").strip(),
                     glossary=source_name,
                     is_auto=str(row.get("is_auto", "")).strip().lower() in ("1", "true", "yes"),
+                    include_original=str(row.get("include_original", "")).strip().lower() in ("1", "true", "yes"),
                 )
                 if entry.source and entry.target:
                     self._add_entry(entry)
@@ -177,6 +179,7 @@ class GlossaryManager:
         author: str = "",
         glossary: str = "",
         is_auto: bool = False,
+        include_original: bool = False,
     ) -> None:
         """Add or update a glossary term.
 
@@ -198,6 +201,7 @@ class GlossaryManager:
                 existing.author = author or existing.author
                 existing.glossary = glossary or existing.glossary
                 existing.is_auto = existing.is_auto or is_auto
+                existing.include_original = existing.include_original or include_original
                 self._rebuild_patterns()
                 return
 
@@ -215,6 +219,7 @@ class GlossaryManager:
                 existing.domain = domain or existing.domain
                 existing.glossary = glossary or existing.glossary
                 existing.is_auto = existing.is_auto or is_auto
+                existing.include_original = existing.include_original or include_original
                 self._rebuild_patterns()
                 return
 
@@ -228,6 +233,7 @@ class GlossaryManager:
             author=author.strip(),
             glossary=glossary.strip(),
             is_auto=is_auto,
+            include_original=include_original,
         )
         self._add_entry(entry)
 
@@ -467,12 +473,16 @@ def _entry_to_row(entry: GlossaryEntry) -> dict[str, str]:
         "sense": entry.sense,
         "author": entry.author,
         "is_auto": "true" if entry.is_auto else "",
+        "include_original": "true" if entry.include_original else "",
     }
 
 
 def _fieldnames_for_entries(entries: Iterable[GlossaryEntry]) -> list[str]:
     entries_list = list(entries)
-    if any(entry.sense or entry.author or entry.is_auto for entry in entries_list):
+    if any(
+        entry.sense or entry.author or entry.is_auto or entry.include_original
+        for entry in entries_list
+    ):
         return FIELDNAMES
     return BASE_FIELDNAMES
 

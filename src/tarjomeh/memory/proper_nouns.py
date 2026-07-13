@@ -13,6 +13,25 @@ import re
 from typing import Any
 
 
+INLINE_ORIGINAL_CATEGORIES = frozenset({
+    "proper_noun", "person", "place", "institution", "organization",
+    "publication", "product", "theory", "approved_term",
+})
+_CATEGORY_ALIASES = {
+    "organisation": "organization",
+    "book": "publication",
+    "article": "publication",
+    "journal": "publication",
+    "work": "publication",
+    "named_theory": "theory",
+}
+
+
+def _normalise_category(category: str) -> str:
+    value = (category or "proper_noun").strip().lower().replace("-", "_").replace(" ", "_")
+    return _CATEGORY_ALIASES.get(value, value)
+
+
 class ProperNouns:
     """Proper noun translation memory layer.
 
@@ -23,9 +42,10 @@ class ProperNouns:
 
     def __init__(self) -> None:
         self._nouns: dict[str, str] = {}
+        self._categories: dict[str, str] = {}
         self._introduced: set[str] = set()
 
-    def add_noun(self, english: str, persian: str) -> None:
+    def add_noun(self, english: str, persian: str, category: str = "proper_noun") -> None:
         """Add or update a proper noun mapping.
 
         Parameters
@@ -41,6 +61,17 @@ class ProperNouns:
             # Never overwrite an established rendering with a new suggestion —
             # consistency across the book beats a "better" late transliteration.
             self._nouns.setdefault(en_key, fa_val)
+            new_category = _normalise_category(category)
+            current_category = self._categories.get(en_key)
+            if (
+                current_category is None
+                or new_category == "approved_term"
+                or (
+                    current_category not in INLINE_ORIGINAL_CATEGORIES
+                    and new_category in INLINE_ORIGINAL_CATEGORIES
+                )
+            ):
+                self._categories[en_key] = new_category
 
     def mark_introduced(self, english: str) -> None:
         """Mark a noun as already introduced (parenthetical already shown)."""
@@ -56,14 +87,38 @@ class ProperNouns:
         not repeat the English parenthetical.
         """
         for en in self._nouns:
-            if en in self._introduced:
+            if en in self._introduced or not self.is_inline_eligible(en):
                 continue
-            if re.search(rf"\b{re.escape(en)}\b", source_text):
+            if re.search(rf"\b{re.escape(en)}\b", source_text, re.IGNORECASE):
                 self._introduced.add(en)
 
     def is_introduced(self, english: str) -> bool:
         """Return True if the noun's first occurrence has already happened."""
         return english.strip() in self._introduced
+
+    def category_for(self, english: str) -> str:
+        """Return the semantic category retained from extraction."""
+        return self._categories.get(english.strip(), "proper_noun")
+
+    def is_inline_eligible(self, english: str) -> bool:
+        """Return whether a noun may carry a first-occurrence English original."""
+        return self.category_for(english) in INLINE_ORIGINAL_CATEGORIES
+
+    def inline_eligible_nouns(self) -> dict[str, str]:
+        """Return only deterministic inline-original candidates."""
+        return {
+            source: target for source, target in self._nouns.items()
+            if self.is_inline_eligible(source)
+        }
+
+    def pending_inline_originals(self, source_text: str) -> dict[str, str]:
+        """Return eligible, not-yet-introduced originals present in one chunk."""
+        return {
+            source: target for source, target in self._nouns.items()
+            if self.is_inline_eligible(source)
+            and source not in self._introduced
+            and re.search(rf"\b{re.escape(source)}\b", source_text, re.IGNORECASE)
+        }
 
     def get_context(self, include_inline_originals: bool = True) -> str:
         """Return a formatted string representing the proper nouns dictionary.
@@ -83,7 +138,10 @@ class ProperNouns:
             return ""
         lines = []
         for en, fa in sorted(self._nouns.items()):
-            if en in self._introduced:
+            category = self.category_for(en)
+            if not self.is_inline_eligible(en):
+                marker = f"[terminology only; category={category}; never add an English parenthetical]"
+            elif en in self._introduced:
                 marker = "[introduced]"
             elif not include_inline_originals:
                 marker = (
@@ -99,6 +157,7 @@ class ProperNouns:
         """Serialize the layer state for database checkpointing."""
         return {
             "nouns": dict(self._nouns),
+            "categories": dict(self._categories),
             "introduced": sorted(self._introduced),
         }
 
@@ -110,15 +169,22 @@ class ProperNouns:
         """
         if not data:
             self._nouns = {}
+            self._categories = {}
             self._introduced = set()
             return
 
         if "nouns" in data and isinstance(data.get("nouns"), dict):
             self._nouns = dict(data["nouns"])
+            stored_categories = data.get("categories", {})
+            self._categories = {
+                source: _normalise_category(str(stored_categories.get(source, "proper_noun")))
+                for source in self._nouns
+            }
             self._introduced = set(data.get("introduced", []))
         else:
             # Legacy checkpoint: flat mapping, no introduction tracking.
             self._nouns = {k: v for k, v in data.items() if isinstance(v, str)}
+            self._categories = {source: "proper_noun" for source in self._nouns}
             self._introduced = set()
 
     def __len__(self) -> int:

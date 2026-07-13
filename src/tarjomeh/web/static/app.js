@@ -755,7 +755,7 @@ async function fetchGlossaryTerms() {
             row.className = `glossary-row ${term.is_auto ? "auto" : ""}`;
             row.innerHTML = `
                 <span><strong>${escapeHtml(term.source)}</strong> to ${escapeHtml(term.target)}</span>
-                <span>${escapeHtml(term.domain || "")}</span>
+                <span>${escapeHtml(term.domain || "")} ${term.include_original ? "| English on first use" : ""}</span>
                 <span class="glossary-actions">
                     ${term.is_auto ? `<button class="action-btn" onclick="approveGlossaryTerm(${term.index})">Approve</button>` : ""}
                     <button class="action-btn danger" onclick="deleteGlossaryTerm(${term.index})">Delete</button>
@@ -774,7 +774,8 @@ async function addGlossaryTerm() {
         source: document.getElementById("glossSource").value,
         target: document.getElementById("glossTarget").value,
         domain: document.getElementById("glossDomain").value,
-        context: document.getElementById("glossContext").value
+        context: document.getElementById("glossContext").value,
+        include_original: document.getElementById("glossIncludeOriginal").checked
     };
     const response = await fetch(authUrl("/api/glossary/terms"), {
         method: "POST",
@@ -787,6 +788,7 @@ async function addGlossaryTerm() {
         return;
     }
     ["glossSource", "glossTarget", "glossDomain", "glossContext"].forEach(id => document.getElementById(id).value = "");
+    document.getElementById("glossIncludeOriginal").checked = false;
     fetchGlossaryTerms();
 }
 

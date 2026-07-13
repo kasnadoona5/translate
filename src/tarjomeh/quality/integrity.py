@@ -19,7 +19,7 @@ _NOTE_RE = re.compile(r"\[(\d+)\]|([\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u
 _PERSIAN_RE = re.compile(r"[\u0600-\u06ff]")
 _ASCII_WORD_RE = re.compile(r"[A-Za-z]{2,}")
 _JSON_LEAK_RE = re.compile(r'(^\s*\{|"(?:translation|decision|rationale)"\s*:)', re.IGNORECASE)
-_ENGLISH_PAREN_RE = re.compile(r"\(([A-Za-z][A-Za-z0-9 .&'\u2019\-]{1,80})\)")
+_ENGLISH_PAREN_RE = re.compile(r"\(([A-Za-z][A-Za-z0-9 .,&':;\u2019\-]{1,80})\)")
 
 
 def normalize_for_match(text: str) -> str:
@@ -62,6 +62,14 @@ def protected_english_originals(source: str, translation: str) -> list[str]:
         if cleaned and cleaned.casefold() in source_folded:
             values.append(cleaned)
     return sorted(set(values), key=str.casefold)
+
+
+def protected_source_citations(source: str, translation: str) -> list[str]:
+    """Return numeric English parentheticals that also occur in the source."""
+    return [
+        value for value in protected_english_originals(source, translation)
+        if any(char.isdigit() for char in value)
+    ]
 
 
 @dataclass
@@ -129,6 +137,7 @@ class PostEditIntegrityGate:
         stage: str = "final",
         protected_terms: Iterable[str] = (),
         protect_inline_english: bool = False,
+        allowed_inline_originals: Iterable[str] | None = None,
         enforce_all_terms: bool = False,
     ) -> IntegrityResult:
         source = source or ""
@@ -247,10 +256,28 @@ class PostEditIntegrityGate:
                 missing=missing_terms,
             )
 
-        if protect_inline_english and previous:
+        if protect_inline_english:
+            previous_originals = protected_english_originals(source, previous)
+            candidate_originals = protected_english_originals(source, candidate)
+            previous_folded = {value.casefold() for value in previous_originals}
+            candidate_folded = {value.casefold() for value in candidate_originals}
+            allowed_folded = (
+                {
+                    str(value).strip().casefold()
+                    for value in allowed_inline_originals
+                    if str(value).strip()
+                }
+                if allowed_inline_originals is not None else None
+            )
+            protected_previous = previous_originals
+            if allowed_folded is not None:
+                protected_previous = [
+                    value for value in previous_originals
+                    if value.casefold() in allowed_folded
+                ]
             missing_originals = [
-                value for value in protected_english_originals(source, previous)
-                if value.casefold() not in candidate.casefold()
+                value for value in protected_previous
+                if value.casefold() not in candidate_folded
             ]
             if missing_originals:
                 add(
@@ -258,6 +285,38 @@ class PostEditIntegrityGate:
                     "A required first-occurrence English original was removed.",
                     missing=missing_originals,
                 )
+
+            if allowed_folded is not None:
+                unauthorized = [
+                    value for value in candidate_originals
+                    if value.casefold() not in allowed_folded
+                    and value.casefold() not in previous_folded
+                    and not any(char.isdigit() for char in value)
+                ]
+                if unauthorized and previous:
+                    add(
+                        "unauthorized_english_original_added", "blocking",
+                        "The edit added an English parenthetical not authorized by policy.",
+                        added=unauthorized,
+                    )
+                elif unauthorized:
+                    add(
+                        "unauthorized_english_original_present", "warning",
+                        "The initial translation contains an unauthorized English parenthetical.",
+                        present=unauthorized,
+                    )
+
+            if previous:
+                missing_citations = [
+                    value for value in protected_source_citations(source, previous)
+                    if value.casefold() not in candidate_folded
+                ]
+                if missing_citations:
+                    add(
+                        "source_citation_removed", "blocking",
+                        "A source-grounded citation parenthetical was removed.",
+                        missing=missing_citations,
+                    )
 
         if source_paragraphs and len(source_paragraphs[0]) <= 100 and len(source_paragraphs) > 1:
             if not candidate_paragraphs or len(candidate_paragraphs[0]) > 180:

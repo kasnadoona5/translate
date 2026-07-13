@@ -1022,6 +1022,7 @@ def _register_api(app: Flask) -> None:
                 author=str(term.get("author", "")).strip(),
                 glossary="book_research_approved",
                 is_auto=False,
+                include_original=False,
             ))
             _save_glossary_entries(path, entries)
 
@@ -1094,6 +1095,7 @@ def _register_api(app: Flask) -> None:
             sense=str(data.get("sense", "")).strip(),
             author=str(data.get("author", "")).strip(),
             is_auto=bool(data.get("is_auto", False)),
+            include_original=bool(data.get("include_original", False)),
         )
         if not entry.source or not entry.target:
             return jsonify({"error": "source and target are required"}), 400
@@ -1132,6 +1134,7 @@ def _register_api(app: Flask) -> None:
             author=str(data.get("author", current.author)).strip(),
             glossary=current.glossary,
             is_auto=bool(data.get("is_auto", current.is_auto)),
+            include_original=bool(data.get("include_original", current.include_original)),
         )
         if not entries[index].source or not entries[index].target:
             return jsonify({"error": "source and target are required"}), 400
@@ -1163,6 +1166,7 @@ def _register_api(app: Flask) -> None:
             author=e.author,
             glossary=e.glossary,
             is_auto=False,
+            include_original=e.include_original,
         )
         _save_glossary_entries(path, entries)
         return jsonify({"status": "approved", "term": _glossary_entry_payload(index, entries[index])})
@@ -1197,6 +1201,7 @@ def _glossary_entry_payload(index: int, entry: Any) -> dict[str, Any]:
         "author": entry.author,
         "glossary": entry.glossary,
         "is_auto": entry.is_auto,
+        "include_original": entry.include_original,
     }
 
 

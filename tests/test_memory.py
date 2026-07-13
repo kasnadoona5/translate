@@ -54,6 +54,31 @@ class TestProperNouns(unittest.TestCase):
         self.assertIn("first occurrence pending", ctx)
 
 
+    def test_categories_control_first_occurrence_originals(self) -> None:
+        pn = ProperNouns()
+        pn.add_noun("capital", "sarmaye", category="term")
+        pn.add_noun("Monsanto", "monsanto", category="organization")
+
+        self.assertFalse(pn.is_inline_eligible("capital"))
+        self.assertTrue(pn.is_inline_eligible("Monsanto"))
+
+        pn.add_noun("capital", "sarmaye", category="approved_term")
+        self.assertTrue(pn.is_inline_eligible("capital"))
+        self.assertEqual(
+            pn.pending_inline_originals("capital and Monsanto"),
+            {"capital": "sarmaye", "Monsanto": "monsanto"},
+        )
+
+        restored = ProperNouns()
+        restored.deserialize(pn.serialize())
+        self.assertEqual(restored.category_for("capital"), "approved_term")
+        self.assertEqual(restored.category_for("Monsanto"), "organization")
+
+        pn.mark_seen_in_text("capital and Monsanto")
+        self.assertTrue(pn.is_introduced("capital"))
+        self.assertTrue(pn.is_introduced("Monsanto"))
+
+
 class TestBilingualSummary(unittest.TestCase):
     """Test Layer 2: Running Bilingual Summary."""
 
