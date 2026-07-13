@@ -23,13 +23,13 @@ class CritiqueResult:
 
     Attributes
     ----------
-    accuracy : int
+    accuracy : float
         Faithfulness to source meaning (1-10).
-    fluency : int
+    fluency : float
         Natural flow as Persian academic prose (1-10).
-    terminology : int
+    terminology : float
         Consistency and correctness of domain terms (1-10).
-    register : int
+    register : float
         Appropriateness of formality level (1-10).
     average : float
         Arithmetic mean of the four scores.
@@ -39,17 +39,20 @@ class CritiqueResult:
         The raw LLM response text (for debugging / audit).
     """
 
-    accuracy: int = 0
-    fluency: int = 0
-    terminology: int = 0
-    register: int = 0
+    accuracy: float = 0.0
+    fluency: float = 0.0
+    terminology: float = 0.0
+    register: float = 0.0
     average: float = 0.0
     issues: list[str] = field(default_factory=list)
     raw_response: str = ""
+    valid: bool = True
+    validation_errors: list[str] = field(default_factory=list)
+    attempts: int = 1
 
     def passes_threshold(self, threshold: float = 7.0) -> bool:
         """Return ``True`` if the average score meets *threshold*."""
-        return self.average >= threshold
+        return self.valid and self.average >= threshold
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise to a plain dict (suitable for JSON / SQLite)."""
@@ -61,19 +64,25 @@ class CritiqueResult:
             "average": self.average,
             "issues": self.issues,
             "raw_response": self.raw_response,
+            "valid": self.valid,
+            "validation_errors": self.validation_errors,
+            "attempts": self.attempts,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CritiqueResult:
         """Reconstruct from a dict (e.g. loaded from the database)."""
         return cls(
-            accuracy=int(data.get("accuracy", 0)),
-            fluency=int(data.get("fluency", 0)),
-            terminology=int(data.get("terminology", 0)),
-            register=int(data.get("register", 0)),
+            accuracy=float(data.get("accuracy", 0)),
+            fluency=float(data.get("fluency", 0)),
+            terminology=float(data.get("terminology", 0)),
+            register=float(data.get("register", 0)),
             average=float(data.get("average", 0.0)),
             issues=list(data.get("issues", [])),
             raw_response=str(data.get("raw_response", "")),
+            valid=bool(data.get("valid", True)),
+            validation_errors=list(data.get("validation_errors", [])),
+            attempts=int(data.get("attempts", 1)),
         )
 
 
@@ -95,9 +104,11 @@ class TranslationCritique:
         self,
         llm_client: Any,
         quality_threshold: float = 7.0,
+        max_parse_retries: int = 1,
     ) -> None:
         self._llm = llm_client
         self.quality_threshold = quality_threshold
+        self.max_parse_retries = max(0, max_parse_retries)
 
     async def critique(
         self,
@@ -130,7 +141,33 @@ class TranslationCritique:
         )
 
         raw = await self._llm.chat(prompt)
-        return self._parse_response(raw)
+        result = self._parse_response(raw)
+        result.attempts = 1
+        all_errors = list(result.validation_errors)
+        for retry in range(self.max_parse_retries):
+            if result.valid:
+                break
+            logger.warning("Invalid critique response; requesting JSON repair.")
+            repair_prompt = self._repair_prompt(raw, result.validation_errors)
+            raw = await self._llm.chat(repair_prompt)
+            result = self._parse_response(raw)
+            result.attempts = retry + 2
+            all_errors.extend(result.validation_errors)
+        if result.attempts > 1:
+            result.validation_errors = list(dict.fromkeys(all_errors))
+        return result
+
+    @staticmethod
+    def _repair_prompt(raw: str, errors: list[str]) -> str:
+        return f"""The previous translation critique was not valid JSON for the required schema.
+Validation errors: {json.dumps(errors, ensure_ascii=False)}
+
+Previous response:
+{raw}
+
+Return ONLY a corrected JSON object with numeric 1-10 scores for accuracy,
+fluency, terminology, and register; an optional numeric overall score; and an
+issues array. Do not add markdown fences or commentary."""
 
     # ── response parsing ─────────────────────────────────────────────
 
@@ -156,22 +193,34 @@ class TranslationCritique:
 
         try:
             data: dict[str, Any] = json.loads(cleaned)
-        except json.JSONDecodeError:
-            logger.warning("Failed to parse critique JSON, returning zero scores.")
-            return CritiqueResult(raw_response=raw)
+        except json.JSONDecodeError as exc:
+            logger.warning("Failed to parse critique JSON.")
+            return CritiqueResult(
+                raw_response=raw,
+                valid=False,
+                validation_errors=[f"invalid_json: {exc.msg}"],
+            )
+
+        if not isinstance(data, dict):
+            return CritiqueResult(
+                raw_response=raw,
+                valid=False,
+                validation_errors=["top_level_must_be_object"],
+            )
 
         scores = data.get("scores", {})
         if not isinstance(scores, dict):
             scores = {}
 
-        accuracy = _clamp(scores.get("accuracy") if scores.get("accuracy") is not None else data.get("accuracy", 0), 1, 10)
-        fluency = _clamp(scores.get("fluency") if scores.get("fluency") is not None else data.get("fluency", 0), 1, 10)
-        terminology = _clamp(scores.get("terminology") if scores.get("terminology") is not None else data.get("terminology", 0), 1, 10)
-        register = _clamp(scores.get("register") if scores.get("register") is not None else data.get("register", 0), 1, 10)
+        errors: list[str] = []
+        accuracy = _score(data, scores, "accuracy", errors)
+        fluency = _score(data, scores, "fluency", errors)
+        terminology = _score(data, scores, "terminology", errors)
+        register = _score(data, scores, "register", errors)
 
         overall = data.get("overall")
         if overall is not None:
-            average = _clamp(overall, 1, 10)
+            average = _score_value(overall, "overall", errors)
         else:
             average = (accuracy + fluency + terminology + register) / 4.0
 
@@ -202,7 +251,8 @@ class TranslationCritique:
             parsed.sort(key=lambda t: t[0])
             issues = [text for _, text in parsed]
         else:
-            issues = [str(raw_issues)]
+            issues = []
+            errors.append("issues_must_be_array")
 
         return CritiqueResult(
             accuracy=accuracy,
@@ -212,13 +262,24 @@ class TranslationCritique:
             average=average,
             issues=issues,
             raw_response=raw,
+            valid=not errors,
+            validation_errors=errors,
         )
 
 
-def _clamp(value: Any, lo: int, hi: int) -> int:
-    """Clamp *value* to [lo, hi], converting to int first."""
+def _score(data: dict[str, Any], scores: dict[str, Any], key: str, errors: list[str]) -> float:
+    value = scores.get(key) if scores.get(key) is not None else data.get(key)
+    return _score_value(value, key, errors)
+
+
+def _score_value(value: Any, key: str, errors: list[str]) -> float:
+    """Validate one score without silently coercing missing values."""
     try:
-        v = int(value)
+        score = float(value)
     except (TypeError, ValueError):
-        return lo
-    return max(lo, min(hi, v))
+        errors.append(f"{key}_must_be_numeric")
+        return 0.0
+    if not 1.0 <= score <= 10.0:
+        errors.append(f"{key}_must_be_between_1_and_10")
+        return 0.0
+    return score

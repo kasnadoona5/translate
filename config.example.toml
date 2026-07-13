@@ -96,6 +96,10 @@ enable_web_context = true        # web search for ambiguous-term disambiguation
 enable_book_research = false     # opt-in one-time book/topic research seed pass
 parallel_workers = 1             # >1 only in fast/quality; academic is always 1
 critique_threshold = 7.0         # refine chunks scoring below this (1-10)
+enable_integrity_gate = true     # reject lossy post-edits and retain prior text
+integrity_min_retention_ratio = 0.65
+integrity_max_growth_ratio = 1.75
+qa_json_retries = 1              # bounded critic/refiner schema repair calls
 
 [web_search]
 # "auto" uses the first configured API provider: Tavily, Brave, Google, then

@@ -300,6 +300,40 @@ def cmd_glossary(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_evaluate(args: argparse.Namespace) -> int:
+    """Compare two completed jobs without calling the translation pipeline."""
+    from tarjomeh.quality.evaluation import (
+        QualityEvaluator,
+        evaluation_csv_report,
+        evaluation_json_report,
+        evaluation_text_report,
+    )
+
+    try:
+        evaluation = QualityEvaluator().evaluate(args.baseline_job, args.candidate_job)
+    except ValueError as exc:
+        console.print(f"[red]Evaluation failed:[/red] {exc}")
+        return 1
+
+    renderers = {
+        "text": evaluation_text_report,
+        "json": evaluation_json_report,
+        "csv": evaluation_csv_report,
+    }
+    report = renderers[args.format](evaluation)
+    if args.output:
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(report, encoding="utf-8")
+        console.print(f"[green]Evaluation saved:[/green] {output_path}")
+    else:
+        console.print(report, markup=False, highlight=False)
+
+    console.print(f"Evaluation ID: [cyan]{evaluation['id']}[/cyan]")
+    blocked = bool(evaluation.get("summary", {}).get("release_blocked"))
+    return 2 if args.fail_on_regression and blocked else 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     """Start the web UI server."""
     from tarjomeh.web.app import create_app
@@ -383,6 +417,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_validate = glossary_sub.add_parser("validate", help="Validate glossary CSV")
     p_validate.add_argument("file", help="Glossary CSV file path")
 
+    # eval
+    p_eval = subparsers.add_parser(
+        "eval", help="Compare two persisted translation jobs"
+    )
+    p_eval.add_argument("baseline_job", help="Known baseline job ID")
+    p_eval.add_argument("candidate_job", help="Candidate job ID")
+    p_eval.add_argument(
+        "-f", "--format", choices=["text", "json", "csv"], default="text",
+        help="Report format (default: text)",
+    )
+    p_eval.add_argument("-o", "--output", help="Write the report to a file")
+    p_eval.add_argument(
+        "--fail-on-regression", action="store_true",
+        help="Exit with status 2 when the candidate has a blocking regression",
+    )
+
     # serve
     p_serve = subparsers.add_parser("serve", help="Start web UI server")
     p_serve.add_argument("-c", "--config", help="Config file path")
@@ -411,6 +461,7 @@ def main() -> int:
         "translate": cmd_translate,
         "jobs": cmd_jobs,
         "glossary": cmd_glossary,
+        "eval": cmd_evaluate,
         "serve": cmd_serve,
     }
 

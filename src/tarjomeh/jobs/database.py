@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -114,6 +115,45 @@ class JobDatabase:
                 )
             """)
             conn.execute("""
+                CREATE TABLE IF NOT EXISTS evaluation_runs (
+                    id TEXT PRIMARY KEY,
+                    baseline_job_id TEXT NOT NULL,
+                    candidate_job_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS evaluation_chunks (
+                    evaluation_id TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    result TEXT NOT NULL,
+                    PRIMARY KEY (evaluation_id, chunk_index)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS evaluation_preferences (
+                    evaluation_id TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    preference TEXT NOT NULL,
+                    edited_translation TEXT,
+                    notes TEXT,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (evaluation_id, chunk_index)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS approved_benchmark (
+                    source_hash TEXT PRIMARY KEY,
+                    source_text TEXT NOT NULL,
+                    approved_translation TEXT NOT NULL,
+                    metadata TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_chunk_events_job_chunk
                 ON chunk_events (job_id, chunk_index, timestamp)
             """)
@@ -128,6 +168,145 @@ class JobDatabase:
                 (job_id, str(input_path), JobStatus.PENDING, json.dumps(config_dict), created_at)
             )
             conn.commit()
+
+    def save_evaluation(
+        self,
+        baseline_job_id: str,
+        candidate_job_id: str,
+        summary: dict[str, Any],
+        chunks: list[dict[str, Any]],
+        evaluation_id: str | None = None,
+    ) -> str:
+        """Persist one immutable comparison run and its per-chunk evidence."""
+        evaluation_id = evaluation_id or uuid.uuid4().hex[:12]
+        created_at = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO evaluation_runs
+                    (id, baseline_job_id, candidate_job_id, status, summary, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    evaluation_id, baseline_job_id, candidate_job_id, "completed",
+                    json.dumps(summary, ensure_ascii=False, sort_keys=True), created_at,
+                ),
+            )
+            conn.executemany(
+                """
+                INSERT INTO evaluation_chunks (evaluation_id, chunk_index, result)
+                VALUES (?, ?, ?)
+                """,
+                [
+                    (evaluation_id, int(chunk["chunk_index"]),
+                     json.dumps(chunk, ensure_ascii=False, sort_keys=True))
+                    for chunk in chunks
+                ],
+            )
+            conn.commit()
+        return evaluation_id
+
+    def get_evaluation(self, evaluation_id: str) -> dict[str, Any] | None:
+        """Return a persisted evaluation with chunks and human decisions."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM evaluation_runs WHERE id = ?", (evaluation_id,)
+            ).fetchone()
+            if not row:
+                return None
+            chunk_rows = conn.execute(
+                "SELECT result FROM evaluation_chunks WHERE evaluation_id = ? ORDER BY chunk_index",
+                (evaluation_id,),
+            ).fetchall()
+            preference_rows = conn.execute(
+                "SELECT * FROM evaluation_preferences WHERE evaluation_id = ?",
+                (evaluation_id,),
+            ).fetchall()
+        result = dict(row)
+        try:
+            result["summary"] = json.loads(result["summary"])
+        except json.JSONDecodeError:
+            result["summary"] = {}
+        preferences = {int(item["chunk_index"]): dict(item) for item in preference_rows}
+        result["chunks"] = []
+        for chunk_row in chunk_rows:
+            try:
+                chunk = json.loads(chunk_row["result"])
+            except json.JSONDecodeError:
+                continue
+            chunk["preference"] = preferences.get(int(chunk["chunk_index"]))
+            result["chunks"].append(chunk)
+        return result
+
+    def save_evaluation_preference(
+        self,
+        evaluation_id: str,
+        chunk_index: int,
+        preference: str,
+        edited_translation: str | None = None,
+        notes: str | None = None,
+    ) -> None:
+        """Save or replace a human decision for one blind comparison."""
+        created_at = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO evaluation_preferences
+                    (evaluation_id, chunk_index, preference, edited_translation, notes, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(evaluation_id, chunk_index) DO UPDATE SET
+                    preference = excluded.preference,
+                    edited_translation = excluded.edited_translation,
+                    notes = excluded.notes,
+                    created_at = excluded.created_at
+                """,
+                (evaluation_id, chunk_index, preference, edited_translation, notes, created_at),
+            )
+            conn.commit()
+
+    def save_approved_benchmark(
+        self,
+        source_hash: str,
+        source_text: str,
+        approved_translation: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        """Add a human-approved pair to the private regression corpus."""
+        timestamp = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO approved_benchmark
+                    (source_hash, source_text, approved_translation, metadata, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_hash) DO UPDATE SET
+                    approved_translation = excluded.approved_translation,
+                    metadata = excluded.metadata,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    source_hash, source_text, approved_translation,
+                    json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                    timestamp, timestamp,
+                ),
+            )
+            conn.commit()
+
+    def list_approved_benchmark(self) -> list[dict[str, Any]]:
+        """Return the private human-approved regression corpus."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM approved_benchmark ORDER BY updated_at DESC"
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["metadata"] = json.loads(item["metadata"])
+            except json.JSONDecodeError:
+                item["metadata"] = {}
+            items.append(item)
+        return items
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         """Retrieve full details of a job."""

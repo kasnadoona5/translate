@@ -7,7 +7,7 @@ improved version by feeding the critique feedback back to the LLM.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from tarjomeh.quality.critique import CritiqueResult
@@ -33,6 +33,9 @@ class RefinementResult:
     decision: str = "unknown"
     rationale: str = ""
     raw_response: str = ""
+    valid: bool = True
+    validation_errors: list[str] = field(default_factory=list)
+    attempts: int = 1
 
 
 class TranslationRefiner:
@@ -56,6 +59,7 @@ class TranslationRefiner:
         llm_client: Any,
         max_iterations: int | None = None,
         mode: str = "academic",
+        max_parse_retries: int = 1,
     ) -> None:
         self._llm = llm_client
 
@@ -63,6 +67,7 @@ class TranslationRefiner:
             self.max_iterations = max_iterations
         else:
             self.max_iterations = _MODE_MAX_ITERATIONS.get(mode, 1)
+        self.max_parse_retries = max(0, max_parse_retries)
 
     async def refine(
         self,
@@ -128,36 +133,83 @@ class TranslationRefiner:
         )
 
         raw: str = await self._llm.chat(prompt)
+        result = self._parse_response(raw)
+        result.attempts = 1
+        all_errors = list(result.validation_errors)
+        for retry in range(self.max_parse_retries):
+            if result.valid:
+                break
+            logger.warning("Invalid refiner response; requesting JSON repair.")
+            raw = await self._llm.chat(self._repair_prompt(raw, result.validation_errors))
+            result = self._parse_response(raw)
+            result.attempts = retry + 2
+            all_errors.extend(result.validation_errors)
 
-        # Strip any accidental markdown fences the LLM might include.
-        cleaned = raw.strip()
-        if cleaned.startswith("```"):
-            lines = cleaned.splitlines()
-            lines = [ln for ln in lines if not ln.strip().startswith("```")]
-            cleaned = "\n".join(lines).strip()
+        if not result.valid:
+            return RefinementResult(
+                translation=translation,
+                decision="preserved",
+                rationale="Refiner output was invalid after bounded JSON repair; prior translation retained.",
+                raw_response=raw,
+                valid=False,
+                validation_errors=list(dict.fromkeys(all_errors)),
+                attempts=result.attempts,
+            )
 
-        try:
-            data = json.loads(cleaned)
-        except json.JSONDecodeError:
-            data = None
-
-        if isinstance(data, dict) and str(data.get("translation", "")).strip():
-            refined = str(data["translation"]).strip()
-            decision = str(data.get("decision", "unknown")).strip().lower() or "unknown"
-            rationale = str(data.get("rationale", "")).strip()
-        else:
-            refined = cleaned
-            decision = "unknown"
-            rationale = "Refiner returned plain text instead of structured JSON."
+        if result.attempts > 1:
+            result.validation_errors = list(dict.fromkeys(all_errors))
 
         logger.info(
             "Refined translation (critique avg was %.1f, decision=%s).",
             critique.average,
-            decision,
+            result.decision,
         )
+        return result
+
+    @staticmethod
+    def _parse_response(raw: str) -> RefinementResult:
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            lines = [line for line in cleaned.splitlines() if not line.strip().startswith("```")]
+            cleaned = "\n".join(lines).strip()
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError as exc:
+            return RefinementResult(
+                translation="", raw_response=raw, valid=False,
+                validation_errors=[f"invalid_json: {exc.msg}"],
+            )
+        if not isinstance(data, dict):
+            return RefinementResult(
+                translation="", raw_response=raw, valid=False,
+                validation_errors=["top_level_must_be_object"],
+            )
+        errors = []
+        refined = str(data.get("translation", "")).strip()
+        decision = str(data.get("decision", "")).strip().lower()
+        rationale = str(data.get("rationale", "")).strip()
+        if not refined:
+            errors.append("translation_is_required")
+        if decision not in {"revised", "preserved", "mixed"}:
+            errors.append("decision_must_be_revised_preserved_or_mixed")
+        if not rationale:
+            errors.append("rationale_is_required")
         return RefinementResult(
             translation=refined,
-            decision=decision,
+            decision=decision or "unknown",
             rationale=rationale,
             raw_response=raw,
+            valid=not errors,
+            validation_errors=errors,
         )
+
+    @staticmethod
+    def _repair_prompt(raw: str, errors: list[str]) -> str:
+        return f"""The previous refinement response violated the required JSON schema.
+Validation errors: {json.dumps(errors, ensure_ascii=False)}
+
+Previous response:
+{raw}
+
+Return ONLY valid JSON with non-empty fields: translation, decision
+(revised, preserved, or mixed), and rationale. Do not add markdown fences."""

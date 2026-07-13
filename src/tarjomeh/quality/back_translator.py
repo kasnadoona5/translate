@@ -16,6 +16,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from tarjomeh.core.prompts import BACK_TRANSLATE_PROMPT
+from tarjomeh.quality.integrity import extract_numbers
 
 
 @dataclass
@@ -41,6 +42,7 @@ class BackTranslationResult:
     flagged: bool = False
     differences: list[str] = field(default_factory=list)
     back_translated: str = ""
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise to a plain dict."""
@@ -49,6 +51,7 @@ class BackTranslationResult:
             "flagged": self.flagged,
             "differences": self.differences,
             "back_translated": self.back_translated,
+            "diagnostics": self.diagnostics,
         }
 
 
@@ -67,9 +70,8 @@ class BackTranslator:
         Percentage of chunks to back-translate (0–100).  Default ``20``
         (the ``academic`` mode default).
     similarity_threshold : float
-        Minimum word-overlap similarity (0.0–1.0) required for a chunk
-        to pass.  Chunks below this threshold are flagged for human
-        review.  Default ``0.5``.
+        Retained for API compatibility. Lexical overlap is advisory; structured
+        number, entity, negation, omission, and addition risks drive flags.
     """
 
     def __init__(
@@ -136,7 +138,8 @@ class BackTranslator:
     ) -> BackTranslationResult:
         """Compare the original English with a back-translation.
 
-        Uses a simple word-overlap ratio as the similarity metric:
+        Computes word overlap as an advisory metric and structured high-risk
+        diagnostics for numbers, entities, negation, omission, and addition:
 
         .. math::
 
@@ -173,13 +176,66 @@ class BackTranslator:
         missing = orig_counter - back_counter
         differences = sorted(missing.elements())
 
-        flagged = similarity < self._similarity_threshold
+        source_numbers = extract_numbers(original_english)
+        back_numbers = extract_numbers(back_translated)
+        missing_numbers = list((source_numbers - back_numbers).elements())
+        added_numbers = list((back_numbers - source_numbers).elements())
+
+        source_entities = _extract_entities(original_english)
+        back_folded = back_translated.casefold()
+        missing_entities = [
+            entity for entity in source_entities if entity.casefold() not in back_folded
+        ]
+        source_negations = _negations(original_english)
+        back_negations = _negations(back_translated)
+        negation_mismatch = bool(source_negations) != bool(back_negations)
+
+        source_sentences = _sentence_count(original_english)
+        back_sentences = _sentence_count(back_translated)
+        sentence_ratio = back_sentences / max(1, source_sentences)
+        possible_omission = (
+            (source_sentences >= 2 and sentence_ratio < 0.5)
+            or (len(orig_tokens) >= 20 and similarity < 0.2)
+        )
+        possible_addition = source_sentences >= 1 and sentence_ratio > 2.0
+        risk_flags = []
+        if missing_numbers:
+            risk_flags.append("numbers_missing_or_changed")
+        if added_numbers:
+            risk_flags.append("numbers_added_or_changed")
+        if missing_entities:
+            risk_flags.append("named_entities_missing")
+        if negation_mismatch:
+            risk_flags.append("negation_mismatch")
+        if possible_omission:
+            risk_flags.append("possible_proposition_omission")
+        if possible_addition:
+            risk_flags.append("possible_unsupported_addition")
+
+        diagnostics = {
+            "risk_flags": risk_flags,
+            "missing_numbers": missing_numbers,
+            "added_numbers": added_numbers,
+            "missing_entities": missing_entities,
+            "source_negations": source_negations,
+            "back_translation_negations": back_negations,
+            "negation_mismatch": negation_mismatch,
+            "source_sentence_count": source_sentences,
+            "back_translation_sentence_count": back_sentences,
+            "sentence_count_ratio": round(sentence_ratio, 4),
+            "possible_omission": possible_omission,
+            "possible_addition": possible_addition,
+            "lexical_overlap_advisory": round(similarity, 4),
+        }
+        # Back-translation is a secondary review signal. It never replaces or
+        # edits the Persian translation by itself.
+        flagged = bool(risk_flags)
 
         if flagged:
             logger.warning(
-                "Back-translation flagged: similarity=%.2f (threshold=%.2f)",
+                "Back-translation structured risks: %s (lexical advisory=%.2f)",
+                risk_flags,
                 similarity,
-                self._similarity_threshold,
             )
 
         return BackTranslationResult(
@@ -187,12 +243,17 @@ class BackTranslator:
             flagged=flagged,
             differences=differences,
             back_translated=back_translated,
+            diagnostics=diagnostics,
         )
 
 
 # ── Utility ──────────────────────────────────────────────────────────
 
 _WORD_RE = re.compile(r"[a-zA-Z0-9']+")
+_ENTITY_RE = re.compile(r"\b(?:[A-Z][\w'\-]+(?:\s+(?:of|the|and|&|[A-Z][\w'\-]+)){0,5})\b")
+_ENTITY_STOP = {"the", "a", "an", "this", "that", "these", "those", "in", "on", "chapter", "introduction"}
+_NEGATION_RE = re.compile(r"\b(?:not|no|never|without|neither|nor|cannot|can't|won't|isn't|aren't|didn't|doesn't)\b", re.IGNORECASE)
+_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 
 
 def _tokenize_simple(text: str) -> list[str]:
@@ -202,3 +263,25 @@ def _tokenize_simple(text: str) -> list[str]:
     lowercases everything.  Good enough for word-overlap comparison.
     """
     return [m.group().lower() for m in _WORD_RE.finditer(text)]
+
+
+def _extract_entities(text: str) -> list[str]:
+    entities = []
+    for match in _ENTITY_RE.finditer(text or ""):
+        value = " ".join(match.group().split()).strip()
+        prefix = (text or "")[:match.start()].rstrip()
+        at_sentence_start = not prefix or prefix.endswith((".", "!", "?"))
+        single_word = " " not in value
+        if single_word and at_sentence_start and not value.isupper():
+            continue
+        if value.casefold() not in _ENTITY_STOP and len(value) > 2:
+            entities.append(value)
+    return sorted(set(entities), key=str.casefold)
+
+
+def _negations(text: str) -> list[str]:
+    return [match.group().casefold() for match in _NEGATION_RE.finditer(text or "")]
+
+
+def _sentence_count(text: str) -> int:
+    return len([part for part in _SENTENCE_RE.split((text or "").strip()) if part.strip()])

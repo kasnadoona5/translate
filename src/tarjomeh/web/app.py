@@ -210,6 +210,7 @@ def _register_api(app: Flask) -> None:
             "enable_book_research": "translation.enable_book_research",
             "enable_critique": "translation.enable_critique",
             "enable_back_translation": "translation.enable_back_translation",
+            "enable_integrity_gate": "translation.enable_integrity_gate",
             "enable_web_context": "translation.enable_web_context",
             "enable_auto_extraction": "glossary.enable_auto_extraction",
             "enable_compliance_check": "glossary.enable_compliance_check",
@@ -227,6 +228,7 @@ def _register_api(app: Flask) -> None:
                 int,
             ),
             "critique_threshold": ("translation.critique_threshold", float),
+            "qa_json_retries": ("translation.qa_json_retries", int),
             "back_translation_sample_pct": (
                 "translation.back_translation_sample_pct",
                 int,
@@ -367,6 +369,159 @@ def _register_api(app: Flask) -> None:
 
         return jsonify({"events": db.get_chunk_events(job_id, chunk_index)})
 
+    @app.route("/api/evaluations", methods=["POST"])
+    @_require_auth
+    def api_create_evaluation():
+        """Create a persisted deterministic comparison between two jobs."""
+        from tarjomeh.quality.evaluation import QualityEvaluator
+
+        data = request.get_json(silent=True) or {}
+        baseline = str(data.get("baseline_job_id", "")).strip()
+        candidate = str(data.get("candidate_job_id", "")).strip()
+        if not baseline or not candidate:
+            return jsonify({"error": "baseline_job_id and candidate_job_id are required"}), 400
+        try:
+            evaluation = QualityEvaluator().evaluate(baseline, candidate)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify({
+            "evaluation_id": evaluation["id"],
+            "summary": evaluation["summary"],
+        }), 201
+
+    @app.route("/api/evaluations/<evaluation_id>")
+    @_require_auth
+    def api_get_evaluation(evaluation_id: str):
+        """Return blind A/B translations and deterministic evidence."""
+        from tarjomeh.jobs.database import JobDatabase
+
+        evaluation = JobDatabase().get_evaluation(evaluation_id)
+        if not evaluation:
+            return jsonify({"error": "Evaluation not found"}), 404
+        blind_chunks = []
+        for item in evaluation.get("chunks", []):
+            candidate_first = bool(item.get("a_is_candidate"))
+            blind_chunks.append({
+                "chunk_index": item["chunk_index"],
+                "source": item.get("source", ""),
+                "source_aligned": item.get("source_aligned", False),
+                "translation_a": item.get(
+                    "candidate_translation" if candidate_first else "baseline_translation", ""
+                ),
+                "translation_b": item.get(
+                    "baseline_translation" if candidate_first else "candidate_translation", ""
+                ),
+                "regression_count": len(item.get("regressions", [])),
+                "improvement_count": len(item.get("improvements", [])),
+                "preference": item.get("preference"),
+            })
+        return jsonify({
+            "id": evaluation["id"],
+            "created_at": evaluation["created_at"],
+            "summary": evaluation["summary"],
+            "chunks": blind_chunks,
+        })
+
+    @app.route("/api/evaluations/<evaluation_id>/report")
+    @_require_auth
+    def api_evaluation_report(evaluation_id: str):
+        """Download a text, JSON, or CSV regression report."""
+        from tarjomeh.jobs.database import JobDatabase
+        from tarjomeh.quality.evaluation import (
+            evaluation_csv_report,
+            evaluation_json_report,
+            evaluation_text_report,
+        )
+
+        evaluation = JobDatabase().get_evaluation(evaluation_id)
+        if not evaluation:
+            return jsonify({"error": "Evaluation not found"}), 404
+        report_format = request.args.get("format", "text").lower()
+        renderers = {
+            "text": (evaluation_text_report, "text/plain", "txt"),
+            "json": (evaluation_json_report, "application/json", "json"),
+            "csv": (evaluation_csv_report, "text/csv", "csv"),
+        }
+        if report_format not in renderers:
+            return jsonify({"error": "format must be text, json, or csv"}), 400
+        renderer, mimetype, extension = renderers[report_format]
+        return Response(
+            renderer(evaluation), mimetype=f"{mimetype}; charset=utf-8",
+            headers={
+                "Content-Disposition":
+                    f"attachment; filename={evaluation_id}_evaluation.{extension}"
+            },
+        )
+
+    @app.route(
+        "/api/evaluations/<evaluation_id>/chunks/<int:chunk_index>/preference",
+        methods=["POST"],
+    )
+    @_require_auth
+    def api_evaluation_preference(evaluation_id: str, chunk_index: int):
+        """Persist a blind human choice and optionally add it to the benchmark."""
+        from tarjomeh.jobs.database import JobDatabase
+        from tarjomeh.quality.evaluation import source_hash
+
+        db = JobDatabase()
+        evaluation = db.get_evaluation(evaluation_id)
+        if not evaluation:
+            return jsonify({"error": "Evaluation not found"}), 404
+        chunk = next(
+            (item for item in evaluation.get("chunks", [])
+             if int(item["chunk_index"]) == chunk_index),
+            None,
+        )
+        if not chunk:
+            return jsonify({"error": "Evaluation chunk not found"}), 404
+
+        data = request.get_json(silent=True) or {}
+        preference = str(data.get("preference", "")).lower()
+        if preference not in {"a", "b", "equal", "both_need_edit"}:
+            return jsonify({"error": "Invalid preference"}), 400
+        edited = str(data.get("edited_translation", "")).strip() or None
+        notes = str(data.get("notes", "")).strip() or None
+        db.save_evaluation_preference(
+            evaluation_id, chunk_index, preference, edited, notes,
+        )
+
+        approved = edited
+        if not approved and preference in {"a", "b"}:
+            a_is_candidate = bool(chunk.get("a_is_candidate"))
+            selected_candidate = (preference == "a") == a_is_candidate
+            approved = chunk.get(
+                "candidate_translation" if selected_candidate else "baseline_translation"
+            )
+        saved_to_benchmark = bool(data.get("save_to_benchmark") and approved)
+        if saved_to_benchmark:
+            db.save_approved_benchmark(
+                source_hash(chunk.get("source", "")),
+                chunk.get("source", ""),
+                approved or "",
+                {
+                    "evaluation_id": evaluation_id,
+                    "chunk_index": chunk_index,
+                    "preference": preference,
+                    "baseline_job_id": evaluation["baseline_job_id"],
+                    "candidate_job_id": evaluation["candidate_job_id"],
+                    "notes": notes or "",
+                },
+            )
+        return jsonify({
+            "status": "saved",
+            "preference": preference,
+            "saved_to_benchmark": saved_to_benchmark,
+        })
+
+    @app.route("/api/evaluation-benchmark")
+    @_require_auth
+    def api_evaluation_benchmark():
+        """Return private approved examples for regression administration."""
+        from tarjomeh.jobs.database import JobDatabase
+
+        items = JobDatabase().list_approved_benchmark()
+        return jsonify({"count": len(items), "items": items})
+
     @app.route("/api/jobs/<job_id>/review")
     @_require_auth
     def api_job_review(job_id: str):
@@ -411,6 +566,15 @@ def _register_api(app: Flask) -> None:
                 e for e in chunk_events
                 if e["event_type"] == "critique_needs_review"
             ]
+            qa_unavailable_events = [
+                e for e in chunk_events if e["event_type"] == "qa_unavailable"
+            ]
+            integrity_rejections = [
+                e for e in chunk_events if e["event_type"] == "integrity_edit_rejected"
+            ]
+            integrity_final_failures = [
+                e for e in chunk_events if e["event_type"] == "integrity_final_failed"
+            ]
             final_glossary_events = [
                 e for e in chunk_events
                 if e["event_type"] == "glossary_compliance_final"
@@ -434,6 +598,9 @@ def _register_api(app: Flask) -> None:
                 or low_score
                 or bool(blocking_critique_issues)
                 or bool(needs_review_events)
+                or bool(qa_unavailable_events)
+                or bool(integrity_rejections)
+                or bool(integrity_final_failures)
                 or glossary_violations > 0
                 or bt_flagged
             )
@@ -445,7 +612,16 @@ def _register_api(app: Flask) -> None:
                 "critique_average": min(scores) if scores else None,
                 "critique_threshold": critique_threshold,
                 "blocking_critique_issues": blocking_critique_issues,
-                "needs_review": bool(needs_review_events),
+                "needs_review": bool(
+                    needs_review_events
+                    or qa_unavailable_events
+                    or integrity_rejections
+                    or integrity_final_failures
+                    or bt_flagged
+                ),
+                "qa_unavailable": bool(qa_unavailable_events),
+                "integrity_rejections": len(integrity_rejections),
+                "integrity_final_failures": len(integrity_final_failures),
                 "glossary_violations": glossary_violations,
                 "back_translation_flagged": bt_flagged,
                 "flagged": flagged,
@@ -505,9 +681,11 @@ def _register_api(app: Flask) -> None:
                 if event["event_type"] == "critique_completed":
                     scores = payload.get("scores", {})
                     lines.append(
-                        "  Critique: avg={average} accuracy={accuracy} fluency={fluency} "
+                        "  Critique: valid={valid} attempts={attempts} avg={average} accuracy={accuracy} fluency={fluency} "
                         "terminology={terminology} register={register} issues={issues} "
                         "blocking={blocking}".format(
+                            valid=payload.get("valid", True),
+                            attempts=payload.get("attempts", 1),
                             average=scores.get("average"),
                             accuracy=scores.get("accuracy"),
                             fluency=scores.get("fluency"),
@@ -541,8 +719,31 @@ def _register_api(app: Flask) -> None:
                 elif event["event_type"] == "back_translation_completed":
                     lines.append(
                         f"  Back-translation: score={payload.get('similarity_score')} "
-                        f"flagged={payload.get('flagged')}"
+                        f"flagged={payload.get('flagged')} "
+                        f"risks={payload.get('diagnostics', {}).get('risk_flags', [])}"
                     )
+                elif event["event_type"] == "integrity_edit_rejected":
+                    lines.append(
+                        f"  INTEGRITY REJECTED: stage={payload.get('stage')} "
+                        f"blocking={payload.get('blocking_count')} prior translation retained"
+                    )
+                    for finding in payload.get("findings", []):
+                        if finding.get("severity") == "blocking":
+                            lines.append(
+                                f"    {finding.get('check_id')}: {finding.get('message')}"
+                            )
+                elif event["event_type"] == "integrity_final_failed":
+                    lines.append(
+                        f"  INTEGRITY FINAL: blocking={payload.get('blocking_count')} "
+                        "chunk requires review"
+                    )
+                elif event["event_type"] == "qa_unavailable":
+                    lines.append(
+                        f"  QA UNAVAILABLE: component={payload.get('component')} "
+                        f"attempts={payload.get('attempts')}"
+                    )
+                    if payload.get("message"):
+                        lines.append(f"    {payload.get('message')}")
             lines.append("")
 
         report = "\n".join(lines)

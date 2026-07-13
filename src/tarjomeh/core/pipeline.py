@@ -37,6 +37,7 @@ from tarjomeh.jobs.database import JobDatabase, JobStatus, ChunkStatus
 from tarjomeh.quality.critique import TranslationCritique
 from tarjomeh.quality.refiner import TranslationRefiner
 from tarjomeh.quality.back_translator import BackTranslator
+from tarjomeh.quality.integrity import PostEditIntegrityGate
 from tarjomeh.core.prompts import (
     TRANSLATE_SYSTEM_PROMPT,
     TRANSLATE_CHUNK_PROMPT,
@@ -248,7 +249,10 @@ def _glossary_entries_for_event(entries: list[Any]) -> list[dict[str, Any]]:
     return payload
 
 
-_BLOCKING_CRITIQUE_RE = re.compile(r"^\[(?:CRITICAL|MAJOR)/(?:accuracy|terminology)\]", re.IGNORECASE)
+_BLOCKING_CRITIQUE_RE = re.compile(
+    r"^\[(?:CRITICAL/[^\]]+|MAJOR/(?:accuracy|terminology))\]",
+    re.IGNORECASE,
+)
 
 
 def _blocking_critique_issues(critique: Any) -> list[str]:
@@ -262,13 +266,20 @@ def _blocking_critique_issues(critique: Any) -> list[str]:
 
 def _critique_passes_quality_gate(critique: Any, threshold: float) -> bool:
     """Average score must pass and no major conceptual/terminology issue may remain."""
-    return bool(critique.passes_threshold(threshold) and not _blocking_critique_issues(critique))
+    return bool(
+        getattr(critique, "valid", True)
+        and critique.passes_threshold(threshold)
+        and not _blocking_critique_issues(critique)
+    )
 
 
 def _critique_for_event(critique: Any, threshold: float, iteration: int) -> dict[str, Any]:
     blocking_issues = _blocking_critique_issues(critique)
     return {
         "iteration": iteration,
+        "valid": bool(getattr(critique, "valid", True)),
+        "attempts": int(getattr(critique, "attempts", 1)),
+        "validation_errors": list(getattr(critique, "validation_errors", []) or []),
         "threshold": threshold,
         "passes_average_threshold": bool(critique.passes_threshold(threshold)),
         "passes_threshold": bool(critique.passes_threshold(threshold) and not blocking_issues),
@@ -295,10 +306,14 @@ def _chunk_needs_review(db: Any, job_id: str, chunk_index: int) -> bool:
     for i, event in enumerate(events):
         if event.get("event_type") == "chunk_started":
             last_start = i
-    return any(
-        event.get("event_type") == "critique_needs_review"
-        for event in events[last_start:]
-    )
+    review_events = {
+        "critique_needs_review",
+        "qa_unavailable",
+        "integrity_edit_rejected",
+        "integrity_final_failed",
+        "back_translation_flagged",
+    }
+    return any(event.get("event_type") in review_events for event in events[last_start:])
 
 
 def _compliance_report_for_event(report: Any) -> dict[str, Any]:
@@ -781,8 +796,15 @@ class TranslationPipeline:
         compliance_checker = GlossaryComplianceChecker()
         # Critique and back-translation QA run on the independent judge model
         # (critic_client); translation and refinement stay on the translator.
-        critique_tool = TranslationCritique(llm_client=self.critic_client)
-        refiner_tool = TranslationRefiner(llm_client=self.llm_client, max_iterations=self.config.translation.max_refine_iterations)
+        critique_tool = TranslationCritique(
+            llm_client=self.critic_client,
+            max_parse_retries=self.config.translation.qa_json_retries,
+        )
+        refiner_tool = TranslationRefiner(
+            llm_client=self.llm_client,
+            max_iterations=self.config.translation.max_refine_iterations,
+            max_parse_retries=self.config.translation.qa_json_retries,
+        )
         back_translator = BackTranslator(llm_client=self.critic_client, sample_pct=self.config.translation.back_translation_sample_pct)
 
         try:
@@ -1361,16 +1383,21 @@ class TranslationPipeline:
         if saved_search_state:
             web_searcher.import_state(saved_search_state)
         compliance_checker = GlossaryComplianceChecker()
-        critique_tool = TranslationCritique(llm_client=self.critic_client)
+        critique_tool = TranslationCritique(
+            llm_client=self.critic_client,
+            max_parse_retries=self.config.translation.qa_json_retries,
+        )
         refiner_tool = TranslationRefiner(
             llm_client=self.llm_client,
             max_iterations=self.config.translation.max_refine_iterations,
+            max_parse_retries=self.config.translation.qa_json_retries,
         )
         back_translator = BackTranslator(
             llm_client=self.critic_client,
             sample_pct=self.config.translation.back_translation_sample_pct,
         )
 
+        previous_translation = translations.get(chunk_index, "")
         translation = self._translate_single_chunk(
             idx=chunk_index,
             chunk=chunks[chunk_index],
@@ -1384,6 +1411,38 @@ class TranslationPipeline:
             translations=translations,
             job_id=job_id,
         )
+        if (
+            getattr(self.config.translation, "enable_integrity_gate", True)
+            and previous_translation.strip()
+        ):
+            manual_gate = PostEditIntegrityGate(
+                min_retention_ratio=getattr(
+                    self.config.translation, "integrity_min_retention_ratio", 0.65
+                ),
+                max_growth_ratio=getattr(
+                    self.config.translation, "integrity_max_growth_ratio", 1.75
+                ),
+            )
+            manual_result = manual_gate.evaluate(
+                chunks[chunk_index].text,
+                translation,
+                previous=previous_translation,
+                stage="manual_retranslation",
+                protect_inline_english=effective_term_notes_mode(
+                    self.config.output.term_notes,
+                    self.config.output.format,
+                ) in {"inline", "both"},
+            )
+            self.db.log_chunk_event(
+                job_id, chunk_index, "integrity_check_completed",
+                manual_result.to_dict(),
+            )
+            if not manual_result.accepted:
+                self.db.log_chunk_event(
+                    job_id, chunk_index, "integrity_edit_rejected",
+                    manual_result.to_dict(),
+                )
+                translation = previous_translation
         final_status = (
             ChunkStatus.NEEDS_REVIEW
             if _chunk_needs_review(self.db, job_id, chunk_index)
@@ -1580,6 +1639,23 @@ class TranslationPipeline:
             "matched_count": len(matched_entries),
             "entries": _glossary_entries_for_event(matched_entries),
         })
+        protected_targets = [
+            str(getattr(entry, "target", "")).strip()
+            for entry in matched_entries
+            if str(getattr(entry, "target", "")).strip()
+            and not bool(getattr(entry, "is_auto", False))
+        ]
+        integrity_enabled = bool(
+            getattr(self.config.translation, "enable_integrity_gate", True)
+        )
+        integrity_gate = PostEditIntegrityGate(
+            min_retention_ratio=getattr(
+                self.config.translation, "integrity_min_retention_ratio", 0.65
+            ),
+            max_growth_ratio=getattr(
+                self.config.translation, "integrity_max_growth_ratio", 1.75
+            ),
+        )
         # Context-aware glossary table: includes each term's Context column
         # (author-specific sense, e.g. Marx's vs Bourdieu's "capital").
         glossary_terms_str = glossary_manager.format_for_prompt(matched_entries) \
@@ -1600,6 +1676,11 @@ class TranslationPipeline:
                 self.config.output.format,
             )
         )
+        effective_notes_mode = effective_term_notes_mode(
+            self.config.output.term_notes,
+            self.config.output.format,
+        )
+        protect_inline_english = effective_notes_mode in {"inline", "both"}
         sys_prompt = TRANSLATE_SYSTEM_PROMPT.format(
             domain=self.config.translation.domain,
             style_register=style_register_value,
@@ -1652,6 +1733,19 @@ class TranslationPipeline:
             "translation_paragraphs": _paragraph_count(translation),
             "expected_paragraphs": n_source_paras,
         })
+        if integrity_enabled:
+            initial_integrity = integrity_gate.evaluate(
+                chunk.text,
+                translation,
+                stage="initial_translation",
+            )
+            self.db.log_chunk_event(
+                job_id, idx, "integrity_check_completed", initial_integrity.to_dict()
+            )
+            if not initial_integrity.accepted:
+                self.db.log_chunk_event(
+                    job_id, idx, "integrity_initial_failed", initial_integrity.to_dict()
+                )
 
         # Critique and Refine (judge scores against the terminology mandate)
         if self.config.translation.enable_critique:
@@ -1661,12 +1755,50 @@ class TranslationPipeline:
                     critique_tool.critique(chunk.text, translation, terminology=terminology_ctx)
                 )
                 self.db.update_chunk(job_id, idx, ChunkStatus.CRITIQUED)
+                if getattr(critique_rep, "attempts", 1) > 1:
+                    retry_payload = {
+                        "attempts": critique_rep.attempts,
+                        "recovered": bool(getattr(critique_rep, "valid", False)),
+                        "validation_errors": list(
+                            getattr(critique_rep, "validation_errors", []) or []
+                        ),
+                    }
+                    self.db.log_chunk_event(
+                        job_id, idx, "critic_response_invalid", retry_payload
+                    )
+                    self.db.log_chunk_event(
+                        job_id, idx, "critic_response_retried", retry_payload
+                    )
                 self.db.log_chunk_event(
                     job_id,
                     idx,
                     "critique_completed",
                     _critique_for_event(critique_rep, threshold, ref_iter),
                 )
+                if not getattr(critique_rep, "valid", True):
+                    if getattr(critique_rep, "attempts", 1) <= 1:
+                        self.db.log_chunk_event(
+                            job_id, idx, "critic_response_invalid", {
+                                "attempts": getattr(critique_rep, "attempts", 1),
+                                "recovered": False,
+                                "validation_errors": list(
+                                    getattr(critique_rep, "validation_errors", []) or []
+                                ),
+                            },
+                        )
+                    self.db.log_chunk_event(job_id, idx, "qa_unavailable", {
+                        "component": "critic",
+                        "iteration": ref_iter,
+                        "attempts": getattr(critique_rep, "attempts", 1),
+                        "validation_errors": list(
+                            getattr(critique_rep, "validation_errors", []) or []
+                        ),
+                        "message": (
+                            "Critic output remained invalid after bounded repair; "
+                            "translation kept and chunk requires human review."
+                        ),
+                    })
+                    break
                 if _critique_passes_quality_gate(critique_rep, threshold):
                     break
                 if ref_iter == self.config.translation.max_refine_iterations:
@@ -1694,7 +1826,8 @@ class TranslationPipeline:
                         "message": message,
                     })
                     break
-                before_chars = len(translation)
+                before_translation = translation
+                before_chars = len(before_translation)
                 refinement = self._run_async(
                     refiner_tool.refine_with_decision(
                         chunk.text,
@@ -1703,7 +1836,67 @@ class TranslationPipeline:
                         terminology=terminology_ctx,
                     )
                 )
-                translation = refinement.translation
+                if getattr(refinement, "attempts", 1) > 1:
+                    refiner_retry_payload = {
+                        "iteration": ref_iter + 1,
+                        "attempts": refinement.attempts,
+                        "recovered": bool(getattr(refinement, "valid", False)),
+                        "validation_errors": list(
+                            getattr(refinement, "validation_errors", []) or []
+                        ),
+                    }
+                    self.db.log_chunk_event(
+                        job_id, idx, "refiner_response_invalid",
+                        refiner_retry_payload,
+                    )
+                    self.db.log_chunk_event(
+                        job_id, idx, "refiner_response_retried",
+                        refiner_retry_payload,
+                    )
+                if not getattr(refinement, "valid", True):
+                    invalid_payload = {
+                        "iteration": ref_iter + 1,
+                        "attempts": getattr(refinement, "attempts", 1),
+                        "validation_errors": list(
+                            getattr(refinement, "validation_errors", []) or []
+                        ),
+                        "message": (
+                            "Refiner output remained invalid after bounded repair; "
+                            "prior translation retained."
+                        ),
+                    }
+                    if getattr(refinement, "attempts", 1) <= 1:
+                        self.db.log_chunk_event(
+                            job_id, idx, "refiner_response_invalid", invalid_payload
+                        )
+                    self.db.log_chunk_event(
+                        job_id, idx, "qa_unavailable",
+                        {"component": "refiner", **invalid_payload},
+                    )
+                    break
+
+                proposed_translation = refinement.translation
+                edit_accepted = True
+                integrity_payload: dict[str, Any] | None = None
+                if integrity_enabled:
+                    edit_integrity = integrity_gate.evaluate(
+                        chunk.text,
+                        proposed_translation,
+                        previous=before_translation,
+                        stage="refinement",
+                        protected_terms=protected_targets,
+                        protect_inline_english=protect_inline_english,
+                    )
+                    integrity_payload = edit_integrity.to_dict()
+                    self.db.log_chunk_event(
+                        job_id, idx, "integrity_check_completed", integrity_payload
+                    )
+                    edit_accepted = edit_integrity.accepted
+                    if not edit_accepted:
+                        self.db.log_chunk_event(
+                            job_id, idx, "integrity_edit_rejected", integrity_payload
+                        )
+                translation = proposed_translation if edit_accepted else before_translation
                 self.db.update_chunk(job_id, idx, ChunkStatus.REFINED, translation)
                 self.db.log_chunk_event(job_id, idx, "refinement_completed", {
                     "iteration": ref_iter + 1,
@@ -1714,6 +1907,9 @@ class TranslationPipeline:
                     "rationale": _truncate_for_event(refinement.rationale, 1000),
                     "before_chars": before_chars,
                     "after_chars": len(translation),
+                    "proposed_chars": len(proposed_translation),
+                    "integrity_accepted": edit_accepted,
+                    "integrity": integrity_payload,
                     "paragraphs_after": _paragraph_count(translation),
                 })
         else:
@@ -1759,19 +1955,48 @@ Glossary violations found:
 Please re-translate the text, ensuring that you use the expected glossary terms exactly as prescribed.
 Output ONLY the corrected Persian translation.
 """
-                        translation = self.llm_client.complete(
+                        before_correction = translation
+                        proposed_correction = self.llm_client.complete(
                             messages=[{"role": "user", "content": correction_prompt}],
                             system_prompt=sys_prompt
                         )
-                        report = compliance_checker.check(
-                            translation=translation,
-                            source_text=chunk.text,
-                            glossary_manager=glossary_manager,
-                            chunk_location=f"Chunk {idx}",
-                        )
+                        correction_accepted = True
+                        correction_integrity: dict[str, Any] | None = None
+                        if integrity_enabled:
+                            correction_result = integrity_gate.evaluate(
+                                chunk.text,
+                                proposed_correction,
+                                previous=before_correction,
+                                stage="glossary_auto_correction",
+                                protected_terms=protected_targets,
+                                protect_inline_english=protect_inline_english,
+                                enforce_all_terms=True,
+                            )
+                            correction_integrity = correction_result.to_dict()
+                            self.db.log_chunk_event(
+                                job_id, idx, "integrity_check_completed",
+                                correction_integrity,
+                            )
+                            correction_accepted = correction_result.accepted
+                            if not correction_accepted:
+                                self.db.log_chunk_event(
+                                    job_id, idx, "integrity_edit_rejected",
+                                    correction_integrity,
+                                )
+                        if correction_accepted:
+                            translation = proposed_correction
+                            report = compliance_checker.check(
+                                translation=translation,
+                                source_text=chunk.text,
+                                glossary_manager=glossary_manager,
+                                chunk_location=f"Chunk {idx}",
+                            )
                         self.db.log_chunk_event(job_id, idx, "glossary_auto_correct_attempt", {
                             "attempt": attempts,
                             "translation_chars": len(translation),
+                            "proposed_chars": len(proposed_correction or ""),
+                            "integrity_accepted": correction_accepted,
+                            "integrity": correction_integrity,
                             **_compliance_report_for_event(report),
                         })
 
@@ -1793,6 +2018,23 @@ Output ONLY the corrected Persian translation.
         else:
             self.db.log_chunk_event(job_id, idx, "glossary_compliance_skipped", {"enabled": False})
 
+        if integrity_enabled:
+            final_integrity = integrity_gate.evaluate(
+                chunk.text,
+                translation,
+                stage="final_translation",
+                protected_terms=protected_targets,
+                enforce_all_terms=bool(self.config.glossary.enable_compliance_check),
+            )
+            final_integrity_payload = final_integrity.to_dict()
+            self.db.log_chunk_event(
+                job_id, idx, "integrity_check_completed", final_integrity_payload
+            )
+            if not final_integrity.accepted:
+                self.db.log_chunk_event(
+                    job_id, idx, "integrity_final_failed", final_integrity_payload
+                )
+
         # Back translation verification
         if self.config.translation.enable_back_translation:
             if back_translator.should_sample():
@@ -1805,12 +2047,22 @@ Output ONLY the corrected Persian translation.
                     "difference_count": len(bt_result.differences),
                     "differences_preview": bt_result.differences[:50],
                     "back_translated_preview": _truncate_for_event(bt_result.back_translated, 2000),
+                    "diagnostics": bt_result.diagnostics,
                 })
                 if bt_result.flagged:
+                    self.db.log_chunk_event(job_id, idx, "back_translation_flagged", {
+                        "risk_flags": bt_result.diagnostics.get("risk_flags", []),
+                        "diagnostics": bt_result.diagnostics,
+                        "message": (
+                            "Structured back-translation diagnostics require human review; "
+                            "the Persian translation was not changed automatically."
+                        ),
+                    })
                     self.db.log_event(
                         job_id,
                         "WARNING",
-                        f"Back-translation flagged for Chunk {idx} (Similarity: {bt_result.similarity_score:.2f}). Differences: {bt_result.differences}",
+                        f"Back-translation flagged for Chunk {idx}: "
+                        f"{bt_result.diagnostics.get('risk_flags', [])}",
                     )
             else:
                 self.db.log_chunk_event(job_id, idx, "back_translation_skipped", {

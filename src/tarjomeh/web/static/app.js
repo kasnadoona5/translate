@@ -3,6 +3,8 @@
 let selectedFile = null;
 let currentEventSource = null;
 let currentReviewJobId = null;
+let comparisonBaselineJobId = null;
+let currentEvaluationId = null;
 
 // Initialize on page load
 document.addEventListener("DOMContentLoaded", () => {
@@ -147,6 +149,7 @@ async function startTranslation() {
     formData.append("enable_book_research", String(document.getElementById("cfgBookResearch").checked));
     formData.append("enable_critique", String(document.getElementById("cfgCritique").checked));
     formData.append("enable_back_translation", String(document.getElementById("cfgBackTranslation").checked));
+    formData.append("enable_integrity_gate", String(document.getElementById("cfgIntegrityGate").checked));
     formData.append("enable_web_context", String(document.getElementById("cfgWebContext").checked));
     formData.append("enable_auto_extraction", String(document.getElementById("cfgAutoExtraction").checked));
     formData.append("enable_compliance_check", String(document.getElementById("cfgCompliance").checked));
@@ -154,6 +157,7 @@ async function startTranslation() {
     formData.append("scholarly_mode", String(document.getElementById("cfgScholarly").checked));
     formData.append("max_refine_iterations", document.getElementById("cfgRefineIterations").value);
     formData.append("critique_threshold", document.getElementById("cfgCritiqueThreshold").value);
+    formData.append("qa_json_retries", document.getElementById("cfgQaJsonRetries").value);
     formData.append("back_translation_sample_pct", document.getElementById("cfgBackSample").value);
     formData.append("search_provider", document.getElementById("cfgSearchProvider").value);
     formData.append("phase7_max_queries", document.getElementById("cfgResearchQueries").value);
@@ -361,6 +365,7 @@ async function fetchJobs() {
 
             if (job.status === "completed") {
                 actionHtml = `
+                    <button class="action-btn" title="Use this job in a quality comparison" onclick="selectComparisonJob('${job.id}')">Compare</button>
                     <button class="action-btn" title="Review translation" onclick="openReview('${job.id}')">Review</button>
                     <button class="action-btn" title="Download QA report" onclick="downloadQaReport('${job.id}')">QA report</button>
                     ${actionHtml}
@@ -439,6 +444,131 @@ function authUrl(path) {
     return token ? `${path}${path.includes("?") ? "&" : "?"}token=${token}` : path;
 }
 
+async function selectComparisonJob(jobId) {
+    const section = document.getElementById("evaluationSection");
+    const status = document.getElementById("evaluationStatus");
+    section.hidden = false;
+    if (!comparisonBaselineJobId) {
+        comparisonBaselineJobId = jobId;
+        currentEvaluationId = null;
+        document.getElementById("evaluationSummary").innerHTML = "";
+        document.getElementById("evaluationList").innerHTML = "";
+        document.getElementById("evaluationDownloads").hidden = true;
+        status.innerText = `Baseline selected: ${jobId}. Choose Compare on a second completed job.`;
+        section.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+    }
+    if (comparisonBaselineJobId === jobId) {
+        status.innerText = "Choose a different completed job as the candidate.";
+        return;
+    }
+
+    const baseline = comparisonBaselineJobId;
+    comparisonBaselineJobId = null;
+    status.innerText = "Running local integrity checks...";
+    const response = await fetch(authUrl("/api/evaluations"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ baseline_job_id: baseline, candidate_job_id: jobId })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        status.innerText = data.error || "Evaluation failed.";
+        return;
+    }
+    await openEvaluation(data.evaluation_id);
+}
+
+async function openEvaluation(evaluationId) {
+    currentEvaluationId = evaluationId;
+    const response = await fetch(authUrl(`/api/evaluations/${evaluationId}`));
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Failed to load evaluation");
+    document.getElementById("evaluationStatus").innerText =
+        `Evaluation ${evaluationId} | ${formatJobDate(data.created_at)}`;
+    document.getElementById("evaluationDownloads").hidden = false;
+    const summary = data.summary || {};
+    document.getElementById("evaluationSummary").innerHTML = `
+        <span class="metric">${summary.chunks_compared || 0} chunks</span>
+        <span class="metric">${summary.integrity_regressions || 0} regressions</span>
+        <span class="metric">${summary.integrity_improvements || 0} improvements</span>
+        <span class="metric ${summary.release_blocked ? "metric-alert" : "metric-ok"}">
+            ${summary.release_blocked ? "Release check blocked" : "Integrity check clear"}
+        </span>`;
+
+    const list = document.getElementById("evaluationList");
+    list.innerHTML = "";
+    (data.chunks || []).forEach(chunk => {
+        const item = document.createElement("div");
+        item.className = "evaluation-item";
+        const saved = chunk.preference && chunk.preference.preference
+            ? `Saved: ${chunk.preference.preference}` : "Not reviewed";
+        item.innerHTML = `
+            <div class="review-head">
+                <strong>Chunk ${chunk.chunk_index}</strong>
+                <span>${chunk.source_aligned ? "Source aligned" : "Source mismatch"}</span>
+                <span>${saved}</span>
+            </div>
+            <details class="evaluation-source">
+                <summary>Source text</summary>
+                <pre>${escapeHtml(chunk.source || "")}</pre>
+            </details>
+            <div class="evaluation-columns">
+                <div><strong>Translation A</strong><pre dir="rtl">${escapeHtml(chunk.translation_a || "")}</pre></div>
+                <div><strong>Translation B</strong><pre dir="rtl">${escapeHtml(chunk.translation_b || "")}</pre></div>
+            </div>
+            <div class="evaluation-actions">
+                <button class="action-btn" onclick="saveEvaluationPreference(${chunk.chunk_index}, 'a')">A is better</button>
+                <button class="action-btn" onclick="saveEvaluationPreference(${chunk.chunk_index}, 'b')">B is better</button>
+                <button class="action-btn" onclick="saveEvaluationPreference(${chunk.chunk_index}, 'equal')">Equal</button>
+                <button class="action-btn" onclick="saveEvaluationPreference(${chunk.chunk_index}, 'both_need_edit')">Both need work</button>
+            </div>
+            <label class="evaluation-edit field">
+                <span>Approved Persian correction (optional)</span>
+                <textarea id="evaluation-edit-${chunk.chunk_index}" dir="rtl" rows="4"></textarea>
+            </label>
+            <button class="btn btn-primary btn-compact" onclick="saveEvaluationEdit(${chunk.chunk_index})">Approve correction</button>`;
+        list.appendChild(item);
+    });
+    document.getElementById("evaluationSection").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function saveEvaluationPreference(chunkIndex, preference, editedTranslation = "") {
+    if (!currentEvaluationId) return;
+    const response = await fetch(authUrl(
+        `/api/evaluations/${currentEvaluationId}/chunks/${chunkIndex}/preference`
+    ), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            preference: preference,
+            edited_translation: editedTranslation,
+            save_to_benchmark: preference === "a" || preference === "b" || Boolean(editedTranslation)
+        })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        alert(data.error || "Could not save the comparison decision.");
+        return;
+    }
+    await openEvaluation(currentEvaluationId);
+}
+
+async function saveEvaluationEdit(chunkIndex) {
+    const field = document.getElementById(`evaluation-edit-${chunkIndex}`);
+    const value = (field.value || "").trim();
+    if (!value) {
+        alert("Enter an approved Persian correction first.");
+        return;
+    }
+    await saveEvaluationPreference(chunkIndex, "both_need_edit", value);
+}
+
+function downloadEvaluation(format) {
+    if (!currentEvaluationId) return;
+    window.open(authUrl(`/api/evaluations/${currentEvaluationId}/report?format=${format}`), "_blank");
+}
+
 async function openReview(jobId) {
     currentReviewJobId = jobId;
     fetchResearchSuggestions(jobId);
@@ -468,6 +598,9 @@ async function openReview(jobId) {
                     <span>Critique: ${score}</span>
                     <span>Blocking: ${(chunk.blocking_critique_issues || []).length}</span>
                     <span>Review: ${chunk.needs_review ? "needed" : "clear"}</span>
+                    <span>QA: ${chunk.qa_unavailable ? "unavailable" : "available"}</span>
+                    <span>Rejected edits: ${chunk.integrity_rejections || 0}</span>
+                    <span>Final integrity: ${chunk.integrity_final_failures ? "review" : "clear"}</span>
                     <span>Glossary: ${chunk.glossary_violations}</span>
                     <span>Back-check: ${chunk.back_translation_flagged ? "flagged" : "ok/unsampled"}</span>
                     <button class="btn" onclick="retranslateChunk('${jobId}', ${chunk.chunk_index})">Retranslate</button>

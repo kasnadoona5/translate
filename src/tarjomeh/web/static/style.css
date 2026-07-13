@@ -722,6 +722,81 @@ select {
     white-space: pre-wrap;
 }
 
+.evaluation-summary,
+.evaluation-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+}
+
+.evaluation-summary {
+    margin-bottom: 10px;
+}
+
+.metric-alert {
+    background: var(--red-soft);
+    color: var(--red);
+}
+
+.metric-ok {
+    background: var(--primary-soft);
+    color: var(--primary);
+}
+
+.evaluation-list {
+    display: grid;
+    gap: 10px;
+}
+
+.evaluation-item {
+    padding: 13px;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    background: #ffffff;
+}
+
+.evaluation-source {
+    margin-top: 10px;
+    color: var(--muted);
+    font-size: 11px;
+}
+
+.evaluation-source pre,
+.evaluation-columns pre {
+    max-height: 300px;
+    margin: 7px 0 0;
+    overflow: auto;
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--surface-muted);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 12px;
+    line-height: 1.8;
+    white-space: pre-wrap;
+}
+
+.evaluation-columns {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 10px;
+    margin: 12px 0;
+}
+
+.evaluation-columns > div {
+    min-width: 0;
+}
+
+.evaluation-edit {
+    margin: 12px 0 8px;
+}
+
+.evaluation-edit textarea {
+    width: 100%;
+    resize: vertical;
+}
+
 .glossary-form {
     display: grid;
     grid-template-columns: 1fr 1fr 0.8fr 1.2fr auto;
@@ -884,7 +959,8 @@ select {
     .settings-grid,
     .settings-group .settings-grid,
     .glossary-form,
-    .review-columns {
+    .review-columns,
+    .evaluation-columns {
         grid-template-columns: 1fr;
     }
 

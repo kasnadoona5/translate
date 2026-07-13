@@ -181,6 +181,11 @@
                                         <span class="toggle" aria-hidden="true"></span>
                                     </label>
                                     <label class="toggle-field">
+                                        <span><strong>Integrity gate</strong><small>Reject lossy automatic edits</small></span>
+                                        <input id="cfgIntegrityGate" type="checkbox" checked>
+                                        <span class="toggle" aria-hidden="true"></span>
+                                    </label>
+                                    <label class="toggle-field">
                                         <span><strong>Web context</strong><small>Resolve ambiguous terms</small></span>
                                         <input id="cfgWebContext" type="checkbox" checked>
                                         <span class="toggle" aria-hidden="true"></span>
@@ -201,6 +206,10 @@
                                     <label class="field compact-field">
                                         <span>Back-check sample %</span>
                                         <input id="cfgBackSample" type="number" min="0" max="100" step="5" value="20">
+                                    </label>
+                                    <label class="field compact-field">
+                                        <span>QA JSON repair attempts</span>
+                                        <input id="cfgQaJsonRetries" type="number" min="0" max="2" step="1" value="1">
                                     </label>
                                 </div>
                             </div>
@@ -247,6 +256,26 @@
                 <div id="jobsList" class="jobs-list">
                     <p class="empty-state">Loading jobs...</p>
                 </div>
+            </section>
+
+            <section class="workspace-panel evaluation-section" id="evaluationSection" hidden>
+                <div class="section-heading evaluation-toolbar">
+                    <div>
+                        <p class="section-kicker">Quality regression</p>
+                        <h2>Blind A/B comparison</h2>
+                        <span id="evaluationStatus" class="job-submeta"></span>
+                    </div>
+                    <div class="toolbar-actions" id="evaluationDownloads" hidden>
+                        <button class="btn btn-secondary btn-compact" type="button"
+                                onclick="downloadEvaluation('text')">Text</button>
+                        <button class="btn btn-secondary btn-compact" type="button"
+                                onclick="downloadEvaluation('json')">JSON</button>
+                        <button class="btn btn-secondary btn-compact" type="button"
+                                onclick="downloadEvaluation('csv')">CSV</button>
+                    </div>
+                </div>
+                <div id="evaluationSummary" class="evaluation-summary"></div>
+                <div id="evaluationList" class="evaluation-list"></div>
             </section>
 
             <section class="workspace-panel review-section" id="reviewSection" hidden>

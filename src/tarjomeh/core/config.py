@@ -162,6 +162,10 @@ class TranslationConfig:
     parallel_workers: int = 1
     max_refine_iterations: int = 2
     critique_threshold: float = 7.0
+    enable_integrity_gate: bool = True
+    integrity_min_retention_ratio: float = 0.65
+    integrity_max_growth_ratio: float = 1.75
+    qa_json_retries: int = 1
     # Optional one-time research pass before chunk translation. Disabled by
     # default because it adds web searches and one LLM call.
     enable_book_research: bool = False
@@ -642,6 +646,15 @@ class TarjomehConfig:
 
         if not 1 <= self.translation.critique_threshold <= 10:
             errors.append("translation.critique_threshold must be 1-10")
+
+        if not 0.3 <= self.translation.integrity_min_retention_ratio <= 1.0:
+            errors.append("translation.integrity_min_retention_ratio must be 0.3-1.0")
+
+        if not 1.0 <= self.translation.integrity_max_growth_ratio <= 3.0:
+            errors.append("translation.integrity_max_growth_ratio must be 1.0-3.0")
+
+        if not 0 <= self.translation.qa_json_retries <= 2:
+            errors.append("translation.qa_json_retries must be 0-2")
 
         if self.retry.max_retries < 0:
             errors.append("retry.max_retries must be >= 0")

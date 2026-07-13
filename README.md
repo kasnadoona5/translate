@@ -98,6 +98,39 @@ tarjomeh glossary validate glossary/academic_political_theory.csv
 tarjomeh serve --port 8080
 ```
 
+### Quality regression evaluation
+
+Compare two completed jobs locally without making any LLM calls or changing
+their translations:
+
+```bash
+tarjomeh eval BASELINE_JOB_ID CANDIDATE_JOB_ID
+tarjomeh eval BASELINE_JOB_ID CANDIDATE_JOB_ID --format json --output evaluation.json
+tarjomeh eval BASELINE_JOB_ID CANDIDATE_JOB_ID --fail-on-regression
+```
+
+The evaluator checks chunk/source alignment, empty or duplicate output,
+paragraph and heading structure, length anomalies, numbers, note markers,
+persisted glossary compliance, QA score changes, and output-file validity.
+Reports are available as text, JSON, or CSV. The web workspace also supports
+blind A/B decisions and stores explicitly approved corrections in a private
+benchmark table for future regression runs.
+
+### Post-edit integrity and QA reliability
+
+The enabled-by-default integrity gate checks every refinement, glossary repair,
+and manual chunk retranslation before it can replace persisted Persian text.
+Lossy proposals are rejected, the prior translation is retained, and the chunk
+is marked for review with structured evidence. Final chunks are also checked
+for missing numbers, notes, paragraphs, protected terminology, duplicated text,
+and leaked JSON control fields.
+
+Critic and refiner JSON is schema-validated and repaired with a bounded retry
+(`translation.qa_json_retries`). Persistent malformed output is recorded as
+`qa_unavailable`; it is never treated as a valid low score or approval.
+Back-translation reports structured number, entity, negation, omission, and
+addition risks while lexical overlap remains advisory.
+
 ## Translation modes
 
 | Setting | Fast | Quality | Academic |
