@@ -39,8 +39,9 @@ class MalformedLLMResponseError(Exception):
     pass
 
 
-# Hard ceiling for the automatic max_tokens escalation on truncated completions.
-_MAX_TOKENS_CEILING = 32000
+class IncompleteCompletionError(Exception):
+    """Raised when a provider explicitly reports an incomplete generation."""
+    pass
 
 
 class LLMClient:
@@ -63,6 +64,7 @@ class LLMClient:
         # API key index for rotation
         self._api_key_index = 0
         self._api_key_lock = threading.Lock()
+        self._attempt_observer: Any = None
 
     @property
     def _aclient(self) -> httpx.AsyncClient:
@@ -233,96 +235,287 @@ class LLMClient:
                 f"LLM endpoint returned malformed JSON response: {snippet!r}"
             ) from first_error
 
+    def set_trace_context(self, job_id: str | None, chunk_index: int | None) -> None:
+        """Attach job context to attempt events in the current worker thread."""
+        self._thread_local.trace_context = {
+            "job_id": job_id,
+            "chunk_index": chunk_index,
+        }
+
+    def set_operation(self, operation: str) -> None:
+        """Label subsequent calls in this worker without changing chat protocols."""
+        self._thread_local.operation = operation
+
+    def set_attempt_observer(self, observer: Any) -> None:
+        """Register a callback that receives sanitized per-attempt diagnostics."""
+        self._attempt_observer = observer
+
+    def _emit_attempt(self, payload: dict[str, Any]) -> None:
+        context = getattr(self._thread_local, "trace_context", {})
+        event = {**context, **payload}
+        observer = self._attempt_observer
+        if observer is not None:
+            try:
+                observer(event)
+            except Exception:
+                logger.exception("Failed to persist LLM attempt diagnostics.")
+
+    def limit_next_call_attempts(self, attempts: int) -> None:
+        """Constrain one follow-up call so nested repair cannot multiply retries."""
+        self._thread_local.next_attempt_limit = max(0, int(attempts))
+
+    def last_call_attempt_count(self) -> int:
+        return int(getattr(self._thread_local, "last_call_attempts", 0))
+
+    def remaining_attempt_budget(self, total: int = 3) -> int:
+        used = int(getattr(self._thread_local, "last_call_attempts", 0))
+        return max(0, int(total) - used)
+
+    def _max_call_attempts(self) -> int:
+        override = getattr(self._thread_local, "next_attempt_limit", None)
+        if hasattr(self._thread_local, "next_attempt_limit"):
+            del self._thread_local.next_attempt_limit
+        recovery = self.config.llm.recovery
+        if not recovery.enabled:
+            configured = 1
+        else:
+            configured = min(
+                max(1, int(self.config.retry.max_retries) + 1),
+                int(recovery.max_attempts),
+                3,
+            )
+        if override is not None:
+            return min(configured, max(1, int(override)))
+        return configured
+
+    def _recovery_payload(
+        self,
+        original: dict[str, Any],
+        attempt: int,
+        max_attempts: int,
+        failure_reason: str,
+    ) -> dict[str, Any]:
+        """Build recovery without mutating the unchanged first-attempt payload."""
+        payload = dict(original)
+        recovery = self.config.llm.recovery
+
+        if attempt >= 2 and attempt == max_attempts - 1 and recovery.model.strip():
+            payload["model"] = recovery.model.strip()
+
+        if self.config.llm.provider.lower() == "openrouter" and failure_reason == "length":
+            payload["reasoning"] = {
+                "effort": recovery.reasoning_effort,
+                "exclude": True,
+            }
+            prompt_chars = sum(
+                len(str(message.get("content", "")))
+                for message in payload.get("messages", [])
+                if isinstance(message, dict)
+            )
+            estimated_visible = max(2048, int(prompt_chars / 2.5) + 1024)
+            original_max = int(
+                original.get("max_tokens", self.config.llm.max_tokens)
+            )
+            recovery_ceiling = max(original_max, int(recovery.max_tokens))
+            payload["max_tokens"] = max(
+                original_max,
+                min(estimated_visible, recovery_ceiling),
+            )
+        return payload
+
+    @staticmethod
+    def _retryable_exception(exc: Exception, status_code: int | None) -> bool:
+        return bool(
+            isinstance(
+                exc,
+                (
+                    EmptyCompletionError,
+                    TruncatedCompletionError,
+                    IncompleteCompletionError,
+                    MalformedLLMResponseError,
+                ),
+            )
+            or status_code is None
+            or status_code in (429, 500, 502, 503, 504)
+        )
+
+    def _attempt_event(
+        self,
+        *,
+        operation: str,
+        attempt: int,
+        max_attempts: int,
+        payload: dict[str, Any],
+        started: float,
+        success: bool,
+        finish_reason: str | None,
+        status_code: int | None,
+        usage: dict[str, Any],
+        failure_reason: str = "",
+        error: str = "",
+    ) -> dict[str, Any]:
+        event = {
+            "operation": operation,
+            "attempt": attempt + 1,
+            "max_attempts": max_attempts,
+            "normal_attempt": attempt == 0,
+            "recovery": attempt > 0,
+            "success": success,
+            "finish_reason": finish_reason,
+            "status_code": status_code,
+            "model": payload.get("model"),
+            "max_tokens": payload.get("max_tokens"),
+            "reasoning": payload.get("reasoning"),
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+            "duration_seconds": round(time.monotonic() - started, 3),
+        }
+        if failure_reason:
+            event["failure_reason"] = failure_reason
+        if error:
+            event["error"] = error[:1000]
+        return event
+
     def complete(
         self,
         messages: list[dict[str, str]],
         system_prompt: str | None = None,
         **kwargs: Any,
     ) -> str:
-        """Synchronously complete a chat request with key rotation and retries."""
-        url, headers, payload = self._prepare_request(messages, system_prompt, **kwargs)
-        max_retries = self.config.retry.max_retries
-        base_delay = self.config.retry.base_delay
-        max_delay = self.config.retry.max_delay
-        jitter = self.config.retry.jitter
+        """Synchronously complete one bounded logical request."""
+        operation = str(kwargs.pop("_operation", "completion"))
+        url, headers, original_payload = self._prepare_request(
+            messages, system_prompt, **kwargs
+        )
+        max_attempts = self._max_call_attempts()
+        failure_reason = ""
 
-        for attempt in range(max_retries + 1):
+        for attempt in range(max_attempts):
+            self._thread_local.last_call_attempts = attempt + 1
+            payload = (
+                original_payload
+                if attempt == 0
+                else self._recovery_payload(
+                    original_payload, attempt, max_attempts, failure_reason
+                )
+            )
+            started = time.monotonic()
+            finish_reason = None
+            status_code = None
+            usage: dict[str, Any] = {}
             try:
                 response = self._client.post(url, headers=headers, json=payload)
-                
-                # Check for rate limits or server errors explicitly
-                if response.status_code in (429, 500, 502, 503, 504):
-                    response.raise_for_status()
-                
+                status_code = response.status_code
                 response.raise_for_status()
-                
-                # Safe JSON parsing that handles trailing garbage (like "data: [DONE]")
                 res_json = self._parse_response_json(response.text)
-                
                 self._update_usage(response, res_json)
-                
+                raw_usage = res_json.get("usage", {})
+                usage = raw_usage if isinstance(raw_usage, dict) else {}
                 choices = res_json.get("choices", [])
                 if not choices:
-                    raise MalformedLLMResponseError(f"Empty choices in response: {res_json}")
-                
+                    raise MalformedLLMResponseError(
+                        f"Empty choices in response: {res_json}"
+                    )
+
                 finish_reason = choices[0].get("finish_reason")
                 content = choices[0].get("message", {}).get("content")
-                if not content or not content.strip():
-                    raise EmptyCompletionError("LLM returned an empty or null translation completion.")
-
-                # Completion cut off at max_tokens (finish_reason == "length").
-                # Raise the budget and retry so we never persist a truncated
-                # translation. Note: for reasoning models, hidden reasoning
-                # tokens also count against max_tokens.
                 if finish_reason == "length":
-                    current_max = int(payload.get("max_tokens") or self.config.llm.max_tokens)
-                    if current_max < _MAX_TOKENS_CEILING:
-                        payload["max_tokens"] = min(current_max * 2, _MAX_TOKENS_CEILING)
-                        raise TruncatedCompletionError(
-                            f"Completion truncated at max_tokens={current_max}; "
-                            f"retrying with max_tokens={payload['max_tokens']}."
-                        )
-                    logger.warning(
-                        "Completion still truncated at max_tokens=%d (ceiling); "
-                        "returning partial translation.", current_max
+                    raise TruncatedCompletionError(
+                        "Provider stopped the completion at the output limit."
                     )
-                
-                return content
+                if finish_reason in {"error", "cancelled"}:
+                    raise IncompleteCompletionError(
+                        f"Provider returned finish_reason={finish_reason!r}."
+                    )
+                if not content or not content.strip():
+                    raise EmptyCompletionError(
+                        "LLM returned an empty or null translation completion."
+                    )
 
+                self._emit_attempt(self._attempt_event(
+                    operation=operation,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    payload=payload,
+                    started=started,
+                    success=True,
+                    finish_reason=finish_reason,
+                    status_code=status_code,
+                    usage=usage,
+                ))
+                return content
             except (
                 httpx.HTTPStatusError,
                 httpx.RequestError,
                 EmptyCompletionError,
                 TruncatedCompletionError,
+                IncompleteCompletionError,
                 MalformedLLMResponseError,
             ) as exc:
-                status_code = getattr(exc.response, "status_code", None) if hasattr(exc, "response") else None
-                
-                # Check if we should retry
-                should_retry = (
-                    attempt < max_retries and
-                    (isinstance(exc, (EmptyCompletionError, TruncatedCompletionError, MalformedLLMResponseError)) or status_code is None or status_code in (429, 500, 502, 503, 504))
+                status_code = (
+                    getattr(exc.response, "status_code", None)
+                    if hasattr(exc, "response") else status_code
                 )
-
-                if should_retry:
-                    delay = min(max_delay, base_delay * (2 ** attempt))
-                    if jitter:
-                        delay = delay / 2 + random.uniform(0, delay / 2)
-                    
-                    logger.warning(
-                        "LLM call failed (attempt %d/%d, status=%s): %s. Retrying in %.2fs...",
-                        attempt + 1, max_retries, status_code, exc, delay
-                    )
-                    time.sleep(delay)
-
-                    # For OpenRouter, rotate API key on retry
-                    if self.config.llm.provider.lower() == "openrouter":
-                        headers["Authorization"] = f"Bearer {self._get_next_api_key()}"
+                if isinstance(exc, TruncatedCompletionError):
+                    failure_reason = "length"
+                elif isinstance(exc, IncompleteCompletionError):
+                    failure_reason = str(finish_reason or "error")
+                elif isinstance(exc, EmptyCompletionError):
+                    failure_reason = "empty"
+                elif isinstance(exc, MalformedLLMResponseError):
+                    failure_reason = "malformed_response"
                 else:
-                    logger.error("LLM call failed permanently after %d retries: %s", attempt, exc)
+                    failure_reason = (
+                        f"http_{status_code}" if status_code else "transport_error"
+                    )
+
+                self._emit_attempt(self._attempt_event(
+                    operation=operation,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    payload=payload,
+                    started=started,
+                    success=False,
+                    finish_reason=finish_reason,
+                    status_code=status_code,
+                    usage=usage,
+                    failure_reason=failure_reason,
+                    error=str(exc),
+                ))
+                should_retry = (
+                    attempt + 1 < max_attempts
+                    and self._retryable_exception(exc, status_code)
+                )
+                if not should_retry:
+                    logger.error(
+                        "LLM call failed permanently after %d attempt(s): %s",
+                        attempt + 1,
+                        exc,
+                    )
                     raise
 
-        raise RuntimeError("LLM request failed after max retries without returning a response.")
+                delay = min(
+                    self.config.retry.max_delay,
+                    self.config.retry.base_delay * (2 ** attempt),
+                )
+                if self.config.retry.jitter:
+                    delay = delay / 2 + random.uniform(0, delay / 2)
+                logger.warning(
+                    "LLM call failed (attempt %d/%d, reason=%s, status=%s): %s. "
+                    "Retrying in %.2fs...",
+                    attempt + 1,
+                    max_attempts,
+                    failure_reason,
+                    status_code,
+                    exc,
+                    delay,
+                )
+                time.sleep(delay)
+                if self.config.llm.provider.lower() == "openrouter":
+                    headers["Authorization"] = f"Bearer {self._get_next_api_key()}"
+
+        raise RuntimeError("LLM request exhausted its bounded attempt budget.")
 
     async def acomplete(
         self,
@@ -330,91 +523,146 @@ class LLMClient:
         system_prompt: str | None = None,
         **kwargs: Any,
     ) -> str:
-        """Asynchronously complete a chat request with key rotation and retries."""
-        url, headers, payload = self._prepare_request(messages, system_prompt, **kwargs)
-        max_retries = self.config.retry.max_retries
-        base_delay = self.config.retry.base_delay
-        max_delay = self.config.retry.max_delay
-        jitter = self.config.retry.jitter
+        """Asynchronously complete one bounded logical request."""
+        operation = str(kwargs.pop("_operation", "completion"))
+        url, headers, original_payload = self._prepare_request(
+            messages, system_prompt, **kwargs
+        )
+        max_attempts = self._max_call_attempts()
+        failure_reason = ""
 
-        for attempt in range(max_retries + 1):
+        for attempt in range(max_attempts):
+            self._thread_local.last_call_attempts = attempt + 1
+            payload = (
+                original_payload
+                if attempt == 0
+                else self._recovery_payload(
+                    original_payload, attempt, max_attempts, failure_reason
+                )
+            )
+            started = time.monotonic()
+            finish_reason = None
+            status_code = None
+            usage: dict[str, Any] = {}
             try:
-                response = await self._aclient.post(url, headers=headers, json=payload)
-                
-                # Check for rate limits or server errors explicitly
-                if response.status_code in (429, 500, 502, 503, 504):
-                    response.raise_for_status()
-                
+                response = await self._aclient.post(
+                    url, headers=headers, json=payload
+                )
+                status_code = response.status_code
                 response.raise_for_status()
-                
-                # Safe JSON parsing that handles trailing garbage (like "data: [DONE]")
                 res_json = self._parse_response_json(response.text)
-                
                 self._update_usage(response, res_json)
-                
+                raw_usage = res_json.get("usage", {})
+                usage = raw_usage if isinstance(raw_usage, dict) else {}
                 choices = res_json.get("choices", [])
                 if not choices:
-                    raise MalformedLLMResponseError(f"Empty choices in response: {res_json}")
-                
+                    raise MalformedLLMResponseError(
+                        f"Empty choices in response: {res_json}"
+                    )
+
                 finish_reason = choices[0].get("finish_reason")
                 content = choices[0].get("message", {}).get("content")
-                if not content or not content.strip():
-                    raise EmptyCompletionError("LLM returned an empty or null translation completion.")
-
-                # Completion cut off at max_tokens (finish_reason == "length").
-                # Raise the budget and retry so we never persist a truncated
-                # translation. Note: for reasoning models, hidden reasoning
-                # tokens also count against max_tokens.
                 if finish_reason == "length":
-                    current_max = int(payload.get("max_tokens") or self.config.llm.max_tokens)
-                    if current_max < _MAX_TOKENS_CEILING:
-                        payload["max_tokens"] = min(current_max * 2, _MAX_TOKENS_CEILING)
-                        raise TruncatedCompletionError(
-                            f"Completion truncated at max_tokens={current_max}; "
-                            f"retrying with max_tokens={payload['max_tokens']}."
-                        )
-                    logger.warning(
-                        "Completion still truncated at max_tokens=%d (ceiling); "
-                        "returning partial translation.", current_max
+                    raise TruncatedCompletionError(
+                        "Provider stopped the completion at the output limit."
                     )
-                
-                return content
+                if finish_reason in {"error", "cancelled"}:
+                    raise IncompleteCompletionError(
+                        f"Provider returned finish_reason={finish_reason!r}."
+                    )
+                if not content or not content.strip():
+                    raise EmptyCompletionError(
+                        "LLM returned an empty or null translation completion."
+                    )
 
+                self._emit_attempt(self._attempt_event(
+                    operation=operation,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    payload=payload,
+                    started=started,
+                    success=True,
+                    finish_reason=finish_reason,
+                    status_code=status_code,
+                    usage=usage,
+                ))
+                return content
             except (
                 httpx.HTTPStatusError,
                 httpx.RequestError,
                 EmptyCompletionError,
                 TruncatedCompletionError,
+                IncompleteCompletionError,
                 MalformedLLMResponseError,
             ) as exc:
-                status_code = getattr(exc.response, "status_code", None) if hasattr(exc, "response") else None
-                
-                # Check if we should retry
-                should_retry = (
-                    attempt < max_retries and
-                    (isinstance(exc, (EmptyCompletionError, TruncatedCompletionError, MalformedLLMResponseError)) or status_code is None or status_code in (429, 500, 502, 503, 504))
+                status_code = (
+                    getattr(exc.response, "status_code", None)
+                    if hasattr(exc, "response") else status_code
                 )
-
-                if should_retry:
-                    delay = min(max_delay, base_delay * (2 ** attempt))
-                    if jitter:
-                        delay = delay / 2 + random.uniform(0, delay / 2)
-                    
-                    logger.warning(
-                        "LLM call failed (attempt %d/%d, status=%s): %s. Retrying in %.2fs...",
-                        attempt + 1, max_retries, status_code, exc, delay
-                    )
-                    await asyncio.sleep(delay)
-
-                    # For OpenRouter, rotate API key on retry
-                    if self.config.llm.provider.lower() == "openrouter":
-                        headers["Authorization"] = f"Bearer {self._get_next_api_key()}"
+                if isinstance(exc, TruncatedCompletionError):
+                    failure_reason = "length"
+                elif isinstance(exc, IncompleteCompletionError):
+                    failure_reason = str(finish_reason or "error")
+                elif isinstance(exc, EmptyCompletionError):
+                    failure_reason = "empty"
+                elif isinstance(exc, MalformedLLMResponseError):
+                    failure_reason = "malformed_response"
                 else:
-                    logger.error("LLM call failed permanently after %d retries: %s", attempt, exc)
+                    failure_reason = (
+                        f"http_{status_code}" if status_code else "transport_error"
+                    )
+
+                self._emit_attempt(self._attempt_event(
+                    operation=operation,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    payload=payload,
+                    started=started,
+                    success=False,
+                    finish_reason=finish_reason,
+                    status_code=status_code,
+                    usage=usage,
+                    failure_reason=failure_reason,
+                    error=str(exc),
+                ))
+                should_retry = (
+                    attempt + 1 < max_attempts
+                    and self._retryable_exception(exc, status_code)
+                )
+                if not should_retry:
+                    logger.error(
+                        "LLM call failed permanently after %d attempt(s): %s",
+                        attempt + 1,
+                        exc,
+                    )
                     raise
 
-        raise RuntimeError("LLM request failed after max retries without returning a response.")
+                delay = min(
+                    self.config.retry.max_delay,
+                    self.config.retry.base_delay * (2 ** attempt),
+                )
+                if self.config.retry.jitter:
+                    delay = delay / 2 + random.uniform(0, delay / 2)
+                logger.warning(
+                    "LLM call failed (attempt %d/%d, reason=%s, status=%s): %s. "
+                    "Retrying in %.2fs...",
+                    attempt + 1,
+                    max_attempts,
+                    failure_reason,
+                    status_code,
+                    exc,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                if self.config.llm.provider.lower() == "openrouter":
+                    headers["Authorization"] = f"Bearer {self._get_next_api_key()}"
 
+        raise RuntimeError("LLM request exhausted its bounded attempt budget.")
     async def chat(self, prompt: str) -> str:
-        """Compatibility method for quality tools that expect an async chat(prompt) -> str interface."""
-        return await self.acomplete(messages=[{"role": "user", "content": prompt}])
+        """Compatibility method for async quality and context tools."""
+        operation = getattr(self._thread_local, "operation", "chat")
+        self._thread_local.operation = "chat"
+        return await self.acomplete(
+            messages=[{"role": "user", "content": prompt}],
+            _operation=operation,
+        )

@@ -73,15 +73,15 @@ function setupSettingsControls() {
         const presets = {
             fast: {
                 critique: false, backTranslation: false, webContext: false,
-                refinements: 0, threshold: 7, sample: 0
+                refinements: 0, threshold: 9, sample: 0
             },
             quality: {
                 critique: true, backTranslation: true, webContext: true,
-                refinements: 1, threshold: 7, sample: 5
+                refinements: 1, threshold: 9, sample: 5
             },
             academic: {
                 critique: true, backTranslation: true, webContext: true,
-                refinements: 2, threshold: 7, sample: 20
+                refinements: 2, threshold: 9, sample: 20
             }
         };
         const preset = presets[mode.value];
@@ -158,6 +158,7 @@ async function startTranslation() {
     formData.append("max_refine_iterations", document.getElementById("cfgRefineIterations").value);
     formData.append("critique_threshold", document.getElementById("cfgCritiqueThreshold").value);
     formData.append("qa_json_retries", document.getElementById("cfgQaJsonRetries").value);
+    formData.append("recovery_model", document.getElementById("cfgRecoveryModel").value.trim());
     formData.append("back_translation_sample_pct", document.getElementById("cfgBackSample").value);
     formData.append("search_provider", document.getElementById("cfgSearchProvider").value);
     formData.append("phase7_max_queries", document.getElementById("cfgResearchQueries").value);

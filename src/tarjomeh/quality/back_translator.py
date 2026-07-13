@@ -118,6 +118,8 @@ class BackTranslator:
             English back-translation.
         """
         prompt = BACK_TRANSLATE_PROMPT.format(persian_text=persian_text)
+        if hasattr(self._llm, "set_operation"):
+            self._llm.set_operation("back_translation")
         result: str = await self._llm.chat(prompt)
 
         # Strip accidental markdown fences.
@@ -250,7 +252,9 @@ class BackTranslator:
 # ── Utility ──────────────────────────────────────────────────────────
 
 _WORD_RE = re.compile(r"[a-zA-Z0-9']+")
-_ENTITY_RE = re.compile(r"\b(?:[A-Z][\w'\-]+(?:\s+(?:of|the|and|&|[A-Z][\w'\-]+)){0,5})\b")
+_ENTITY_RE = re.compile(
+    r"\b(?:[A-Z][\w'\-]+(?:[ \t]+(?:of|the|and|&|[A-Z][\w'\-]+)){0,5})\b"
+)
 _ENTITY_STOP = {"the", "a", "an", "this", "that", "these", "those", "in", "on", "chapter", "introduction"}
 _NEGATION_RE = re.compile(r"\b(?:not|no|never|without|neither|nor|cannot|can't|won't|isn't|aren't|didn't|doesn't)\b", re.IGNORECASE)
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
@@ -272,6 +276,8 @@ def _extract_entities(text: str) -> list[str]:
         prefix = (text or "")[:match.start()].rstrip()
         at_sentence_start = not prefix or prefix.endswith((".", "!", "?"))
         single_word = " " not in value
+        if value.split()[-1].casefold() in {"of", "the", "and", "&"}:
+            continue
         if single_word and at_sentence_start and not value.isupper():
             continue
         if value.casefold() not in _ENTITY_STOP and len(value) > 2:

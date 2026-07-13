@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from tarjomeh.core.config import TarjomehConfig
-from tarjomeh.core.llm_client import LLMClient
+from tarjomeh.core.llm_client import LLMClient, TruncatedCompletionError
 from tarjomeh.parsers.base import BaseParser, Document, EXTENSION_PARSER_MAP
 from tarjomeh.chunking.chunker import SemanticChunker, FixedChunker, Chunk
 from tarjomeh.memory.manager import MemoryManager, MemoryContext
@@ -29,6 +29,7 @@ from tarjomeh.glossary.compliance import GlossaryComplianceChecker
 from tarjomeh.persian.typography import PersianTypographer
 from tarjomeh.core.term_notes import (
     apply_term_notes,
+    audit_inline_english_originals,
     effective_term_notes_mode,
     ensure_inline_proper_noun_originals,
 )
@@ -343,6 +344,24 @@ def _inline_eligible_nouns_from_state(noun_state: Any) -> dict[str, str]:
     }
 
 
+def _normalized_translation_version(value: str) -> str:
+    return " ".join((value or "").split()).casefold()
+
+
+def _critique_candidate_rank(critique: Any) -> tuple[float, float, float, float]:
+    scores = [
+        float(getattr(critique, name, 0.0))
+        for name in ("accuracy", "fluency", "terminology", "register")
+    ]
+    blocking = len(_blocking_critique_issues(critique))
+    return (
+        -float(blocking),
+        float(getattr(critique, "average", 0.0)),
+        min(scores) if scores else 0.0,
+        float(getattr(critique, "accuracy", 0.0)),
+    )
+
+
 def _critique_passes_quality_gate(critique: Any, threshold: float) -> bool:
     """Average score must pass and no major conceptual/terminology issue may remain."""
     return bool(
@@ -512,6 +531,41 @@ class TranslationPipeline:
         self.critic_client = self._build_critic_client(config)
         self.db = JobDatabase()
         self.current_job_id: str | None = None
+        observed: set[int] = set()
+        for client in (self.llm_client, self.critic_client):
+            if id(client) not in observed:
+                client.set_attempt_observer(self._record_llm_attempt)
+                observed.add(id(client))
+
+    def _record_llm_attempt(self, event: dict[str, Any]) -> None:
+        """Persist sanitized provider completion evidence for the active job."""
+        payload = dict(event)
+        job_id = payload.pop("job_id", None) or self.current_job_id
+        chunk_index = payload.pop("chunk_index", None)
+        if not job_id:
+            return
+        if chunk_index is None:
+            self.db.log_event(
+                job_id,
+                "INFO" if payload.get("success") else "WARNING",
+                "LLM {operation} attempt {attempt}/{max_attempts}: {result}".format(
+                    operation=payload.get("operation", "completion"),
+                    attempt=payload.get("attempt", 1),
+                    max_attempts=payload.get("max_attempts", 1),
+                    result=(
+                        payload.get("finish_reason") or "completed"
+                        if payload.get("success")
+                        else payload.get("failure_reason", "failed")
+                    ),
+                ),
+            )
+            return
+        self.db.log_chunk_event(
+            job_id,
+            int(chunk_index),
+            "llm_call_attempt",
+            payload,
+        )
 
     def _build_critic_client(self, config: TarjomehConfig) -> LLMClient:
         """Build the judge client for critique / back-translation QA.
@@ -541,6 +595,9 @@ class TranslationPipeline:
             # (e.g. translator via 9router, judge via OpenRouter directly).
             critic_config.llm.openrouter.api_base = critic.api_base.strip()
         critic_config.llm.temperature = critic.temperature
+        # A translator fallback combo may not exist on an independent critic
+        # endpoint. The critic safely retries its own configured model.
+        critic_config.llm.recovery.model = ""
 
         logger.info(
             "Critic model active: %s via %s (translator: %s)",
@@ -791,7 +848,8 @@ class TranslationPipeline:
                 ner_response = self.llm_client.complete(
                     messages=[{"role": "user", "content": GLOSSARY_EXTRACT_PROMPT.format(text=first_text)}],
                     system_prompt=sys_prompt,
-                    response_format={"type": "json_object"}
+                    response_format={"type": "json_object"},
+                    _operation="auto_term_extraction",
                 )
                 ner_data = json.loads(ner_response)
                 # The model may return either a JSON object ({"terms": [...]})
@@ -1283,6 +1341,21 @@ class TranslationPipeline:
                     job_id, "INFO",
                     f"Restored {restored} first-occurrence English original(s).",
                 )
+        original_audit = audit_inline_english_originals(
+            trans_doc,
+            proper_nouns if note_mode in {"inline", "both"} else {},
+        )
+        self.db.save_job_artifact(
+            job_id, "english_original_audit", original_audit
+        )
+        self.db.log_event(
+            job_id,
+            "INFO",
+            "English-original audit: "
+            f"unauthorized={original_audit['removed_unauthorized_count']}, "
+            f"duplicates={original_audit['removed_duplicate_count']}, "
+            f"citations_preserved={original_audit['preserved_citation_count']}.",
+        )
         if note_mode != "inline" and self.config.output.format in note_formats:
             notes = apply_term_notes(
                 trans_doc,
@@ -1387,6 +1460,13 @@ class TranslationPipeline:
             ensure_inline_proper_noun_originals(
                 trans_doc, dict(proper_nouns), typographer
             )
+        original_audit = audit_inline_english_originals(
+            trans_doc,
+            dict(proper_nouns) if note_mode in {"inline", "both"} else {},
+        )
+        self.db.save_job_artifact(
+            job_id, "english_original_audit", original_audit
+        )
         if note_mode != "inline" and fmt in {"docx", "epub", "markdown"}:
             glossary_manager = GlossaryManager()
             glossary_paths = []
@@ -1689,6 +1769,11 @@ class TranslationPipeline:
             logger.info("Pipeline paused cooperatively for job %s", job_id)
             raise PipelinePausedException("Job paused cooperatively")
 
+        if hasattr(self.llm_client, "set_trace_context"):
+            self.llm_client.set_trace_context(job_id, idx)
+        critic_client = getattr(self, "critic_client", self.llm_client)
+        if hasattr(critic_client, "set_trace_context"):
+            critic_client.set_trace_context(job_id, idx)
         self.db.log_chunk_event(job_id, idx, "chunk_started", {
             "source_chars": len(chunk.text),
             "source_paragraphs": _paragraph_count(chunk.text),
@@ -1827,18 +1912,31 @@ class TranslationPipeline:
             country=self.config.translation.country,
             term_notes_instruction=term_notes_instruction,
         )
+        source_paragraphs = [
+            paragraph.strip()
+            for paragraph in chunk.text.split("\n\n")
+            if paragraph.strip()
+        ]
         n_source_paras = len(chunk.metadata.get("paragraph_indices", [])) or \
-            len([p for p in chunk.text.split("\n\n") if p.strip()])
-        user_content = TRANSLATE_CHUNK_PROMPT.format(
-            exemplars=exemplars,
-            glossary_terms=glossary_terms_str,
-            memory_context=mem_context.format() + inline_policy_context,
-            web_context=web_context_str,
-            previous_translation=prev_trans,
-            source_text=chunk.text,
-            paragraph_count=n_source_paras,
-            term_notes_instruction=term_notes_instruction,
-        )
+            len(source_paragraphs)
+
+        def build_translation_prompt(source_text: str, previous: str) -> str:
+            paragraph_count = len([
+                paragraph for paragraph in source_text.split("\n\n")
+                if paragraph.strip()
+            ])
+            return TRANSLATE_CHUNK_PROMPT.format(
+                exemplars=exemplars,
+                glossary_terms=glossary_terms_str,
+                memory_context=mem_context.format() + inline_policy_context,
+                web_context=web_context_str,
+                previous_translation=previous,
+                source_text=source_text,
+                paragraph_count=paragraph_count,
+                term_notes_instruction=term_notes_instruction,
+            )
+
+        user_content = build_translation_prompt(chunk.text, prev_trans)
 
         # Terminology context for the judge & refiner: matched glossary terms
         # plus the established proper-noun renderings, so the "terminology"
@@ -1865,10 +1963,46 @@ class TranslationPipeline:
 
         # Translate
         self.db.update_chunk(job_id, idx, ChunkStatus.TRANSLATING)
-        translation = self.llm_client.complete(
-            messages=[{"role": "user", "content": user_content}],
-            system_prompt=sys_prompt
-        )
+        try:
+            translation = self.llm_client.complete(
+                messages=[{"role": "user", "content": user_content}],
+                system_prompt=sys_prompt,
+                _operation="translation",
+            )
+        except TruncatedCompletionError:
+            if len(source_paragraphs) <= 1:
+                raise
+            self.db.log_chunk_event(
+                job_id,
+                idx,
+                "translation_adaptive_split",
+                {
+                    "reason": "repeated_finish_reason_length",
+                    "part_count": len(source_paragraphs),
+                    "message": (
+                        "The complete chunk exhausted its bounded output budget; "
+                        "paragraph-boundary recovery was activated."
+                    ),
+                },
+            )
+            recovered_parts: list[str] = []
+            continuity = prev_trans
+            for part_index, source_paragraph in enumerate(source_paragraphs):
+                part_prompt = build_translation_prompt(
+                    source_paragraph, continuity
+                )
+                recovered = self.llm_client.complete(
+                    messages=[{"role": "user", "content": part_prompt}],
+                    system_prompt=sys_prompt,
+                    _operation="translation_split_recovery",
+                ).strip()
+                if not recovered:
+                    raise ValueError(
+                        f"Adaptive translation part {part_index} was empty."
+                    )
+                recovered_parts.append(recovered)
+                continuity = recovered
+            translation = "\n\n".join(recovered_parts)
         if not translation or not translation.strip():
             raise ValueError(f"LLM returned an empty or whitespace-only translation for chunk {idx}.")
         self.db.update_chunk(job_id, idx, ChunkStatus.TRANSLATED, translation)
@@ -1895,7 +2029,9 @@ class TranslationPipeline:
 
         # Critique and Refine (judge scores against the terminology mandate)
         if self.config.translation.enable_critique:
-            threshold = getattr(self.config.translation, "critique_threshold", 7.0)
+            threshold = getattr(self.config.translation, "critique_threshold", 9.0)
+            accepted_versions = [translation]
+            evaluated_versions: list[tuple[str, Any]] = []
             for ref_iter in range(self.config.translation.max_refine_iterations + 1):
                 critique_rep = self._run_async(
                     critique_tool.critique(chunk.text, translation, terminology=terminology_ctx)
@@ -1919,6 +2055,24 @@ class TranslationPipeline:
                 if getattr(critique_rep, "valid", True):
                     policy_conflicts = _filter_critique_policy_conflicts(
                         critique_rep, chunk.text, allowed_inline_originals
+                    )
+                ignored_issues = list(
+                    getattr(critique_rep, "ignored_issue_details", []) or []
+                )
+                if ignored_issues:
+                    self.db.log_chunk_event(
+                        job_id,
+                        idx,
+                        "critique_noop_issues_filtered",
+                        {
+                            "iteration": ref_iter,
+                            "count": len(ignored_issues),
+                            "issues": ignored_issues,
+                            "message": (
+                                "Critic advice requiring no textual change was "
+                                "withheld from refinement."
+                            ),
+                        },
                     )
                 if policy_conflicts:
                     self.db.log_chunk_event(
@@ -1963,6 +2117,7 @@ class TranslationPipeline:
                         ),
                     })
                     break
+                evaluated_versions.append((translation, critique_rep))
                 if _critique_passes_quality_gate(critique_rep, threshold):
                     break
                 if ref_iter == self.config.translation.max_refine_iterations:
@@ -2061,7 +2216,46 @@ class TranslationPipeline:
                         self.db.log_chunk_event(
                             job_id, idx, "integrity_edit_rejected", integrity_payload
                         )
+                convergence_reason = ""
+                if edit_accepted:
+                    proposed_key = _normalized_translation_version(proposed_translation)
+                    current_key = _normalized_translation_version(before_translation)
+                    prior_keys = [
+                        _normalized_translation_version(value)
+                        for value in accepted_versions
+                    ]
+                    if proposed_key == current_key:
+                        convergence_reason = "refinement_no_change"
+                    elif proposed_key in prior_keys[:-1]:
+                        convergence_reason = "refinement_oscillation"
+
                 translation = proposed_translation if edit_accepted else before_translation
+                if convergence_reason == "refinement_oscillation":
+                    best_index, (translation, _) = max(
+                        enumerate(evaluated_versions),
+                        key=lambda item: (
+                            _critique_candidate_rank(item[1][1]),
+                            item[0],
+                        ),
+                    )
+                    self.db.log_chunk_event(
+                        job_id,
+                        idx,
+                        "refinement_convergence_stopped",
+                        {
+                            "reason": convergence_reason,
+                            "iteration": ref_iter + 1,
+                            "selected_evaluated_version": best_index,
+                            "candidate_count": len(accepted_versions) + 1,
+                            "message": (
+                                "A previously accepted translation reappeared; "
+                                "the best integrity-passing evaluated version was retained."
+                            ),
+                        },
+                    )
+                elif edit_accepted and not convergence_reason:
+                    accepted_versions.append(translation)
+
                 self.db.update_chunk(job_id, idx, ChunkStatus.REFINED, translation)
                 self.db.log_chunk_event(job_id, idx, "refinement_completed", {
                     "iteration": ref_iter + 1,
@@ -2076,7 +2270,27 @@ class TranslationPipeline:
                     "integrity_accepted": edit_accepted,
                     "integrity": integrity_payload,
                     "paragraphs_after": _paragraph_count(translation),
+                    "convergence_reason": convergence_reason or None,
                 })
+                if convergence_reason:
+                    self.db.log_chunk_event(
+                        job_id,
+                        idx,
+                        "critique_needs_review",
+                        {
+                            "iteration": ref_iter + 1,
+                            "critique_average": critique_rep.average,
+                            "blocking_issue_count": len(
+                                _blocking_critique_issues(critique_rep)
+                            ),
+                            "review_reason": convergence_reason,
+                            "message": (
+                                "Refinement stopped because another pass would "
+                                "repeat or reverse an accepted edit."
+                            ),
+                        },
+                    )
+                    break
         else:
             self.db.log_chunk_event(job_id, idx, "critique_skipped", {"enabled": False})
 
@@ -2150,7 +2364,8 @@ Output ONLY the corrected Persian translation.
                         before_correction = translation
                         proposed_correction = self.llm_client.complete(
                             messages=[{"role": "user", "content": correction_prompt}],
-                            system_prompt=sys_prompt
+                            system_prompt=sys_prompt,
+                            _operation="glossary_auto_correction",
                         )
                         correction_accepted = True
                         correction_integrity: dict[str, Any] | None = None

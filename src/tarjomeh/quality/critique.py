@@ -46,6 +46,7 @@ class CritiqueResult:
     average: float = 0.0
     issues: list[str] = field(default_factory=list)
     issue_details: list[dict[str, Any]] = field(default_factory=list)
+    ignored_issue_details: list[dict[str, Any]] = field(default_factory=list)
     raw_response: str = ""
     valid: bool = True
     validation_errors: list[str] = field(default_factory=list)
@@ -65,6 +66,7 @@ class CritiqueResult:
             "average": self.average,
             "issues": self.issues,
             "issue_details": self.issue_details,
+            "ignored_issue_details": self.ignored_issue_details,
             "raw_response": self.raw_response,
             "valid": self.valid,
             "validation_errors": self.validation_errors,
@@ -82,6 +84,7 @@ class CritiqueResult:
             average=float(data.get("average", 0.0)),
             issues=list(data.get("issues", [])),
             issue_details=list(data.get("issue_details", [])),
+            ignored_issue_details=list(data.get("ignored_issue_details", [])),
             raw_response=str(data.get("raw_response", "")),
             valid=bool(data.get("valid", True)),
             validation_errors=list(data.get("validation_errors", [])),
@@ -143,18 +146,33 @@ class TranslationCritique:
             terminology=terminology or "(no glossary terms apply to this chunk)",
         )
 
+        if hasattr(self._llm, "set_operation"):
+            self._llm.set_operation("critique")
         raw = await self._llm.chat(prompt)
         result = self._parse_response(raw)
         result.attempts = 1
         all_errors = list(result.validation_errors)
+        remaining_budget = (
+            self._llm.remaining_attempt_budget(3)
+            if hasattr(self._llm, "remaining_attempt_budget")
+            else self.max_parse_retries
+        )
         for retry in range(self.max_parse_retries):
             if result.valid:
                 break
             logger.warning("Invalid critique response; requesting JSON repair.")
+            if remaining_budget <= 0:
+                break
+            if hasattr(self._llm, "limit_next_call_attempts"):
+                self._llm.limit_next_call_attempts(remaining_budget)
             repair_prompt = self._repair_prompt(raw, result.validation_errors)
+            if hasattr(self._llm, "set_operation"):
+                self._llm.set_operation("critique_json_repair")
             raw = await self._llm.chat(repair_prompt)
             result = self._parse_response(raw)
             result.attempts = retry + 2
+            if hasattr(self._llm, "last_call_attempt_count"):
+                remaining_budget -= self._llm.last_call_attempt_count()
             all_errors.extend(result.validation_errors)
         if result.attempts > 1:
             result.validation_errors = list(dict.fromkeys(all_errors))
@@ -234,6 +252,7 @@ issues array. Do not add markdown fences or commentary."""
             # fix critical issues first) and sort critical → major → minor.
             severity_rank = {"critical": 0, "major": 1, "minor": 2}
             parsed: list[tuple[int, str, dict[str, Any]]] = []
+            ignored_issue_details: list[dict[str, Any]] = []
             for issue in raw_issues:
                 if isinstance(issue, dict):
                     detail = dict(issue)
@@ -243,6 +262,9 @@ issues array. Do not add markdown fences or commentary."""
                     current = detail.get("current_translation", "")
                     fix = detail.get("suggested_fix", "")
                     explanation = detail.get("explanation", "")
+                    if _is_noop_issue(detail):
+                        ignored_issue_details.append(detail)
+                        continue
                     text = f"[{severity.upper()}/{category}]"
                     if segment:
                         text += f' source: "{segment}"'
@@ -260,6 +282,7 @@ issues array. Do not add markdown fences or commentary."""
         else:
             issues = []
             issue_details = []
+            ignored_issue_details = []
             errors.append("issues_must_be_array")
 
         return CritiqueResult(
@@ -270,10 +293,47 @@ issues array. Do not add markdown fences or commentary."""
             average=average,
             issues=issues,
             issue_details=issue_details,
+            ignored_issue_details=ignored_issue_details,
             raw_response=raw,
             valid=not errors,
             validation_errors=errors,
         )
+
+
+def _normalized_issue_text(value: Any) -> str:
+    return " ".join(str(value or "").casefold().split()).strip(" .;:!?\"'")
+
+
+def _is_noop_issue(detail: dict[str, Any]) -> bool:
+    """Ignore advice that cannot produce a real textual edit."""
+    current = _normalized_issue_text(detail.get("current_translation"))
+    suggested = _normalized_issue_text(detail.get("suggested_fix"))
+    explanation = _normalized_issue_text(detail.get("explanation"))
+    if current and suggested and current == suggested:
+        return True
+    no_change_values = {
+        "no change needed",
+        "no correction needed",
+        "keep as is",
+        "preserve as is",
+        "none",
+        "n/a",
+    }
+    if suggested in no_change_values:
+        return True
+    return (
+        (not suggested or suggested == current)
+        and any(
+            phrase in explanation
+            for phrase in (
+                "no change needed",
+                "no correction needed",
+                "already correct",
+                "current translation is acceptable",
+                "keep the current",
+            )
+        )
+    )
 
 
 def _score(data: dict[str, Any], scores: dict[str, Any], key: str, errors: list[str]) -> float:

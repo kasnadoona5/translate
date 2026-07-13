@@ -45,11 +45,16 @@ provider = "openrouter"          # "openrouter" (any OpenAI-compatible endpoint,
 # "anthropic/claude-sonnet-5") or a 9router combo name (e.g. "combo1").
 model = "deepseek/deepseek-v4-flash"
 temperature = 0.3
-# Output budget PER REQUEST. Keep at 8192+: reasoning models spend hidden
-# "thinking" tokens from this budget, and 4096 caused truncated/empty
-# translations. The client auto-doubles it (up to 32000) if a completion
-# is still cut off.
+# Output budget for the unchanged first request. Recovery settings below are
+# used only after an explicit provider/integrity failure.
 max_tokens = 8192
+
+[llm.recovery]
+enabled = true
+max_attempts = 3                # total attempts, including the normal request
+model = ""                      # optional same-endpoint fallback/combo
+reasoning_effort = "low"        # used only after finish_reason="length"
+max_tokens = 8192               # recovery ceiling; not a blind token increase
 
 [llm.openrouter]
 # API keys live in .env — referenced here as ${VAR}. For key rotation list
@@ -95,7 +100,7 @@ back_translation_sample_pct = 20 # auto-set by mode: fast=0, quality=5, academic
 enable_web_context = true        # web search for ambiguous-term disambiguation
 enable_book_research = false     # opt-in one-time book/topic research seed pass
 parallel_workers = 1             # >1 only in fast/quality; academic is always 1
-critique_threshold = 7.0         # refine chunks scoring below this (1-10)
+critique_threshold = 9.0         # production recommendation; 10 over-refines style
 enable_integrity_gate = true     # reject lossy post-edits and retain prior text
 integrity_min_retention_ratio = 0.65
 integrity_max_growth_ratio = 1.75

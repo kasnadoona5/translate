@@ -65,7 +65,7 @@ def _safe_glossary_upload_path(filename: str) -> Path:
 def _job_critique_threshold(job: dict[str, Any]) -> float:
     """Read the configured critique threshold for review UI flagging."""
     try:
-        return float(job.get("config", {}).get("translation", {}).get("critique_threshold", 7.0))
+        return float(job.get("config", {}).get("translation", {}).get("critique_threshold", 9.0))
     except (TypeError, ValueError):
         return 7.0
 
@@ -201,6 +201,7 @@ def _register_api(app: Flask) -> None:
             "bilingual_mode": "output.bilingual_mode",
             "term_notes": "output.term_notes",
             "search_provider": "web_search.provider",
+            "recovery_model": "llm.recovery.model",
         }
         for form_key, dotted_key in _form_field_map.items():
             value = request.form.get(form_key)
@@ -668,6 +669,15 @@ def _register_api(app: Flask) -> None:
                 f"  context={research.get('book_context', '')}",
                 "",
             ])
+        original_audit = db.get_job_artifact(job_id, "english_original_audit")
+        if original_audit is not None:
+            lines.extend([
+                "English-original audit:",
+                f"  authorized={original_audit.get('authorized_count', 0)} kept={original_audit.get('kept_authorized', 0)}",
+                f"  unauthorized_removed={original_audit.get('removed_unauthorized_count', 0)} duplicates_removed={original_audit.get('removed_duplicate_count', 0)}",
+                f"  citations_preserved={original_audit.get('preserved_citation_count', 0)}",
+                "",
+            ])
         events_by_chunk: dict[int, list[dict[str, Any]]] = {}
         for event in db.get_chunk_events(job_id):
             events_by_chunk.setdefault(int(event["chunk_index"]), []).append(event)
@@ -678,7 +688,19 @@ def _register_api(app: Flask) -> None:
             lines.append(f"Chunk {idx} [{chunk['status']}]")
             for event in chunk_events:
                 payload = event["payload"]
-                if event["event_type"] == "critique_completed":
+                if event["event_type"] == "llm_call_attempt" and (
+                    payload.get("recovery") or not payload.get("success", False)
+                ):
+                    lines.append(
+                        f"  LLM attempt: operation={payload.get('operation')} "
+                        f"attempt={payload.get('attempt')}/{payload.get('max_attempts')} "
+                        f"success={payload.get('success')} "
+                        f"finish={payload.get('finish_reason')} "
+                        f"failure={payload.get('failure_reason', '')} "
+                        f"model={payload.get('model')} "
+                        f"tokens={payload.get('completion_tokens', 0)}"
+                    )
+                elif event["event_type"] == "critique_completed":
                     scores = payload.get("scores", {})
                     lines.append(
                         "  Critique: valid={valid} attempts={attempts} avg={average} accuracy={accuracy} fluency={fluency} "

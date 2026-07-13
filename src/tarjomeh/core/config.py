@@ -133,6 +133,17 @@ class LLMCriticConfig:
 
 
 @dataclass
+class LLMRecoveryConfig:
+    """Bounded recovery used only after the unchanged normal request fails."""
+
+    enabled: bool = True
+    max_attempts: int = 3
+    model: str = ""
+    reasoning_effort: str = "low"
+    max_tokens: int = 8192
+
+
+@dataclass
 class LLMConfig:
     """LLM provider settings."""
 
@@ -143,6 +154,7 @@ class LLMConfig:
     openrouter: LLMOpenRouterConfig = field(default_factory=LLMOpenRouterConfig)
     ollama: LLMOllamaConfig = field(default_factory=LLMOllamaConfig)
     critic: LLMCriticConfig = field(default_factory=LLMCriticConfig)
+    recovery: LLMRecoveryConfig = field(default_factory=LLMRecoveryConfig)
 
 
 @dataclass
@@ -161,7 +173,7 @@ class TranslationConfig:
     enable_web_context: bool = True
     parallel_workers: int = 1
     max_refine_iterations: int = 2
-    critique_threshold: float = 7.0
+    critique_threshold: float = 9.0
     enable_integrity_gate: bool = True
     integrity_min_retention_ratio: float = 0.65
     integrity_max_growth_ratio: float = 1.75
@@ -406,6 +418,7 @@ class TarjomehConfig:
         _populate_dataclass(config.llm.openrouter, raw.get("llm", {}).get("openrouter", {}))
         _populate_dataclass(config.llm.ollama, raw.get("llm", {}).get("ollama", {}))
         _populate_dataclass(config.llm.critic, raw.get("llm", {}).get("critic", {}))
+        _populate_dataclass(config.llm.recovery, raw.get("llm", {}).get("recovery", {}))
         _populate_dataclass(config.translation, raw.get("translation", {}))
         _populate_dataclass(config.web_search, raw.get("web_search", {}))
         _populate_dataclass(config.chunking, raw.get("chunking", {}))
@@ -455,6 +468,10 @@ class TarjomehConfig:
         value = env("TRANSLATOR_MAX_TOKENS", "").strip()
         if value.isdigit():
             self.llm.max_tokens = int(value)
+
+        value = env("TRANSLATOR_RECOVERY_MODEL", "").strip()
+        if value:
+            self.llm.recovery.model = value
 
         value = env("CRITIC_ENABLED", "").strip().lower()
         if value in ("1", "true", "yes", "on"):
@@ -658,6 +675,13 @@ class TarjomehConfig:
 
         if self.retry.max_retries < 0:
             errors.append("retry.max_retries must be >= 0")
+
+        if not 1 <= self.llm.recovery.max_attempts <= 3:
+            errors.append("llm.recovery.max_attempts must be 1-3")
+        if self.llm.recovery.reasoning_effort not in ("none", "low", "medium"):
+            errors.append("llm.recovery.reasoning_effort must be none, low, or medium")
+        if self.llm.recovery.max_tokens < 512:
+            errors.append("llm.recovery.max_tokens must be >= 512")
 
         if self.translation.back_translation_sample_pct < 0 or \
            self.translation.back_translation_sample_pct > 100:

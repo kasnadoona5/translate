@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from tarjomeh.exporters.base import TranslatedDocument
@@ -59,6 +60,83 @@ def ensure_inline_proper_noun_originals(
             seen.add(key)
         paragraph.translated_text = text
     return inserted
+
+
+_LATIN_PARENTHETICAL_RE = re.compile(r"\s*\(([^()\n]{1,160})\)")
+
+
+def audit_inline_english_originals(
+    document: TranslatedDocument,
+    authorized_originals: dict[str, str],
+) -> dict[str, Any]:
+    """Remove grounded unauthorized originals and deduplicate authorized ones.
+
+    Numeric and source-authored parentheticals are treated as scholarly
+    apparatus and are always preserved.
+    """
+    authorized = {
+        source.casefold().strip(): source
+        for source in authorized_originals
+        if source.strip()
+    }
+    seen: set[str] = set()
+    removed_unauthorized: list[dict[str, Any]] = []
+    removed_duplicates: list[dict[str, Any]] = []
+    preserved_citations = 0
+
+    for paragraph in document.paragraphs:
+        source_text = paragraph.source_text or ""
+        source_folded = source_text.casefold()
+
+        def replace(match: re.Match[str]) -> str:
+            nonlocal preserved_citations
+            content = " ".join(match.group(1).split()).strip()
+            if not re.search(r"[A-Za-z]", content):
+                return match.group(0)
+
+            key = content.casefold()
+            exact_source_parenthetical = f"({content})".casefold() in source_folded
+            if any(char.isdigit() for char in content) or exact_source_parenthetical:
+                preserved_citations += 1
+                return match.group(0)
+
+            if key in authorized:
+                if key not in seen:
+                    seen.add(key)
+                    return match.group(0)
+                removed_duplicates.append({
+                    "paragraph_index": paragraph.index,
+                    "original": content,
+                })
+                return ""
+
+            grounded = re.search(
+                rf"(?<!\w){re.escape(content)}(?!\w)",
+                source_text,
+                flags=re.IGNORECASE,
+            )
+            if grounded:
+                removed_unauthorized.append({
+                    "paragraph_index": paragraph.index,
+                    "original": content,
+                })
+                return ""
+            return match.group(0)
+
+        cleaned = _LATIN_PARENTHETICAL_RE.sub(
+            replace, paragraph.translated_text or ""
+        )
+        paragraph.translated_text = re.sub(r" {2,}", " ", cleaned).strip()
+
+    return {
+        "authorized_count": len(authorized),
+        "kept_authorized": len(seen),
+        "removed_unauthorized_count": len(removed_unauthorized),
+        "removed_duplicate_count": len(removed_duplicates),
+        "preserved_citation_count": preserved_citations,
+        "removed_unauthorized": removed_unauthorized,
+        "removed_duplicates": removed_duplicates,
+    }
 
 
 def apply_term_notes(
