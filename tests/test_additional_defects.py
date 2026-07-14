@@ -477,6 +477,17 @@ class TestBalancedRefinementPolicy(unittest.TestCase):
             db.log_chunk_event(job_id, 0, "chunk_started", {})
             db.log_chunk_event(job_id, 0, "critique_completed", {"passes_threshold": True})
             self.assertFalse(_chunk_needs_review(db, job_id, 0))
+
+            glossary_job_id = "glossary-review-job"
+            db.create_job(glossary_job_id, "input.txt", {})
+            db.log_chunk_event(glossary_job_id, 0, "chunk_started", {})
+            db.log_chunk_event(
+                glossary_job_id,
+                0,
+                "glossary_needs_review",
+                {"violation_count": 1},
+            )
+            self.assertTrue(_chunk_needs_review(db, glossary_job_id, 0))
         finally:
             import gc
             del db

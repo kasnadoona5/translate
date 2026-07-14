@@ -45,6 +45,16 @@ def test_glossary_compliance_accepts_conservative_persian_inflections() -> None:
     assert not present("\u06a9\u0627\u0631", "\u0627\u06cc\u0646 \u06a9\u0627\u0631\u062e\u0627\u0646\u0647 \u062a\u0639\u0637\u06cc\u0644 \u0627\u0633\u062a")
 
 
+@pytest.mark.parametrize("punctuation", ["\u060c", "\u061b", ".", ")"])
+def test_glossary_compliance_accepts_exact_target_before_punctuation(
+    punctuation: str,
+) -> None:
+    present = GlossaryComplianceChecker._target_present
+    target = "\u0627\u0644\u06af\u0648\u0631\u06cc\u062a\u0645\u200c\u0647\u0627"
+
+    assert present(target, f"\u062f\u0627\u062f\u0647 \u0648 {target}{punctuation} \u0633\u0631\u0645\u0627\u06cc\u0647")
+
+
 def test_job_history_reports_real_output_name_and_format() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db = JobDatabase(Path(tmp) / "jobs.db")

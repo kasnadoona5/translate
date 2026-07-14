@@ -259,6 +259,16 @@ _ENTITY_RE = re.compile(
 _ENTITY_STOP = {"the", "a", "an", "this", "that", "these", "those", "in", "on", "chapter", "introduction"}
 _ENTITY_LINK_WORDS = {"a", "an", "the", "of", "and"}
 _ENTITY_DESCRIPTORS = {"book", "work", "text", "title"}
+_ENTITY_TOKEN_EQUIVALENTS = {
+    "africa": {"african"},
+    "african": {"africa"},
+    "america": {"american"},
+    "american": {"america"},
+    "asia": {"asian"},
+    "asian": {"asia"},
+    "europe": {"european"},
+    "european": {"europe"},
+}
 _NEGATION_RE = re.compile(r"\b(?:not|no|never|without|neither|nor|cannot|can't|won't|isn't|aren't|didn't|doesn't)\b", re.IGNORECASE)
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 
@@ -312,7 +322,14 @@ def _entity_is_present(entity: str, text: str) -> bool:
 
     width = len(entity_tokens)
     return any(
-        back_tokens[index:index + width] == entity_tokens
+        all(
+            actual == expected
+            or actual in _ENTITY_TOKEN_EQUIVALENTS.get(expected, set())
+            for expected, actual in zip(
+                entity_tokens,
+                back_tokens[index:index + width],
+            )
+        )
         for index in range(len(back_tokens) - width + 1)
     )
 

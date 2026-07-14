@@ -151,6 +151,15 @@ class GlossaryComplianceChecker:
         normalised_text = _normalise_persian(translation)
         if not normalised_target:
             return False
+        # Use letter ranges rather than the whole Arabic block; that block also
+        # contains Persian comma/semicolon characters, which are valid term
+        # boundaries.
+        persian_word = r"\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff"
+        if re.search(
+            rf"(?<![{persian_word}]){re.escape(normalised_target)}(?![{persian_word}])",
+            normalised_text,
+        ):
+            return True
         intra_word_joiner = rf"[{_ZWNJ}{_ZWJ}]*"
         parts = [
             intra_word_joiner.join(re.escape(char) for char in part)
@@ -160,7 +169,6 @@ class GlossaryComplianceChecker:
         if not parts:
             return False
         flexible_target = rf"[\s{_ZWNJ}{_ZWJ}]*".join(parts)
-        persian_word = r"\u0600-\u06ff"
         # Persian targets can take productive suffixes without a word boundary
         # (for example, a noun becoming an adjective or plural). Keep the
         # leading boundary so embedded substrings in unrelated words still fail.

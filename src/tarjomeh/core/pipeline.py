@@ -410,6 +410,7 @@ def _chunk_needs_review(db: Any, job_id: str, chunk_index: int) -> bool:
         "integrity_edit_rejected",
         "integrity_final_failed",
         "back_translation_flagged",
+        "glossary_needs_review",
     }
     return any(event.get("event_type") in review_events for event in events[last_start:])
 
@@ -2367,6 +2368,10 @@ Output ONLY the corrected Persian translation.
                             system_prompt=sys_prompt,
                             _operation="glossary_auto_correction",
                         )
+                        correction_changed = (
+                            (proposed_correction or "").strip()
+                            != (before_correction or "").strip()
+                        )
                         correction_accepted = True
                         correction_integrity: dict[str, Any] | None = None
                         if integrity_enabled:
@@ -2411,10 +2416,28 @@ Output ONLY the corrected Persian translation.
                                 glossary_manager=glossary_manager,
                                 chunk_location=f"Chunk {idx}",
                             )
+                            if not report.compliant:
+                                remaining_terms = "; ".join(
+                                    f"{v.term} -> {v.expected}"
+                                    for v in report.violations
+                                )
+                                no_change = (
+                                    "The previous correction made no textual change. "
+                                    if not correction_changed else ""
+                                )
+                                correction_feedback = (
+                                    no_change
+                                    + "The candidate passed integrity, but these exact "
+                                      "glossary requirements remain unmet: "
+                                    + remaining_terms
+                                    + ". Make only the minimum necessary edits and include "
+                                      "each expected Persian form exactly."
+                                )
                         self.db.log_chunk_event(job_id, idx, "glossary_auto_correct_attempt", {
                             "attempt": attempts,
                             "translation_chars": len(translation),
                             "proposed_chars": len(proposed_correction or ""),
+                            "changed": correction_changed,
                             "integrity_accepted": correction_accepted,
                             "integrity": correction_integrity,
                             **_compliance_report_for_event(report),
@@ -2429,6 +2452,17 @@ Output ONLY the corrected Persian translation.
                                 self.warnings.append(f"{v.chunk_location}: {warn_msg}")
                         else:
                             self.warnings.append(f"{v.chunk_location}: {warn_msg}")
+                    review_payload = _compliance_report_for_event(report)
+                    review_payload["message"] = (
+                        "Mandatory glossary requirements remained unmet after "
+                        "the configured compliance and correction checks."
+                    )
+                    self.db.log_chunk_event(
+                        job_id,
+                        idx,
+                        "glossary_needs_review",
+                        review_payload,
+                    )
             self.db.log_chunk_event(
                 job_id,
                 idx,

@@ -169,6 +169,22 @@ def test_back_translation_entity_matching_allows_harmless_title_descriptor() -> 
         in missing_meaningful_token.diagnostics["risk_flags"]
     )
 
+
+def test_back_translation_entity_matching_allows_geographic_demonym() -> None:
+    checker = BackTranslator(MagicMock())
+
+    preserved = checker.compare(
+        "The study covers Latin American rural areas.",
+        "The study covers rural areas of Latin America.",
+    )
+    assert preserved.diagnostics["missing_entities"] == []
+
+    missing_region = checker.compare(
+        "The study covers Latin American rural areas.",
+        "The study covers Latin rural areas.",
+    )
+    assert missing_region.diagnostics["missing_entities"] == ["Latin American"]
+
 def test_integrity_uses_authorized_original_allowlist() -> None:
     gate = PostEditIntegrityGate()
     source = "capital Monsanto field"

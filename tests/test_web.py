@@ -224,6 +224,21 @@ class TestWebUI(unittest.TestCase):
         mock_db.get_chunk_events.return_value = [
             {
                 "chunk_index": 0,
+                "event_type": "glossary_compliance_final",
+                "payload": {
+                    "compliant": False,
+                    "violation_count": 1,
+                    "violations": [
+                        {
+                            "term": "algorithms",
+                            "expected": "\u0627\u0644\u06af\u0648\u0631\u06cc\u062a\u0645\u200c\u0647\u0627",
+                            "status": "missing",
+                        }
+                    ],
+                },
+            },
+            {
+                "chunk_index": 0,
                 "event_type": "back_translation_completed",
                 "payload": {
                     "similarity_score": 0.65,
@@ -247,6 +262,10 @@ class TestWebUI(unittest.TestCase):
         self.assertIn("threshold=9.0 refinements=2", report)
         self.assertIn("search_provider=tavily", report)
         self.assertIn("Missing entities: The Politics of Operations", report)
+        self.assertIn(
+            "algorithms -> \u0627\u0644\u06af\u0648\u0631\u06cc\u062a\u0645\u200c\u0647\u0627 status=missing",
+            report,
+        )
 
     def test_safe_glossary_upload_path_sanitizes_filename(self) -> None:
         from tarjomeh.web.app import _safe_glossary_upload_path

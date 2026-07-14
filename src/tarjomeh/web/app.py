@@ -763,6 +763,19 @@ def _register_api(app: Flask) -> None:
                         f"  Glossary: compliant={payload.get('compliant')} "
                         f"violations={payload.get('violation_count')}"
                     )
+                    for violation in payload.get("violations", []):
+                        lines.append(
+                            "    "
+                            f"{violation.get('term')} -> {violation.get('expected')} "
+                            f"status={violation.get('status')}"
+                        )
+                elif event["event_type"] == "glossary_needs_review":
+                    lines.append(
+                        "  GLOSSARY NEEDS REVIEW: "
+                        f"violations={payload.get('violation_count')}"
+                    )
+                    if payload.get("message"):
+                        lines.append(f"    {payload.get('message')}")
                 elif event["event_type"] == "back_translation_completed":
                     diagnostics = payload.get("diagnostics", {})
                     lines.append(
