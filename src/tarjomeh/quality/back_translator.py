@@ -184,9 +184,10 @@ class BackTranslator:
         added_numbers = list((back_numbers - source_numbers).elements())
 
         source_entities = _extract_entities(original_english)
-        back_folded = back_translated.casefold()
         missing_entities = [
-            entity for entity in source_entities if entity.casefold() not in back_folded
+            entity
+            for entity in source_entities
+            if not _entity_is_present(entity, back_translated)
         ]
         source_negations = _negations(original_english)
         back_negations = _negations(back_translated)
@@ -256,6 +257,8 @@ _ENTITY_RE = re.compile(
     r"\b(?:[A-Z][\w'\-]+(?:[ \t]+(?:of|the|and|&|[A-Z][\w'\-]+)){0,5})\b"
 )
 _ENTITY_STOP = {"the", "a", "an", "this", "that", "these", "those", "in", "on", "chapter", "introduction"}
+_ENTITY_LINK_WORDS = {"a", "an", "the", "of", "and"}
+_ENTITY_DESCRIPTORS = {"book", "work", "text", "title"}
 _NEGATION_RE = re.compile(r"\b(?:not|no|never|without|neither|nor|cannot|can't|won't|isn't|aren't|didn't|doesn't)\b", re.IGNORECASE)
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 
@@ -283,6 +286,35 @@ def _extract_entities(text: str) -> list[str]:
         if value.casefold() not in _ENTITY_STOP and len(value) > 2:
             entities.append(value)
     return sorted(set(entities), key=str.casefold)
+
+
+def _entity_is_present(entity: str, text: str) -> bool:
+    """Match an entity by its ordered meaningful tokens.
+
+    Back-translations may insert a harmless descriptor, such as "book" in a
+    translated title. Meaningful entity tokens must still occur contiguously
+    and in their original order after normalization.
+    """
+    entity_tokens = [
+        token for token in _tokenize_simple(entity)
+        if token not in _ENTITY_LINK_WORDS
+    ]
+    if not entity_tokens:
+        return True
+
+    ignored_back_tokens = _ENTITY_LINK_WORDS | (
+        _ENTITY_DESCRIPTORS - set(entity_tokens)
+    )
+    back_tokens = [
+        token for token in _tokenize_simple(text)
+        if token not in ignored_back_tokens
+    ]
+
+    width = len(entity_tokens)
+    return any(
+        back_tokens[index:index + width] == entity_tokens
+        for index in range(len(back_tokens) - width + 1)
+    )
 
 
 def _negations(text: str) -> list[str]:

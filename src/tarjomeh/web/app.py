@@ -648,6 +648,31 @@ def _register_api(app: Flask) -> None:
             f"Status: {job.get('status')}",
             "",
         ]
+        job_config = job.get("config", {})
+        translation_config = job_config.get("translation", {})
+        glossary_config = job_config.get("glossary", {})
+        output_config = job_config.get("output", {})
+        search_config = job_config.get("web_search", {})
+        lines.extend([
+            "Job Configuration:",
+            f"  mode={translation_config.get('mode')}",
+            f"  output={output_config.get('format')} term_notes={output_config.get('term_notes')}",
+            f"  critique={translation_config.get('enable_critique')} "
+            f"threshold={translation_config.get('critique_threshold')} "
+            f"refinements={translation_config.get('max_refine_iterations')}",
+            f"  integrity_gate={translation_config.get('enable_integrity_gate')}",
+            f"  back_translation={translation_config.get('enable_back_translation')} "
+            f"sample_pct={translation_config.get('back_translation_sample_pct')}",
+            f"  book_research={translation_config.get('enable_book_research')} "
+            f"web_context={translation_config.get('enable_web_context')}",
+            f"  glossary_compliance={glossary_config.get('enable_compliance_check')} "
+            f"auto_correction={glossary_config.get('enable_auto_correction')}",
+            f"  search_provider={search_config.get('provider')} "
+            f"research_queries={search_config.get('phase7_max_queries')} "
+            f"chunk_queries={search_config.get('max_queries_per_chunk')} "
+            f"book_query_budget={search_config.get('max_queries_per_book')}",
+            "",
+        ])
         research = db.get_job_artifact(job_id, "book_research")
         if research is not None:
             suggested = [
@@ -739,11 +764,17 @@ def _register_api(app: Flask) -> None:
                         f"violations={payload.get('violation_count')}"
                     )
                 elif event["event_type"] == "back_translation_completed":
+                    diagnostics = payload.get("diagnostics", {})
                     lines.append(
                         f"  Back-translation: score={payload.get('similarity_score')} "
                         f"flagged={payload.get('flagged')} "
-                        f"risks={payload.get('diagnostics', {}).get('risk_flags', [])}"
+                        f"risks={diagnostics.get('risk_flags', [])}"
                     )
+                    if diagnostics.get("missing_entities"):
+                        lines.append(
+                            "    Missing entities: "
+                            + ", ".join(diagnostics["missing_entities"])
+                        )
                 elif event["event_type"] == "integrity_edit_rejected":
                     lines.append(
                         f"  INTEGRITY REJECTED: stage={payload.get('stage')} "

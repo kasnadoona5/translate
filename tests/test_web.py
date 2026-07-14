@@ -185,6 +185,69 @@ class TestWebUI(unittest.TestCase):
         self.assertEqual(data["critique_threshold"], 9.0)
         self.assertTrue(data["chunks"][0]["flagged"])
 
+    @patch("tarjomeh.jobs.database.JobDatabase")
+    def test_qa_report_exposes_config_and_missing_entities(self, mock_db_cls: MagicMock) -> None:
+        mock_db = mock_db_cls.return_value
+        mock_db.get_job.return_value = {
+            "id": "job-123",
+            "input_path": "book.pdf",
+            "status": "completed",
+            "config": {
+                "translation": {
+                    "mode": "academic",
+                    "enable_critique": True,
+                    "critique_threshold": 9.0,
+                    "max_refine_iterations": 2,
+                    "enable_integrity_gate": True,
+                    "enable_back_translation": True,
+                    "back_translation_sample_pct": 100,
+                    "enable_book_research": True,
+                    "enable_web_context": True,
+                },
+                "glossary": {
+                    "enable_compliance_check": True,
+                    "enable_auto_correction": True,
+                },
+                "output": {"format": "docx", "term_notes": "inline"},
+                "web_search": {
+                    "provider": "tavily",
+                    "phase7_max_queries": 8,
+                    "max_queries_per_chunk": 2,
+                    "max_queries_per_book": 100,
+                },
+            },
+        }
+        mock_db.get_job_artifact.return_value = None
+        mock_db.get_chunks.return_value = [
+            {"chunk_index": 0, "status": "needs_review"}
+        ]
+        mock_db.get_chunk_events.return_value = [
+            {
+                "chunk_index": 0,
+                "event_type": "back_translation_completed",
+                "payload": {
+                    "similarity_score": 0.65,
+                    "flagged": True,
+                    "diagnostics": {
+                        "risk_flags": ["named_entities_missing"],
+                        "missing_entities": ["The Politics of Operations"],
+                    },
+                },
+            }
+        ]
+
+        response = self.client.get(
+            "/api/jobs/job-123/qa-report",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        report = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Job Configuration:", report)
+        self.assertIn("threshold=9.0 refinements=2", report)
+        self.assertIn("search_provider=tavily", report)
+        self.assertIn("Missing entities: The Politics of Operations", report)
+
     def test_safe_glossary_upload_path_sanitizes_filename(self) -> None:
         from tarjomeh.web.app import _safe_glossary_upload_path
 

@@ -147,6 +147,28 @@ def test_back_translation_uses_structured_risks_not_overlap_alone() -> None:
     assert "negation_mismatch" in drift.diagnostics["risk_flags"]
 
 
+def test_back_translation_entity_matching_allows_harmless_title_descriptor() -> None:
+    checker = BackTranslator(MagicMock())
+
+    preserved = checker.compare(
+        "The Politics of Operations examines contemporary capitalism.",
+        "The book Politics of Operations examines contemporary capitalism.",
+    )
+    assert preserved.diagnostics["missing_entities"] == []
+    assert "named_entities_missing" not in preserved.diagnostics["risk_flags"]
+
+    missing_meaningful_token = checker.compare(
+        "The Politics of Operations examines contemporary capitalism.",
+        "The book Politics examines contemporary capitalism.",
+    )
+    assert missing_meaningful_token.diagnostics["missing_entities"] == [
+        "The Politics of Operations"
+    ]
+    assert (
+        "named_entities_missing"
+        in missing_meaningful_token.diagnostics["risk_flags"]
+    )
+
 def test_integrity_uses_authorized_original_allowlist() -> None:
     gate = PostEditIntegrityGate()
     source = "capital Monsanto field"
