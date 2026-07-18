@@ -99,6 +99,41 @@ class TestBoundedRecovery(unittest.TestCase):
         self.assertEqual(payloads[1]["model"], self.config.llm.model)
         self.assertEqual(payloads[2]["model"], "recovery-combo")
 
+    def test_fourth_length_attempt_expands_only_after_unchanged_first_try(self) -> None:
+        self.config.llm.recovery.max_attempts = 4
+        self.config.llm.recovery.model = "critic-fallback"
+        self.config.llm.recovery.max_tokens = 16384
+        self.config.llm.recovery.expanded_final_attempt = True
+        messages = [{"role": "user", "content": "Judge this translation."}]
+        _, _, expected = self.client._prepare_request(messages)
+        payloads = []
+        responses = iter([
+            _response("partial one", "length"),
+            _response("partial two", "length"),
+            _response("partial three", "length"),
+            _response("recovered", "stop"),
+        ])
+
+        def post(*args, **kwargs):
+            payloads.append(json.loads(json.dumps(kwargs["json"])))
+            return next(responses)
+
+        events = []
+        self.client._client.post = post
+        self.client.set_attempt_observer(events.append)
+        result = self.client.complete(messages=messages, _operation="critique")
+
+        self.assertEqual(result, "recovered")
+        self.assertEqual(payloads[0], expected)
+        self.assertEqual(payloads[1]["model"], self.config.llm.model)
+        self.assertEqual(payloads[1]["max_tokens"], 8192)
+        self.assertEqual(payloads[2]["model"], "critic-fallback")
+        self.assertEqual(payloads[2]["max_tokens"], 8192)
+        self.assertEqual(payloads[3]["model"], "critic-fallback")
+        self.assertEqual(payloads[3]["max_tokens"], 16384)
+        self.assertEqual(payloads[3]["reasoning"]["effort"], "none")
+        self.assertEqual(events[3]["recovery_stage"], "final_expanded")
+
     def test_partial_length_response_is_never_returned(self) -> None:
         self.config.llm.recovery.max_attempts = 1
         self.client._client.post = Mock(return_value=_response("partial", "length"))

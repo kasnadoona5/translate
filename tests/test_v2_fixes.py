@@ -109,6 +109,7 @@ class TestCriticClient(unittest.TestCase):
     def test_separate_client_when_model_set(self) -> None:
         cfg = self._base_config()
         cfg.llm.critic.model = "anthropic/claude-opus-4-8"
+        cfg.llm.critic.recovery_model = "google/gemini-critic-fallback"
         pipeline = TranslationPipeline(cfg)
         self.assertIsNot(pipeline.critic_client, pipeline.llm_client)
         self.assertEqual(
@@ -120,6 +121,14 @@ class TestCriticClient(unittest.TestCase):
         # API keys are inherited from the main [llm.openrouter] block.
         self.assertEqual(
             pipeline.critic_client.config.llm.openrouter.api_keys, ["test-key"]
+        )
+        self.assertEqual(
+            pipeline.critic_client.config.llm.recovery.model,
+            "google/gemini-critic-fallback",
+        )
+        self.assertEqual(pipeline.critic_client.config.llm.recovery.max_attempts, 4)
+        self.assertTrue(
+            pipeline.critic_client.config.llm.recovery.expanded_final_attempt
         )
 
     def test_invalid_critic_provider_rejected(self) -> None:
@@ -141,6 +150,8 @@ class TestSimpleEnvOverrides(unittest.TestCase):
         "CRITIC_API_BASE": "https://openrouter.ai/api/v1",
         "CRITIC_API_KEY": "sk-or-judge-key",
         "CRITIC_MODEL": "anthropic/claude-sonnet-5",
+        "CRITIC_RECOVERY_MODEL": "google/gemini-critic-fallback",
+        "CRITIC_RECOVERY_MAX_TOKENS": "16384",
     }
 
     def test_env_overrides_apply(self) -> None:
@@ -156,6 +167,10 @@ class TestSimpleEnvOverrides(unittest.TestCase):
         self.assertEqual(cfg.llm.critic.model, "anthropic/claude-sonnet-5")
         self.assertEqual(cfg.llm.critic.api_keys, ["sk-or-judge-key"])
         self.assertEqual(cfg.llm.critic.api_base, "https://openrouter.ai/api/v1")
+        self.assertEqual(
+            cfg.llm.critic.recovery_model, "google/gemini-critic-fallback"
+        )
+        self.assertEqual(cfg.llm.critic.recovery_max_tokens, 16384)
 
     def test_unset_env_changes_nothing(self) -> None:
         from unittest.mock import patch

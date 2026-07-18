@@ -12,13 +12,20 @@ import time
 import uuid
 import threading
 import json
+import httpx
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
 from tarjomeh.core.config import TarjomehConfig
-from tarjomeh.core.llm_client import LLMClient, TruncatedCompletionError
+from tarjomeh.core.llm_client import (
+    EmptyCompletionError,
+    IncompleteCompletionError,
+    LLMClient,
+    MalformedLLMResponseError,
+    TruncatedCompletionError,
+)
 from tarjomeh.parsers.base import BaseParser, Document, EXTENSION_PARSER_MAP
 from tarjomeh.chunking.chunker import SemanticChunker, FixedChunker, Chunk
 from tarjomeh.memory.manager import MemoryManager, MemoryContext
@@ -56,6 +63,40 @@ logger = logging.getLogger(__name__)
 class PipelinePausedException(Exception):
     """Raised when the translation pipeline is cooperatively paused."""
     pass
+
+
+_QUALITY_STAGE_ERRORS = (
+    EmptyCompletionError,
+    IncompleteCompletionError,
+    MalformedLLMResponseError,
+    TruncatedCompletionError,
+    httpx.HTTPStatusError,
+    httpx.RequestError,
+)
+
+
+def _qa_provider_failure_payload(
+    component: str,
+    operation: str,
+    client: Any,
+    exc: Exception,
+) -> dict[str, Any]:
+    attempts = (
+        client.last_call_attempt_count()
+        if hasattr(client, "last_call_attempt_count") else 1
+    )
+    return {
+        "component": component,
+        "operation": operation,
+        "attempts": attempts,
+        "failure_type": type(exc).__name__,
+        "error": _truncate_for_event(str(exc), 1000),
+        "message": (
+            f"{component.replace('_', ' ').title()} remained unavailable after "
+            "bounded provider recovery; the prior translation was retained and "
+            "the chunk requires human review."
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -596,9 +637,15 @@ class TranslationPipeline:
             # (e.g. translator via 9router, judge via OpenRouter directly).
             critic_config.llm.openrouter.api_base = critic.api_base.strip()
         critic_config.llm.temperature = critic.temperature
-        # A translator fallback combo may not exist on an independent critic
-        # endpoint. The critic safely retries its own configured model.
-        critic_config.llm.recovery.model = ""
+        # Critic recovery is independent from translator recovery. Its normal
+        # request is unchanged; only bounded follow-up attempts use these.
+        critic_config.llm.recovery.model = critic.recovery_model.strip()
+        critic_config.llm.recovery.max_attempts = critic.recovery_max_attempts
+        critic_config.llm.recovery.max_tokens = max(
+            critic_config.llm.max_tokens,
+            critic.recovery_max_tokens,
+        )
+        critic_config.llm.recovery.expanded_final_attempt = True
 
         logger.info(
             "Critic model active: %s via %s (translator: %s)",
@@ -1172,16 +1219,35 @@ class TranslationPipeline:
                         self.db.update_chunk(job_id, idx, ChunkStatus.ERROR)
                         consecutive_errors += 1
 
-                        if consecutive_errors >= max_errors:
+                        pause_for_order = bool(
+                            getattr(
+                                self.config.retry,
+                                "pause_on_sequential_error",
+                                True,
+                            )
+                        )
+                        if pause_for_order or consecutive_errors >= max_errors:
                             self.db.update_job_status(job_id, JobStatus.PAUSED_ERROR, str(e))
                             self._send_webhook(
                                 "tarjomeh.job.paused_error",
-                                f"Pipeline paused after {consecutive_errors} consecutive failures: {e}",
+                                (
+                                    f"Pipeline paused at chunk {idx} to preserve "
+                                    f"sequential memory order: {e}"
+                                    if pause_for_order else
+                                    f"Pipeline paused after {consecutive_errors} "
+                                    f"consecutive failures: {e}"
+                                ),
                                 JobStatus.PAUSED_ERROR,
                             )
                             raise RuntimeError(
-                                f"Pipeline terminated due to {consecutive_errors} consecutive failures. "
-                                f"Last error: {e}"
+                                (
+                                    f"Pipeline paused at chunk {idx} after a genuine "
+                                    "chunk-stage failure so later chunks do not advance "
+                                    f"without its memory. Last error: {e}"
+                                    if pause_for_order else
+                                    f"Pipeline terminated due to {consecutive_errors} "
+                                    f"consecutive failures. Last error: {e}"
+                                )
                             ) from e
         except PipelinePausedException:
             logger.info("Pipeline paused cooperatively for job %s", job_id)
@@ -2034,9 +2100,28 @@ class TranslationPipeline:
             accepted_versions = [translation]
             evaluated_versions: list[tuple[str, Any]] = []
             for ref_iter in range(self.config.translation.max_refine_iterations + 1):
-                critique_rep = self._run_async(
-                    critique_tool.critique(chunk.text, translation, terminology=terminology_ctx)
-                )
+                try:
+                    critique_rep = self._run_async(
+                        critique_tool.critique(
+                            chunk.text,
+                            translation,
+                            terminology=terminology_ctx,
+                        )
+                    )
+                except _QUALITY_STAGE_ERRORS as exc:
+                    payload = _qa_provider_failure_payload(
+                        "critic", "critique", critic_client, exc
+                    )
+                    payload["iteration"] = ref_iter
+                    self.db.log_chunk_event(
+                        job_id, idx, "qa_unavailable", payload
+                    )
+                    self.db.log_event(
+                        job_id,
+                        "WARNING",
+                        f"Critique unavailable for Chunk {idx}: {type(exc).__name__}",
+                    )
+                    break
                 self.db.update_chunk(job_id, idx, ChunkStatus.CRITIQUED)
                 if getattr(critique_rep, "attempts", 1) > 1:
                     retry_payload = {
@@ -2148,14 +2233,29 @@ class TranslationPipeline:
                     break
                 before_translation = translation
                 before_chars = len(before_translation)
-                refinement = self._run_async(
-                    refiner_tool.refine_with_decision(
-                        chunk.text,
-                        translation,
-                        critique_rep,
-                        terminology=terminology_ctx,
+                try:
+                    refinement = self._run_async(
+                        refiner_tool.refine_with_decision(
+                            chunk.text,
+                            translation,
+                            critique_rep,
+                            terminology=terminology_ctx,
+                        )
                     )
-                )
+                except _QUALITY_STAGE_ERRORS as exc:
+                    payload = _qa_provider_failure_payload(
+                        "refiner", "refinement", self.llm_client, exc
+                    )
+                    payload["iteration"] = ref_iter + 1
+                    self.db.log_chunk_event(
+                        job_id, idx, "qa_unavailable", payload
+                    )
+                    self.db.log_event(
+                        job_id,
+                        "WARNING",
+                        f"Refinement unavailable for Chunk {idx}: {type(exc).__name__}",
+                    )
+                    break
                 if getattr(refinement, "attempts", 1) > 1:
                     refiner_retry_payload = {
                         "iteration": ref_iter + 1,
@@ -2363,11 +2463,25 @@ citations, numbers, names, and all text unrelated to the listed violations.
 Output ONLY the corrected Persian translation.
 """
                         before_correction = translation
-                        proposed_correction = self.llm_client.complete(
-                            messages=[{"role": "user", "content": correction_prompt}],
-                            system_prompt=sys_prompt,
-                            _operation="glossary_auto_correction",
-                        )
+                        try:
+                            proposed_correction = self.llm_client.complete(
+                                messages=[{"role": "user", "content": correction_prompt}],
+                                system_prompt=sys_prompt,
+                                _operation="glossary_auto_correction",
+                            )
+                        except _QUALITY_STAGE_ERRORS as exc:
+                            self.db.log_chunk_event(
+                                job_id,
+                                idx,
+                                "qa_unavailable",
+                                _qa_provider_failure_payload(
+                                    "glossary_auto_correction",
+                                    "glossary_auto_correction",
+                                    self.llm_client,
+                                    exc,
+                                ),
+                            )
+                            break
                         correction_changed = (
                             (proposed_correction or "").strip()
                             != (before_correction or "").strip()
@@ -2495,17 +2609,37 @@ Output ONLY the corrected Persian translation.
         if self.config.translation.enable_back_translation:
             if back_translator.should_sample():
                 self.db.log_chunk_event(job_id, idx, "back_translation_sampled", {"sampled": True})
-                back_translated = self._run_async(back_translator.back_translate(translation))
-                bt_result = back_translator.compare(chunk.text, back_translated)
-                self.db.log_chunk_event(job_id, idx, "back_translation_completed", {
-                    "similarity_score": bt_result.similarity_score,
-                    "flagged": bt_result.flagged,
-                    "difference_count": len(bt_result.differences),
-                    "differences_preview": bt_result.differences[:50],
-                    "back_translated_preview": _truncate_for_event(bt_result.back_translated, 2000),
-                    "diagnostics": bt_result.diagnostics,
-                })
-                if bt_result.flagged:
+                try:
+                    back_translated = self._run_async(
+                        back_translator.back_translate(translation)
+                    )
+                except _QUALITY_STAGE_ERRORS as exc:
+                    self.db.log_chunk_event(
+                        job_id,
+                        idx,
+                        "qa_unavailable",
+                        _qa_provider_failure_payload(
+                            "back_translation",
+                            "back_translation",
+                            critic_client,
+                            exc,
+                        ),
+                    )
+                    back_translated = ""
+                bt_result = (
+                    back_translator.compare(chunk.text, back_translated)
+                    if back_translated else None
+                )
+                if bt_result is not None:
+                    self.db.log_chunk_event(job_id, idx, "back_translation_completed", {
+                        "similarity_score": bt_result.similarity_score,
+                        "flagged": bt_result.flagged,
+                        "difference_count": len(bt_result.differences),
+                        "differences_preview": bt_result.differences[:50],
+                        "back_translated_preview": _truncate_for_event(bt_result.back_translated, 2000),
+                        "diagnostics": bt_result.diagnostics,
+                    })
+                if bt_result is not None and bt_result.flagged:
                     self.db.log_chunk_event(job_id, idx, "back_translation_flagged", {
                         "risk_flags": bt_result.diagnostics.get("risk_flags", []),
                         "diagnostics": bt_result.diagnostics,

@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import queue
+import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor, Future
 from datetime import datetime
@@ -38,6 +39,40 @@ _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tarjomeh-job")
 _active_jobs: dict[str, Future] = {}
 _progress_queues: dict[str, queue.Queue] = {}
 _PROGRESS_QUEUE_TTL_SECONDS = 300.0
+_QUERY_SECRET_RE = re.compile(
+    r"(?P<prefix>[?&](?:token|api_key|key)=)[^&\s\"']+",
+    re.IGNORECASE,
+)
+
+
+def _redact_query_secrets(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    return _QUERY_SECRET_RE.sub(r"\g<prefix>[REDACTED]", value)
+
+
+class _QuerySecretLogFilter(logging.Filter):
+    """Prevent URL authentication secrets from entering request logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = _redact_query_secrets(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(_redact_query_secrets(arg) for arg in record.args)
+        elif isinstance(record.args, dict):
+            record.args = {
+                key: _redact_query_secrets(value)
+                for key, value in record.args.items()
+            }
+        return True
+
+
+def _install_request_log_redaction() -> None:
+    werkzeug_logger = logging.getLogger("werkzeug")
+    if not any(
+        isinstance(item, _QuerySecretLogFilter)
+        for item in werkzeug_logger.filters
+    ):
+        werkzeug_logger.addFilter(_QuerySecretLogFilter())
 
 
 def _schedule_progress_queue_cleanup(job_id: str, delay: float = _PROGRESS_QUEUE_TTL_SECONDS) -> None:
@@ -79,6 +114,7 @@ def create_app(config: Any = None) -> Flask:
     Returns:
         Configured Flask application.
     """
+    _install_request_log_redaction()
     app = Flask(
         __name__,
         template_folder=str(Path(__file__).parent / "templates"),
@@ -202,6 +238,7 @@ def _register_api(app: Flask) -> None:
             "term_notes": "output.term_notes",
             "search_provider": "web_search.provider",
             "recovery_model": "llm.recovery.model",
+            "critic_recovery_model": "llm.critic.recovery_model",
         }
         for form_key, dotted_key in _form_field_map.items():
             value = request.form.get(form_key)
@@ -230,6 +267,10 @@ def _register_api(app: Flask) -> None:
             ),
             "critique_threshold": ("translation.critique_threshold", float),
             "qa_json_retries": ("translation.qa_json_retries", int),
+            "critic_recovery_max_tokens": (
+                "llm.critic.recovery_max_tokens",
+                int,
+            ),
             "back_translation_sample_pct": (
                 "translation.back_translation_sample_pct",
                 int,
@@ -653,6 +694,7 @@ def _register_api(app: Flask) -> None:
         glossary_config = job_config.get("glossary", {})
         output_config = job_config.get("output", {})
         search_config = job_config.get("web_search", {})
+        critic_config = job_config.get("llm", {}).get("critic", {})
         lines.extend([
             "Job Configuration:",
             f"  mode={translation_config.get('mode')}",
@@ -660,6 +702,9 @@ def _register_api(app: Flask) -> None:
             f"  critique={translation_config.get('enable_critique')} "
             f"threshold={translation_config.get('critique_threshold')} "
             f"refinements={translation_config.get('max_refine_iterations')}",
+            f"  critic_recovery_attempts={critic_config.get('recovery_max_attempts')} "
+            f"fallback={critic_config.get('recovery_model') or '(same model)'} "
+            f"final_tokens={critic_config.get('recovery_max_tokens')}",
             f"  integrity_gate={translation_config.get('enable_integrity_gate')}",
             f"  back_translation={translation_config.get('enable_back_translation')} "
             f"sample_pct={translation_config.get('back_translation_sample_pct')}",

@@ -282,7 +282,7 @@ class LLMClient:
             configured = min(
                 max(1, int(self.config.retry.max_retries) + 1),
                 int(recovery.max_attempts),
-                3,
+                4,
             )
         if override is not None:
             return min(configured, max(1, int(override)))
@@ -299,12 +299,20 @@ class LLMClient:
         payload = dict(original)
         recovery = self.config.llm.recovery
 
-        if attempt >= 2 and attempt == max_attempts - 1 and recovery.model.strip():
+        if attempt >= 2 and recovery.model.strip():
             payload["model"] = recovery.model.strip()
 
         if self.config.llm.provider.lower() == "openrouter" and failure_reason == "length":
+            final_expanded = bool(
+                recovery.expanded_final_attempt
+                and max_attempts >= 4
+                and attempt == max_attempts - 1
+            )
             payload["reasoning"] = {
-                "effort": recovery.reasoning_effort,
+                "effort": (
+                    recovery.final_reasoning_effort
+                    if final_expanded else recovery.reasoning_effort
+                ),
                 "exclude": True,
             }
             prompt_chars = sum(
@@ -317,9 +325,10 @@ class LLMClient:
                 original.get("max_tokens", self.config.llm.max_tokens)
             )
             recovery_ceiling = max(original_max, int(recovery.max_tokens))
-            payload["max_tokens"] = max(
-                original_max,
-                min(estimated_visible, recovery_ceiling),
+            payload["max_tokens"] = (
+                recovery_ceiling
+                if final_expanded
+                else max(original_max, min(estimated_visible, recovery_ceiling))
             )
         return payload
 
@@ -360,6 +369,21 @@ class LLMClient:
             "max_attempts": max_attempts,
             "normal_attempt": attempt == 0,
             "recovery": attempt > 0,
+            "recovery_stage": (
+                "normal"
+                if attempt == 0
+                else (
+                    "final_expanded"
+                    if self.config.llm.recovery.expanded_final_attempt
+                    and max_attempts >= 4
+                    and attempt == max_attempts - 1
+                    else (
+                        "fallback_model"
+                        if attempt >= 2 and self.config.llm.recovery.model.strip()
+                        else "same_model"
+                    )
+                )
+            ),
             "success": success,
             "finish_reason": finish_reason,
             "status_code": status_code,

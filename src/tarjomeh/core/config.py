@@ -126,6 +126,9 @@ class LLMCriticConfig:
     # DIFFERENT endpoint than the translator (e.g. translator via 9router,
     # judge via OpenRouter directly: "https://openrouter.ai/api/v1").
     api_base: str = ""
+    recovery_model: str = ""
+    recovery_max_attempts: int = 4
+    recovery_max_tokens: int = 16384
 
     @property
     def is_active(self) -> bool:
@@ -141,6 +144,8 @@ class LLMRecoveryConfig:
     model: str = ""
     reasoning_effort: str = "low"
     max_tokens: int = 8192
+    expanded_final_attempt: bool = False
+    final_reasoning_effort: str = "none"
 
 
 @dataclass
@@ -272,6 +277,7 @@ class RetryConfig:
     max_delay: float = 60.0
     jitter: bool = True
     max_consecutive_errors: int = 3
+    pause_on_sequential_error: bool = True
 
 
 @dataclass
@@ -487,6 +493,15 @@ class TarjomehConfig:
         value = env("CRITIC_API_BASE", "").strip()
         if value:
             self.llm.critic.api_base = value
+        value = env("CRITIC_RECOVERY_MODEL", "").strip()
+        if value:
+            self.llm.critic.recovery_model = value
+        value = env("CRITIC_RECOVERY_MAX_ATTEMPTS", "").strip()
+        if value.isdigit():
+            self.llm.critic.recovery_max_attempts = int(value)
+        value = env("CRITIC_RECOVERY_MAX_TOKENS", "").strip()
+        if value.isdigit():
+            self.llm.critic.recovery_max_tokens = int(value)
 
     def _apply_mode_preset(self, raw: dict[str, Any]) -> None:
         """Apply mode-specific defaults for keys not explicitly provided."""
@@ -676,12 +691,16 @@ class TarjomehConfig:
         if self.retry.max_retries < 0:
             errors.append("retry.max_retries must be >= 0")
 
-        if not 1 <= self.llm.recovery.max_attempts <= 3:
-            errors.append("llm.recovery.max_attempts must be 1-3")
+        if not 1 <= self.llm.recovery.max_attempts <= 4:
+            errors.append("llm.recovery.max_attempts must be 1-4")
         if self.llm.recovery.reasoning_effort not in ("none", "low", "medium"):
             errors.append("llm.recovery.reasoning_effort must be none, low, or medium")
         if self.llm.recovery.max_tokens < 512:
             errors.append("llm.recovery.max_tokens must be >= 512")
+        if not 1 <= self.llm.critic.recovery_max_attempts <= 4:
+            errors.append("llm.critic.recovery_max_attempts must be 1-4")
+        if self.llm.critic.recovery_max_tokens < 512:
+            errors.append("llm.critic.recovery_max_tokens must be >= 512")
 
         if self.translation.back_translation_sample_pct < 0 or \
            self.translation.back_translation_sample_pct > 100:

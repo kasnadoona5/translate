@@ -159,6 +159,8 @@ async function startTranslation() {
     formData.append("critique_threshold", document.getElementById("cfgCritiqueThreshold").value);
     formData.append("qa_json_retries", document.getElementById("cfgQaJsonRetries").value);
     formData.append("recovery_model", document.getElementById("cfgRecoveryModel").value.trim());
+    formData.append("critic_recovery_model", document.getElementById("cfgCriticRecoveryModel").value.trim());
+    formData.append("critic_recovery_max_tokens", document.getElementById("cfgCriticRecoveryTokens").value);
     formData.append("back_translation_sample_pct", document.getElementById("cfgBackSample").value);
     formData.append("search_provider", document.getElementById("cfgSearchProvider").value);
     formData.append("phase7_max_queries", document.getElementById("cfgResearchQueries").value);

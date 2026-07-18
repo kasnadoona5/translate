@@ -175,11 +175,16 @@ class TestTranslationPipeline(unittest.TestCase):
 
         mock_llm = mock_llm_cls.return_value
         mock_llm.count_tokens.side_effect = lambda text: len(text.split())
-        mock_llm.complete.side_effect = ["ترجمه اول", RuntimeError("malformed router response")]
+        mock_llm.complete.side_effect = [
+            "ترجمه اول",
+            RuntimeError("malformed router response"),
+            "must not translate after the memory gap",
+        ]
 
         temp_file = Path("tests_two_chunk_source.txt")
         temp_file.write_text(
-            "alpha beta gamma delta epsilon zeta eta theta iota kappa",
+            "alpha beta gamma delta epsilon zeta eta theta iota kappa "
+            "lambda mu nu xi omicron",
             encoding="utf-8",
         )
 
@@ -201,8 +206,10 @@ class TestTranslationPipeline(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 pipeline.run(input_path=temp_file, output_path=output_file)
 
-            self.assertIn("Translation incomplete", str(ctx.exception))
+            self.assertIn("paused at chunk 1", str(ctx.exception))
+            self.assertIn("later chunks do not advance", str(ctx.exception))
             self.assertFalse(output_file.exists())
+            self.assertEqual(mock_llm.complete.call_count, 2)
             self.assertTrue(
                 any(
                     call.args and call.args[1] == JobStatus.PAUSED_ERROR

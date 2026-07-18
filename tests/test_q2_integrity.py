@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 from tarjomeh.chunking.chunker import Chunk
 from tarjomeh.core.config import TarjomehConfig
+from tarjomeh.core.llm_client import TruncatedCompletionError
 from tarjomeh.core.pipeline import TranslationPipeline, _filter_critique_policy_conflicts
 from tarjomeh.quality.back_translator import BackTranslator
 from tarjomeh.quality.critique import CritiqueResult, TranslationCritique
@@ -368,3 +369,63 @@ def test_pipeline_rejects_lossy_refinement_and_keeps_prior_text() -> None:
     event_types = [call.args[2] for call in pipeline.db.log_chunk_event.call_args_list]
     assert "integrity_edit_rejected" in event_types
     assert "critique_needs_review" in event_types
+
+
+def test_pipeline_keeps_translation_when_critic_provider_exhausts_length() -> None:
+    config = TarjomehConfig()
+    config.translation.enable_web_context = False
+    config.translation.enable_back_translation = False
+    config.translation.enable_critique = True
+    config.glossary.enable_compliance_check = False
+
+    pipeline = object.__new__(TranslationPipeline)
+    pipeline.config = config
+    pipeline.db = MagicMock()
+    pipeline.db.get_job.return_value = {"status": "running"}
+    pipeline.llm_client = MagicMock()
+    initial = "\u0645\u0642\u062f\u0645\u0647\n\n\u062a\u0631\u062c\u0645\u0647 \u06a9\u0627\u0645\u0644 \u0648 \u0645\u0639\u062a\u0628\u0631 \u0627\u0633\u062a."
+    pipeline.llm_client.complete.return_value = initial
+    pipeline.llm_client.last_call_attempt_count.return_value = 4
+
+    memory_context = MagicMock()
+    memory_context.style_profile = ""
+    memory_context.proper_nouns = ""
+    memory_context.long_term = ""
+    memory_context.short_term = ""
+    memory_context.bilingual_summary = ""
+    memory_context.format.return_value = ""
+    memory_manager = MagicMock()
+    memory_manager.get_context_for_chunk.return_value = memory_context
+
+    glossary = MagicMock()
+    glossary.find_terms.return_value = []
+    glossary.format_for_prompt.return_value = ""
+
+    class Critic:
+        async def critique(self, *args, **kwargs):
+            raise TruncatedCompletionError("judge exhausted output budget")
+
+    chunk = Chunk(0, "Introduction\n\nComplete source text.", "Introduction", "")
+    result = pipeline._translate_single_chunk(
+        idx=0,
+        chunk=chunk,
+        memory_manager=memory_manager,
+        web_searcher=MagicMock(),
+        glossary_manager=glossary,
+        compliance_checker=MagicMock(),
+        critique_tool=Critic(),
+        refiner_tool=MagicMock(),
+        back_translator=MagicMock(),
+        translations={},
+        job_id="job-critic-length",
+    )
+
+    assert result == initial
+    events = {
+        call.args[2]: call.args[3]
+        for call in pipeline.db.log_chunk_event.call_args_list
+    }
+    assert events["qa_unavailable"]["component"] == "critic"
+    assert events["qa_unavailable"]["attempts"] == 4
+    assert events["qa_unavailable"]["failure_type"] == "TruncatedCompletionError"
+    assert "chunk_completed" in events

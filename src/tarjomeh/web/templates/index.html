@@ -212,9 +212,19 @@
                                         <input id="cfgQaJsonRetries" type="number" min="0" max="2" step="1" value="1">
                                     </label>
                                     <label class="field compact-field">
-                                        <span>Recovery model</span>
+                                        <span>Translator fallback</span>
                                         <input id="cfgRecoveryModel" type="text"
                                                placeholder="Optional model or 9router combo">
+                                    </label>
+                                    <label class="field compact-field">
+                                        <span>Critic fallback</span>
+                                        <input id="cfgCriticRecoveryModel" type="text"
+                                               placeholder="Optional independent judge combo">
+                                    </label>
+                                    <label class="field compact-field">
+                                        <span>Critic final tokens</span>
+                                        <input id="cfgCriticRecoveryTokens" type="number"
+                                               min="8192" max="32768" step="1024" value="16384">
                                     </label>
                                 </div>
                             </div>

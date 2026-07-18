@@ -209,6 +209,13 @@ class TestWebUI(unittest.TestCase):
                     "enable_auto_correction": True,
                 },
                 "output": {"format": "docx", "term_notes": "inline"},
+                "llm": {
+                    "critic": {
+                        "recovery_model": "critic-fallback",
+                        "recovery_max_attempts": 4,
+                        "recovery_max_tokens": 16384,
+                    }
+                },
                 "web_search": {
                     "provider": "tavily",
                     "phase7_max_queries": 8,
@@ -260,6 +267,10 @@ class TestWebUI(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("Job Configuration:", report)
         self.assertIn("threshold=9.0 refinements=2", report)
+        self.assertIn(
+            "critic_recovery_attempts=4 fallback=critic-fallback final_tokens=16384",
+            report,
+        )
         self.assertIn("search_provider=tavily", report)
         self.assertIn("Missing entities: The Politics of Operations", report)
         self.assertIn(
@@ -274,6 +285,25 @@ class TestWebUI(unittest.TestCase):
 
         self.assertEqual(path.name, "evil.csv")
         self.assertEqual(path.parent.name, "glossary")
+
+    def test_request_log_filter_redacts_query_token(self) -> None:
+        import logging
+        from tarjomeh.web.app import _QuerySecretLogFilter
+
+        record = logging.LogRecord(
+            "werkzeug",
+            logging.INFO,
+            "",
+            0,
+            "%s %s",
+            ("GET", "/api/jobs/1/stream?token=secret-value&mode=full"),
+            None,
+        )
+
+        self.assertTrue(_QuerySecretLogFilter().filter(record))
+        rendered = record.getMessage()
+        self.assertNotIn("secret-value", rendered)
+        self.assertIn("token=[REDACTED]", rendered)
 
     def test_progress_queue_cleanup_drops_finished_queue(self) -> None:
         from tarjomeh.web.app import _progress_queues, _schedule_progress_queue_cleanup
