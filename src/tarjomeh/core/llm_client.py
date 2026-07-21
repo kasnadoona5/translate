@@ -218,11 +218,14 @@ class LLMClient:
 
     @staticmethod
     def _parse_response_json(response_text: str) -> dict[str, Any]:
-        """Parse a provider response, tolerating trailing SSE-style garbage."""
+        """Parse a JSON response or assemble an OpenAI-compatible SSE stream."""
         res_text = response_text.strip()
         try:
             return json.loads(res_text)
         except json.JSONDecodeError as first_error:
+            if res_text.startswith("data:"):
+                return LLMClient._assemble_sse_chat_completion(res_text)
+
             last_brace = res_text.rfind("}")
             if last_brace != -1:
                 try:
@@ -234,6 +237,91 @@ class LLMClient:
             raise MalformedLLMResponseError(
                 f"LLM endpoint returned malformed JSON response: {snippet!r}"
             ) from first_error
+
+    @staticmethod
+    def _assemble_sse_chat_completion(response_text: str) -> dict[str, Any]:
+        """Combine ``chat.completion.chunk`` SSE events into one response."""
+        result: dict[str, Any] = {}
+        content_parts: list[str] = []
+        finish_reason: str | None = None
+        usage: dict[str, Any] = {}
+        saw_event = False
+        saw_done = False
+
+        for raw_line in response_text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith(":") or line.startswith("event:"):
+                continue
+            if not line.startswith("data:"):
+                raise MalformedLLMResponseError(
+                    "LLM endpoint returned an invalid SSE chat-completion stream."
+                )
+
+            data = line[5:].strip()
+            if data == "[DONE]":
+                saw_done = True
+                continue
+
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError as exc:
+                snippet = data[:300].replace("\n", "\\n")
+                raise MalformedLLMResponseError(
+                    f"LLM endpoint returned malformed SSE data: {snippet!r}"
+                ) from exc
+            if not isinstance(chunk, dict):
+                raise MalformedLLMResponseError(
+                    "LLM endpoint returned a non-object SSE data event."
+                )
+            if chunk.get("error"):
+                raise IncompleteCompletionError(
+                    f"LLM SSE stream reported an error: {chunk['error']}"
+                )
+
+            saw_event = True
+            for key in ("id", "object", "created", "model", "system_fingerprint"):
+                if key in chunk and key not in result:
+                    result[key] = chunk[key]
+
+            raw_usage = chunk.get("usage")
+            if isinstance(raw_usage, dict):
+                usage = raw_usage
+
+            choices = chunk.get("choices")
+            if not isinstance(choices, list) or not choices:
+                continue
+            choice = choices[0]
+            if not isinstance(choice, dict):
+                continue
+            delta = choice.get("delta")
+            message = choice.get("message")
+            part = None
+            if isinstance(delta, dict):
+                part = delta.get("content")
+            elif isinstance(message, dict):
+                part = message.get("content")
+            if isinstance(part, str):
+                content_parts.append(part)
+            if choice.get("finish_reason") is not None:
+                finish_reason = choice["finish_reason"]
+
+        if not saw_event:
+            raise MalformedLLMResponseError(
+                "LLM endpoint returned an empty SSE chat-completion stream."
+            )
+        if not saw_done and finish_reason is None:
+            raise IncompleteCompletionError(
+                "LLM SSE stream ended without [DONE] or a finish reason."
+            )
+
+        result["choices"] = [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "".join(content_parts)},
+            "finish_reason": finish_reason,
+        }]
+        if usage:
+            result["usage"] = usage
+        return result
 
     def set_trace_context(self, job_id: str | None, chunk_index: int | None) -> None:
         """Attach job context to attempt events in the current worker thread."""

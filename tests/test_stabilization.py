@@ -8,7 +8,11 @@ from pathlib import Path
 from unittest.mock import Mock
 
 from tarjomeh.core.config import TarjomehConfig
-from tarjomeh.core.llm_client import LLMClient, TruncatedCompletionError
+from tarjomeh.core.llm_client import (
+    IncompleteCompletionError,
+    LLMClient,
+    TruncatedCompletionError,
+)
 from tarjomeh.core.term_notes import audit_inline_english_originals
 from tarjomeh.exporters.base import TranslatedDocument, TranslatedParagraph
 from tarjomeh.exporters.docx_exporter import DocxExporter, HAS_DOCX
@@ -139,6 +143,41 @@ class TestBoundedRecovery(unittest.TestCase):
         self.client._client.post = Mock(return_value=_response("partial", "length"))
         with self.assertRaises(TruncatedCompletionError):
             self.client.complete(messages=[{"role": "user", "content": "x"}])
+
+    def test_assembles_openai_compatible_sse_response(self) -> None:
+        body = "\n\n".join([
+            'data: {"id":"chatcmpl-1","object":"chat.completion.chunk",'
+            '"model":"qwen3.7-plus","choices":[{"index":0,"delta":'
+            '{"role":"assistant"},"finish_reason":null}]}',
+            'data: {"id":"chatcmpl-1","object":"chat.completion.chunk",'
+            '"model":"qwen3.7-plus","choices":[{"index":0,"delta":'
+            '{"content":"Persian "},"finish_reason":null}]}',
+            'data: {"id":"chatcmpl-1","object":"chat.completion.chunk",'
+            '"model":"qwen3.7-plus","choices":[{"index":0,"delta":'
+            '{"content":"translation"},"finish_reason":"stop"}]}',
+            'data: {"choices":[],"usage":{"prompt_tokens":10,'
+            '"completion_tokens":2,"total_tokens":12}}',
+            "data: [DONE]",
+        ])
+
+        parsed = LLMClient._parse_response_json(body)
+
+        self.assertEqual(parsed["model"], "qwen3.7-plus")
+        self.assertEqual(
+            parsed["choices"][0]["message"]["content"],
+            "Persian translation",
+        )
+        self.assertEqual(parsed["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(parsed["usage"]["total_tokens"], 12)
+
+    def test_rejects_interrupted_sse_response(self) -> None:
+        body = (
+            'data: {"choices":[{"index":0,"delta":{"content":"partial"},'
+            '"finish_reason":null}]}'
+        )
+
+        with self.assertRaises(IncompleteCompletionError):
+            LLMClient._parse_response_json(body)
 
 
 class TestStabilizationPolicies(unittest.TestCase):
