@@ -1,157 +1,152 @@
-# =============================================================================
-# Tarjomeh (ترجمه) Configuration
-# =============================================================================
-# HOW TO USE THIS FILE
-#   1. Copy it:            cp config.example.toml config.toml
-#   2. Put your API KEYS in the .env file (NOT here — see .env.example).
-#   3. Pick ONE of the scenarios below (A, B, or C) and set [llm] + [llm.critic]
-#      accordingly. Everything else can stay at its default.
+# Tarjomeh v8.7.1 configuration template
 #
-# WHERE REQUESTS GO (api_base resolution order):
-#   [llm.openrouter] api_base  →  OPENROUTER_API_BASE env var  →  openrouter.ai
+# 1. Copy this file to config.toml.
+# 2. Keep API keys and UI secrets in .env.
+# 3. Use the Web UI for per-job overrides.
 #
-# -----------------------------------------------------------------------------
-# SCENARIO A — Everything via OpenRouter directly (simplest)
-#   .env:        OPENROUTER_API_KEY=sk-or-...   (and REMOVE/blank OPENROUTER_API_BASE)
-#   [llm]        model = "deepseek/deepseek-v4-flash"
-#   [llm.openrouter] api_base = "https://openrouter.ai/api/v1"
-#   [llm.critic] enabled = true, model = "anthropic/claude-sonnet-5"
-#   → OpenRouter automatically falls back between providers for each model.
-#
-# SCENARIO B — Everything via 9router (9router handles fallback combos)
-#   .env:        OPENROUTER_API_KEY=<the key your 9router accepts>
-#                OPENROUTER_API_BASE=http://172.17.0.1:20128/v1
-#   [llm]        model = "combo1"          (a combo you defined in 9router)
-#   [llm.openrouter] api_base = ""          (inherits the env var above)
-#   [llm.critic] enabled = true, model = "combo2"   (a second 9router combo)
-#
-# SCENARIO C — MIXED: cheap translator via 9router + strong judge via OpenRouter  ⭐
-#   .env:        OPENROUTER_API_KEY=<9router key>
-#                CRITIC_API_KEY=sk-or-...   (your real OpenRouter key)
-#   [llm]        model = "combo1"
-#   [llm.openrouter] api_base = "http://172.17.0.1:20128/v1"
-#   [llm.critic] enabled   = true
-#                model     = "anthropic/claude-sonnet-5"
-#                api_base  = "https://openrouter.ai/api/v1"
-#                api_keys  = ["${CRITIC_API_KEY}"]
-#   (The reverse also works: translator via OpenRouter, judge via 9router —
-#    just swap the api_base values.)
-# =============================================================================
+# Configuration precedence:
+# built-in defaults -> config.toml -> .env overrides -> CLI/Web UI overrides.
 
 [llm]
-provider = "openrouter"          # "openrouter" (any OpenAI-compatible endpoint,
-                                 #  incl. 9router) | "ollama" (local models)
-# TRANSLATOR model. An OpenRouter model id (e.g. "deepseek/deepseek-v4-flash",
-# "anthropic/claude-sonnet-5") or a 9router combo name (e.g. "combo1").
+# "openrouter" means any OpenAI-compatible endpoint, including 9router.
+# Use "ollama" only with the [llm.ollama] block below.
+provider = "openrouter"
 model = "deepseek/deepseek-v4-flash"
 temperature = 0.3
-# Output budget for the unchanged first request. Recovery settings below are
-# used only after an explicit provider/integrity failure.
+
+# Output budget for the unchanged normal request.
 max_tokens = 8192
 
 [llm.recovery]
+# Bounded translator recovery. The first request remains unchanged.
 enabled = true
-max_attempts = 3                # total attempts, including the normal request
-model = ""                      # optional same-endpoint fallback/combo
-reasoning_effort = "low"        # used only after finish_reason="length"
-max_tokens = 8192               # recovery ceiling; not a blind token increase
+max_attempts = 3
+model = ""
+reasoning_effort = "low"
+max_tokens = 8192
+expanded_final_attempt = false
+final_reasoning_effort = "none"
 
 [llm.openrouter]
-# API keys live in .env — referenced here as ${VAR}. For key rotation list
-# several: api_keys = ["${OPENROUTER_API_KEY}", "${OPENROUTER_API_KEY_2}"]
+# For one key, normally use TRANSLATOR_API_KEY in .env.
+# For rotation, define named variables in .env and list them here:
+# api_keys = [
+#   "${OPENROUTER_TRANSLATOR_KEY_1}",
+#   "${OPENROUTER_TRANSLATOR_KEY_2}",
+# ]
 api_keys = ["${OPENROUTER_API_KEY}"]
 site_url = "https://tarjomeh.local"
 app_name = "Tarjomeh"
-# Endpoint for the TRANSLATOR.
-#   ""                                = use OPENROUTER_API_BASE env var,
-#                                       else https://openrouter.ai/api/v1
-#   "https://openrouter.ai/api/v1"    = force OpenRouter directly
-#   "http://172.17.0.1:20128/v1"      = 9router on the same VPS (Docker host IP)
+
+# Empty resolves through OPENROUTER_API_BASE and then OpenRouter.
+# Direct OpenRouter: https://openrouter.ai/api/v1
+# Example 9router: http://172.17.0.1:20128/v1
 api_base = ""
+exclude_reasoning = true
 
 [llm.ollama]
 host = "http://localhost:11434"
 model = "llama3.1:70b"
 
 [llm.critic]
-# INDEPENDENT JUDGE for self-critique and back-translation QA. A separate,
-# stronger model grading the translation removes the blind spots of a model
-# scoring its own output. Active when enabled = true OR model is set.
-# ⚠ Never use a free/congested model as the judge — the critique loop
-#   multiplies calls and a flaky judge poisons refinement.
+# A separate critic is recommended for academic translation.
+# It is active when enabled=true or model is non-empty.
+# Blank provider/key/base values inherit from the translator.
 enabled = false
-provider = ""                    # "" = inherit [llm] provider
-model = ""                       # e.g. "anthropic/claude-sonnet-5" or "combo2"
-api_keys = []                    # [] = inherit keys above; or ["${CRITIC_API_KEY}"]
-api_base = ""                    # "" = inherit translator endpoint; or set a
-                                 # DIFFERENT one (see Scenario C)
-temperature = 0.0                # judges should be near-deterministic
+provider = ""
+model = ""
+api_keys = []
+api_base = ""
+temperature = 0.0
+
+# Critic-specific bounded recovery.
+recovery_model = ""
+recovery_max_attempts = 4
+recovery_max_tokens = 16384
 
 [translation]
 source_lang = "English"
 target_lang = "Persian (Farsi)"
-country = "Iran"                 # dialect: "Iran" (فارسی) vs "Afghanistan" (دری)
-mode = "academic"                # "fast" (draft) | "quality" | "academic" (best)
-style_register = "academic"      # "academic" | "literary" | "general"
+country = "Iran"
+
+# fast | quality | academic
+mode = "academic"
+
+# academic | literary | general
+style_register = "academic"
 domain = "political theory, sociology, philosophy"
-enable_critique = true           # auto-set by mode, overridable
-enable_back_translation = true   # auto-set by mode, overridable
-back_translation_sample_pct = 20 # auto-set by mode: fast=0, quality=5, academic=20
-enable_web_context = true        # web search for ambiguous-term disambiguation
-enable_book_research = false     # opt-in one-time book/topic research seed pass
-parallel_workers = 1             # >1 only in fast/quality; academic is always 1
-critique_threshold = 9.0         # production recommendation; 10 over-refines style
-enable_integrity_gate = true     # reject lossy post-edits and retain prior text
+
+enable_critique = true
+max_refine_iterations = 2
+critique_threshold = 9.0
+
+enable_back_translation = true
+back_translation_sample_pct = 20
+
+enable_web_context = true
+enable_book_research = false
+
+# Academic mode always forces sequential operation.
+parallel_workers = 1
+
+# Reject lossy refinements, glossary repairs, and manual retranslations.
+enable_integrity_gate = true
 integrity_min_retention_ratio = 0.65
 integrity_max_growth_ratio = 1.75
-qa_json_retries = 1              # bounded critic/refiner schema repair calls
+
+# Bounded schema-repair calls for critic/refiner JSON.
+qa_json_retries = 1
 
 [web_search]
-# "auto" uses the first configured API provider: Tavily, Brave, Google, then
-# DuckDuckGo. API keys stay in .env: TAVILY_API_KEY / BRAVE_SEARCH_API_KEY.
+# auto | tavily | brave | google | duckduckgo
 provider = "auto"
 fallback_providers = ["brave", "google", "duckduckgo"]
 max_results = 5
 timeout_seconds = 15
 max_retries = 2
-phase7_max_queries = 8           # five core + up to three adaptive follow-ups
-max_queries_per_chunk = 2        # only unresolved ambiguous terms
-max_queries_per_book = 100       # difficult-book ceiling across research/context
+
+# Phase 7 and per-chunk search budgets.
+phase7_max_queries = 8
+max_queries_per_chunk = 2
+max_queries_per_book = 100
 
 [chunking]
-strategy = "semantic"            # "semantic" | "fixed"
-max_chunk_tokens = 1000          # auto-set by mode: fast=3000, quality=1500, academic=1000
+# semantic | fixed
+strategy = "semantic"
+max_chunk_tokens = 1000
 overlap_sentences = 2
 
 [glossary]
+# The primary glossary has highest precedence.
 path = "glossary/academic_political_theory.csv"
-# Optional extra CSVs loaded after the primary glossary above. Old single-file
-# configs keep working; use this when you want namespaced/domain glossaries.
-# Example:
+
+# Optional additional context/domain glossaries:
 # paths = [
 #   "glossary/analytic_philosophy.csv",
-#   "glossary/ethics.csv",
-#   "glossary/ancient_medieval_philosophy.csv",
 #   "glossary/islamic_philosophy.csv",
 # ]
 paths = []
+
 enable_auto_extraction = true
 enable_compliance_check = true
 enable_auto_correction = true
 
 [output]
-format = "docx"                  # "pdf" | "epub" | "docx" | "markdown" | "txt" | "srt"
-bilingual_mode = "inline"        # "inline" (EN+FA) | "side_by_side" | "target_only"
-# First-occurrence English originals. "inline" preserves current behaviour.
-term_notes = "inline"            # "inline" | "footnote" | "endnote" | "both"
+# pdf | epub | docx | markdown | txt | srt
+format = "docx"
+
+# inline | side_by_side | target_only
+bilingual_mode = "inline"
+
+# inline | footnote | endnote | both
+term_notes = "inline"
 
 [persian]
 convert_numerals = true
 normalize_zwnj = true
 fix_punctuation = true
-# Shields scholarly apparatus — citations, years, page numbers, footnote
-# markers — from numeral/punctuation conversion: (Marx 1973, 408) stays
-# exactly as-is. Keep true for academic books.
+
+# Preserve citations, years, page numbers, and footnote markers.
 scholarly_mode = true
 font_family = "Vazirmatn"
 
@@ -162,7 +157,8 @@ long_term_retrieval_k = 5
 short_term_window = 4
 
 [pdf]
-parser_backend = "pymupdf"       # "pymupdf" | "doclayout-yolo"
+# pymupdf | doclayout-yolo
+parser_backend = "pymupdf"
 enable_ocr = false
 
 [retry]
@@ -170,14 +166,22 @@ max_retries = 5
 base_delay = 1.0
 max_delay = 60.0
 jitter = true
-max_consecutive_errors = 3       # pause the job after N consecutive chunk failures
+max_consecutive_errors = 3
+
+# Sequential academic jobs pause on the first genuine chunk-stage failure so
+# later chunks cannot advance without the failed chunk's memory.
+pause_on_sequential_error = true
 
 [notifications]
-webhook_url = ""                 # Telegram bot, ntfy.sh, Discord, Slack — any POST endpoint
+webhook_url = ""
 notify_on_complete = true
 notify_on_error = true
 
 [server]
-host = "127.0.0.1"              # bind to localhost (access via SSH tunnel);
-                                 # Docker overrides this via the serve command
+# Docker overrides these with the serve command in Dockerfile.
+host = "127.0.0.1"
 port = 8080
+
+[system_prompt]
+# Empty uses Tarjomeh's built-in prompt.
+template = ""
