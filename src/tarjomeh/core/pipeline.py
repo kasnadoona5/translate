@@ -65,6 +65,56 @@ class PipelinePausedException(Exception):
     pass
 
 
+class ChapterCheckpointReached(PipelinePausedException):
+    """Raised after an intentional chapter-boundary review checkpoint."""
+
+    def __init__(self, chapter_position: int, chapter_title: str) -> None:
+        self.chapter_position = chapter_position
+        self.chapter_title = chapter_title
+        super().__init__(
+            f"Chapter {chapter_position} checkpoint reached: {chapter_title}"
+        )
+
+
+def build_chapter_manifest(document: Document) -> list[dict[str, Any]]:
+    """Return stable, reviewable chapter metadata in parser order."""
+    manifest: list[dict[str, Any]] = []
+    for position, chapter in enumerate(document.chapters, 1):
+        chapter.metadata["tarjomeh_chapter_position"] = position
+        manifest.append({
+            "position": position,
+            "number": chapter.number,
+            "title": chapter.title or f"Untitled chapter {position}",
+            "paragraphs": len(chapter.all_paragraphs),
+            "start_page": chapter.metadata.get("start_page"),
+            "end_page": chapter.metadata.get("end_page"),
+        })
+    return manifest
+
+
+def apply_chapter_selection(
+    document: Document,
+    selected_positions: list[int] | None,
+) -> Document:
+    """Restrict a parsed document to explicit 1-based chapter positions."""
+    build_chapter_manifest(document)
+    selected = sorted({int(value) for value in (selected_positions or [])})
+    if not selected:
+        return document
+    invalid = [value for value in selected if value < 1 or value > len(document.chapters)]
+    if invalid:
+        raise ValueError(
+            "Selected chapter position(s) are outside the parsed document: "
+            + ", ".join(str(value) for value in invalid)
+        )
+    return Document(
+        title=document.title,
+        chapters=[document.chapters[position - 1] for position in selected],
+        metadata=dict(document.metadata),
+        raw_toc=document.raw_toc,
+    )
+
+
 _QUALITY_STAGE_ERRORS = (
     EmptyCompletionError,
     IncompleteCompletionError,
@@ -805,12 +855,18 @@ class TranslationPipeline:
             progress_callback("Ingestion", 0.05, "Parsing document...")
 
         document: Document
+        research_document: Document
         chunks: list[Chunk]
 
         if is_resume:
             # Reconstruct document structure and loaded chunks from DB
             parser = self._get_parser(input_path)
             document = parser.parse(input_path)
+            build_chapter_manifest(document)
+            research_document = document
+            document = apply_chapter_selection(
+                document, self.config.translation.chapter_selection
+            )
             
             # Re-generate chunks to match indices
             def token_counter(text: str) -> int:
@@ -832,6 +888,21 @@ class TranslationPipeline:
             # Fresh parse and chunk
             parser = self._get_parser(input_path)
             document = parser.parse(input_path)
+            chapter_manifest = build_chapter_manifest(document)
+            research_document = document
+            self.db.save_job_artifact(job_id, "chapter_manifest", {
+                "chapters": chapter_manifest,
+                "selected_positions": list(
+                    self.config.translation.chapter_selection
+                ),
+                "stop_after_chapter": self.config.translation.stop_after_chapter,
+                "pause_after_each_chapter": (
+                    self.config.translation.pause_after_each_chapter
+                ),
+            })
+            document = apply_chapter_selection(
+                document, self.config.translation.chapter_selection
+            )
 
             def token_counter(text: str) -> int:
                 return self.llm_client.count_tokens(text)
@@ -966,7 +1037,7 @@ class TranslationPipeline:
 
         research_artifact = self._prepare_book_research(
             job_id,
-            document,
+            research_document,
             progress_callback,
         )
         if research_artifact and research_artifact.get("status") in {
@@ -1007,6 +1078,13 @@ class TranslationPipeline:
         try:
             # Separate execution paths based on workers
             workers = self.config.translation.parallel_workers
+            if (
+                self.config.translation.stop_after_chapter > 0
+                or self.config.translation.pause_after_each_chapter
+            ):
+                # Chapter checkpoints require deterministic source order. The
+                # translation/QA stages themselves remain unchanged.
+                workers = 1
             if workers > 1:
                 # Concurrent Pass (Fast / Quality modes only)
                 logger.info("Running parallel translation with %d workers", workers)
@@ -1139,7 +1217,14 @@ class TranslationPipeline:
                     chunk = chunks[idx]
                     if progress_callback:
                         pct = 0.10 + (idx / total_chunks) * 0.80
-                        progress_callback("Translation", pct, f"Translating chunk {idx + 1}/{total_chunks}...")
+                        chapter_position = self._chunk_chapter_position(chunk)
+                        chapter_label = chunk.chapter_title or f"Chapter {chapter_position}"
+                        progress_callback(
+                            "Translation",
+                            pct,
+                            f"Chapter {chapter_position}: {chapter_label} - "
+                            f"translating chunk {idx + 1}/{total_chunks}...",
+                        )
 
                     try:
                         # Check pause and translate
@@ -1211,6 +1296,12 @@ class TranslationPipeline:
                             web_searcher.export_state(),
                         )
 
+                        if self._claim_chapter_checkpoint(job_id, chunks, idx):
+                            raise ChapterCheckpointReached(
+                                self._chunk_chapter_position(chunk),
+                                chunk.chapter_title,
+                            )
+
                     except PipelinePausedException as e:
                         raise e
                     except Exception as e:
@@ -1249,6 +1340,40 @@ class TranslationPipeline:
                                     f"consecutive failures. Last error: {e}"
                                 )
                             ) from e
+        except ChapterCheckpointReached as checkpoint:
+            self.db.update_job_status(job_id, JobStatus.PAUSED)
+            selected_positions = list(
+                self.config.translation.chapter_selection
+            )
+            preview_positions = (
+                [
+                    position for position in selected_positions
+                    if position <= checkpoint.chapter_position
+                ]
+                if selected_positions
+                else list(range(1, checkpoint.chapter_position + 1))
+            )
+            partial_path = self.export_completed_job(
+                job_id,
+                output_path,
+                chapter_positions=preview_positions,
+            )
+            message = (
+                f"Review checkpoint after chapter {checkpoint.chapter_position}: "
+                f"{checkpoint.chapter_title}. Partial output is ready."
+            )
+            self.db.log_event(job_id, "INFO", message)
+            if progress_callback:
+                progress_callback(
+                    "Paused", len(translations) / total_chunks, message
+                )
+            duration = time.monotonic() - t0
+            return PipelineResult(
+                partial_path,
+                len(translations),
+                duration,
+                warnings=["Chapter review checkpoint"],
+            )
         except PipelinePausedException:
             logger.info("Pipeline paused cooperatively for job %s", job_id)
             if progress_callback:
@@ -1484,6 +1609,7 @@ class TranslationPipeline:
         *,
         output_format: str | None = None,
         bilingual_mode: str | None = None,
+        chapter_positions: list[int] | None = None,
     ) -> Path:
         """Re-export a completed/partially-reviewed job without LLM calls."""
         job = self.db.get_job(job_id)
@@ -1503,7 +1629,9 @@ class TranslationPipeline:
         else:
             output_path = Path(output_path)
 
-        document, chunks = self._parse_and_chunk(input_path)
+        document, chunks = self._parse_and_chunk(
+            input_path, chapter_positions=chapter_positions
+        )
         translations: dict[int, str] = {}
         for c_record in self.db.get_chunks(job_id):
             if c_record["status"] in (ChunkStatus.COMPLETED, ChunkStatus.NEEDS_REVIEW) and c_record.get("translation"):
@@ -1709,9 +1837,58 @@ class TranslationPipeline:
         self.db.log_event(job_id, "INFO", f"Retranslated chunk {chunk_index}.")
         return translation
 
-    def _parse_and_chunk(self, input_path: Path) -> tuple[Document, list[Chunk]]:
+    @staticmethod
+    def _chunk_chapter_position(chunk: Chunk) -> int:
+        return int(chunk.metadata.get("chapter_position", 1))
+
+    def _claim_chapter_checkpoint(
+        self,
+        job_id: str,
+        chunks: list[Chunk],
+        chunk_index: int,
+    ) -> bool:
+        """Record a configured checkpoint at a completed chapter boundary."""
+        if chunk_index >= len(chunks) - 1:
+            return False
+        current = self._chunk_chapter_position(chunks[chunk_index])
+        following = self._chunk_chapter_position(chunks[chunk_index + 1])
+        if current == following:
+            return False
+
+        requested = (
+            self.config.translation.pause_after_each_chapter
+            or self.config.translation.stop_after_chapter == current
+        )
+        if not requested:
+            return False
+
+        artifact = self.db.get_job_artifact(job_id, "chapter_checkpoints") or {}
+        reached = {
+            int(value) for value in artifact.get("reached_positions", [])
+        }
+        if current in reached:
+            return False
+        reached.add(current)
+        self.db.save_job_artifact(job_id, "chapter_checkpoints", {
+            "reached_positions": sorted(reached),
+            "latest_position": current,
+            "latest_title": chunks[chunk_index].chapter_title,
+        })
+        return True
+
+    def _parse_and_chunk(
+        self,
+        input_path: Path,
+        chapter_positions: list[int] | None = None,
+    ) -> tuple[Document, list[Chunk]]:
         parser = self._get_parser(input_path)
         document = parser.parse(input_path)
+        selection = (
+            chapter_positions
+            if chapter_positions is not None
+            else self.config.translation.chapter_selection
+        )
+        document = apply_chapter_selection(document, selection)
 
         def token_counter(text: str) -> int:
             return self.llm_client.count_tokens(text)

@@ -186,6 +186,15 @@ class TranslationConfig:
     # Optional one-time research pass before chunk translation. Disabled by
     # default because it adds web searches and one LLM call.
     enable_book_research: bool = False
+    # Optional 1-based parser chapter positions. An empty list translates the
+    # entire document. These positions come from the chapter inspection API,
+    # not from potentially missing/duplicated printed chapter numbers.
+    chapter_selection: list[int] = field(default_factory=list)
+    # Intentional review checkpoints. ``stop_after_chapter`` pauses once after
+    # that 1-based parser chapter; ``pause_after_each_chapter`` checkpoints at
+    # every chapter boundary except the end of the selected document.
+    stop_after_chapter: int = 0
+    pause_after_each_chapter: bool = False
 
 
 @dataclass
@@ -705,6 +714,16 @@ class TarjomehConfig:
         if self.translation.back_translation_sample_pct < 0 or \
            self.translation.back_translation_sample_pct > 100:
             errors.append("translation.back_translation_sample_pct must be 0-100")
+
+        if self.translation.stop_after_chapter < 0:
+            errors.append("translation.stop_after_chapter must be >= 0")
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 1
+            for value in self.translation.chapter_selection
+        ):
+            errors.append(
+                "translation.chapter_selection must contain positive integers"
+            )
 
         valid_search_providers = {
             "auto", "tavily", "brave", "google", "duckduckgo"

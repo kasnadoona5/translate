@@ -89,6 +89,36 @@
                         </label>
                     </div>
 
+                    <div class="chapter-scope" id="chapterScope">
+                        <div class="chapter-scope-heading">
+                            <div>
+                                <h3>Chapter scope</h3>
+                                <span id="chapterStatus">Entire document</span>
+                            </div>
+                            <button class="btn btn-secondary btn-compact" id="inspectChaptersBtn"
+                                    type="button" onclick="inspectChapters()">
+                                Detect chapters
+                            </button>
+                        </div>
+                        <div class="settings-grid chapter-scope-settings">
+                            <label class="field">
+                                <span>Translation range</span>
+                                <select id="cfgChapterMode" disabled>
+                                    <option value="all" selected>Entire document</option>
+                                    <option value="selected">Selected chapters only</option>
+                                    <option value="through">Pause after a chapter</option>
+                                    <option value="each">Pause after every chapter</option>
+                                </select>
+                            </label>
+                            <label class="field" id="chapterStopField" hidden>
+                                <span>Review checkpoint</span>
+                                <select id="cfgStopAfterChapter"></select>
+                            </label>
+                        </div>
+                        <div class="chapter-list" id="chapterList" hidden></div>
+                        <div class="chapter-warning" id="chapterWarning" hidden></div>
+                    </div>
+
                     <details class="advanced-settings">
                         <summary>
                             <span>Advanced settings</span>

@@ -197,6 +197,50 @@ def _register_api(app: Flask) -> None:
             "timestamp": datetime.utcnow().isoformat(),
         })
 
+    @app.route("/api/chapters", methods=["POST"])
+    @_require_auth
+    def api_chapters():
+        """Parse an upload and return its detected chapter manifest only."""
+        if "file" not in request.files or not request.files["file"].filename:
+            return jsonify({"error": "No file provided"}), 400
+
+        from tarjomeh.core.pipeline import build_chapter_manifest
+        from tarjomeh.parsers.base import EXTENSION_PARSER_MAP
+
+        upload = request.files["file"]
+        suffix = Path(upload.filename).suffix.lower()
+        if suffix not in EXTENSION_PARSER_MAP:
+            return jsonify({"error": f"Unsupported file format: {suffix}"}), 400
+
+        inspection_path = (
+            app.config["UPLOAD_FOLDER"]
+            / f"chapter-inspection-{uuid.uuid4().hex[:12]}{suffix}"
+        )
+        try:
+            upload.save(str(inspection_path))
+            import importlib
+
+            module_path, class_name = EXTENSION_PARSER_MAP[suffix].rsplit(".", 1)
+            parser_cls = getattr(importlib.import_module(module_path), class_name)
+            document = parser_cls().parse(inspection_path)
+            chapters = build_chapter_manifest(document)
+            warnings = []
+            if len(chapters) == 1:
+                warnings.append(
+                    "Only one chapter was detected. Check source bookmarks or heading styles."
+                )
+            return jsonify({
+                "title": document.title,
+                "format": document.format_type,
+                "chapters": chapters,
+                "warnings": warnings,
+            })
+        except Exception as exc:
+            logger.exception("Chapter inspection failed: %s", exc)
+            return jsonify({"error": f"Chapter inspection failed: {exc}"}), 400
+        finally:
+            inspection_path.unlink(missing_ok=True)
+
     @app.route("/api/translate", methods=["POST"])
     @_require_auth
     def api_translate():
@@ -254,6 +298,9 @@ def _register_api(app: Flask) -> None:
             "enable_compliance_check": "glossary.enable_compliance_check",
             "enable_auto_correction": "glossary.enable_auto_correction",
             "scholarly_mode": "persian.scholarly_mode",
+            "pause_after_each_chapter": (
+                "translation.pause_after_each_chapter"
+            ),
         }
         for form_key, dotted_key in _boolean_field_map.items():
             value = request.form.get(form_key, "").lower()
@@ -284,6 +331,10 @@ def _register_api(app: Flask) -> None:
                 "web_search.max_queries_per_book",
                 int,
             ),
+            "stop_after_chapter": (
+                "translation.stop_after_chapter",
+                int,
+            ),
         }
         for form_key, (dotted_key, converter) in _numeric_field_map.items():
             value = request.form.get(form_key)
@@ -294,6 +345,21 @@ def _register_api(app: Flask) -> None:
                     return jsonify({
                         "error": f"Invalid numeric setting: {form_key}"
                     }), 400
+
+        selected_raw = request.form.get("selected_chapters", "").strip()
+        if selected_raw:
+            try:
+                selected = json.loads(selected_raw)
+                if not isinstance(selected, list):
+                    raise ValueError
+                selected = sorted({int(value) for value in selected})
+                if any(value < 1 for value in selected):
+                    raise ValueError
+                config_overrides["translation.chapter_selection"] = selected
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return jsonify({
+                    "error": "selected_chapters must be a JSON list of positive integers"
+                }), 400
 
         # Create progress queue for SSE
         _progress_queues[job_id] = queue.Queue()
@@ -710,6 +776,9 @@ def _register_api(app: Flask) -> None:
             f"sample_pct={translation_config.get('back_translation_sample_pct')}",
             f"  book_research={translation_config.get('enable_book_research')} "
             f"web_context={translation_config.get('enable_web_context')}",
+            f"  chapter_selection={translation_config.get('chapter_selection') or 'all'} "
+            f"stop_after={translation_config.get('stop_after_chapter') or 0} "
+            f"pause_each={translation_config.get('pause_after_each_chapter', False)}",
             f"  glossary_compliance={glossary_config.get('enable_compliance_check')} "
             f"auto_correction={glossary_config.get('enable_auto_correction')}",
             f"  search_provider={search_config.get('provider')} "
@@ -719,6 +788,17 @@ def _register_api(app: Flask) -> None:
             "",
         ])
         research = db.get_job_artifact(job_id, "book_research")
+        chapter_manifest = db.get_job_artifact(job_id, "chapter_manifest")
+        chapter_checkpoints = db.get_job_artifact(job_id, "chapter_checkpoints")
+        if chapter_manifest is not None:
+            lines.extend([
+                "Chapter Scope:",
+                f"  detected={len(chapter_manifest.get('chapters', []))}",
+                f"  selected={chapter_manifest.get('selected_positions') or 'all'}",
+                "  checkpoints_reached="
+                + str((chapter_checkpoints or {}).get("reached_positions", [])),
+                "",
+            ])
         if research is not None:
             suggested = [
                 term for term in research.get("terms", [])

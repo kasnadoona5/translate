@@ -43,6 +43,8 @@ class _Chapter(Protocol):
     """Minimal chapter-like object expected inside a Document."""
 
     title: str
+    number: int | None
+    metadata: dict[str, object]
     sections: list[_Section]
 
 
@@ -159,7 +161,14 @@ class SemanticChunker:
         
         para_to_idx = {id(p): i for i, p in enumerate(document.all_paragraphs)}
 
-        for chapter in document.chapters:
+        for chapter_position, chapter in enumerate(document.chapters, 1):
+            chapter_metadata = getattr(chapter, "metadata", {}) or {}
+            original_position = int(
+                chapter_metadata.get(
+                    "tarjomeh_chapter_position", chapter_position
+                )
+            )
+            chapter_number = getattr(chapter, "number", None)
             for section in chapter.sections:
                 buffer: list[str] = []
                 buffer_tokens = 0
@@ -180,6 +189,9 @@ class SemanticChunker:
                             tokens=buffer_tokens,
                             chapter_title=chapter.title,
                             section_title=section.title,
+                            chapter_position=original_position,
+                            chapter_number=chapter_number,
+                            chapter_metadata=chapter_metadata,
                             previous_sentences=previous_sentences,
                             para_indices=buffer_para_indices,
                         )
@@ -203,6 +215,9 @@ class SemanticChunker:
                         tokens=buffer_tokens,
                         chapter_title=chapter.title,
                         section_title=section.title,
+                        chapter_position=original_position,
+                        chapter_number=chapter_number,
+                        chapter_metadata=chapter_metadata,
                         previous_sentences=previous_sentences,
                         para_indices=buffer_para_indices,
                     )
@@ -223,6 +238,9 @@ class SemanticChunker:
         tokens: int,
         chapter_title: str,
         section_title: str,
+        chapter_position: int,
+        chapter_number: int | None,
+        chapter_metadata: dict[str, object],
         previous_sentences: list[str],
         para_indices: list[int],
     ) -> Chunk:
@@ -231,6 +249,11 @@ class SemanticChunker:
         if previous_sentences and self.overlap_sentences > 0:
             metadata["overlap_prefix"] = " ".join(previous_sentences)
         metadata["paragraph_indices"] = list(para_indices)
+        metadata["chapter_position"] = chapter_position
+        metadata["chapter_number"] = chapter_number
+        for key in ("start_page", "end_page"):
+            if key in chapter_metadata:
+                metadata[key] = chapter_metadata[key]
         return Chunk(
             index=index,
             text=combined,
@@ -279,7 +302,14 @@ class FixedChunker:
         chunks: list[Chunk] = []
         para_to_idx = {id(p): i for i, p in enumerate(document.all_paragraphs)}
 
-        for chapter in document.chapters:
+        for chapter_position, chapter in enumerate(document.chapters, 1):
+            chapter_metadata = getattr(chapter, "metadata", {}) or {}
+            original_position = int(
+                chapter_metadata.get(
+                    "tarjomeh_chapter_position", chapter_position
+                )
+            )
+            chapter_number = getattr(chapter, "number", None)
             for section in chapter.sections:
                 for para in section.paragraphs:
                     para_text = para.text.strip()
@@ -293,6 +323,11 @@ class FixedChunker:
                     )
                     for c in sub_chunks:
                         c.metadata["paragraph_indices"] = [para_to_idx[id(para)]]
+                        c.metadata["chapter_position"] = original_position
+                        c.metadata["chapter_number"] = chapter_number
+                        for key in ("start_page", "end_page"):
+                            if key in chapter_metadata:
+                                c.metadata[key] = chapter_metadata[key]
                     chunks.extend(sub_chunks)
 
         return chunks

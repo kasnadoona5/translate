@@ -78,10 +78,16 @@ class JobDatabase:
                     chunk_index INTEGER,
                     text TEXT,
                     translation TEXT,
+                    metadata TEXT,
                     status TEXT NOT NULL,
                     PRIMARY KEY (job_id, chunk_index)
                 )
             """)
+            chunk_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(chunks)").fetchall()
+            }
+            if "metadata" not in chunk_columns:
+                conn.execute("ALTER TABLE chunks ADD COLUMN metadata TEXT")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS memory_state (
                     job_id TEXT PRIMARY KEY,
@@ -496,8 +502,16 @@ class JobDatabase:
         with self._get_connection() as conn:
             for chunk in chunks:
                 conn.execute(
-                    "INSERT OR IGNORE INTO chunks (job_id, chunk_index, text, status) VALUES (?, ?, ?, ?)",
-                    (job_id, chunk.index, chunk.text, ChunkStatus.PENDING)
+                    """INSERT OR IGNORE INTO chunks
+                       (job_id, chunk_index, text, metadata, status)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        job_id,
+                        chunk.index,
+                        chunk.text,
+                        json.dumps(chunk.metadata, ensure_ascii=False, sort_keys=True),
+                        ChunkStatus.PENDING,
+                    )
                 )
             conn.commit()
 
@@ -505,7 +519,15 @@ class JobDatabase:
         """Retrieve all chunk records for a job."""
         with self._get_connection() as conn:
             rows = conn.execute("SELECT * FROM chunks WHERE job_id = ? ORDER BY chunk_index ASC", (job_id,)).fetchall()
-            return [dict(row) for row in rows]
+            chunks = []
+            for row in rows:
+                chunk = dict(row)
+                try:
+                    chunk["metadata"] = json.loads(chunk.get("metadata") or "{}")
+                except json.JSONDecodeError:
+                    chunk["metadata"] = {}
+                chunks.append(chunk)
+            return chunks
 
     def update_chunk(self, job_id: str, chunk_index: int, status: str, translation: str | None = None) -> None:
         """Update status and translation text for a single chunk."""

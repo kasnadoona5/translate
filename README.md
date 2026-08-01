@@ -497,10 +497,22 @@ This recreates only Tarjomeh and leaves 9router unchanged.
 1. Open `http://SERVER_IP:8080/?token=YOUR_UI_SECRET_TOKEN`.
 2. Upload a supported document.
 3. Select mode, output format, and document layout.
-4. Review advanced terminology, research, and QA options.
-5. Start the job and keep the job ID.
-6. Use History to monitor, pause/resume, review chunks, download output, or
+4. Select **Detect chapters** when you need chapter-level control.
+5. Translate the whole document, selected chapters, pause after one chapter,
+   or pause after every chapter.
+6. Review advanced terminology, research, and QA options.
+7. Start the job and keep the job ID.
+8. Use History to monitor, pause/resume, review chunks, download output, or
    download the QA report.
+
+An intentional chapter checkpoint exports a downloadable preview containing
+every completed chapter through that boundary. The job remains paused and its
+four-layer memory is retained; Resume starts with the next untranslated
+chapter. A selected-chapter job is complete when its selected scope finishes.
+Chapter detection is strongest for PDF bookmarks, EPUB structure, DOCX
+Heading 1 styles, Markdown `#` headings, and explicit `Chapter N` TXT lines.
+Review the detected list before starting because unstructured or scanned PDFs
+may appear as a single chapter.
 
 Recommended production academic settings:
 

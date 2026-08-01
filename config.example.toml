@@ -86,6 +86,12 @@ back_translation_sample_pct = 20
 enable_web_context = true
 enable_book_research = false
 
+# Optional chapter controls. Positions are the 1-based order reported by the
+# Web UI chapter detector. Empty/zero values preserve whole-book behavior.
+chapter_selection = []
+stop_after_chapter = 0
+pause_after_each_chapter = false
+
 # Academic mode always forces sequential operation.
 parallel_workers = 1
 

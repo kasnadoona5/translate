@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import io
 import queue
 import time
 import tempfile
@@ -63,6 +64,9 @@ class TestWebUI(unittest.TestCase):
             "cfgResearchQueries",
             "cfgChunkQueries",
             "cfgBookQueryBudget",
+            "cfgChapterMode",
+            "cfgStopAfterChapter",
+            "chapterList",
         ):
             self.assertIn(f'id="{control_id}"', html)
 
@@ -70,6 +74,29 @@ class TestWebUI(unittest.TestCase):
         headers = {"Authorization": "Bearer test-token"}
         response = self.client.get("/api/jobs", headers=headers)
         self.assertEqual(response.status_code, 200)
+
+    def test_chapter_inspection_returns_detected_manifest(self) -> None:
+        response = self.client.post(
+            "/api/chapters",
+            data={
+                "file": (
+                    io.BytesIO(
+                        b"Chapter 1: Opening\nFirst text.\n\n"
+                        b"Chapter 2: Argument\nSecond text."
+                    ),
+                    "book.txt",
+                )
+            },
+            headers={"Authorization": "Bearer test-token"},
+            content_type="multipart/form-data",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(len(payload["chapters"]), 2)
+        self.assertEqual(payload["chapters"][1]["position"], 2)
+        self.assertEqual(payload["chapters"][1]["number"], 2)
+        self.assertEqual(payload["chapters"][1]["title"], "Argument")
 
     @patch("tarjomeh.jobs.database.JobDatabase")
     def test_get_jobs_api(self, mock_db_cls: MagicMock) -> None:

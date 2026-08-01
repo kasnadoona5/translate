@@ -5,6 +5,7 @@ let currentEventSource = null;
 let currentReviewJobId = null;
 let comparisonBaselineJobId = null;
 let currentEvaluationId = null;
+let detectedChapters = [];
 
 // Initialize on page load
 document.addEventListener("DOMContentLoaded", () => {
@@ -53,6 +54,7 @@ function setupDragAndDrop() {
 // Handle selected file details
 function handleFileSelect(file) {
     selectedFile = file;
+    detectedChapters = [];
     document.getElementById("selectedFileName").innerText = file.name;
     document.getElementById("selectedFileMeta").innerText =
         formatFileSize(file.size) + " · " +
@@ -60,6 +62,7 @@ function handleFileSelect(file) {
     document.querySelector(".file-indicator").innerText =
         file.name.split(".").pop().slice(0, 3).toUpperCase();
     document.getElementById("configPanel").hidden = false;
+    resetChapterScope();
     updateRunSummary();
 }
 
@@ -68,6 +71,7 @@ function setupSettingsControls() {
     const format = document.getElementById("cfgFormat");
     const bilingual = document.getElementById("cfgBilingual");
     const termNotes = document.getElementById("cfgTermNotes");
+    const chapterMode = document.getElementById("cfgChapterMode");
 
     mode.addEventListener("change", () => {
         const presets = {
@@ -100,8 +104,100 @@ function setupSettingsControls() {
     });
     bilingual.addEventListener("change", updateRunSummary);
     termNotes.addEventListener("change", updateRunSummary);
+    chapterMode.addEventListener("change", () => {
+        updateChapterScopeVisibility();
+        updateRunSummary();
+    });
     syncTermNoteAvailability();
     updateRunSummary();
+}
+
+function resetChapterScope() {
+    const mode = document.getElementById("cfgChapterMode");
+    mode.value = "all";
+    mode.disabled = true;
+    document.getElementById("chapterStatus").innerText = "Entire document";
+    document.getElementById("chapterList").hidden = true;
+    document.getElementById("chapterList").replaceChildren();
+    document.getElementById("chapterStopField").hidden = true;
+    document.getElementById("chapterWarning").hidden = true;
+}
+
+function updateChapterScopeVisibility() {
+    const mode = document.getElementById("cfgChapterMode").value;
+    document.getElementById("chapterList").hidden = mode !== "selected";
+    document.getElementById("chapterStopField").hidden = mode !== "through";
+}
+
+async function inspectChapters() {
+    if (!selectedFile) return;
+    const button = document.getElementById("inspectChaptersBtn");
+    const status = document.getElementById("chapterStatus");
+    button.disabled = true;
+    status.innerText = "Detecting document structure...";
+
+    const formData = new FormData();
+    formData.append("file", selectedFile);
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("token");
+    const url = token ? `/api/chapters?token=${encodeURIComponent(token)}` : "/api/chapters";
+
+    try {
+        const response = await fetch(url, { method: "POST", body: formData });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Chapter detection failed");
+        detectedChapters = data.chapters || [];
+        renderDetectedChapters();
+        status.innerText = `${detectedChapters.length} chapter${detectedChapters.length === 1 ? "" : "s"} detected`;
+        document.getElementById("cfgChapterMode").disabled = detectedChapters.length === 0;
+
+        const warning = document.getElementById("chapterWarning");
+        const warnings = data.warnings || [];
+        warning.hidden = warnings.length === 0;
+        warning.innerText = warnings.join(" ");
+    } catch (error) {
+        detectedChapters = [];
+        status.innerText = error.message;
+        document.getElementById("cfgChapterMode").disabled = true;
+    } finally {
+        button.disabled = false;
+        updateRunSummary();
+    }
+}
+
+function renderDetectedChapters() {
+    const list = document.getElementById("chapterList");
+    const stop = document.getElementById("cfgStopAfterChapter");
+    list.replaceChildren();
+    stop.replaceChildren();
+
+    detectedChapters.forEach(chapter => {
+        const label = document.createElement("label");
+        label.className = "chapter-option";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.value = String(chapter.position);
+        checkbox.checked = true;
+        checkbox.addEventListener("change", updateRunSummary);
+        const text = document.createElement("span");
+        text.innerText = `${chapter.position}. ${chapter.title}`;
+        const meta = document.createElement("small");
+        const pageRange = chapter.start_page
+            ? `Pages ${chapter.start_page}-${chapter.end_page || chapter.start_page}`
+            : `${chapter.paragraphs} paragraph${chapter.paragraphs === 1 ? "" : "s"}`;
+        meta.innerText = pageRange;
+        text.appendChild(meta);
+        label.append(checkbox, text);
+        list.appendChild(label);
+
+        if (chapter.position < detectedChapters.length) {
+            const option = document.createElement("option");
+            option.value = String(chapter.position);
+            option.innerText = `${chapter.position}. ${chapter.title}`;
+            stop.appendChild(option);
+        }
+    });
+    updateChapterScopeVisibility();
 }
 
 function syncTermNoteAvailability() {
@@ -118,10 +214,15 @@ function updateRunSummary() {
     const mode = document.getElementById("cfgMode");
     const format = document.getElementById("cfgFormat");
     const bilingual = document.getElementById("cfgBilingual");
+    const chapterMode = document.getElementById("cfgChapterMode");
+    const scopeText = chapterMode && !chapterMode.disabled
+        ? chapterMode.options[chapterMode.selectedIndex].text
+        : "Entire document";
     summary.innerText = [
         mode.options[mode.selectedIndex].text,
         format.options[format.selectedIndex].text,
-        bilingual.options[bilingual.selectedIndex].text
+        bilingual.options[bilingual.selectedIndex].text,
+        scopeText
     ].join(" · ");
 }
 
@@ -166,6 +267,25 @@ async function startTranslation() {
     formData.append("phase7_max_queries", document.getElementById("cfgResearchQueries").value);
     formData.append("max_queries_per_chunk", document.getElementById("cfgChunkQueries").value);
     formData.append("max_queries_per_book", document.getElementById("cfgBookQueryBudget").value);
+    const chapterMode = document.getElementById("cfgChapterMode").value;
+    const selectedChapters = chapterMode === "selected"
+        ? Array.from(document.querySelectorAll("#chapterList input:checked"))
+            .map(input => Number(input.value))
+        : [];
+    if (chapterMode === "selected" && selectedChapters.length === 0) {
+        alert("Select at least one chapter.");
+        startBtn.disabled = false;
+        startBtn.innerHTML = "Start translation <span aria-hidden='true'>→</span>";
+        return;
+    }
+    formData.append("selected_chapters", JSON.stringify(selectedChapters));
+    formData.append(
+        "stop_after_chapter",
+        chapterMode === "through"
+            ? document.getElementById("cfgStopAfterChapter").value
+            : "0"
+    );
+    formData.append("pause_after_each_chapter", String(chapterMode === "each"));
 
     // Get Auth token if set
     const params = new URLSearchParams(window.location.search);
@@ -363,7 +483,10 @@ async function fetchJobs() {
                     <button class="action-btn" title="Pause job" onclick="pauseJob('${job.id}')">Pause</button>
                 `;
             } else if (job.status === "paused" || job.status === "paused_error") {
-                actionHtml = `<button class="action-btn" title="Resume job" onclick="resumeJob('${job.id}')">Resume</button>`;
+                actionHtml = `
+                    ${job.output_filename ? `<button class="action-btn" title="Download chapter checkpoint" onclick="downloadJob('${job.id}')">Download preview</button>` : ""}
+                    <button class="action-btn" title="Resume job" onclick="resumeJob('${job.id}')">Resume</button>
+                `;
             }
 
             if (job.status === "completed") {
