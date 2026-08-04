@@ -838,11 +838,41 @@ def _register_api(app: Flask) -> None:
                 f"  citations_preserved={original_audit.get('preserved_citation_count', 0)}",
                 "",
             ])
+        all_events = db.get_chunk_events(job_id)
+        all_chunks = db.get_chunks(job_id)
         events_by_chunk: dict[int, list[dict[str, Any]]] = {}
-        for event in db.get_chunk_events(job_id):
+        for event in all_events:
             events_by_chunk.setdefault(int(event["chunk_index"]), []).append(event)
 
-        for chunk in db.get_chunks(job_id):
+        review_reasons: set[str] = set()
+        if job.get("status") != "completed":
+            review_reasons.add(f"job_{job.get('status')}")
+        if any(chunk.get("status") == "needs_review" for chunk in all_chunks):
+            review_reasons.add("chunk_needs_review")
+        if any(
+            chunk.get("status") not in {"completed", "needs_review"}
+            for chunk in all_chunks
+        ):
+            review_reasons.add("incomplete_chunk")
+        review_event_reasons = {
+            "qa_unavailable": "qa_unavailable",
+            "glossary_needs_review": "glossary_needs_review",
+            "integrity_final_failed": "integrity_final_failed",
+        }
+        for event in all_events:
+            reason = review_event_reasons.get(event["event_type"])
+            if reason:
+                review_reasons.add(reason)
+        lines.extend([
+            "QA Verdict:",
+            "  status=" + ("review_required" if review_reasons else "pass"),
+            "  reasons=" + (
+                ", ".join(sorted(review_reasons)) if review_reasons else "none"
+            ),
+            "",
+        ])
+
+        for chunk in all_chunks:
             idx = int(chunk["chunk_index"])
             chunk_events = events_by_chunk.get(idx, [])
             lines.append(f"Chunk {idx} [{chunk['status']}]")
@@ -934,6 +964,10 @@ def _register_api(app: Flask) -> None:
                             "    "
                             f"{violation.get('term')} -> {violation.get('expected')} "
                             f"status={violation.get('status')}"
+                        )
+                    for term in payload.get("citation_exemptions", []):
+                        lines.append(
+                            f"    Citation preserved (not terminology): {term}"
                         )
                 elif event["event_type"] == "glossary_needs_review":
                     lines.append(

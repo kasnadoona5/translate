@@ -49,6 +49,7 @@ class ComplianceReport:
 
     violations: list[Violation] = field(default_factory=list)
     total_checked: int = 0
+    citation_exemptions: list[str] = field(default_factory=list)
 
     @property
     def compliant(self) -> bool:
@@ -109,8 +110,12 @@ class GlossaryComplianceChecker:
         matched_entries = glossary_manager.find_terms(source_text)
 
         violations: list[Violation] = []
+        citation_exemptions: list[str] = []
 
         for entry in matched_entries:
+            if term_occurs_only_in_citations(source_text, entry.source):
+                citation_exemptions.append(entry.source)
+                continue
             if not self._target_present(entry.target, translation):
                 escaped_source = re.escape(entry.source)
                 if re.search(rf"\b{escaped_source}\b", translation, re.IGNORECASE):
@@ -129,7 +134,8 @@ class GlossaryComplianceChecker:
 
         return ComplianceReport(
             violations=violations,
-            total_checked=len(matched_entries),
+            total_checked=len(matched_entries) - len(citation_exemptions),
+            citation_exemptions=citation_exemptions,
         )
 
     # -- internals -----------------------------------------------------------
@@ -191,6 +197,30 @@ class GlossaryComplianceChecker:
 
 _ZWNJ = "\u200c"  # zero-width non-joiner
 _ZWJ = "\u200d"   # zero-width joiner
+_SCHOLARLY_CITATION_RE = re.compile(
+    r"\([^()\n]{0,240}\b(?:1[5-9]\d{2}|20\d{2})[a-z]?\b[^()\n]{0,240}\)",
+    re.IGNORECASE,
+)
+
+
+def term_occurs_only_in_citations(source_text: str, term: str) -> bool:
+    """Return whether every source occurrence is inside an author-year citation."""
+    escaped = re.escape(term.strip())
+    if not escaped:
+        return False
+    occurrences = list(re.finditer(rf"\b{escaped}\b", source_text, re.IGNORECASE))
+    if not occurrences:
+        return False
+    citation_spans = [
+        match.span() for match in _SCHOLARLY_CITATION_RE.finditer(source_text)
+    ]
+    return bool(citation_spans) and all(
+        any(
+            start <= occurrence.start() and occurrence.end() <= end
+            for start, end in citation_spans
+        )
+        for occurrence in occurrences
+    )
 
 
 def _normalise_persian(text: str) -> str:

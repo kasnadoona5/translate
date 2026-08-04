@@ -162,7 +162,7 @@ flag is omitted.
 
 ```dotenv
 # Translator: three total attempts by default
-TRANSLATOR_MAX_TOKENS=8192
+TRANSLATOR_MAX_TOKENS=10000
 TRANSLATOR_RECOVERY_MODEL=
 
 # Critic: unchanged normal attempt plus bounded recovery
@@ -171,15 +171,20 @@ CRITIC_RECOVERY_MAX_ATTEMPTS=4
 CRITIC_RECOVERY_MAX_TOKENS=16384
 ```
 
-The first request is unchanged. Recovery settings apply only after a provider
-failure such as `finish_reason=length`.
+The normal request uses a 10,000-token ceiling; unused capacity is not billed.
+Recovery settings apply only after a provider failure such as
+`finish_reason=length`, and the default recovery ceiling is 16,384 tokens.
 
 Recommended critic recovery sequence:
 
 1. Normal configured critic request
 2. Same critic with low reasoning after a length failure
-3. Optional critic-specific fallback model
-4. Final expanded attempt, up to the configured recovery token ceiling
+3. Optional critic-specific fallback model, or a no-reasoning recovery when no
+   fallback is configured
+4. Final no-reasoning attempt, up to the configured recovery token ceiling
+
+No-reasoning mode is limited to recovery and compact JSON repair. It does not
+replace the normal translator, critic, or refiner request.
 
 If all critic attempts fail, a valid translation is retained and marked for
 human review. An initial translation failure remains strict and prevents

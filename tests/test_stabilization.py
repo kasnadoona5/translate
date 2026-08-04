@@ -16,6 +16,11 @@ from tarjomeh.core.llm_client import (
 from tarjomeh.core.term_notes import audit_inline_english_originals
 from tarjomeh.exporters.base import TranslatedDocument, TranslatedParagraph
 from tarjomeh.exporters.docx_exporter import DocxExporter, HAS_DOCX
+from tarjomeh.glossary.compliance import (
+    GlossaryComplianceChecker,
+    term_occurs_only_in_citations,
+)
+from tarjomeh.glossary.manager import GlossaryManager
 from tarjomeh.quality.back_translator import _extract_entities
 from tarjomeh.quality.critique import TranslationCritique
 
@@ -56,6 +61,8 @@ class TestBoundedRecovery(unittest.TestCase):
     def test_defaults_recommend_nine_and_bound_recovery(self) -> None:
         self.assertEqual(self.config.translation.critique_threshold, 9.0)
         self.assertEqual(self.config.llm.recovery.max_attempts, 3)
+        self.assertEqual(self.config.llm.max_tokens, 10000)
+        self.assertEqual(self.config.llm.recovery.max_tokens, 16384)
 
     def test_first_attempt_payload_is_unchanged_then_length_recovers(self) -> None:
         messages = [{"role": "user", "content": "Translate this paragraph."}]
@@ -130,13 +137,76 @@ class TestBoundedRecovery(unittest.TestCase):
         self.assertEqual(result, "recovered")
         self.assertEqual(payloads[0], expected)
         self.assertEqual(payloads[1]["model"], self.config.llm.model)
-        self.assertEqual(payloads[1]["max_tokens"], 8192)
+        self.assertEqual(payloads[1]["max_tokens"], 10000)
         self.assertEqual(payloads[2]["model"], "critic-fallback")
-        self.assertEqual(payloads[2]["max_tokens"], 8192)
+        self.assertEqual(payloads[2]["max_tokens"], 10000)
         self.assertEqual(payloads[3]["model"], "critic-fallback")
         self.assertEqual(payloads[3]["max_tokens"], 16384)
         self.assertEqual(payloads[3]["reasoning"]["effort"], "none")
         self.assertEqual(events[3]["recovery_stage"], "final_expanded")
+
+    def test_critic_third_attempt_disables_reasoning_without_fallback(self) -> None:
+        payloads = []
+        responses = iter([
+            _response("partial one", "length"),
+            _response("partial two", "length"),
+            _response("recovered", "stop"),
+        ])
+
+        def post(*args, **kwargs):
+            payloads.append(json.loads(json.dumps(kwargs["json"])))
+            return next(responses)
+
+        self.client._client.post = post
+        result = self.client.complete(
+            messages=[{"role": "user", "content": "Judge this translation."}],
+            _operation="critique",
+        )
+
+        self.assertEqual(result, "recovered")
+        self.assertEqual(payloads[0]["max_tokens"], 10000)
+        self.assertNotEqual(payloads[0].get("reasoning", {}).get("effort"), "none")
+        self.assertEqual(payloads[1]["reasoning"]["effort"], "low")
+        self.assertEqual(payloads[2]["reasoning"]["effort"], "none")
+        self.assertEqual(payloads[2]["max_tokens"], 16384)
+
+    def test_glossary_recovery_disables_reasoning_after_length(self) -> None:
+        payloads = []
+        responses = iter([
+            _response("partial", "length"),
+            _response("recovered", "stop"),
+        ])
+
+        def post(*args, **kwargs):
+            payloads.append(json.loads(json.dumps(kwargs["json"])))
+            return next(responses)
+
+        self.client._client.post = post
+        result = self.client.complete(
+            messages=[{"role": "user", "content": "Repair terminology."}],
+            _operation="glossary_auto_correction",
+        )
+
+        self.assertEqual(result, "recovered")
+        self.assertNotEqual(payloads[0].get("reasoning", {}).get("effort"), "none")
+        self.assertEqual(payloads[1]["reasoning"]["effort"], "none")
+        self.assertEqual(payloads[1]["max_tokens"], 16384)
+
+    def test_json_repair_is_compact_from_its_first_request(self) -> None:
+        payloads = []
+
+        def post(*args, **kwargs):
+            payloads.append(json.loads(json.dumps(kwargs["json"])))
+            return _response('{"scores": {}, "issues": []}', "stop")
+
+        self.client._client.post = post
+        self.client.complete(
+            messages=[{"role": "user", "content": "Repair JSON."}],
+            _operation="critique_json_repair",
+        )
+
+        self.assertEqual(payloads[0]["reasoning"]["effort"], "none")
+        self.assertEqual(payloads[0]["max_tokens"], 16384)
 
     def test_partial_length_response_is_never_returned(self) -> None:
         self.config.llm.recovery.max_attempts = 1
@@ -238,6 +308,72 @@ class TestStabilizationPolicies(unittest.TestCase):
         self.assertEqual(len(result.issues), 1)
         self.assertEqual(len(result.ignored_issue_details), 1)
         self.assertIn('current: "A"', result.issues[0])
+
+    def test_noop_noise_cannot_invalidate_actionable_critique(self) -> None:
+        long_rationale = "x" * 700
+        result = TranslationCritique._parse_response(
+            json.dumps({
+                "scores": {
+                    "accuracy": 9,
+                    "fluency": 9,
+                    "terminology": 9,
+                    "register": 9,
+                },
+                "issues": [
+                    {
+                        "severity": "minor",
+                        "category": "fluency",
+                        "confidence": 0.5,
+                        "source_quote": "not present",
+                        "current_persian_quote": "also not present",
+                        "suggested_correction": "also not present",
+                        "rationale": "No change needed.",
+                    },
+                    {
+                        "severity": "major",
+                        "category": "accuracy",
+                        "confidence": 0.9,
+                        "source_quote": "field",
+                        "current_persian_quote": "زمینه",
+                        "suggested_correction": "میدان",
+                        "rationale": long_rationale,
+                    },
+                ],
+            }),
+            source_text="The field matters.",
+            translation="زمینه مهم است.",
+        )
+
+        self.assertTrue(result.valid)
+        self.assertEqual(len(result.issues), 1)
+        self.assertEqual(len(result.ignored_issue_details), 1)
+        self.assertTrue(result.issue_details[0]["rationale_truncated"])
+        self.assertEqual(len(result.issue_details[0]["rationale"]), 500)
+
+    def test_author_year_citation_is_not_a_glossary_translation_target(self) -> None:
+        glossary = GlossaryManager()
+        glossary.add_term("Caceres", "کاسرس")
+        checker = GlossaryComplianceChecker()
+
+        source = "The claim has been documented (Caceres 2014, 22)."
+        report = checker.check("این ادعا مستند شده است.", source, glossary)
+
+        self.assertTrue(term_occurs_only_in_citations(source, "Caceres"))
+        self.assertTrue(report.compliant)
+        self.assertEqual(report.total_checked, 0)
+        self.assertEqual(report.citation_exemptions, ["Caceres"])
+
+    def test_glossary_term_in_prose_remains_enforced_despite_citation(self) -> None:
+        glossary = GlossaryManager()
+        glossary.add_term("Caceres", "کاسرس")
+        checker = GlossaryComplianceChecker()
+
+        source = "Caceres argues this point (Caceres 2014, 22)."
+        report = checker.check("این نکته مطرح می‌شود.", source, glossary)
+
+        self.assertFalse(term_occurs_only_in_citations(source, "Caceres"))
+        self.assertFalse(report.compliant)
+        self.assertEqual(report.total_checked, 1)
 
     def test_entity_extraction_does_not_join_heading_and_sentence(self) -> None:
         entities = _extract_entities(

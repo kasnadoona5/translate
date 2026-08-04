@@ -143,7 +143,7 @@ class LLMRecoveryConfig:
     max_attempts: int = 3
     model: str = ""
     reasoning_effort: str = "low"
-    max_tokens: int = 8192
+    max_tokens: int = 16384
     expanded_final_attempt: bool = False
     final_reasoning_effort: str = "none"
 
@@ -155,7 +155,7 @@ class LLMConfig:
     provider: str = "openrouter"
     model: str = "anthropic/claude-sonnet-4-5-20250514"
     temperature: float = 0.3
-    max_tokens: int = 8192
+    max_tokens: int = 10000
     openrouter: LLMOpenRouterConfig = field(default_factory=LLMOpenRouterConfig)
     ollama: LLMOllamaConfig = field(default_factory=LLMOllamaConfig)
     critic: LLMCriticConfig = field(default_factory=LLMCriticConfig)
@@ -457,7 +457,7 @@ class TarjomehConfig:
             TRANSLATOR_API_BASE   endpoint ("" = OpenRouter; 9router URL to route via it)
             TRANSLATOR_API_KEY    API key
             TRANSLATOR_MODEL      model id or 9router combo name
-            TRANSLATOR_MAX_TOKENS optional output budget (default 8192)
+            TRANSLATOR_MAX_TOKENS optional output budget (default 10000)
 
         Critic / judge (optional second model):
             CRITIC_ENABLED        true / false

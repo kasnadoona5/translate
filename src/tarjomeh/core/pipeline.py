@@ -32,7 +32,10 @@ from tarjomeh.memory.manager import MemoryManager, MemoryContext
 from tarjomeh.memory.proper_nouns import INLINE_ORIGINAL_CATEGORIES
 from tarjomeh.context.web_searcher import WebContextSearcher
 from tarjomeh.glossary.manager import GlossaryManager
-from tarjomeh.glossary.compliance import GlossaryComplianceChecker
+from tarjomeh.glossary.compliance import (
+    GlossaryComplianceChecker,
+    term_occurs_only_in_citations,
+)
 from tarjomeh.persian.typography import PersianTypographer
 from tarjomeh.core.term_notes import (
     apply_term_notes,
@@ -598,6 +601,9 @@ def _compliance_report_for_event(report: Any) -> dict[str, Any]:
     return {
         "compliant": bool(getattr(report, "compliant", False)),
         "total_checked": int(getattr(report, "total_checked", 0)),
+        "citation_exemptions": list(
+            getattr(report, "citation_exemptions", []) or []
+        ),
         "violation_count": len(violations),
         "violations": violations,
     }
@@ -2171,13 +2177,29 @@ class TranslationPipeline:
             context=f"{chunk.chapter_title}\n{chunk.section_title}",
             domain=self.config.translation.domain,
         )
+        citation_exempt_entries = [
+            entry
+            for entry in matched_entries
+            if term_occurs_only_in_citations(chunk.text, entry.source)
+        ]
+        citation_exempt_sources = {
+            entry.source.casefold() for entry in citation_exempt_entries
+        }
+        enforced_entries = [
+            entry
+            for entry in matched_entries
+            if entry.source.casefold() not in citation_exempt_sources
+        ]
         self.db.log_chunk_event(job_id, idx, "glossary_matches", {
             "matched_count": len(matched_entries),
             "entries": _glossary_entries_for_event(matched_entries),
+            "citation_exemptions": [
+                entry.source for entry in citation_exempt_entries
+            ],
         })
         protected_targets = [
             str(getattr(entry, "target", "")).strip()
-            for entry in matched_entries
+            for entry in enforced_entries
             if str(getattr(entry, "target", "")).strip()
             and not bool(getattr(entry, "is_auto", False))
         ]
@@ -2194,7 +2216,7 @@ class TranslationPipeline:
         )
         # Context-aware glossary table: includes each term's Context column
         # (author-specific sense, e.g. Marx's vs Bourdieu's "capital").
-        glossary_terms_str = glossary_manager.format_for_prompt(matched_entries) \
+        glossary_terms_str = glossary_manager.format_for_prompt(enforced_entries) \
             or "(no glossary terms matched in this chunk)"
 
         style_register = self.config.translation.style_register

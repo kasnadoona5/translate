@@ -168,19 +168,12 @@ class TranslationCritique:
         result = self._parse_response(raw, source_text, translation)
         result.attempts = 1
         all_errors = list(result.validation_errors)
-        remaining_budget = (
-            self._llm.remaining_attempt_budget(3)
-            if hasattr(self._llm, "remaining_attempt_budget")
-            else self.max_parse_retries
-        )
         for retry in range(self.max_parse_retries):
             if result.valid:
                 break
             logger.warning("Invalid critique response; requesting JSON repair.")
-            if remaining_budget <= 0:
-                break
             if hasattr(self._llm, "limit_next_call_attempts"):
-                self._llm.limit_next_call_attempts(remaining_budget)
+                self._llm.limit_next_call_attempts(1)
             repair_prompt = self._repair_prompt(
                 raw, result.validation_errors, source_text, translation
             )
@@ -189,8 +182,6 @@ class TranslationCritique:
             raw = await self._llm.chat(repair_prompt)
             result = self._parse_response(raw, source_text, translation)
             result.attempts = retry + 2
-            if hasattr(self._llm, "last_call_attempt_count"):
-                remaining_budget -= self._llm.last_call_attempt_count()
             all_errors.extend(result.validation_errors)
         if result.attempts > 1:
             result.validation_errors = list(dict.fromkeys(all_errors))
@@ -316,6 +307,33 @@ markdown fences, or commentary."""
                 explanation = str(
                     issue.get("rationale", issue.get("explanation", ""))
                 ).strip()
+                preliminary_detail = {
+                    "issue_id": _stable_issue_id(category, segment),
+                    "category": category,
+                    "severity": severity,
+                    "source_quote": segment,
+                    "current_persian_quote": current,
+                    "suggested_correction": fix,
+                    "rationale": explanation,
+                    "source_segment": segment,
+                    "current_translation": current,
+                    "suggested_fix": fix,
+                    "explanation": explanation,
+                }
+                if _is_noop_issue(preliminary_detail):
+                    ignored_issue_details.append({
+                        **preliminary_detail,
+                        "ignored_reason": "no_textual_change",
+                    })
+                    continue
+                issue_key = (category, _normalize_span(segment))
+                if issue_key in seen_issue_keys:
+                    ignored_issue_details.append({
+                        **preliminary_detail,
+                        "ignored_reason": "duplicate_issue",
+                    })
+                    continue
+                seen_issue_keys.add(issue_key)
                 confidence = _confidence_value(issue.get("confidence"), errors)
                 if category not in _MQM_CATEGORIES:
                     errors.append(f"issue_category_invalid:{category or 'missing'}")
@@ -339,18 +357,12 @@ markdown fences, or commentary."""
                     errors.append("issue_suggested_correction_too_long")
                 if not explanation:
                     errors.append("issue_rationale_required")
-                elif len(explanation) > _MAX_RATIONALE_CHARS:
-                    errors.append("issue_rationale_too_long")
+                rationale_truncated = len(explanation) > _MAX_RATIONALE_CHARS
+                if rationale_truncated:
+                    explanation = explanation[:_MAX_RATIONALE_CHARS].rstrip()
 
-                issue_key = (category, _normalize_span(segment))
-                if issue_key in seen_issue_keys:
-                    ignored_issue_details.append({
-                        **dict(issue), "ignored_reason": "duplicate_issue",
-                    })
-                    continue
-                seen_issue_keys.add(issue_key)
                 detail = {
-                    "issue_id": _stable_issue_id(category, segment),
+                    "issue_id": preliminary_detail["issue_id"],
                     "category": category,
                     "severity": severity,
                     "confidence": confidence,
@@ -364,11 +376,8 @@ markdown fences, or commentary."""
                     "suggested_fix": fix,
                     "explanation": explanation,
                 }
-                if _is_noop_issue(detail):
-                    ignored_issue_details.append({
-                        **detail, "ignored_reason": "no_textual_change",
-                    })
-                    continue
+                if rationale_truncated:
+                    detail["rationale_truncated"] = True
                 text = f"[{severity.upper()}/{category}]"
                 text += f' source: "{segment}" | current: "{current}"'
                 text += f" | fix: {fix} (Reason: {explanation})"

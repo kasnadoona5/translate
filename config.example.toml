@@ -1,4 +1,4 @@
-# Tarjomeh v8.7.1 configuration template
+# Tarjomeh v9.0.1 configuration template
 #
 # 1. Copy this file to config.toml.
 # 2. Keep API keys and UI secrets in .env.
@@ -15,7 +15,7 @@ model = "deepseek/deepseek-v4-flash"
 temperature = 0.3
 
 # Output budget for the unchanged normal request.
-max_tokens = 8192
+max_tokens = 10000
 
 [llm.recovery]
 # Bounded translator recovery. The first request remains unchanged.
@@ -23,7 +23,7 @@ enabled = true
 max_attempts = 3
 model = ""
 reasoning_effort = "low"
-max_tokens = 8192
+max_tokens = 16384
 expanded_final_attempt = false
 final_reasoning_effort = "none"
 

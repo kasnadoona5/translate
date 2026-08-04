@@ -262,6 +262,7 @@ class TestWebUI(unittest.TestCase):
                 "payload": {
                     "compliant": False,
                     "violation_count": 1,
+                    "citation_exemptions": ["Caceres"],
                     "violations": [
                         {
                             "term": "algorithms",
@@ -293,6 +294,9 @@ class TestWebUI(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("Job Configuration:", report)
+        self.assertIn("QA Verdict:", report)
+        self.assertIn("status=review_required", report)
+        self.assertIn("reasons=chunk_needs_review", report)
         self.assertIn("threshold=9.0 refinements=2", report)
         self.assertIn(
             "critic_recovery_attempts=4 fallback=critic-fallback final_tokens=16384",
@@ -304,6 +308,7 @@ class TestWebUI(unittest.TestCase):
             "algorithms -> \u0627\u0644\u06af\u0648\u0631\u06cc\u062a\u0645\u200c\u0647\u0627 status=missing",
             report,
         )
+        self.assertIn("Citation preserved (not terminology): Caceres", report)
 
     def test_safe_glossary_upload_path_sanitizes_filename(self) -> None:
         from tarjomeh.web.app import _safe_glossary_upload_path

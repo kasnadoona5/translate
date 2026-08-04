@@ -24,6 +24,37 @@ from tarjomeh.core.config import TarjomehConfig
 logger = logging.getLogger(__name__)
 
 
+_SCHEMA_REPAIR_OPERATIONS = {
+    "critique_json_repair",
+    "refinement_json_repair",
+}
+_QUALITY_RECOVERY_OPERATIONS = {
+    "critique",
+    "critique_json_repair",
+    "refinement",
+    "refinement_json_repair",
+}
+
+
+def _use_no_reasoning_recovery(
+    *,
+    operation: str,
+    attempt: int,
+    max_attempts: int,
+    has_fallback: bool,
+    final_expanded: bool,
+) -> bool:
+    """Select no-reasoning recovery only after a normal request fails."""
+    if final_expanded or operation == "glossary_auto_correction":
+        return True
+    if operation not in _QUALITY_RECOVERY_OPERATIONS:
+        return False
+    if attempt == max_attempts - 1:
+        return True
+    # Avoid repeating the same low-reasoning model when no fallback exists.
+    return attempt >= 2 and not has_fallback
+
+
 class EmptyCompletionError(Exception):
     """Raised when the LLM returns an empty completion."""
     pass
@@ -382,6 +413,7 @@ class LLMClient:
         attempt: int,
         max_attempts: int,
         failure_reason: str,
+        operation: str = "completion",
     ) -> dict[str, Any]:
         """Build recovery without mutating the unchanged first-attempt payload."""
         payload = dict(original)
@@ -396,11 +428,20 @@ class LLMClient:
                 and max_attempts >= 4
                 and attempt == max_attempts - 1
             )
+            no_reasoning_recovery = _use_no_reasoning_recovery(
+                operation=operation,
+                attempt=attempt,
+                max_attempts=max_attempts,
+                has_fallback=bool(recovery.model.strip()),
+                final_expanded=final_expanded,
+            )
+            reasoning_effort = (
+                recovery.final_reasoning_effort
+                if final_expanded or no_reasoning_recovery
+                else recovery.reasoning_effort
+            )
             payload["reasoning"] = {
-                "effort": (
-                    recovery.final_reasoning_effort
-                    if final_expanded else recovery.reasoning_effort
-                ),
+                "effort": reasoning_effort,
                 "exclude": True,
             }
             prompt_chars = sum(
@@ -415,9 +456,31 @@ class LLMClient:
             recovery_ceiling = max(original_max, int(recovery.max_tokens))
             payload["max_tokens"] = (
                 recovery_ceiling
-                if final_expanded
+                if final_expanded or no_reasoning_recovery
                 else max(original_max, min(estimated_visible, recovery_ceiling))
             )
+        return payload
+
+    def _initial_payload_for_operation(
+        self,
+        original: dict[str, Any],
+        operation: str,
+    ) -> dict[str, Any]:
+        """Constrain schema-repair calls without changing normal operations."""
+        if (
+            self.config.llm.provider.lower() != "openrouter"
+            or operation not in _SCHEMA_REPAIR_OPERATIONS
+        ):
+            return original
+        payload = dict(original)
+        payload["reasoning"] = {
+            "effort": self.config.llm.recovery.final_reasoning_effort,
+            "exclude": True,
+        }
+        payload["max_tokens"] = max(
+            int(original.get("max_tokens", self.config.llm.max_tokens)),
+            int(self.config.llm.recovery.max_tokens),
+        )
         return payload
 
     @staticmethod
@@ -500,6 +563,9 @@ class LLMClient:
         url, headers, original_payload = self._prepare_request(
             messages, system_prompt, **kwargs
         )
+        original_payload = self._initial_payload_for_operation(
+            original_payload, operation
+        )
         max_attempts = self._max_call_attempts()
         failure_reason = ""
 
@@ -509,7 +575,11 @@ class LLMClient:
                 original_payload
                 if attempt == 0
                 else self._recovery_payload(
-                    original_payload, attempt, max_attempts, failure_reason
+                    original_payload,
+                    attempt,
+                    max_attempts,
+                    failure_reason,
+                    operation,
                 )
             )
             started = time.monotonic()
@@ -640,6 +710,9 @@ class LLMClient:
         url, headers, original_payload = self._prepare_request(
             messages, system_prompt, **kwargs
         )
+        original_payload = self._initial_payload_for_operation(
+            original_payload, operation
+        )
         max_attempts = self._max_call_attempts()
         failure_reason = ""
 
@@ -649,7 +722,11 @@ class LLMClient:
                 original_payload
                 if attempt == 0
                 else self._recovery_payload(
-                    original_payload, attempt, max_attempts, failure_reason
+                    original_payload,
+                    attempt,
+                    max_attempts,
+                    failure_reason,
+                    operation,
                 )
             )
             started = time.monotonic()

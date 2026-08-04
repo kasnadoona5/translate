@@ -171,19 +171,12 @@ class TranslationRefiner:
         result = self._parse_response(raw, expected_issue_ids)
         result.attempts = 1
         all_errors = list(result.validation_errors)
-        remaining_budget = (
-            self._llm.remaining_attempt_budget(3)
-            if hasattr(self._llm, "remaining_attempt_budget")
-            else self.max_parse_retries
-        )
         for retry in range(self.max_parse_retries):
             if result.valid:
                 break
             logger.warning("Invalid refiner response; requesting JSON repair.")
-            if remaining_budget <= 0:
-                break
             if hasattr(self._llm, "limit_next_call_attempts"):
-                self._llm.limit_next_call_attempts(remaining_budget)
+                self._llm.limit_next_call_attempts(1)
             if hasattr(self._llm, "set_operation"):
                 self._llm.set_operation("refinement_json_repair")
             raw = await self._llm.chat(
@@ -193,8 +186,6 @@ class TranslationRefiner:
             )
             result = self._parse_response(raw, expected_issue_ids)
             result.attempts = retry + 2
-            if hasattr(self._llm, "last_call_attempt_count"):
-                remaining_budget -= self._llm.last_call_attempt_count()
             all_errors.extend(result.validation_errors)
 
         if not result.valid:
