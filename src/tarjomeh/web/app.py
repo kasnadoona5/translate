@@ -644,6 +644,14 @@ def _register_api(app: Flask) -> None:
         events_by_chunk: dict[int, list[dict[str, Any]]] = {}
         for event in events:
             events_by_chunk.setdefault(int(event["chunk_index"]), []).append(event)
+        issues_by_chunk: dict[int, list[dict[str, Any]]] = {}
+        for issue in db.get_qa_issues(job_id):
+            issues_by_chunk.setdefault(int(issue["chunk_index"]), []).append(issue)
+        decisions_by_chunk: dict[int, list[dict[str, Any]]] = {}
+        for decision in db.get_issue_decisions(job_id):
+            decisions_by_chunk.setdefault(
+                int(decision["chunk_index"]), []
+            ).append(decision)
 
         critique_threshold = _job_critique_threshold(job)
         review_chunks = []
@@ -733,6 +741,8 @@ def _register_api(app: Flask) -> None:
                 "glossary_violations": glossary_violations,
                 "back_translation_flagged": bt_flagged,
                 "flagged": flagged,
+                "qa_issues": issues_by_chunk.get(idx, []),
+                "issue_decisions": decisions_by_chunk.get(idx, []),
                 "events": chunk_events,
             })
 
@@ -867,6 +877,27 @@ def _register_api(app: Flask) -> None:
                             blocking=payload.get("blocking_issue_count", 0),
                         )
                     )
+                    for issue in payload.get("issue_details", []):
+                        lines.append(
+                            "    MQM {issue_id}: {severity}/{category} "
+                            "confidence={confidence}".format(
+                                issue_id=issue.get("issue_id"),
+                                severity=issue.get("severity"),
+                                category=issue.get("category"),
+                                confidence=issue.get("confidence"),
+                            )
+                        )
+                        lines.append(
+                            f"      Source: {issue.get('source_quote', '')}"
+                        )
+                        lines.append(
+                            "      Current: "
+                            f"{issue.get('current_persian_quote', '')}"
+                        )
+                        lines.append(
+                            "      Suggested: "
+                            f"{issue.get('suggested_correction', '')}"
+                        )
                 elif event["event_type"] == "refinement_completed":
                     lines.append(
                         f"  Refinement: iteration={payload.get('iteration')} "
@@ -875,6 +906,16 @@ def _register_api(app: Flask) -> None:
                     )
                     if payload.get("rationale"):
                         lines.append(f"    Rationale: {payload.get('rationale')}")
+                    for decision in payload.get("issue_decisions", []):
+                        lines.append(
+                            f"    Decision {decision.get('issue_id')}: "
+                            f"{decision.get('decision')} -> "
+                            f"{decision.get('resulting_span')}"
+                        )
+                        if decision.get("rationale"):
+                            lines.append(
+                                f"      {decision.get('rationale')}"
+                            )
                 elif event["event_type"] == "critique_needs_review":
                     lines.append(
                         f"  NEEDS REVIEW: reason={payload.get('review_reason', 'legacy_unresolved')} "

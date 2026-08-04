@@ -18,6 +18,19 @@ from tarjomeh.chunking.chunker import Chunk
 logger = logging.getLogger(__name__)
 
 
+def _decode_payload_row(row: sqlite3.Row) -> dict[str, Any]:
+    item = dict(row)
+    try:
+        item["payload"] = json.loads(item.get("payload") or "{}")
+    except json.JSONDecodeError:
+        item["payload"] = {}
+    item["candidate_accepted"] = (
+        bool(item["candidate_accepted"])
+        if "candidate_accepted" in item else None
+    )
+    return item
+
+
 class JobStatus:
     PENDING = "pending"
     RUNNING = "running"
@@ -160,8 +173,54 @@ class JobDatabase:
                 )
             """)
             conn.execute("""
+                CREATE TABLE IF NOT EXISTS qa_issues (
+                    job_id TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    critique_iteration INTEGER NOT NULL,
+                    issue_id TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    source_quote TEXT NOT NULL,
+                    current_persian_quote TEXT NOT NULL,
+                    suggested_correction TEXT NOT NULL,
+                    rationale TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (
+                        job_id, chunk_index, critique_iteration, issue_id
+                    )
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS issue_decisions (
+                    job_id TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    refinement_iteration INTEGER NOT NULL,
+                    issue_id TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    resulting_span TEXT NOT NULL,
+                    rationale TEXT NOT NULL,
+                    candidate_accepted INTEGER NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (
+                        job_id, chunk_index, refinement_iteration, issue_id
+                    )
+                )
+            """)
+            conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_chunk_events_job_chunk
                 ON chunk_events (job_id, chunk_index, timestamp)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_qa_issues_job_chunk
+                ON qa_issues (job_id, chunk_index, critique_iteration)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_issue_decisions_job_chunk
+                ON issue_decisions (job_id, chunk_index, refinement_iteration)
             """)
             conn.commit()
 
@@ -496,6 +555,148 @@ class JobDatabase:
                 event["payload"] = {}
             events.append(event)
         return events
+
+    def save_qa_issues(
+        self,
+        job_id: str,
+        chunk_index: int,
+        critique_iteration: int,
+        issues: list[dict[str, Any]],
+    ) -> None:
+        """Persist one validated MQM issue set without changing existing events."""
+        timestamp = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                "DELETE FROM qa_issues WHERE job_id=? AND chunk_index=? "
+                "AND critique_iteration=?",
+                (job_id, chunk_index, critique_iteration),
+            )
+            for issue in issues:
+                issue_id = str(issue.get("issue_id", "")).strip()
+                if not issue_id:
+                    continue
+                payload = dict(issue)
+                conn.execute(
+                    """
+                    INSERT INTO qa_issues (
+                        job_id, chunk_index, critique_iteration, issue_id,
+                        category, severity, confidence, source_quote,
+                        current_persian_quote, suggested_correction, rationale,
+                        status, payload, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        job_id, chunk_index, critique_iteration, issue_id,
+                        str(issue.get("category", "")),
+                        str(issue.get("severity", "")),
+                        float(issue.get("confidence", 0.0) or 0.0),
+                        str(issue.get("source_quote", "")),
+                        str(issue.get("current_persian_quote", "")),
+                        str(issue.get("suggested_correction", "")),
+                        str(issue.get("rationale", "")),
+                        "open",
+                        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                        timestamp,
+                    ),
+                )
+            conn.commit()
+
+    def clear_chunk_qa_records(self, job_id: str, chunk_index: int) -> None:
+        """Discard superseded structured QA rows before a chunk is rerun."""
+        with self._get_connection() as conn:
+            conn.execute(
+                "DELETE FROM qa_issues WHERE job_id=? AND chunk_index=?",
+                (job_id, chunk_index),
+            )
+            conn.execute(
+                "DELETE FROM issue_decisions WHERE job_id=? AND chunk_index=?",
+                (job_id, chunk_index),
+            )
+            conn.commit()
+
+    def save_issue_decisions(
+        self,
+        job_id: str,
+        chunk_index: int,
+        refinement_iteration: int,
+        critique_iteration: int,
+        decisions: list[dict[str, Any]],
+        *,
+        candidate_accepted: bool,
+    ) -> None:
+        """Persist the translator's decision for each validated MQM issue."""
+        timestamp = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                "DELETE FROM issue_decisions WHERE job_id=? AND chunk_index=? "
+                "AND refinement_iteration=?",
+                (job_id, chunk_index, refinement_iteration),
+            )
+            for decision in decisions:
+                issue_id = str(decision.get("issue_id", "")).strip()
+                if not issue_id:
+                    continue
+                payload = dict(decision)
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO issue_decisions (
+                        job_id, chunk_index, refinement_iteration, issue_id,
+                        decision, resulting_span, rationale,
+                        candidate_accepted, payload, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        job_id, chunk_index, refinement_iteration, issue_id,
+                        str(decision.get("decision", "")),
+                        str(decision.get("resulting_span", "")),
+                        str(decision.get("rationale", "")),
+                        int(candidate_accepted),
+                        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                        timestamp,
+                    ),
+                )
+                conn.execute(
+                    """
+                    UPDATE qa_issues SET status=?
+                    WHERE job_id=? AND chunk_index=?
+                      AND critique_iteration=? AND issue_id=?
+                    """,
+                    (
+                        (
+                            str(decision.get("decision", ""))
+                            if candidate_accepted else "candidate_rejected"
+                        ),
+                        job_id,
+                        chunk_index, critique_iteration, issue_id,
+                    ),
+                )
+            conn.commit()
+
+    def get_qa_issues(
+        self, job_id: str, chunk_index: int | None = None,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM qa_issues WHERE job_id=?"
+        params: tuple[Any, ...] = (job_id,)
+        if chunk_index is not None:
+            query += " AND chunk_index=?"
+            params += (chunk_index,)
+        query += " ORDER BY chunk_index, critique_iteration, issue_id"
+        with self._get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [_decode_payload_row(row) for row in rows]
+
+    def get_issue_decisions(
+        self, job_id: str, chunk_index: int | None = None,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM issue_decisions WHERE job_id=?"
+        params: tuple[Any, ...] = (job_id,)
+        if chunk_index is not None:
+            query += " AND chunk_index=?"
+            params += (chunk_index,)
+        query += " ORDER BY chunk_index, refinement_iteration, issue_id"
+        with self._get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [_decode_payload_row(row) for row in rows]
 
     def save_chunks(self, job_id: str, chunks: list[Chunk]) -> None:
         """Insert or ignore initial list of chunks for a job."""

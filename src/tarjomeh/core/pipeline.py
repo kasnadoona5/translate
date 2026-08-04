@@ -354,6 +354,26 @@ _BLOCKING_CRITIQUE_RE = re.compile(
 
 def _blocking_critique_issues(critique: Any) -> list[str]:
     """Return critique issues that must force refinement, regardless of average."""
+    details = list(getattr(critique, "issue_details", []) or [])
+    if details:
+        blocking: list[str] = []
+        for detail in details:
+            severity = str(detail.get("severity", "")).strip().lower()
+            category = str(detail.get("category", "")).strip().lower()
+            required = (
+                severity == "critical"
+                and category in {
+                    "accuracy", "omission", "number", "citation", "name",
+                }
+            ) or (
+                severity == "major"
+                and category in {"accuracy", "terminology"}
+            )
+            if required:
+                blocking.append(
+                    str(detail.get("formatted") or detail.get("issue_id") or detail)
+                )
+        return blocking
     return [
         str(issue)
         for issue in getattr(critique, "issues", []) or []
@@ -454,12 +474,29 @@ def _critique_candidate_rank(critique: Any) -> tuple[float, float, float, float]
 
 
 def _critique_passes_quality_gate(critique: Any, threshold: float) -> bool:
-    """Average score must pass and no major conceptual/terminology issue may remain."""
+    """Pass when no validated issue justifies another bounded refinement."""
     return bool(
         getattr(critique, "valid", True)
-        and critique.passes_threshold(threshold)
-        and not _blocking_critique_issues(critique)
+        and not _critique_requires_refinement(critique, threshold)
     )
+
+
+def _critique_requires_refinement(critique: Any, threshold: float) -> bool:
+    """Apply Q3 severity routing while preserving legacy score-only critiques."""
+    if not getattr(critique, "valid", True):
+        return False
+    if _blocking_critique_issues(critique):
+        return True
+    details = list(getattr(critique, "issue_details", []) or [])
+    if not details:
+        return bool(getattr(critique, "issues", []) or []) and not critique.passes_threshold(
+            threshold
+        )
+    has_substantive_nonblocking = any(
+        str(detail.get("severity", "")).strip().lower() in {"critical", "major"}
+        for detail in details
+    )
+    return bool(has_substantive_nonblocking and not critique.passes_threshold(threshold))
 
 
 def _critique_for_event(critique: Any, threshold: float, iteration: int) -> dict[str, Any]:
@@ -471,8 +508,8 @@ def _critique_for_event(critique: Any, threshold: float, iteration: int) -> dict
         "validation_errors": list(getattr(critique, "validation_errors", []) or []),
         "threshold": threshold,
         "passes_average_threshold": bool(critique.passes_threshold(threshold)),
-        "passes_threshold": bool(critique.passes_threshold(threshold) and not blocking_issues),
-        "force_refinement": bool(blocking_issues),
+        "passes_threshold": not _critique_requires_refinement(critique, threshold),
+        "force_refinement": _critique_requires_refinement(critique, threshold),
         "scores": {
             "accuracy": critique.accuracy,
             "fluency": critique.fluency,
@@ -484,8 +521,50 @@ def _critique_for_event(critique: Any, threshold: float, iteration: int) -> dict
         "blocking_issue_count": len(blocking_issues),
         "blocking_issues": [_truncate_for_event(str(issue), 1000) for issue in blocking_issues],
         "issues": [_truncate_for_event(str(issue), 1000) for issue in critique.issues],
+        "issue_details": [
+            {
+                key: detail.get(key)
+                for key in (
+                    "issue_id", "category", "severity", "confidence",
+                    "source_quote", "current_persian_quote",
+                    "suggested_correction", "rationale",
+                )
+            }
+            for detail in list(getattr(critique, "issue_details", []) or [])
+        ],
         "raw_response_preview": _truncate_for_event(critique.raw_response, 3000),
     }
+
+
+def _adjacent_source_context(chunks: list[Chunk], index: int) -> str:
+    """Return one bounded source neighbour on either side for Q3 review only."""
+    parts: list[str] = []
+    if index > 0:
+        parts.append("Previous source:\n" + chunks[index - 1].text[-1800:])
+    if index + 1 < len(chunks):
+        parts.append("Next source:\n" + chunks[index + 1].text[:1800])
+    return "\n\n".join(parts)
+
+
+def _bounded_qa_context(chunk: Chunk, adjacent: str, memory: Any) -> str:
+    """Build compact critic/refiner context without changing translation input."""
+    parts = [
+        f"Chapter: {chunk.chapter_title or '(untitled)'}",
+        f"Section: {chunk.section_title or '(none)'}",
+    ]
+    if adjacent:
+        parts.append(adjacent[:3600])
+    for label, value, limit in (
+        ("Style rules", getattr(memory, "style_profile", ""), 1200),
+        ("Summary", getattr(memory, "bilingual_summary", ""), 1200),
+        ("Relevant proper nouns", getattr(memory, "proper_nouns", ""), 1200),
+        ("Relevant long-term memory", getattr(memory, "long_term", ""), 1200),
+        ("Recent Persian context", getattr(memory, "short_term", ""), 900),
+    ):
+        text = str(value or "").strip()
+        if text:
+            parts.append(f"{label}:\n{text[:limit]}")
+    return "\n\n".join(parts)
 
 
 def _chunk_needs_review(db: Any, job_id: str, chunk_index: int) -> bool:
@@ -1105,6 +1184,7 @@ class TranslationPipeline:
                         translations=translations,
                         job_id=job_id,
                         lock=lock,
+                        adjacent_source_context=_adjacent_source_context(chunks, idx),
                     )
 
                     # Update shared memory and database safely under lock
@@ -1240,6 +1320,7 @@ class TranslationPipeline:
                             back_translator=back_translator,
                             translations=translations,
                             job_id=job_id,
+                            adjacent_source_context=_adjacent_source_context(chunks, idx),
                         )
 
                         # Successful translation updates
@@ -1782,6 +1863,7 @@ class TranslationPipeline:
             back_translator=back_translator,
             translations=translations,
             job_id=job_id,
+            adjacent_source_context=_adjacent_source_context(chunks, chunk_index),
         )
         if (
             getattr(self.config.translation, "enable_integrity_gate", True)
@@ -2006,6 +2088,7 @@ class TranslationPipeline:
         translations: dict[int, str],
         job_id: str,
         lock: threading.Lock | None = None,
+        adjacent_source_context: str = "",
     ) -> str:
         # Cooperative pause check
         job_record = self.db.get_job(job_id)
@@ -2018,6 +2101,7 @@ class TranslationPipeline:
         critic_client = getattr(self, "critic_client", self.llm_client)
         if hasattr(critic_client, "set_trace_context"):
             critic_client.set_trace_context(job_id, idx)
+        self.db.clear_chunk_qa_records(job_id, idx)
         self.db.log_chunk_event(job_id, idx, "chunk_started", {
             "source_chars": len(chunk.text),
             "source_paragraphs": _paragraph_count(chunk.text),
@@ -2033,6 +2117,21 @@ class TranslationPipeline:
                 mem_context = memory_manager.get_context_for_chunk(chunk)
         else:
             mem_context = memory_manager.get_context_for_chunk(chunk)
+        qa_context = _bounded_qa_context(
+            chunk, adjacent_source_context, mem_context
+        )
+        self.db.log_chunk_event(job_id, idx, "mqm_review_context", {
+            "chars": len(qa_context),
+            "has_adjacent_source": bool(adjacent_source_context),
+            "has_style_rules": bool(mem_context.style_profile),
+            "has_summary": bool(mem_context.bilingual_summary),
+            "has_relevant_memory": bool(
+                mem_context.proper_nouns
+                or mem_context.long_term
+                or mem_context.short_term
+            ),
+            "preview": _truncate_for_event(qa_context, 2400),
+        })
         self.db.log_chunk_event(job_id, idx, "memory_context", {
             "has_style_profile": bool(mem_context.style_profile),
             "has_proper_nouns": bool(mem_context.proper_nouns),
@@ -2283,6 +2382,7 @@ class TranslationPipeline:
                             chunk.text,
                             translation,
                             terminology=terminology_ctx,
+                            review_context=qa_context,
                         )
                     )
                 except _QUALITY_STAGE_ERRORS as exc:
@@ -2350,12 +2450,41 @@ class TranslationPipeline:
                             ),
                         }
                     )
+                if getattr(critique_rep, "valid", True):
+                    self.db.save_qa_issues(
+                        job_id,
+                        idx,
+                        ref_iter,
+                        list(getattr(critique_rep, "issue_details", []) or []),
+                    )
                 self.db.log_chunk_event(
                     job_id,
                     idx,
                     "critique_completed",
                     _critique_for_event(critique_rep, threshold, ref_iter),
                 )
+                if (
+                    getattr(critique_rep, "issue_details", None)
+                    and not critique_rep.passes_threshold(threshold)
+                    and not _critique_requires_refinement(critique_rep, threshold)
+                ):
+                    self.db.log_chunk_event(
+                        job_id,
+                        idx,
+                        "mqm_minor_only_deferred",
+                        {
+                            "iteration": ref_iter,
+                            "critique_average": critique_rep.average,
+                            "issue_ids": [
+                                detail.get("issue_id")
+                                for detail in critique_rep.issue_details
+                            ],
+                            "message": (
+                                "Minor-only MQM advice was recorded without "
+                                "starting another refinement loop."
+                            ),
+                        },
+                    )
                 if not getattr(critique_rep, "valid", True):
                     if getattr(critique_rep, "attempts", 1) <= 1:
                         self.db.log_chunk_event(
@@ -2417,6 +2546,7 @@ class TranslationPipeline:
                             translation,
                             critique_rep,
                             terminology=terminology_ctx,
+                            review_context=qa_context,
                         )
                     )
                 except _QUALITY_STAGE_ERRORS as exc:
@@ -2508,6 +2638,14 @@ class TranslationPipeline:
                         convergence_reason = "refinement_oscillation"
 
                 translation = proposed_translation if edit_accepted else before_translation
+                self.db.save_issue_decisions(
+                    job_id,
+                    idx,
+                    ref_iter + 1,
+                    ref_iter,
+                    list(getattr(refinement, "issue_decisions", []) or []),
+                    candidate_accepted=edit_accepted,
+                )
                 if convergence_reason == "refinement_oscillation":
                     best_index, (translation, _) = max(
                         enumerate(evaluated_versions),
@@ -2542,6 +2680,9 @@ class TranslationPipeline:
                     "blocking_issue_count": len(_blocking_critique_issues(critique_rep)),
                     "decision": refinement.decision,
                     "rationale": _truncate_for_event(refinement.rationale, 1000),
+                    "issue_decisions": list(
+                        getattr(refinement, "issue_decisions", []) or []
+                    ),
                     "before_chars": before_chars,
                     "after_chars": len(translation),
                     "proposed_chars": len(proposed_translation),

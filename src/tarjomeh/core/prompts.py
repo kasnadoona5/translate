@@ -128,6 +128,11 @@ Judge the "terminology" dimension against THIS list — a rendering that deviate
 from it is a terminology violation even if otherwise acceptable Persian:
 {terminology}
 
+### Bounded review context
+Use this only to resolve discourse, style, and reference ambiguity. Do not
+criticize text outside the current source/translation pair:
+{review_context}
+
 Return a JSON object with exactly this schema:
 {{
   "scores": {{
@@ -139,15 +144,16 @@ Return a JSON object with exactly this schema:
   "overall": <1-10>,
   "issues": [
     {{
-      "category": "accuracy" | "fluency" | "terminology" | "register" | "typography",
+      "category": "accuracy" | "omission" | "addition" | "terminology" |
+        "name" | "number" | "citation" | "fluency" | "register" | "typography",
       "severity": "critical" | "major" | "minor",
-      "source_segment": "<relevant English segment>",
-      "current_translation": "<current Persian rendering>",
-      "suggested_fix": "<improved Persian rendering>",
-      "explanation": "<brief explanation in English>"
+      "confidence": <0-1>,
+      "source_quote": "<exact short quote copied from the current English source>",
+      "current_persian_quote": "<exact short quote copied from the current Persian translation>",
+      "suggested_correction": "<compact improved Persian span>",
+      "rationale": "<brief explanation in English>"
     }}
-  ],
-  "praise": "<brief note on what the translation does well>"
+  ]
 }}
 
 Scoring guide:
@@ -155,7 +161,17 @@ Scoring guide:
 - fluency   : natural Persian prose flow, correct grammar, proper ZWNJ usage
 - terminology: adherence to glossary, consistency of technical terms
 - register  : appropriateness of academic tone, avoidance of colloquialisms
-- overall   : holistic quality; a score below 7 means the chunk should be revised
+- overall   : holistic quality
+
+MQM rules:
+- Report at most 8 actionable issues, prioritizing critical and major issues.
+- Categories may also be omission, addition, name, number, or citation.
+- Critical accuracy/omission/number/citation/name issues and major
+  accuracy/terminology issues are blocking.
+- Minor style preferences must stay minor and must not be inflated to force edits.
+- Every quote must occur verbatim in the current source or translation.
+- Do not praise, repeat the full source, repeat the full translation, or provide
+  commentary outside the JSON. Keep each rationale under 60 words.
 
 Return ONLY valid JSON — no markdown fences, no commentary outside the JSON.
 """
@@ -179,21 +195,36 @@ The critique identifies high-risk passages; it is not automatically authoritativ
 ### Mandatory terminology (glossary + established proper-noun renderings)
 {terminology}
 
+### Bounded review context
+{review_context}
+
 Instructions:
 1. Evaluate each critique issue in severity order: "critical", then "major", then "minor".
 2. If the critique is correct, revise the translation to fix the issue.
 3. If the current translation is more accurate in context, preserve it; do not change a
    correct rendering merely because the critic suggested an alternative.
-4. Preserve parts of the translation that were praised or have no issues.
+4. Preserve every part of the translation that has no validated issue.
 5. Apply the mandatory terminology above exactly; do not introduce new renderings for
    listed terms while fixing other issues.
 6. Ensure correct ZWNJ placement, Persian numerals in prose, and RTL punctuation — but keep
    citations, years, and page numbers in Latin script and Western digits.
-7. Return ONLY valid JSON with this schema:
+7. Return exactly one compact decision for every issue ID. A serious issue must
+   be evaluated, but the critic's suggested wording is never mandatory.
+8. Include the complete Persian translation exactly once. Do not repeat it in
+   issue decisions or rationales.
+9. Return ONLY valid JSON with this schema:
 {{
   "translation": "<the final Persian translation only>",
   "decision": "revised" | "preserved" | "mixed",
-  "rationale": "<brief English note explaining whether critique was applied or rejected>"
+  "rationale": "<brief holistic English note, under 80 words>",
+  "issue_decisions": [
+    {{
+      "issue_id": "<exact issue ID>",
+      "decision": "accepted" | "rejected" | "partially_applied",
+      "resulting_span": "<short final Persian span, not the full translation>",
+      "rationale": "<brief English reason, under 50 words>"
+    }}
+  ]
 }}
 """
 

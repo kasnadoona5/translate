@@ -25,7 +25,7 @@ Current capabilities include:
 - Glossary compliance checking and guarded auto-correction
 - Optional pre-translation book research with source tracking
 - Optional per-chunk web context for ambiguous terminology
-- Independent critic model and bounded refinement loop
+- Independent structured-MQM critic and bounded balanced refinement loop
 - Back-translation sampling for semantic-risk detection
 - Post-edit integrity checks that reject lossy model edits
 - First-occurrence English originals inline or as document notes
@@ -50,8 +50,8 @@ Document
        glossary and first-occurrence policy
        initial translation
        integrity check
-       critic
-       bounded refinement
+       grounded structured-MQM critic
+       per-issue balanced refinement decisions
        glossary compliance and guarded correction
        optional back-translation
        memory update and SQLite checkpoint
@@ -62,8 +62,9 @@ Document
   -> review and QA report
 ```
 
-The translator does not blindly obey the critic. Critic findings are advice.
-The refiner may apply, reject, or partially apply them. Integrity failures retain
+The translator does not blindly obey the critic. Grounded critic findings are
+advice, and each receives a persisted accepted, rejected, or partially-applied
+decision. Integrity failures retain
 the previous valid translation. Persistent QA-provider failures retain valid
 translation content, mark the chunk `needs_review`, and remain visible in the
 QA report.
@@ -690,7 +691,7 @@ not overwrite curated entries.
 The Web UI provides:
 
 - per-chunk source and translation review
-- persisted critique/refinement/integrity evidence
+- persisted MQM issues, per-issue decisions, and integrity evidence
 - manual edits and chunk retranslation
 - `needs_review` filtering
 - glossary approval/edit/download

@@ -7,14 +7,28 @@ a :class:`CritiqueResult` with numeric scores and issue annotations.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 from tarjomeh.core.prompts import CRITIQUE_PROMPT
+
+
+_MQM_CATEGORIES = {
+    "accuracy", "omission", "addition", "terminology", "name", "number",
+    "citation", "fluency", "register", "typography",
+}
+_MQM_SEVERITIES = {"critical", "major", "minor"}
+_MAX_MQM_ISSUES = 8
+_MAX_QUOTE_CHARS = 240
+_MAX_FIX_CHARS = 320
+_MAX_RATIONALE_CHARS = 500
 
 
 @dataclass
@@ -121,6 +135,7 @@ class TranslationCritique:
         source_text: str,
         translation: str,
         terminology: str = "",
+        review_context: str = "",
     ) -> CritiqueResult:
         """Run a critique of *translation* against *source_text*.
 
@@ -144,12 +159,13 @@ class TranslationCritique:
             source_text=source_text,
             translation=translation,
             terminology=terminology or "(no glossary terms apply to this chunk)",
+            review_context=review_context or "(no additional review context)",
         )
 
         if hasattr(self._llm, "set_operation"):
             self._llm.set_operation("critique")
         raw = await self._llm.chat(prompt)
-        result = self._parse_response(raw)
+        result = self._parse_response(raw, source_text, translation)
         result.attempts = 1
         all_errors = list(result.validation_errors)
         remaining_budget = (
@@ -165,11 +181,13 @@ class TranslationCritique:
                 break
             if hasattr(self._llm, "limit_next_call_attempts"):
                 self._llm.limit_next_call_attempts(remaining_budget)
-            repair_prompt = self._repair_prompt(raw, result.validation_errors)
+            repair_prompt = self._repair_prompt(
+                raw, result.validation_errors, source_text, translation
+            )
             if hasattr(self._llm, "set_operation"):
                 self._llm.set_operation("critique_json_repair")
             raw = await self._llm.chat(repair_prompt)
-            result = self._parse_response(raw)
+            result = self._parse_response(raw, source_text, translation)
             result.attempts = retry + 2
             if hasattr(self._llm, "last_call_attempt_count"):
                 remaining_budget -= self._llm.last_call_attempt_count()
@@ -179,21 +197,40 @@ class TranslationCritique:
         return result
 
     @staticmethod
-    def _repair_prompt(raw: str, errors: list[str]) -> str:
+    def _repair_prompt(
+        raw: str,
+        errors: list[str],
+        source_text: str = "",
+        translation: str = "",
+    ) -> str:
+        raw_preview = (raw or "")[-12000:]
         return f"""The previous translation critique was not valid JSON for the required schema.
 Validation errors: {json.dumps(errors, ensure_ascii=False)}
 
 Previous response:
-{raw}
+{raw_preview}
+
+Current source for exact quote repair:
+{source_text[:6000]}
+
+Current Persian translation for exact quote repair:
+{translation[:6000]}
 
 Return ONLY a corrected JSON object with numeric 1-10 scores for accuracy,
-fluency, terminology, and register; an optional numeric overall score; and an
-issues array. Do not add markdown fences or commentary."""
+fluency, terminology, and register; an optional numeric overall score; and at
+most {_MAX_MQM_ISSUES} compact MQM issues. Every issue must contain category,
+severity, confidence (0-1), an exact source_quote, an exact
+current_persian_quote, suggested_correction, and rationale. Do not add praise,
+markdown fences, or commentary."""
 
     # ── response parsing ─────────────────────────────────────────────
 
     @staticmethod
-    def _parse_response(raw: str) -> CritiqueResult:
+    def _parse_response(
+        raw: str,
+        source_text: str = "",
+        translation: str = "",
+    ) -> CritiqueResult:
         """Parse a JSON response from the LLM into a CritiqueResult.
 
         Handles minor formatting issues (markdown fences, trailing
@@ -246,41 +283,107 @@ issues array. Do not add markdown fences or commentary."""
             average = (accuracy + fluency + terminology + register) / 4.0
 
         raw_issues = data.get("issues", [])
-        issues = []
+        issues: list[str] = []
         if isinstance(raw_issues, list):
-            # Preserve severity + source segment (the refiner is instructed to
-            # fix critical issues first) and sort critical → major → minor.
             severity_rank = {"critical": 0, "major": 1, "minor": 2}
             parsed: list[tuple[int, str, dict[str, Any]]] = []
             ignored_issue_details: list[dict[str, Any]] = []
+            seen_issue_keys: set[tuple[str, str]] = set()
             for issue in raw_issues:
-                if isinstance(issue, dict):
-                    detail = dict(issue)
-                    severity = str(detail.get("severity", "minor")).lower()
-                    category = detail.get("category", "")
-                    segment = detail.get("source_segment", "")
-                    current = detail.get("current_translation", "")
-                    fix = detail.get("suggested_fix", "")
-                    explanation = detail.get("explanation", "")
-                    if _is_noop_issue(detail):
-                        ignored_issue_details.append(detail)
-                        continue
-                    text = f"[{severity.upper()}/{category}]"
-                    if segment:
-                        text += f' source: "{segment}"'
-                    if current:
-                        text += f' | current: "{current}"'
-                    text += f" | fix: {fix} (Reason: {explanation})"
-                    detail["formatted"] = text
-                    parsed.append((severity_rank.get(severity, 2), text, detail))
-                else:
-                    text = str(issue)
-                    parsed.append((2, text, {"formatted": text}))
+                if not isinstance(issue, dict):
+                    if not source_text and not translation:
+                        text = str(issue)
+                        parsed.append((2, text, {"formatted": text}))
+                    else:
+                        errors.append("issue_must_be_object")
+                    continue
+                category = str(issue.get("category", "")).strip().lower()
+                severity = str(issue.get("severity", "")).strip().lower()
+                segment = str(
+                    issue.get("source_quote", issue.get("source_segment", ""))
+                ).strip()
+                current = str(
+                    issue.get(
+                        "current_persian_quote",
+                        issue.get("current_translation", ""),
+                    )
+                ).strip()
+                fix = str(
+                    issue.get(
+                        "suggested_correction", issue.get("suggested_fix", "")
+                    )
+                ).strip()
+                explanation = str(
+                    issue.get("rationale", issue.get("explanation", ""))
+                ).strip()
+                confidence = _confidence_value(issue.get("confidence"), errors)
+                if category not in _MQM_CATEGORIES:
+                    errors.append(f"issue_category_invalid:{category or 'missing'}")
+                if severity not in _MQM_SEVERITIES:
+                    errors.append(f"issue_severity_invalid:{severity or 'missing'}")
+                if not segment:
+                    errors.append("issue_source_quote_required")
+                elif len(segment) > _MAX_QUOTE_CHARS:
+                    errors.append("issue_source_quote_too_long")
+                elif source_text and not _span_is_grounded(segment, source_text):
+                    errors.append("issue_source_quote_not_found")
+                if not current:
+                    errors.append("issue_current_persian_quote_required")
+                elif len(current) > _MAX_QUOTE_CHARS:
+                    errors.append("issue_current_persian_quote_too_long")
+                elif translation and not _span_is_grounded(current, translation):
+                    errors.append("issue_current_persian_quote_not_found")
+                if not fix:
+                    errors.append("issue_suggested_correction_required")
+                elif len(fix) > _MAX_FIX_CHARS:
+                    errors.append("issue_suggested_correction_too_long")
+                if not explanation:
+                    errors.append("issue_rationale_required")
+                elif len(explanation) > _MAX_RATIONALE_CHARS:
+                    errors.append("issue_rationale_too_long")
+
+                issue_key = (category, _normalize_span(segment))
+                if issue_key in seen_issue_keys:
+                    ignored_issue_details.append({
+                        **dict(issue), "ignored_reason": "duplicate_issue",
+                    })
+                    continue
+                seen_issue_keys.add(issue_key)
+                detail = {
+                    "issue_id": _stable_issue_id(category, segment),
+                    "category": category,
+                    "severity": severity,
+                    "confidence": confidence,
+                    "source_quote": segment,
+                    "current_persian_quote": current,
+                    "suggested_correction": fix,
+                    "rationale": explanation,
+                    # Legacy aliases retained for policy filters and old clients.
+                    "source_segment": segment,
+                    "current_translation": current,
+                    "suggested_fix": fix,
+                    "explanation": explanation,
+                }
+                if _is_noop_issue(detail):
+                    ignored_issue_details.append({
+                        **detail, "ignored_reason": "no_textual_change",
+                    })
+                    continue
+                text = f"[{severity.upper()}/{category}]"
+                text += f' source: "{segment}" | current: "{current}"'
+                text += f" | fix: {fix} (Reason: {explanation})"
+                detail["formatted"] = text
+                parsed.append((severity_rank.get(severity, 2), text, detail))
             parsed.sort(key=lambda item: item[0])
+            if len(parsed) > _MAX_MQM_ISSUES:
+                for _, _, detail in parsed[_MAX_MQM_ISSUES:]:
+                    ignored_issue_details.append({
+                        **detail, "ignored_reason": "compact_issue_limit",
+                    })
+                parsed = parsed[:_MAX_MQM_ISSUES]
             issues = [text for _, text, _ in parsed]
             issue_details = [detail for _, _, detail in parsed]
         else:
-            issues = []
             issue_details = []
             ignored_issue_details = []
             errors.append("issues_must_be_array")
@@ -334,6 +437,37 @@ def _is_noop_issue(detail: dict[str, Any]) -> bool:
             )
         )
     )
+
+
+def _normalize_span(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value or "")
+    normalized = normalized.replace("\u200c", " ")
+    return re.sub(r"\s+", " ", normalized).strip().casefold()
+
+
+def _span_is_grounded(quote: str, text: str) -> bool:
+    return bool(quote and _normalize_span(quote) in _normalize_span(text))
+
+
+def _stable_issue_id(category: str, source_quote: str) -> str:
+    material = f"{category}\0{_normalize_span(source_quote)}".encode("utf-8")
+    return "mqm-" + hashlib.sha256(material).hexdigest()[:12]
+
+
+def _confidence_value(value: Any, errors: list[str]) -> float:
+    if value is None or str(value).strip() == "":
+        # Confidence is advisory, so an otherwise grounded issue remains usable
+        # when an older model omits it.
+        return 0.5
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        errors.append("issue_confidence_must_be_numeric")
+        return 0.0
+    if not 0.0 <= confidence <= 1.0:
+        errors.append("issue_confidence_must_be_between_0_and_1")
+        return 0.0
+    return confidence
 
 
 def _score(data: dict[str, Any], scores: dict[str, Any], key: str, errors: list[str]) -> float:
