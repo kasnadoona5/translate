@@ -280,13 +280,19 @@ markdown fences, or commentary."""
             parsed: list[tuple[int, str, dict[str, Any]]] = []
             ignored_issue_details: list[dict[str, Any]] = []
             seen_issue_keys: set[tuple[str, str]] = set()
+            invalid_issue_count = 0
             for issue in raw_issues:
                 if not isinstance(issue, dict):
                     if not source_text and not translation:
                         text = str(issue)
                         parsed.append((2, text, {"formatted": text}))
                     else:
-                        errors.append("issue_must_be_object")
+                        invalid_issue_count += 1
+                        ignored_issue_details.append({
+                            "formatted": str(issue),
+                            "ignored_reason": "invalid_issue",
+                            "validation_errors": ["issue_must_be_object"],
+                        })
                     continue
                 category = str(issue.get("category", "")).strip().lower()
                 severity = str(issue.get("severity", "")).strip().lower()
@@ -326,37 +332,54 @@ markdown fences, or commentary."""
                         "ignored_reason": "no_textual_change",
                     })
                     continue
+                issue_errors: list[str] = []
+                confidence = _confidence_value(
+                    issue.get("confidence"), issue_errors
+                )
+                if category not in _MQM_CATEGORIES:
+                    issue_errors.append(
+                        f"issue_category_invalid:{category or 'missing'}"
+                    )
+                if severity not in _MQM_SEVERITIES:
+                    issue_errors.append(
+                        f"issue_severity_invalid:{severity or 'missing'}"
+                    )
+                if not segment and (source_text or translation):
+                    issue_errors.append("issue_source_quote_required")
+                elif len(segment) > _MAX_QUOTE_CHARS:
+                    issue_errors.append("issue_source_quote_too_long")
+                elif source_text and not _span_is_grounded(segment, source_text):
+                    issue_errors.append("issue_source_quote_not_found")
+                if not current and (source_text or translation):
+                    issue_errors.append("issue_current_persian_quote_required")
+                elif len(current) > _MAX_QUOTE_CHARS:
+                    issue_errors.append("issue_current_persian_quote_too_long")
+                elif translation and not _span_is_grounded(current, translation):
+                    issue_errors.append("issue_current_persian_quote_not_found")
+                if not fix:
+                    issue_errors.append("issue_suggested_correction_required")
+                elif len(fix) > _MAX_FIX_CHARS:
+                    issue_errors.append("issue_suggested_correction_too_long")
+                if not explanation:
+                    issue_errors.append("issue_rationale_required")
+                if issue_errors:
+                    invalid_issue_count += 1
+                    ignored_issue_details.append({
+                        **preliminary_detail,
+                        "confidence": confidence,
+                        "ignored_reason": "invalid_issue",
+                        "validation_errors": issue_errors,
+                    })
+                    continue
                 issue_key = (category, _normalize_span(segment))
                 if issue_key in seen_issue_keys:
                     ignored_issue_details.append({
                         **preliminary_detail,
+                        "confidence": confidence,
                         "ignored_reason": "duplicate_issue",
                     })
                     continue
                 seen_issue_keys.add(issue_key)
-                confidence = _confidence_value(issue.get("confidence"), errors)
-                if category not in _MQM_CATEGORIES:
-                    errors.append(f"issue_category_invalid:{category or 'missing'}")
-                if severity not in _MQM_SEVERITIES:
-                    errors.append(f"issue_severity_invalid:{severity or 'missing'}")
-                if not segment:
-                    errors.append("issue_source_quote_required")
-                elif len(segment) > _MAX_QUOTE_CHARS:
-                    errors.append("issue_source_quote_too_long")
-                elif source_text and not _span_is_grounded(segment, source_text):
-                    errors.append("issue_source_quote_not_found")
-                if not current:
-                    errors.append("issue_current_persian_quote_required")
-                elif len(current) > _MAX_QUOTE_CHARS:
-                    errors.append("issue_current_persian_quote_too_long")
-                elif translation and not _span_is_grounded(current, translation):
-                    errors.append("issue_current_persian_quote_not_found")
-                if not fix:
-                    errors.append("issue_suggested_correction_required")
-                elif len(fix) > _MAX_FIX_CHARS:
-                    errors.append("issue_suggested_correction_too_long")
-                if not explanation:
-                    errors.append("issue_rationale_required")
                 rationale_truncated = len(explanation) > _MAX_RATIONALE_CHARS
                 if rationale_truncated:
                     explanation = explanation[:_MAX_RATIONALE_CHARS].rstrip()
@@ -392,6 +415,10 @@ markdown fences, or commentary."""
                 parsed = parsed[:_MAX_MQM_ISSUES]
             issues = [text for _, text, _ in parsed]
             issue_details = [detail for _, _, detail in parsed]
+            if invalid_issue_count and not parsed:
+                for detail in ignored_issue_details:
+                    errors.extend(detail.get("validation_errors", []))
+                errors.append("all_critic_issues_invalid")
         else:
             issue_details = []
             ignored_issue_details = []

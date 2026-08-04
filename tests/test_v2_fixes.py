@@ -146,6 +146,8 @@ class TestSimpleEnvOverrides(unittest.TestCase):
         "TRANSLATOR_API_KEY": "nine-router-key",
         "TRANSLATOR_MODEL": "combo1",
         "TRANSLATOR_MAX_TOKENS": "16000",
+        "TRANSLATOR_RECOVERY_MAX_ATTEMPTS": "2",
+        "TRANSLATOR_RECOVERY_MAX_TOKENS": "24000",
         "CRITIC_ENABLED": "true",
         "CRITIC_API_BASE": "https://openrouter.ai/api/v1",
         "CRITIC_API_KEY": "sk-or-judge-key",
@@ -163,6 +165,8 @@ class TestSimpleEnvOverrides(unittest.TestCase):
         self.assertEqual(cfg.llm.openrouter.api_keys, ["nine-router-key"])
         self.assertEqual(cfg.llm.openrouter.api_base, "http://172.17.0.1:20128/v1")
         self.assertEqual(cfg.llm.max_tokens, 16000)
+        self.assertEqual(cfg.llm.recovery.max_attempts, 2)
+        self.assertEqual(cfg.llm.recovery.max_tokens, 24000)
         self.assertTrue(cfg.llm.critic.enabled)
         self.assertEqual(cfg.llm.critic.model, "anthropic/claude-sonnet-5")
         self.assertEqual(cfg.llm.critic.api_keys, ["sk-or-judge-key"])

@@ -165,6 +165,30 @@ def _split_sentences_fa(text: str) -> list[str]:
     return [p for p in parts if p.strip()]
 
 
+def _split_source_recovery_groups(
+    text: str,
+    max_chars: int = 1800,
+) -> list[str]:
+    """Group source sentences for one bounded, paragraph-preserving recovery."""
+    sentences = _split_sentences_fa(text)
+    if len(sentences) <= 1:
+        return [text.strip()] if text.strip() else []
+    groups: list[str] = []
+    current: list[str] = []
+    current_chars = 0
+    for sentence in sentences:
+        added = len(sentence) + (1 if current else 0)
+        if current and current_chars + added > max_chars:
+            groups.append(" ".join(current).strip())
+            current = []
+            current_chars = 0
+        current.append(sentence.strip())
+        current_chars += len(sentence) + (1 if len(current) > 1 else 0)
+    if current:
+        groups.append(" ".join(current).strip())
+    return groups
+
+
 def _distribute_translation(translation: str, n_parts: int, src_weights: list[int]) -> list[str]:
     """Distribute a translation blob across *n_parts* paragraphs proportionally.
 
@@ -2285,12 +2309,16 @@ class TranslationPipeline:
         n_source_paras = len(chunk.metadata.get("paragraph_indices", [])) or \
             len(source_paragraphs)
 
-        def build_translation_prompt(source_text: str, previous: str) -> str:
+        def build_translation_prompt(
+            source_text: str,
+            previous: str,
+            recovery_context: str = "",
+        ) -> str:
             paragraph_count = len([
                 paragraph for paragraph in source_text.split("\n\n")
                 if paragraph.strip()
             ])
-            return TRANSLATE_CHUNK_PROMPT.format(
+            prompt = TRANSLATE_CHUNK_PROMPT.format(
                 exemplars=exemplars,
                 glossary_terms=glossary_terms_str,
                 memory_context=mem_context.format() + inline_policy_context,
@@ -2300,6 +2328,20 @@ class TranslationPipeline:
                 paragraph_count=paragraph_count,
                 term_notes_instruction=term_notes_instruction,
             )
+            if recovery_context:
+                scope = (
+                    "### Read-only surrounding source context\n"
+                    "Use this only for meaning and continuity. Translate only the "
+                    "source text in the target section below; do not repeat this "
+                    "surrounding context in the output.\n"
+                    f"{recovery_context[:8000]}\n\n"
+                )
+                prompt = prompt.replace(
+                    "### Source text to translate\n",
+                    scope + "### Source text to translate\n",
+                    1,
+                )
+            return prompt
 
         user_content = build_translation_prompt(chunk.text, prev_trans)
 
@@ -2335,15 +2377,14 @@ class TranslationPipeline:
                 _operation="translation",
             )
         except TruncatedCompletionError:
-            if len(source_paragraphs) <= 1:
-                raise
+            recovery_paragraphs = source_paragraphs or [chunk.text.strip()]
             self.db.log_chunk_event(
                 job_id,
                 idx,
                 "translation_adaptive_split",
                 {
                     "reason": "repeated_finish_reason_length",
-                    "part_count": len(source_paragraphs),
+                    "part_count": len(recovery_paragraphs),
                     "message": (
                         "The complete chunk exhausted its bounded output budget; "
                         "paragraph-boundary recovery was activated."
@@ -2352,15 +2393,81 @@ class TranslationPipeline:
             )
             recovered_parts: list[str] = []
             continuity = prev_trans
-            for part_index, source_paragraph in enumerate(source_paragraphs):
-                part_prompt = build_translation_prompt(
-                    source_paragraph, continuity
+
+            def translate_sentence_groups(
+                source_paragraph: str,
+                previous: str,
+                paragraph_index: int,
+                reason: str,
+            ) -> str:
+                sentence_groups = _split_source_recovery_groups(source_paragraph)
+                if len(sentence_groups) <= 1:
+                    raise TruncatedCompletionError(
+                        "Source paragraph cannot be split at sentence boundaries."
+                    )
+                self.db.log_chunk_event(
+                    job_id,
+                    idx,
+                    "translation_sentence_split",
+                    {
+                        "paragraph_index": paragraph_index,
+                        "part_count": len(sentence_groups),
+                        "reason": reason,
+                    },
                 )
-                recovered = self.llm_client.complete(
-                    messages=[{"role": "user", "content": part_prompt}],
-                    system_prompt=sys_prompt,
-                    _operation="translation_split_recovery",
-                ).strip()
+                sentence_translations: list[str] = []
+                sentence_continuity = previous
+                for sentence_index, sentence_group in enumerate(sentence_groups):
+                    sentence_prompt = build_translation_prompt(
+                        sentence_group,
+                        sentence_continuity,
+                        recovery_context=source_paragraph,
+                    )
+                    sentence_translation = self.llm_client.complete(
+                        messages=[{"role": "user", "content": sentence_prompt}],
+                        system_prompt=sys_prompt,
+                        _operation="translation_split_recovery",
+                    ).strip()
+                    if not sentence_translation:
+                        raise ValueError(
+                            "Adaptive sentence translation part "
+                            f"{sentence_index} was empty."
+                        )
+                    sentence_translations.append(sentence_translation)
+                    sentence_continuity = sentence_translation
+                return " ".join(sentence_translations).strip()
+
+            for part_index, source_paragraph in enumerate(recovery_paragraphs):
+                if len(recovery_paragraphs) == 1:
+                    groups = _split_source_recovery_groups(source_paragraph)
+                    if len(groups) > 1:
+                        recovered = translate_sentence_groups(
+                            source_paragraph,
+                            continuity,
+                            part_index,
+                            "single_paragraph_chunk_exhausted_output_budget",
+                        )
+                        recovered_parts.append(recovered)
+                        continuity = recovered
+                        continue
+                part_prompt = build_translation_prompt(
+                    source_paragraph,
+                    continuity,
+                    recovery_context=chunk.text,
+                )
+                try:
+                    recovered = self.llm_client.complete(
+                        messages=[{"role": "user", "content": part_prompt}],
+                        system_prompt=sys_prompt,
+                        _operation="translation_split_recovery",
+                    ).strip()
+                except TruncatedCompletionError:
+                    recovered = translate_sentence_groups(
+                        source_paragraph,
+                        continuity,
+                        part_index,
+                        "paragraph_recovery_exhausted_output_budget",
+                    )
                 if not recovered:
                     raise ValueError(
                         f"Adaptive translation part {part_index} was empty."
@@ -2453,9 +2560,19 @@ class TranslationPipeline:
                             "iteration": ref_iter,
                             "count": len(ignored_issues),
                             "issues": ignored_issues,
+                            "reason_counts": {
+                                reason: sum(
+                                    1 for issue in ignored_issues
+                                    if issue.get("ignored_reason") == reason
+                                )
+                                for reason in {
+                                    str(issue.get("ignored_reason", "unknown"))
+                                    for issue in ignored_issues
+                                }
+                            },
                             "message": (
-                                "Critic advice requiring no textual change was "
-                                "withheld from refinement."
+                                "No-op, duplicate, excess, or ungrounded critic "
+                                "items were withheld from refinement."
                             ),
                         },
                     )

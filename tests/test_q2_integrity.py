@@ -429,3 +429,75 @@ def test_pipeline_keeps_translation_when_critic_provider_exhausts_length() -> No
     assert events["qa_unavailable"]["attempts"] == 4
     assert events["qa_unavailable"]["failure_type"] == "TruncatedCompletionError"
     assert "chunk_completed" in events
+
+
+def test_single_paragraph_translation_uses_sentence_groups_after_length() -> None:
+    config = TarjomehConfig()
+    config.translation.enable_web_context = False
+    config.translation.enable_back_translation = False
+    config.translation.enable_critique = False
+    config.translation.enable_integrity_gate = False
+    config.glossary.enable_compliance_check = False
+    config.glossary.enable_auto_extraction = False
+
+    pipeline = object.__new__(TranslationPipeline)
+    pipeline.config = config
+    pipeline.db = MagicMock()
+    pipeline.db.get_job.return_value = {"status": "running"}
+    pipeline.llm_client = MagicMock()
+    pipeline.llm_client.complete.side_effect = [
+        TruncatedCompletionError("whole request exhausted output budget"),
+        "part one",
+        "part two",
+        "part three",
+    ]
+
+    memory_context = MagicMock()
+    memory_context.style_profile = ""
+    memory_context.proper_nouns = ""
+    memory_context.long_term = ""
+    memory_context.short_term = ""
+    memory_context.bilingual_summary = ""
+    memory_context.format.return_value = ""
+    memory_manager = MagicMock()
+    memory_manager.get_context_for_chunk.return_value = memory_context
+
+    glossary = MagicMock()
+    glossary.find_terms.return_value = []
+    glossary.format_for_prompt.return_value = ""
+
+    source = " ".join([
+        "A" * 1000 + ".",
+        "B" * 1000 + ".",
+        "C" * 1000 + ".",
+    ])
+    result = pipeline._translate_single_chunk(
+        idx=0,
+        chunk=Chunk(0, source, "", ""),
+        memory_manager=memory_manager,
+        web_searcher=MagicMock(),
+        glossary_manager=glossary,
+        compliance_checker=MagicMock(),
+        critique_tool=MagicMock(),
+        refiner_tool=MagicMock(),
+        back_translator=MagicMock(),
+        translations={},
+        job_id="job-sentence-recovery",
+    )
+
+    assert result == "part one part two part three"
+    operations = [
+        call.kwargs.get("_operation")
+        for call in pipeline.llm_client.complete.call_args_list
+    ]
+    assert operations == [
+        "translation",
+        "translation_split_recovery",
+        "translation_split_recovery",
+        "translation_split_recovery",
+    ]
+    event_types = [
+        call.args[2] for call in pipeline.db.log_chunk_event.call_args_list
+    ]
+    assert "translation_adaptive_split" in event_types
+    assert "translation_sentence_split" in event_types

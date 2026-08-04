@@ -17,6 +17,7 @@ from tarjomeh.context.search_providers import (
     TavilySearchProvider,
 )
 from tarjomeh.core.config import TarjomehConfig
+from tarjomeh.core.llm_client import TruncatedCompletionError
 from tarjomeh.core.pipeline import _research_context_for_memory
 from tarjomeh.core.term_notes import (
     apply_term_notes,
@@ -361,6 +362,61 @@ class TestBookResearcher(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.status, "degraded")
         self.assertEqual(result.book_context, "Excerpt-only context")
+
+    async def test_research_recovers_with_bounded_evidence_batches(self) -> None:
+        config = TarjomehConfig()
+        llm = MagicMock()
+        llm.chat = AsyncMock(side_effect=[
+            TruncatedCompletionError("whole synthesis reached length"),
+            json.dumps({
+                "book_context": "Batch context",
+                "terms": [{
+                    "source": "operation",
+                    "target": "operation-fa",
+                    "source_urls": ["https://example.test/book"],
+                }],
+            }),
+            json.dumps({
+                "book_context": "Consolidated context",
+                "terms": [{
+                    "source": "operation",
+                    "target": "operation-fa",
+                    "source_urls": ["https://example.test/book"],
+                }],
+                "follow_up_queries": [],
+            }),
+        ])
+        researcher = BookResearcher(config, llm)
+        researcher.provider = MagicMock()
+        researcher.provider.diagnostics = [{
+            "provider": "tavily", "status": "success",
+        }]
+        researcher.provider.search = AsyncMock(return_value=[
+            SearchResult(
+                "Book page",
+                "https://example.test/book",
+                "Evidence",
+            )
+        ])
+        document = type("DocumentStub", (), {
+            "title": "Book",
+            "author": "Author",
+            "raw_toc": [],
+            "all_paragraphs": [
+                type("ParagraphStub", (), {"text": "Book excerpt."})()
+            ],
+        })()
+
+        result = await researcher.research(document)
+
+        self.assertEqual(result.status, "degraded")
+        self.assertEqual(result.book_context, "Consolidated context")
+        self.assertEqual(len(result.terms), 1)
+        self.assertIn("TruncatedCompletionError", result.error)
+        self.assertEqual(
+            [call.args[0] for call in llm.set_operation.call_args_list],
+            ["book_research", "book_research_batch", "book_research_synthesis"],
+        )
 
 
 class TestSearchProviderChain(unittest.IsolatedAsyncioTestCase):

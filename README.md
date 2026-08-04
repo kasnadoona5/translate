@@ -161,19 +161,24 @@ flag is omitted.
 ### Recovery settings
 
 ```dotenv
-# Translator: three total attempts by default
-TRANSLATOR_MAX_TOKENS=10000
+# Translator: normal 12K request, then one full-quality 24K recovery
+TRANSLATOR_MAX_TOKENS=12000
 TRANSLATOR_RECOVERY_MODEL=
+TRANSLATOR_RECOVERY_MAX_ATTEMPTS=2
+TRANSLATOR_RECOVERY_MAX_TOKENS=24000
 
 # Critic: unchanged normal attempt plus bounded recovery
 CRITIC_RECOVERY_MODEL=
 CRITIC_RECOVERY_MAX_ATTEMPTS=4
-CRITIC_RECOVERY_MAX_TOKENS=16384
+CRITIC_RECOVERY_MAX_TOKENS=24000
 ```
 
-The normal request uses a 10,000-token ceiling; unused capacity is not billed.
-Recovery settings apply only after a provider failure such as
-`finish_reason=length`, and the default recovery ceiling is 16,384 tokens.
+The normal request uses a 12,000-token ceiling; unused capacity is not billed.
+For translation and book research, one whole-request recovery keeps the same
+quality/reasoning policy and raises the ceiling to 24,000 tokens. An optional
+translator fallback is used for that recovery. If both whole translation calls
+end with `finish_reason=length`, Tarjomeh preserves context while splitting at
+paragraph boundaries, then sentence-group boundaries only when necessary.
 
 Recommended critic recovery sequence:
 
@@ -181,7 +186,7 @@ Recommended critic recovery sequence:
 2. Same critic with low reasoning after a length failure
 3. Optional critic-specific fallback model, or a no-reasoning recovery when no
    fallback is configured
-4. Final no-reasoning attempt, up to the configured recovery token ceiling
+4. Final no-reasoning attempt, up to the configured 24,000-token ceiling
 
 No-reasoning mode is limited to recovery and compact JSON repair. It does not
 replace the normal translator, critic, or refiner request.
@@ -649,6 +654,11 @@ The one-time seed pass:
 3. summarizes book/domain context
 4. proposes reviewable glossary candidates
 5. stores sources, status, and evidence in the job artifact/QA report
+
+Its normal synthesis also follows the 12K/24K whole-request policy. If both
+attempts truncate, evidence is analyzed in bounded batches and consolidated.
+The job is marked `degraded` when this fallback was needed; translation still
+continues with the source-backed context and review-only suggestions recovered.
 
 Research suggestions are marked automatic and never overwrite curated user
 terms. Approve useful suggestions through the glossary UI.

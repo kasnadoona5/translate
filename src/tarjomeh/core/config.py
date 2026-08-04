@@ -128,7 +128,7 @@ class LLMCriticConfig:
     api_base: str = ""
     recovery_model: str = ""
     recovery_max_attempts: int = 4
-    recovery_max_tokens: int = 16384
+    recovery_max_tokens: int = 24000
 
     @property
     def is_active(self) -> bool:
@@ -140,10 +140,10 @@ class LLMRecoveryConfig:
     """Bounded recovery used only after the unchanged normal request fails."""
 
     enabled: bool = True
-    max_attempts: int = 3
+    max_attempts: int = 2
     model: str = ""
     reasoning_effort: str = "low"
-    max_tokens: int = 16384
+    max_tokens: int = 24000
     expanded_final_attempt: bool = False
     final_reasoning_effort: str = "none"
 
@@ -155,7 +155,7 @@ class LLMConfig:
     provider: str = "openrouter"
     model: str = "anthropic/claude-sonnet-4-5-20250514"
     temperature: float = 0.3
-    max_tokens: int = 10000
+    max_tokens: int = 12000
     openrouter: LLMOpenRouterConfig = field(default_factory=LLMOpenRouterConfig)
     ollama: LLMOllamaConfig = field(default_factory=LLMOllamaConfig)
     critic: LLMCriticConfig = field(default_factory=LLMCriticConfig)
@@ -457,7 +457,9 @@ class TarjomehConfig:
             TRANSLATOR_API_BASE   endpoint ("" = OpenRouter; 9router URL to route via it)
             TRANSLATOR_API_KEY    API key
             TRANSLATOR_MODEL      model id or 9router combo name
-            TRANSLATOR_MAX_TOKENS optional output budget (default 10000)
+            TRANSLATOR_MAX_TOKENS optional output budget (default 12000)
+            TRANSLATOR_RECOVERY_MAX_ATTEMPTS bounded whole-request attempts
+            TRANSLATOR_RECOVERY_MAX_TOKENS recovery output budget (default 24000)
 
         Critic / judge (optional second model):
             CRITIC_ENABLED        true / false
@@ -487,6 +489,12 @@ class TarjomehConfig:
         value = env("TRANSLATOR_RECOVERY_MODEL", "").strip()
         if value:
             self.llm.recovery.model = value
+        value = env("TRANSLATOR_RECOVERY_MAX_ATTEMPTS", "").strip()
+        if value.isdigit():
+            self.llm.recovery.max_attempts = int(value)
+        value = env("TRANSLATOR_RECOVERY_MAX_TOKENS", "").strip()
+        if value.isdigit():
+            self.llm.recovery.max_tokens = int(value)
 
         value = env("CRITIC_ENABLED", "").strip().lower()
         if value in ("1", "true", "yes", "on"):

@@ -28,6 +28,14 @@ _SCHEMA_REPAIR_OPERATIONS = {
     "critique_json_repair",
     "refinement_json_repair",
 }
+
+_FULL_QUALITY_LENGTH_RECOVERY_OPERATIONS = {
+    "translation",
+    "translation_split_recovery",
+    "book_research",
+    "book_research_batch",
+    "book_research_synthesis",
+}
 _QUALITY_RECOVERY_OPERATIONS = {
     "critique",
     "critique_json_repair",
@@ -419,10 +427,22 @@ class LLMClient:
         payload = dict(original)
         recovery = self.config.llm.recovery
 
-        if attempt >= 2 and recovery.model.strip():
+        fallback_attempt = (
+            1 if operation in _FULL_QUALITY_LENGTH_RECOVERY_OPERATIONS else 2
+        )
+        if attempt >= fallback_attempt and recovery.model.strip():
             payload["model"] = recovery.model.strip()
 
         if self.config.llm.provider.lower() == "openrouter" and failure_reason == "length":
+            if operation in _FULL_QUALITY_LENGTH_RECOVERY_OPERATIONS:
+                # Translation and research recovery retain the exact reasoning
+                # policy of the normal request. Only the bounded allowance and
+                # optional recovery model change before structural splitting.
+                payload["max_tokens"] = max(
+                    int(original.get("max_tokens", self.config.llm.max_tokens)),
+                    int(recovery.max_tokens),
+                )
+                return payload
             final_expanded = bool(
                 recovery.expanded_final_attempt
                 and max_attempts >= 4
@@ -530,7 +550,11 @@ class LLMClient:
                     and attempt == max_attempts - 1
                     else (
                         "fallback_model"
-                        if attempt >= 2 and self.config.llm.recovery.model.strip()
+                        if attempt >= (
+                            1
+                            if operation in _FULL_QUALITY_LENGTH_RECOVERY_OPERATIONS
+                            else 2
+                        ) and self.config.llm.recovery.model.strip()
                         else "same_model"
                     )
                 )

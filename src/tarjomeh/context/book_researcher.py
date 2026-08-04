@@ -67,17 +67,13 @@ class BookResearcher:
         try:
             excerpt = self._book_excerpt(document)
             await self._search_queries(queries, sources)
-            evidence = self._evidence_text(sources)
-            response = await self.llm_client.chat(
-                self._prompt(
-                    title,
-                    author,
-                    excerpt,
-                    evidence,
-                    allow_follow_ups=True,
-                )
+            data, used_batches, recovery_error = await self._synthesise(
+                title,
+                author,
+                excerpt,
+                sources,
+                allow_follow_ups=True,
             )
-            data = self._parse_json(response)
 
             remaining = max(
                 0,
@@ -91,20 +87,18 @@ class BookResearcher:
             if follow_ups:
                 queries.extend(follow_ups)
                 await self._search_queries(follow_ups, sources)
-                evidence = self._evidence_text(sources)
-                response = await self.llm_client.chat(
-                    self._prompt(
-                        title,
-                        author,
-                        excerpt,
-                        evidence,
-                        allow_follow_ups=False,
-                    )
+                data, follow_up_batches, follow_up_error = await self._synthesise(
+                    title,
+                    author,
+                    excerpt,
+                    sources,
+                    allow_follow_ups=False,
                 )
-                data = self._parse_json(response)
+                used_batches = used_batches or follow_up_batches
+                recovery_error = recovery_error or follow_up_error
 
             terms = self._normalise_terms(data.get("terms", []), sources)
-            if not sources:
+            if used_batches or not sources:
                 status = "degraded"
             elif not terms:
                 status = "completed_without_suggestions"
@@ -124,6 +118,7 @@ class BookResearcher:
                 search_diagnostics=diagnostics,
                 providers_used=[name for name in providers_used if name],
                 status=status,
+                error=recovery_error,
             )
         except Exception as exc:
             logger.warning("Book research seed pass failed: %s", exc)
@@ -133,9 +128,112 @@ class BookResearcher:
                 search_diagnostics=list(
                     getattr(self.provider, "diagnostics", [])
                 ),
+                providers_used=self._providers_used(),
                 status="failed",
                 error=f"{type(exc).__name__}: {exc}",
             )
+
+    async def _synthesise(
+        self,
+        title: str,
+        author: str,
+        excerpt: str,
+        sources: list[dict[str, str]],
+        *,
+        allow_follow_ups: bool,
+    ) -> tuple[dict[str, Any], bool, str]:
+        """Run normal research first, then bounded evidence batches on failure."""
+        try:
+            data = await self._call_json(
+                self._prompt(
+                    title,
+                    author,
+                    excerpt,
+                    self._evidence_text(sources),
+                    allow_follow_ups=allow_follow_ups,
+                ),
+                "book_research",
+            )
+            return data, False, ""
+        except Exception as exc:
+            logger.warning(
+                "Whole-book research synthesis failed; using evidence batches: %s",
+                exc,
+            )
+            recovery_error = f"{type(exc).__name__}: {exc}"
+
+        batches = [sources[i:i + 6] for i in range(0, len(sources), 6)]
+        if not batches:
+            batches = [[]]
+        batch_results: list[dict[str, Any]] = []
+        batch_errors: list[str] = []
+        for batch_index, batch in enumerate(batches):
+            try:
+                batch_results.append(await self._call_json(
+                    self._batch_prompt(
+                        title,
+                        author,
+                        excerpt,
+                        self._evidence_text(batch),
+                        batch_index=batch_index,
+                        batch_count=len(batches),
+                    ),
+                    "book_research_batch",
+                ))
+            except Exception as exc:
+                batch_errors.append(
+                    f"batch {batch_index + 1}: {type(exc).__name__}: {exc}"
+                )
+
+        if not batch_results:
+            raise RuntimeError(
+                "Book research whole synthesis and every evidence batch failed: "
+                + "; ".join(batch_errors)
+            )
+
+        compact = json.dumps(batch_results, ensure_ascii=False)
+        try:
+            data = await self._call_json(
+                self._compact_synthesis_prompt(
+                    title,
+                    author,
+                    excerpt,
+                    compact,
+                    allow_follow_ups=allow_follow_ups,
+                ),
+                "book_research_synthesis",
+            )
+        except Exception as exc:
+            batch_errors.append(f"compact synthesis: {type(exc).__name__}: {exc}")
+            contexts = [
+                str(item.get("book_context", "")).strip()
+                for item in batch_results
+                if str(item.get("book_context", "")).strip()
+            ]
+            raw_terms: list[Any] = []
+            for item in batch_results:
+                if isinstance(item.get("terms"), list):
+                    raw_terms.extend(item["terms"])
+            data = {
+                "book_context": " ".join(contexts)[:4000],
+                "terms": raw_terms[:60],
+                "follow_up_queries": [],
+            }
+
+        details = "; ".join([recovery_error, *batch_errors]).strip("; ")
+        return data, True, details[:2000]
+
+    async def _call_json(self, prompt: str, operation: str) -> dict[str, Any]:
+        if hasattr(self.llm_client, "set_operation"):
+            self.llm_client.set_operation(operation)
+        return self._parse_json(await self.llm_client.chat(prompt))
+
+    def _providers_used(self) -> list[str]:
+        return list(dict.fromkeys(
+            str(item.get("provider", ""))
+            for item in getattr(self.provider, "diagnostics", [])
+            if item.get("status") == "success" and item.get("provider")
+        ))
 
     async def _search_queries(
         self,
@@ -295,3 +393,55 @@ Rules:
 - Research the book, author, concepts, and domain even when no translation
   or prior Persian scholarship exists.
 - Output JSON only."""
+
+    @staticmethod
+    def _batch_prompt(
+        title: str,
+        author: str,
+        excerpt: str,
+        evidence: str,
+        *,
+        batch_index: int,
+        batch_count: int,
+    ) -> str:
+        return f"""Analyze evidence batch {batch_index + 1} of {batch_count} for
+review-only English-to-Persian academic translation research.
+
+Book: {title} by {author or "(unknown)"}
+Book excerpt for context:
+{excerpt[:3000]}
+
+Evidence batch:
+{evidence}
+
+Return JSON only with book_context and at most 12 terms. Each term must contain
+source, target, context, domain, sense, author, reason, confidence, and
+source_urls. Cite only supplied URLs. Suggestions are non-authoritative and
+must be conservative. Do not include follow-up queries or commentary."""
+
+    @staticmethod
+    def _compact_synthesis_prompt(
+        title: str,
+        author: str,
+        excerpt: str,
+        compact_batches: str,
+        *,
+        allow_follow_ups: bool,
+    ) -> str:
+        follow_up = (
+            "at most 3 focused strings" if allow_follow_ups else "an empty array"
+        )
+        return f"""Consolidate compact research batches for a review-only
+English-to-Persian academic translation seed.
+
+Book: {title} by {author or "(unknown)"}
+Short excerpt:
+{excerpt[:2500]}
+
+Batch findings:
+{compact_batches[:18000]}
+
+Return JSON only with book_context, at most 30 deduplicated terms, and
+follow_up_queries ({follow_up}). Preserve only supplied source URLs. Each term
+must contain source, target, context, domain, sense, author, reason, confidence,
+and source_urls. Suggestions remain non-authoritative."""
