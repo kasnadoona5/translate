@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import random
 import threading
@@ -422,27 +423,90 @@ class LLMClient:
         max_attempts: int,
         failure_reason: str,
         operation: str = "completion",
-    ) -> dict[str, Any]:
+        failure_usage: dict[str, Any] | None = None,
+        failure_content: str = "",
+        expected_output_tokens: int = 0,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Build recovery without mutating the unchanged first-attempt payload."""
         payload = dict(original)
         recovery = self.config.llm.recovery
+        calculation: dict[str, Any] = {}
 
-        fallback_attempt = (
-            1 if operation in _FULL_QUALITY_LENGTH_RECOVERY_OPERATIONS else 2
-        )
+        # Full-quality Attempt 2 intentionally keeps the original model and
+        # reasoning policy. A configured fallback remains a third bounded rung.
+        fallback_attempt = 2
         if attempt >= fallback_attempt and recovery.model.strip():
             payload["model"] = recovery.model.strip()
 
-        if self.config.llm.provider.lower() == "openrouter" and failure_reason == "length":
-            if operation in _FULL_QUALITY_LENGTH_RECOVERY_OPERATIONS:
-                # Translation and research recovery retain the exact reasoning
-                # policy of the normal request. Only the bounded allowance and
-                # optional recovery model change before structural splitting.
-                payload["max_tokens"] = max(
-                    int(original.get("max_tokens", self.config.llm.max_tokens)),
-                    int(recovery.max_tokens),
+        if (
+            failure_reason == "length"
+            and operation in _FULL_QUALITY_LENGTH_RECOVERY_OPERATIONS
+        ):
+            usage = failure_usage or {}
+            details = usage.get("completion_tokens_details") or {}
+            if not isinstance(details, dict):
+                details = {}
+            reasoning_tokens = int(
+                details.get("reasoning_tokens")
+                or usage.get("reasoning_tokens")
+                or 0
+            )
+            completion_tokens = int(
+                usage.get("completion_tokens")
+                or usage.get("output_tokens")
+                or 0
+            )
+            visible_tokens = self.count_tokens(failure_content) if failure_content else 0
+            if reasoning_tokens <= 0:
+                if completion_tokens > 0:
+                    reasoning_tokens = max(0, completion_tokens - visible_tokens)
+                else:
+                    reasoning_tokens = max(
+                        0,
+                        int(original.get("max_tokens", self.config.llm.max_tokens))
+                        - visible_tokens,
+                    )
+
+            if expected_output_tokens > 0:
+                answer_estimate = int(expected_output_tokens)
+                answer_evidence = "source_token_estimate"
+            else:
+                prompt_text = "\n".join(
+                    str(message.get("content", ""))
+                    for message in original.get("messages", [])
+                    if isinstance(message, dict)
                 )
-                return payload
+                answer_estimate = max(512, self.count_tokens(prompt_text) // 3)
+                answer_evidence = "prompt_token_fallback"
+
+            answer_headroom = math.ceil(answer_estimate * 1.35) + 512
+            reasoning_headroom = math.ceil(reasoning_tokens * 1.20)
+            calculated = math.ceil(
+                (answer_headroom + reasoning_headroom) * 1.25
+            )
+            original_max = int(
+                original.get("max_tokens", self.config.llm.max_tokens)
+            )
+            ceiling = max(original_max, int(recovery.max_tokens))
+            requested = min(max(original_max + 512, calculated), ceiling)
+            payload["max_tokens"] = requested
+            calculation = {
+                "answer_estimate_tokens": answer_estimate,
+                "answer_evidence": answer_evidence,
+                "visible_output_tokens": visible_tokens,
+                "reported_completion_tokens": completion_tokens,
+                "reasoning_estimate_tokens": reasoning_tokens,
+                "answer_headroom_tokens": answer_headroom,
+                "reasoning_headroom_tokens": reasoning_headroom,
+                "uncertainty_multiplier": 1.25,
+                "calculated_max_tokens": calculated,
+                "configured_ceiling": ceiling,
+                "applied_max_tokens": requested,
+                "ceiling_applied": requested < calculated,
+            }
+            return payload, calculation
+
+        if self.config.llm.provider.lower() == "openrouter" and failure_reason == "length":
             final_expanded = bool(
                 recovery.expanded_final_attempt
                 and max_attempts >= 4
@@ -479,7 +543,7 @@ class LLMClient:
                 if final_expanded or no_reasoning_recovery
                 else max(original_max, min(estimated_visible, recovery_ceiling))
             )
-        return payload
+        return payload, calculation
 
     def _initial_payload_for_operation(
         self,
@@ -551,9 +615,7 @@ class LLMClient:
                     else (
                         "fallback_model"
                         if attempt >= (
-                            1
-                            if operation in _FULL_QUALITY_LENGTH_RECOVERY_OPERATIONS
-                            else 2
+                            2
                         ) and self.config.llm.recovery.model.strip()
                         else "same_model"
                     )
@@ -584,6 +646,11 @@ class LLMClient:
     ) -> str:
         """Synchronously complete one bounded logical request."""
         operation = str(kwargs.pop("_operation", "completion"))
+        recovery_source_text = str(kwargs.pop("_recovery_source_text", "") or "")
+        expected_output_tokens = (
+            math.ceil(self.count_tokens(recovery_source_text) * 1.35)
+            if recovery_source_text else 0
+        )
         url, headers, original_payload = self._prepare_request(
             messages, system_prompt, **kwargs
         )
@@ -591,24 +658,36 @@ class LLMClient:
             original_payload, operation
         )
         max_attempts = self._max_call_attempts()
+        if (
+            max_attempts >= 2
+            and operation in _FULL_QUALITY_LENGTH_RECOVERY_OPERATIONS
+            and self.config.llm.recovery.model.strip()
+        ):
+            max_attempts = max(max_attempts, 3)
         failure_reason = ""
+        failure_usage: dict[str, Any] = {}
+        failure_content = ""
 
         for attempt in range(max_attempts):
             self._thread_local.last_call_attempts = attempt + 1
-            payload = (
-                original_payload
-                if attempt == 0
-                else self._recovery_payload(
+            recovery_calculation: dict[str, Any] = {}
+            if attempt == 0:
+                payload = original_payload
+            else:
+                payload, recovery_calculation = self._recovery_payload(
                     original_payload,
                     attempt,
                     max_attempts,
                     failure_reason,
                     operation,
+                    failure_usage,
+                    failure_content,
+                    expected_output_tokens,
                 )
-            )
             started = time.monotonic()
             finish_reason = None
             status_code = None
+            content: Any = None
             usage: dict[str, Any] = {}
             try:
                 response = self._client.post(url, headers=headers, json=payload)
@@ -639,7 +718,7 @@ class LLMClient:
                         "LLM returned an empty or null translation completion."
                     )
 
-                self._emit_attempt(self._attempt_event(
+                event = self._attempt_event(
                     operation=operation,
                     attempt=attempt,
                     max_attempts=max_attempts,
@@ -649,7 +728,10 @@ class LLMClient:
                     finish_reason=finish_reason,
                     status_code=status_code,
                     usage=usage,
-                ))
+                )
+                if recovery_calculation:
+                    event["recovery_calculation"] = recovery_calculation
+                self._emit_attempt(event)
                 return content
             except (
                 httpx.HTTPStatusError,
@@ -676,7 +758,10 @@ class LLMClient:
                         f"http_{status_code}" if status_code else "transport_error"
                     )
 
-                self._emit_attempt(self._attempt_event(
+                failure_usage = dict(usage)
+                failure_content = content if isinstance(content, str) else ""
+
+                event = self._attempt_event(
                     operation=operation,
                     attempt=attempt,
                     max_attempts=max_attempts,
@@ -688,7 +773,10 @@ class LLMClient:
                     usage=usage,
                     failure_reason=failure_reason,
                     error=str(exc),
-                ))
+                )
+                if recovery_calculation:
+                    event["recovery_calculation"] = recovery_calculation
+                self._emit_attempt(event)
                 should_retry = (
                     attempt + 1 < max_attempts
                     and self._retryable_exception(exc, status_code)
@@ -731,6 +819,11 @@ class LLMClient:
     ) -> str:
         """Asynchronously complete one bounded logical request."""
         operation = str(kwargs.pop("_operation", "completion"))
+        recovery_source_text = str(kwargs.pop("_recovery_source_text", "") or "")
+        expected_output_tokens = (
+            math.ceil(self.count_tokens(recovery_source_text) * 1.35)
+            if recovery_source_text else 0
+        )
         url, headers, original_payload = self._prepare_request(
             messages, system_prompt, **kwargs
         )
@@ -738,24 +831,36 @@ class LLMClient:
             original_payload, operation
         )
         max_attempts = self._max_call_attempts()
+        if (
+            max_attempts >= 2
+            and operation in _FULL_QUALITY_LENGTH_RECOVERY_OPERATIONS
+            and self.config.llm.recovery.model.strip()
+        ):
+            max_attempts = max(max_attempts, 3)
         failure_reason = ""
+        failure_usage: dict[str, Any] = {}
+        failure_content = ""
 
         for attempt in range(max_attempts):
             self._thread_local.last_call_attempts = attempt + 1
-            payload = (
-                original_payload
-                if attempt == 0
-                else self._recovery_payload(
+            recovery_calculation: dict[str, Any] = {}
+            if attempt == 0:
+                payload = original_payload
+            else:
+                payload, recovery_calculation = self._recovery_payload(
                     original_payload,
                     attempt,
                     max_attempts,
                     failure_reason,
                     operation,
+                    failure_usage,
+                    failure_content,
+                    expected_output_tokens,
                 )
-            )
             started = time.monotonic()
             finish_reason = None
             status_code = None
+            content: Any = None
             usage: dict[str, Any] = {}
             try:
                 response = await self._aclient.post(
@@ -788,7 +893,7 @@ class LLMClient:
                         "LLM returned an empty or null translation completion."
                     )
 
-                self._emit_attempt(self._attempt_event(
+                event = self._attempt_event(
                     operation=operation,
                     attempt=attempt,
                     max_attempts=max_attempts,
@@ -798,7 +903,10 @@ class LLMClient:
                     finish_reason=finish_reason,
                     status_code=status_code,
                     usage=usage,
-                ))
+                )
+                if recovery_calculation:
+                    event["recovery_calculation"] = recovery_calculation
+                self._emit_attempt(event)
                 return content
             except (
                 httpx.HTTPStatusError,
@@ -825,7 +933,10 @@ class LLMClient:
                         f"http_{status_code}" if status_code else "transport_error"
                     )
 
-                self._emit_attempt(self._attempt_event(
+                failure_usage = dict(usage)
+                failure_content = content if isinstance(content, str) else ""
+
+                event = self._attempt_event(
                     operation=operation,
                     attempt=attempt,
                     max_attempts=max_attempts,
@@ -837,7 +948,10 @@ class LLMClient:
                     usage=usage,
                     failure_reason=failure_reason,
                     error=str(exc),
-                ))
+                )
+                if recovery_calculation:
+                    event["recovery_calculation"] = recovery_calculation
+                self._emit_attempt(event)
                 should_retry = (
                     attempt + 1 < max_attempts
                     and self._retryable_exception(exc, status_code)

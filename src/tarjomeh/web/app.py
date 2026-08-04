@@ -863,9 +863,45 @@ def _register_api(app: Flask) -> None:
             reason = review_event_reasons.get(event["event_type"])
             if reason:
                 review_reasons.add(reason)
+        missing_output = any(
+            "translation" in chunk
+            and chunk.get("status") in {"completed", "needs_review"}
+            and not str(chunk.get("translation") or "").strip()
+            for chunk in all_chunks
+        )
+        incomplete_output = any(
+            chunk.get("status") not in {"completed", "needs_review"}
+            for chunk in all_chunks
+        )
+        content_fail = bool(
+            missing_output
+            or incomplete_output
+            or job.get("status") in {"failed", "paused_error"}
+        )
+        quality_fail = any(
+            event["event_type"] == "integrity_final_failed"
+            for event in all_events
+        )
+        if missing_output:
+            review_reasons.add("missing_output")
+        if content_fail:
+            verdict_status = "content_fail"
+        elif quality_fail:
+            verdict_status = "quality_fail"
+        elif review_reasons:
+            verdict_status = "review_required"
+        else:
+            verdict_status = "pass"
+        verdict_labels = {
+            "pass": "PASS",
+            "review_required": "REVIEW REQUIRED",
+            "quality_fail": "QUALITY FAIL",
+            "content_fail": "CONTENT FAIL",
+        }
         lines.extend([
             "QA Verdict:",
-            "  status=" + ("review_required" if review_reasons else "pass"),
+            "  status=" + verdict_status,
+            "  classification=" + verdict_labels[verdict_status],
             "  reasons=" + (
                 ", ".join(sorted(review_reasons)) if review_reasons else "none"
             ),
@@ -889,6 +925,42 @@ def _register_api(app: Flask) -> None:
                         f"failure={payload.get('failure_reason', '')} "
                         f"model={payload.get('model')} "
                         f"tokens={payload.get('completion_tokens', 0)}"
+                    )
+                    calculation = payload.get("recovery_calculation") or {}
+                    if calculation:
+                        lines.append(
+                            "    Recovery budget: answer={answer} reasoning={reasoning} "
+                            "calculated={calculated} applied={applied} "
+                            "ceiling={ceiling} multiplier={multiplier}".format(
+                                answer=calculation.get("answer_headroom_tokens"),
+                                reasoning=calculation.get("reasoning_headroom_tokens"),
+                                calculated=calculation.get("calculated_max_tokens"),
+                                applied=calculation.get("applied_max_tokens"),
+                                ceiling=calculation.get("configured_ceiling"),
+                                multiplier=calculation.get("uncertainty_multiplier"),
+                            )
+                        )
+                elif event["event_type"] == "translation_adaptive_split":
+                    lines.append(
+                        f"  Adaptive recovery: parts={payload.get('part_count')} "
+                        f"reason={payload.get('reason')}"
+                    )
+                elif event["event_type"] == "translation_recovery_part":
+                    lines.append(
+                        f"  Recovery part {payload.get('segment_id')}: "
+                        f"attempt={payload.get('validation_attempt')} "
+                        f"strict={payload.get('strict_target_only')} "
+                        f"source={payload.get('source_chars')} "
+                        f"output={payload.get('output_chars')} "
+                        f"ratio={payload.get('size_ratio')} "
+                        f"valid={payload.get('valid')} "
+                        f"errors={payload.get('errors', [])}"
+                    )
+                elif event["event_type"] == "translation_recovery_assembly_rejected":
+                    lines.append(
+                        "  RECOVERY ASSEMBLY REJECTED: "
+                        f"blocking={payload.get('blocking_count')} "
+                        f"action={payload.get('action')}"
                     )
                 elif event["event_type"] == "critique_completed":
                     scores = payload.get("scores", {})

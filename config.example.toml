@@ -20,9 +20,11 @@ max_tokens = 12000
 [llm.recovery]
 # Bounded translator recovery. The first request remains unchanged.
 enabled = true
+# Normal + calculated same-model retry. A configured fallback adds one final rung.
 max_attempts = 2
 model = ""
 reasoning_effort = "low"
+# Safety ceiling for the calculated answer/reasoning recovery allowance.
 max_tokens = 24000
 expanded_final_attempt = false
 final_reasoning_effort = "none"

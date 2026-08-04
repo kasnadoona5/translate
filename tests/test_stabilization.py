@@ -86,16 +86,61 @@ class TestBoundedRecovery(unittest.TestCase):
         self.assertEqual(result, "complete")
         self.assertEqual(payloads[0], expected)
         self.assertEqual(payloads[1]["reasoning"], expected["reasoning"])
-        self.assertEqual(payloads[1]["max_tokens"], 24000)
+        self.assertGreater(payloads[1]["max_tokens"], payloads[0]["max_tokens"])
+        self.assertLessEqual(payloads[1]["max_tokens"], 24000)
         self.assertEqual([event["success"] for event in events], [False, True])
         self.assertEqual(events[0]["failure_reason"], "length")
         self.assertTrue(events[0]["normal_attempt"])
+        calculation = events[1]["recovery_calculation"]
+        self.assertEqual(calculation["uncertainty_multiplier"], 1.25)
+        self.assertEqual(
+            calculation["applied_max_tokens"], payloads[1]["max_tokens"]
+        )
+
+    def test_translation_recovery_uses_evidence_based_budget_formula(self) -> None:
+        self.config.llm.recovery.max_tokens = 50000
+        source = "Academic source sentence. " * 200
+        partial = "\u062a\u0631\u062c\u0645\u0647 \u0646\u0627\u062a\u0645\u0627\u0645"
+        first = _response(partial, "length")
+        body = json.loads(first.text)
+        body["usage"] = {
+            "prompt_tokens": 3000,
+            "completion_tokens": 10000,
+            "total_tokens": 13000,
+            "completion_tokens_details": {"reasoning_tokens": 9000},
+        }
+        first.text = json.dumps(body)
+        payloads = []
+        responses = iter([first, _response("complete", "stop")])
+
+        def post(*args, **kwargs):
+            payloads.append(json.loads(json.dumps(kwargs["json"])))
+            return next(responses)
+
+        events = []
+        self.client._client.post = post
+        self.client.set_attempt_observer(events.append)
+        self.client.complete(
+            messages=[{"role": "user", "content": "Translate."}],
+            _operation="translation",
+            _recovery_source_text=source,
+        )
+
+        calc = events[1]["recovery_calculation"]
+        expected = __import__("math").ceil(
+            (calc["answer_headroom_tokens"] + calc["reasoning_headroom_tokens"])
+            * 1.25
+        )
+        self.assertEqual(calc["calculated_max_tokens"], expected)
+        self.assertEqual(payloads[1]["max_tokens"], expected)
+        self.assertNotIn("_recovery_source_text", payloads[0])
 
     def test_second_translation_attempt_uses_configured_fallback(self) -> None:
         self.config.llm.recovery.model = "recovery-combo"
         payloads = []
         responses = iter([
             _response("partial one", "length"),
+            _response("partial two", "length"),
             _response("recovered", "stop"),
         ])
 
@@ -110,9 +155,12 @@ class TestBoundedRecovery(unittest.TestCase):
         )
         self.assertEqual(result, "recovered")
         self.assertEqual(payloads[0]["model"], self.config.llm.model)
-        self.assertEqual(payloads[1]["model"], "recovery-combo")
-        self.assertEqual(payloads[1]["max_tokens"], 24000)
+        self.assertEqual(payloads[1]["model"], self.config.llm.model)
+        self.assertEqual(payloads[2]["model"], "recovery-combo")
+        self.assertGreater(payloads[1]["max_tokens"], payloads[0]["max_tokens"])
+        self.assertGreaterEqual(payloads[2]["max_tokens"], payloads[1]["max_tokens"])
         self.assertEqual(payloads[1]["reasoning"], payloads[0]["reasoning"])
+        self.assertEqual(payloads[2]["reasoning"], payloads[0]["reasoning"])
 
     def test_fourth_length_attempt_expands_only_after_unchanged_first_try(self) -> None:
         self.config.llm.recovery.max_attempts = 4

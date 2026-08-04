@@ -161,7 +161,7 @@ flag is omitted.
 ### Recovery settings
 
 ```dotenv
-# Translator: normal 12K request, then one full-quality 24K recovery
+# Translator: normal 12K request, then one calculated full-quality recovery
 TRANSLATOR_MAX_TOKENS=12000
 TRANSLATOR_RECOVERY_MODEL=
 TRANSLATOR_RECOVERY_MAX_ATTEMPTS=2
@@ -173,12 +173,14 @@ CRITIC_RECOVERY_MAX_ATTEMPTS=4
 CRITIC_RECOVERY_MAX_TOKENS=24000
 ```
 
-The normal request uses a 12,000-token ceiling; unused capacity is not billed.
-For translation and book research, one whole-request recovery keeps the same
-quality/reasoning policy and raises the ceiling to 24,000 tokens. An optional
-translator fallback is used for that recovery. If both whole translation calls
-end with `finish_reason=length`, Tarjomeh preserves context while splitting at
-paragraph boundaries, then sentence-group boundaries only when necessary.
+The normal request uses a 12,000-token ceiling and remains unchanged. After a
+length failure, Tarjomeh estimates answer and reasoning headroom from the source
+and provider usage, applies a 1.25 uncertainty margin, and requests only that
+calculated allowance up to `TRANSLATOR_RECOVERY_MAX_TOKENS`. Attempt 2 keeps the
+same model and reasoning policy. A configured translator fallback adds one final
+bounded model rung. Repeated truncation activates validated paragraph recovery,
+then sentence-group recovery only when necessary; recovered parts never receive
+the complete source chunk as context.
 
 Recommended critic recovery sequence:
 

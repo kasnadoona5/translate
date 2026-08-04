@@ -9,7 +9,11 @@ from unittest.mock import MagicMock
 from tarjomeh.chunking.chunker import Chunk
 from tarjomeh.core.config import TarjomehConfig
 from tarjomeh.core.llm_client import TruncatedCompletionError
-from tarjomeh.core.pipeline import TranslationPipeline, _filter_critique_policy_conflicts
+from tarjomeh.core.pipeline import (
+    TranslationPipeline,
+    _filter_critique_policy_conflicts,
+    _parse_recovery_segment,
+)
 from tarjomeh.quality.back_translator import BackTranslator
 from tarjomeh.quality.critique import CritiqueResult, TranslationCritique
 from tarjomeh.quality.integrity import PostEditIntegrityGate
@@ -30,6 +34,19 @@ def test_integrity_gate_rejects_loss_and_preserves_equivalent_percent() -> None:
     assert "numbers_missing" in checks
     assert "note_markers_missing" in checks
     assert "edit_content_loss" in checks
+
+
+def test_recovery_envelope_rejects_foreign_segment_marker() -> None:
+    raw = (
+        "<<<TRANSLATION c1.p0>>>\n"
+        "\u062a\u0631\u062c\u0645\u0647 <<<TRANSLATION c1.p1>>> \u0646\u0627\u0645\u0639\u062a\u0628\u0631\n"
+        "<<<END c1.p0>>>"
+    )
+    candidate, diagnostics = _parse_recovery_segment(raw, "c1.p0")
+
+    assert candidate
+    assert not diagnostics["valid"]
+    assert "foreign_segment_marker" in diagnostics["errors"]
 
 
 def test_integrity_gate_protects_terms_and_inline_originals() -> None:
@@ -445,11 +462,14 @@ def test_single_paragraph_translation_uses_sentence_groups_after_length() -> Non
     pipeline.db = MagicMock()
     pipeline.db.get_job.return_value = {"status": "running"}
     pipeline.llm_client = MagicMock()
+    recovered = [
+        "<<<TRANSLATION c0.p0.s0>>>\n" + "\u062a\u0631\u062c\u0645\u0647 \u062f\u0642\u06cc\u0642 " * 45 + "\n<<<END c0.p0.s0>>>",
+        "<<<TRANSLATION c0.p0.s1>>>\n" + "\u0628\u0631\u06af\u0631\u062f\u0627\u0646 \u0641\u0627\u0631\u0633\u06cc " * 45 + "\n<<<END c0.p0.s1>>>",
+        "<<<TRANSLATION c0.p0.s2>>>\n" + "\u0645\u062a\u0646 \u062f\u0627\u0646\u0634\u06af\u0627\u0647\u06cc " * 45 + "\n<<<END c0.p0.s2>>>",
+    ]
     pipeline.llm_client.complete.side_effect = [
         TruncatedCompletionError("whole request exhausted output budget"),
-        "part one",
-        "part two",
-        "part three",
+        *recovered,
     ]
 
     memory_context = MagicMock()
@@ -485,7 +505,8 @@ def test_single_paragraph_translation_uses_sentence_groups_after_length() -> Non
         job_id="job-sentence-recovery",
     )
 
-    assert result == "part one part two part three"
+    assert "\u062a\u0631\u062c\u0645\u0647 \u062f\u0642\u06cc\u0642" in result
+    assert "<<<TRANSLATION" not in result
     operations = [
         call.kwargs.get("_operation")
         for call in pipeline.llm_client.complete.call_args_list
@@ -501,3 +522,92 @@ def test_single_paragraph_translation_uses_sentence_groups_after_length() -> Non
     ]
     assert "translation_adaptive_split" in event_types
     assert "translation_sentence_split" in event_types
+    assert event_types.count("translation_recovery_part") == 3
+
+    prompts = [
+        call.kwargs["messages"][0]["content"]
+        for call in pipeline.llm_client.complete.call_args_list[1:]
+    ]
+    assert all("<<<TRANSLATION c0.p0.s" in prompt for prompt in prompts)
+    assert all(source not in prompt for prompt in prompts)
+    for prompt in prompts:
+        context = prompt.split("<<<CONTEXT>>>", 1)[1].split(
+            "<<<END CONTEXT>>>", 1
+        )[0]
+        assert len(context.strip()) <= 600
+
+
+def test_invalid_recovery_assembly_never_reaches_critique_or_baseline() -> None:
+    config = TarjomehConfig()
+    config.translation.enable_web_context = False
+    config.translation.enable_back_translation = False
+    config.translation.enable_critique = True
+    config.translation.enable_integrity_gate = True
+    config.glossary.enable_compliance_check = False
+    config.glossary.enable_auto_extraction = False
+
+    pipeline = object.__new__(TranslationPipeline)
+    pipeline.config = config
+    pipeline.db = MagicMock()
+    pipeline.db.get_job.return_value = {"status": "running"}
+    pipeline.llm_client = MagicMock()
+
+    def wrapped(segment_id: str, text: str) -> str:
+        return (
+            f"<<<TRANSLATION {segment_id}>>>\n{text}\n"
+            f"<<<END {segment_id}>>>"
+        )
+
+    pipeline.llm_client.complete.side_effect = [
+        TruncatedCompletionError("whole request exhausted output budget"),
+        wrapped("c0.p0", "\u0627\u06cc\u0646 \u0628\u0646\u062f \u0627\u0648\u0644 \u0628\u062f\u0648\u0646 \u0634\u0645\u0627\u0631\u0647 \u0627\u0633\u062a."),
+        wrapped("c0.p1", "\u0627\u06cc\u0646 \u0628\u0646\u062f \u062f\u0648\u0645 \u0647\u0645 \u0634\u0645\u0627\u0631\u0647 \u0631\u0627 \u062d\u0630\u0641 \u06a9\u0631\u062f\u0647 \u0627\u0633\u062a."),
+        wrapped("c0.p0", "\u0628\u0627\u0632\u0647\u0645 \u0628\u0646\u062f \u0627\u0648\u0644 \u0628\u062f\u0648\u0646 \u062f\u0627\u062f\u0647 \u0639\u062f\u062f\u06cc \u0627\u0633\u062a."),
+        wrapped("c0.p1", "\u0628\u0627\u0632\u0647\u0645 \u0628\u0646\u062f \u062f\u0648\u0645 \u0628\u062f\u0648\u0646 \u062f\u0627\u062f\u0647 \u0639\u062f\u062f\u06cc \u0627\u0633\u062a."),
+    ]
+
+    memory_context = MagicMock()
+    memory_context.style_profile = ""
+    memory_context.proper_nouns = ""
+    memory_context.long_term = ""
+    memory_context.short_term = ""
+    memory_context.bilingual_summary = ""
+    memory_context.format.return_value = ""
+    memory_manager = MagicMock()
+    memory_manager.get_context_for_chunk.return_value = memory_context
+    memory_manager.proper_nouns.pending_inline_originals.return_value = []
+
+    glossary = MagicMock()
+    glossary.find_terms.return_value = []
+    glossary.format_for_prompt.return_value = ""
+    critic = MagicMock()
+    source = "In 1973 the result was recorded.\n\nIn 2014 the value reached 40%."
+
+    try:
+        pipeline._translate_single_chunk(
+            idx=0,
+            chunk=Chunk(0, source, "", ""),
+            memory_manager=memory_manager,
+            web_searcher=MagicMock(),
+            glossary_manager=glossary,
+            compliance_checker=MagicMock(),
+            critique_tool=critic,
+            refiner_tool=MagicMock(),
+            back_translator=MagicMock(),
+            translations={},
+            job_id="job-invalid-recovery",
+        )
+        assert False, "invalid adaptive recovery should fail the chunk"
+    except ValueError as exc:
+        assert "integrity-valid baseline" in str(exc)
+
+    critic.critique.assert_not_called()
+    event_types = [
+        call.args[2] for call in pipeline.db.log_chunk_event.call_args_list
+    ]
+    assert "translation_recovery_assembly_rejected" in event_types
+    assert "integrity_initial_failed" in event_types
+    stored_statuses = [
+        call.args[2] for call in pipeline.db.update_chunk.call_args_list
+    ]
+    assert "translated" not in stored_statuses

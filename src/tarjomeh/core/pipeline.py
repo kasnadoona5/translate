@@ -299,6 +299,108 @@ def _paragraph_count(text: str) -> int:
     return len([p for p in (text or "").split("\n\n") if p.strip()])
 
 
+def _recovery_segment_instruction(segment_id: str) -> str:
+    return (
+        "\n\n### Recovery output contract\n"
+        "Return exactly one Persian translation block and no other text:\n"
+        f"<<<TRANSLATION {segment_id}>>>\n"
+        "[Persian translation of the target source only]\n"
+        f"<<<END {segment_id}>>>"
+    )
+
+
+def _parse_recovery_segment(raw: str, segment_id: str) -> tuple[str, dict[str, Any]]:
+    """Extract and validate one model-neutral adaptive-recovery segment."""
+    text = (raw or "").strip()
+    start = f"<<<TRANSLATION {segment_id}>>>"
+    end = f"<<<END {segment_id}>>>"
+    diagnostics: dict[str, Any] = {
+        "segment_id": segment_id,
+        "raw_chars": len(text),
+        "valid": False,
+        "errors": [],
+    }
+    if text.count(start) != 1 or text.count(end) != 1:
+        diagnostics["errors"].append("segment_envelope_mismatch")
+        return "", diagnostics
+    start_pos = text.find(start) + len(start)
+    end_pos = text.find(end, start_pos)
+    if end_pos < start_pos:
+        diagnostics["errors"].append("segment_envelope_order")
+        return "", diagnostics
+    residue = (text[:text.find(start)] + text[end_pos + len(end):]).strip()
+    residue = residue.replace("```text", "").replace("```", "").strip()
+    if residue or re.search(r"<<<(?:TRANSLATION|END)\s+[^>]+>>>", text[:text.find(start)] + text[end_pos + len(end):]):
+        diagnostics["errors"].append("segment_output_residue")
+    candidate = text[start_pos:end_pos].strip()
+    diagnostics["output_chars"] = len(candidate)
+    diagnostics["output_paragraphs"] = _paragraph_count(candidate)
+    if re.search(r"<<<(?:TRANSLATION|END)\s+[^>]+>>>", candidate):
+        diagnostics["errors"].append("foreign_segment_marker")
+    if not candidate:
+        diagnostics["errors"].append("empty_segment")
+    if diagnostics["output_paragraphs"] != 1:
+        diagnostics["errors"].append("paragraph_parity")
+    diagnostics["valid"] = not diagnostics["errors"]
+    return candidate, diagnostics
+
+
+def _word_shingles(text: str, width: int = 8) -> set[tuple[str, ...]]:
+    words = re.findall(r"[\w\u0600-\u06ff]+", (text or "").casefold())
+    if len(words) < width:
+        return set()
+    return {tuple(words[i:i + width]) for i in range(len(words) - width + 1)}
+
+
+def _validate_recovery_part(
+    source: str,
+    candidate: str,
+    *,
+    previous_target: str = "",
+    source_context: str = "",
+) -> dict[str, Any]:
+    """Apply conservative reject-only checks before recovery assembly."""
+    source_chars = len((source or "").strip())
+    output_chars = len((candidate or "").strip())
+    ratio = output_chars / max(1, source_chars)
+    errors: list[str] = []
+    minimum_ratio, maximum_ratio = (
+        (0.25, 3.0) if source_chars >= 80 else (0.15, 8.0)
+    )
+    if not minimum_ratio <= ratio <= maximum_ratio:
+        errors.append("source_output_size_ratio")
+    if len(re.findall(r"[\u0600-\u06ff]", candidate or "")) < 3:
+        errors.append("target_language_missing")
+
+    context_words = re.findall(r"[A-Za-z][A-Za-z'-]+", source_context or "")
+    context_sequences = {
+        " ".join(context_words[i:i + 6]).casefold()
+        for i in range(max(0, len(context_words) - 5))
+    }
+    candidate_folded = (candidate or "").casefold()
+    if any(sequence in candidate_folded for sequence in context_sequences):
+        errors.append("surrounding_source_repeated")
+
+    prior_shingles = _word_shingles(previous_target)
+    candidate_shingles = _word_shingles(candidate)
+    if prior_shingles and candidate_shingles:
+        common_shingles = len(prior_shingles & candidate_shingles)
+        overlap = common_shingles / max(1, len(candidate_shingles))
+        if len(candidate_shingles) >= 5 and common_shingles >= 3 and overlap >= 0.45:
+            errors.append("previous_translation_repeated")
+    else:
+        overlap = 0.0
+    return {
+        "valid": not errors,
+        "errors": errors,
+        "source_chars": source_chars,
+        "output_chars": output_chars,
+        "size_ratio": round(ratio, 4),
+        "previous_overlap": round(overlap, 4),
+        "context_chars": len(source_context or ""),
+    }
+
+
 def _output_extension(fmt: str) -> str:
     return "md" if fmt.lower() == "markdown" else fmt.lower()
 
@@ -2313,6 +2415,7 @@ class TranslationPipeline:
             source_text: str,
             previous: str,
             recovery_context: str = "",
+            recovery_segment_id: str = "",
         ) -> str:
             paragraph_count = len([
                 paragraph for paragraph in source_text.split("\n\n")
@@ -2330,17 +2433,19 @@ class TranslationPipeline:
             )
             if recovery_context:
                 scope = (
-                    "### Read-only surrounding source context\n"
-                    "Use this only for meaning and continuity. Translate only the "
-                    "source text in the target section below; do not repeat this "
-                    "surrounding context in the output.\n"
-                    f"{recovery_context[:8000]}\n\n"
+                    "### CONTEXT ONLY - DO NOT TRANSLATE\n"
+                    "The bounded text below is context, not a translation target.\n"
+                    "<<<CONTEXT>>>\n"
+                    f"{recovery_context[:600]}\n"
+                    "<<<END CONTEXT>>>\n\n"
                 )
                 prompt = prompt.replace(
                     "### Source text to translate\n",
                     scope + "### Source text to translate\n",
                     1,
                 )
+            if recovery_segment_id:
+                prompt += _recovery_segment_instruction(recovery_segment_id)
             return prompt
 
         user_content = build_translation_prompt(chunk.text, prev_trans)
@@ -2370,11 +2475,13 @@ class TranslationPipeline:
 
         # Translate
         self.db.update_chunk(job_id, idx, ChunkStatus.TRANSLATING)
+        initial_integrity = None
         try:
             translation = self.llm_client.complete(
                 messages=[{"role": "user", "content": user_content}],
                 system_prompt=sys_prompt,
                 _operation="translation",
+                _recovery_source_text=chunk.text,
             )
         except TruncatedCompletionError:
             recovery_paragraphs = source_paragraphs or [chunk.text.strip()]
@@ -2391,14 +2498,66 @@ class TranslationPipeline:
                     ),
                 },
             )
-            recovered_parts: list[str] = []
-            continuity = prev_trans
+
+            def request_recovery_part(
+                source_text: str,
+                previous: str,
+                segment_id: str,
+                source_context: str = "",
+            ) -> str:
+                last_diagnostics: dict[str, Any] = {}
+                for validation_attempt in range(2):
+                    effective_context = source_context if validation_attempt == 0 else ""
+                    effective_previous = previous if validation_attempt == 0 else ""
+                    prompt = build_translation_prompt(
+                        source_text,
+                        effective_previous,
+                        recovery_context=effective_context,
+                        recovery_segment_id=segment_id,
+                    )
+                    raw = self.llm_client.complete(
+                        messages=[{"role": "user", "content": prompt}],
+                        system_prompt=sys_prompt,
+                        _operation="translation_split_recovery",
+                        _recovery_source_text=source_text,
+                    ).strip()
+                    candidate, envelope = _parse_recovery_segment(raw, segment_id)
+                    content_check = _validate_recovery_part(
+                        source_text,
+                        candidate,
+                        previous_target=previous,
+                        source_context=effective_context,
+                    )
+                    errors = list(envelope.get("errors", []))
+                    errors.extend(content_check.get("errors", []))
+                    last_diagnostics = {
+                        **envelope,
+                        **content_check,
+                        "segment_id": segment_id,
+                        "validation_attempt": validation_attempt + 1,
+                        "strict_target_only": validation_attempt > 0,
+                        "valid": not errors,
+                        "errors": sorted(set(errors)),
+                    }
+                    self.db.log_chunk_event(
+                        job_id,
+                        idx,
+                        "translation_recovery_part",
+                        last_diagnostics,
+                    )
+                    if not errors:
+                        return candidate
+                raise ValueError(
+                    f"Adaptive recovery segment {segment_id} failed validation: "
+                    + ", ".join(last_diagnostics.get("errors", []))
+                )
 
             def translate_sentence_groups(
                 source_paragraph: str,
                 previous: str,
                 paragraph_index: int,
                 reason: str,
+                strict_target_only: bool = False,
             ) -> str:
                 sentence_groups = _split_source_recovery_groups(source_paragraph)
                 if len(sentence_groups) <= 1:
@@ -2418,63 +2577,115 @@ class TranslationPipeline:
                 sentence_translations: list[str] = []
                 sentence_continuity = previous
                 for sentence_index, sentence_group in enumerate(sentence_groups):
-                    sentence_prompt = build_translation_prompt(
+                    neighbors = ""
+                    if not strict_target_only:
+                        context_parts = []
+                        if sentence_index > 0:
+                            context_parts.append(
+                                "Previous source sentence group:\n"
+                                + sentence_groups[sentence_index - 1][-300:]
+                            )
+                        if sentence_index + 1 < len(sentence_groups):
+                            context_parts.append(
+                                "Next source sentence group:\n"
+                                + sentence_groups[sentence_index + 1][:300]
+                            )
+                        neighbors = "\n\n".join(context_parts)[:600]
+                    sentence_translation = request_recovery_part(
                         sentence_group,
                         sentence_continuity,
-                        recovery_context=source_paragraph,
+                        f"c{idx}.p{paragraph_index}.s{sentence_index}",
+                        neighbors,
                     )
-                    sentence_translation = self.llm_client.complete(
-                        messages=[{"role": "user", "content": sentence_prompt}],
-                        system_prompt=sys_prompt,
-                        _operation="translation_split_recovery",
-                    ).strip()
-                    if not sentence_translation:
-                        raise ValueError(
-                            "Adaptive sentence translation part "
-                            f"{sentence_index} was empty."
-                        )
                     sentence_translations.append(sentence_translation)
                     sentence_continuity = sentence_translation
                 return " ".join(sentence_translations).strip()
 
-            for part_index, source_paragraph in enumerate(recovery_paragraphs):
-                if len(recovery_paragraphs) == 1:
-                    groups = _split_source_recovery_groups(source_paragraph)
-                    if len(groups) > 1:
+            def recover_all_parts(strict_target_only: bool = False) -> str:
+                recovered_parts: list[str] = []
+                continuity = prev_trans
+                for part_index, source_paragraph in enumerate(recovery_paragraphs):
+                    part_previous = "" if strict_target_only else continuity
+                    if len(recovery_paragraphs) == 1:
+                        groups = _split_source_recovery_groups(source_paragraph)
+                        if len(groups) > 1:
+                            recovered = translate_sentence_groups(
+                                source_paragraph,
+                                part_previous,
+                                part_index,
+                                "single_paragraph_chunk_exhausted_output_budget",
+                                strict_target_only,
+                            )
+                            recovered_parts.append(recovered)
+                            continuity = recovered
+                            continue
+                    try:
+                        recovered = request_recovery_part(
+                            source_paragraph,
+                            part_previous,
+                            f"c{idx}.p{part_index}",
+                        )
+                    except TruncatedCompletionError:
                         recovered = translate_sentence_groups(
                             source_paragraph,
-                            continuity,
+                            part_previous,
                             part_index,
-                            "single_paragraph_chunk_exhausted_output_budget",
+                            "paragraph_recovery_exhausted_output_budget",
+                            strict_target_only,
                         )
-                        recovered_parts.append(recovered)
-                        continuity = recovered
-                        continue
-                part_prompt = build_translation_prompt(
-                    source_paragraph,
-                    continuity,
-                    recovery_context=chunk.text,
-                )
-                try:
-                    recovered = self.llm_client.complete(
-                        messages=[{"role": "user", "content": part_prompt}],
-                        system_prompt=sys_prompt,
-                        _operation="translation_split_recovery",
-                    ).strip()
-                except TruncatedCompletionError:
-                    recovered = translate_sentence_groups(
-                        source_paragraph,
-                        continuity,
-                        part_index,
-                        "paragraph_recovery_exhausted_output_budget",
-                    )
-                if not recovered:
+                    recovered_parts.append(recovered)
+                    continuity = recovered
+                assembled = "\n\n".join(recovered_parts)
+                if _paragraph_count(assembled) != len(recovery_paragraphs):
                     raise ValueError(
-                        f"Adaptive translation part {part_index} was empty."
+                        "Adaptive recovery assembly changed paragraph count."
                     )
-                recovered_parts.append(recovered)
-                continuity = recovered
-            translation = "\n\n".join(recovered_parts)
+                return assembled
+
+            translation = recover_all_parts()
+
+            if integrity_enabled:
+                initial_integrity = integrity_gate.evaluate(
+                    chunk.text,
+                    translation,
+                    stage="adaptive_recovery_assembly",
+                    protect_inline_english=protect_inline_english,
+                    allowed_inline_originals=allowed_inline_originals,
+                )
+                self.db.log_chunk_event(
+                    job_id, idx, "integrity_check_completed",
+                    initial_integrity.to_dict(),
+                )
+                if not initial_integrity.accepted:
+                    self.db.log_chunk_event(
+                        job_id,
+                        idx,
+                        "translation_recovery_assembly_rejected",
+                        {
+                            **initial_integrity.to_dict(),
+                            "action": "strict_target_only_retry",
+                        },
+                    )
+                    translation = recover_all_parts(strict_target_only=True)
+                    initial_integrity = integrity_gate.evaluate(
+                        chunk.text,
+                        translation,
+                        stage="adaptive_recovery_strict_assembly",
+                        protect_inline_english=protect_inline_english,
+                        allowed_inline_originals=allowed_inline_originals,
+                    )
+                    self.db.log_chunk_event(
+                        job_id, idx, "integrity_check_completed",
+                        initial_integrity.to_dict(),
+                    )
+                    if not initial_integrity.accepted:
+                        self.db.log_chunk_event(
+                            job_id, idx, "integrity_initial_failed",
+                            initial_integrity.to_dict(),
+                        )
+                        raise ValueError(
+                            "Adaptive recovery produced no integrity-valid baseline."
+                        )
         if not translation or not translation.strip():
             raise ValueError(f"LLM returned an empty or whitespace-only translation for chunk {idx}.")
         self.db.update_chunk(job_id, idx, ChunkStatus.TRANSLATED, translation)
@@ -2483,7 +2694,7 @@ class TranslationPipeline:
             "translation_paragraphs": _paragraph_count(translation),
             "expected_paragraphs": n_source_paras,
         })
-        if integrity_enabled:
+        if integrity_enabled and initial_integrity is None:
             initial_integrity = integrity_gate.evaluate(
                 chunk.text,
                 translation,

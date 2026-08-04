@@ -283,7 +283,29 @@ class TestWebUI(unittest.TestCase):
                         "missing_entities": ["The Politics of Operations"],
                     },
                 },
-            }
+            },
+            {
+                "chunk_index": 0,
+                "event_type": "integrity_final_failed",
+                "payload": {
+                    "blocking_count": 1,
+                    "findings": [{"check_id": "numbers_missing"}],
+                },
+            },
+            {
+                "chunk_index": 0,
+                "event_type": "translation_recovery_part",
+                "payload": {
+                    "segment_id": "c0.p0",
+                    "validation_attempt": 1,
+                    "strict_target_only": False,
+                    "source_chars": 100,
+                    "output_chars": 90,
+                    "size_ratio": 0.9,
+                    "valid": True,
+                    "errors": [],
+                },
+            },
         ]
 
         response = self.client.get(
@@ -295,7 +317,11 @@ class TestWebUI(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("Job Configuration:", report)
         self.assertIn("QA Verdict:", report)
-        self.assertIn("status=review_required", report)
+        self.assertIn("status=quality_fail", report)
+        self.assertIn("classification=QUALITY FAIL", report)
+        self.assertIn("integrity_final_failed", report)
+        self.assertIn("Recovery part c0.p0", report)
+        self.assertIn("source=100 output=90", report)
         self.assertIn("reasons=chunk_needs_review", report)
         self.assertIn("threshold=9.0 refinements=2", report)
         self.assertIn(
@@ -309,6 +335,36 @@ class TestWebUI(unittest.TestCase):
             report,
         )
         self.assertIn("Citation preserved (not terminology): Caceres", report)
+
+    @patch("tarjomeh.jobs.database.JobDatabase")
+    def test_qa_report_distinguishes_missing_output_from_quality_failure(
+        self, mock_db_cls: MagicMock
+    ) -> None:
+        mock_db = mock_db_cls.return_value
+        mock_db.get_job.return_value = {
+            "id": "job-missing",
+            "input_path": "book.pdf",
+            "status": "completed",
+            "config": {},
+        }
+        mock_db.get_job_artifact.return_value = None
+        mock_db.get_chunks.return_value = [{
+            "chunk_index": 0,
+            "status": "completed",
+            "translation": "",
+        }]
+        mock_db.get_chunk_events.return_value = []
+
+        response = self.client.get(
+            "/api/jobs/job-missing/qa-report",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        report = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("status=content_fail", report)
+        self.assertIn("classification=CONTENT FAIL", report)
+        self.assertIn("missing_output", report)
 
     def test_safe_glossary_upload_path_sanitizes_filename(self) -> None:
         from tarjomeh.web.app import _safe_glossary_upload_path
