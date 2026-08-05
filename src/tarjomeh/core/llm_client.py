@@ -800,6 +800,21 @@ class LLMClient:
     ) -> dict[str, Any]:
         prompt_metrics = self._prompt_metrics(payload)
         usage_evidence = self._usage_evidence(usage, content)
+        contract = {
+            key: payload.get(key)
+            for key in (
+                "model", "messages", "temperature", "reasoning", "response_format"
+            )
+            if key in payload
+        }
+        contract_sha256 = hashlib.sha256(
+            json.dumps(
+                contract,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         event = {
             "operation": operation,
             "attempt": attempt + 1,
@@ -830,6 +845,9 @@ class LLMClient:
             "response_model": response_model,
             "max_tokens": payload.get("max_tokens"),
             "reasoning": payload.get("reasoning"),
+            "temperature": payload.get("temperature"),
+            "response_format": payload.get("response_format"),
+            "request_contract_sha256": contract_sha256,
             "prompt_tokens": usage.get("prompt_tokens", 0),
             "completion_tokens": usage.get("completion_tokens", 0),
             "total_tokens": usage.get("total_tokens", 0),

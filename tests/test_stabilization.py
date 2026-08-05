@@ -114,6 +114,7 @@ class TestBoundedRecovery(unittest.TestCase):
     def test_second_critic_and_refiner_attempts_change_only_budget(self) -> None:
         for operation in ("critique", "refinement"):
             payloads = []
+            events = []
             responses = iter([
                 _response("partial", "length"),
                 _response("complete", "stop"),
@@ -124,6 +125,7 @@ class TestBoundedRecovery(unittest.TestCase):
                 return next(responses)
 
             self.client._client.post = post
+            self.client.set_attempt_observer(events.append)
             self.client.complete(
                 messages=[{"role": "user", "content": "Quality request."}],
                 response_format={"type": "json_object"},
@@ -139,6 +141,10 @@ class TestBoundedRecovery(unittest.TestCase):
             }
             self.assertEqual(second_contract, first_contract)
             self.assertGreater(payloads[1]["max_tokens"], payloads[0]["max_tokens"])
+            self.assertEqual(
+                events[1]["request_contract_sha256"],
+                events[0]["request_contract_sha256"],
+            )
 
     def test_structured_helper_uses_compact_non_reasoning_contract(self) -> None:
         payloads = []
