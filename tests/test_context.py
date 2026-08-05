@@ -88,6 +88,7 @@ class TestWebContextSearcher(unittest.IsolatedAsyncioTestCase):
 
         # 1. Verify LLM and search were called
         mock_llm.chat.assert_called_once()
+        mock_llm.set_operation.assert_called_with("web_context_term_detection")
         mock_provider.search.assert_called_once_with("hegemony definition")
 
         # 2. Verify returned context format
@@ -102,6 +103,7 @@ class TestWebContextSearcher(unittest.IsolatedAsyncioTestCase):
         context_str2 = await searcher.get_context_for_chunk(chunk2)
 
         mock_llm.chat.assert_called_once()  # still identifies terms
+        mock_llm.set_operation.assert_called_with("web_context_term_detection")
         mock_provider.search.assert_not_called()  # but uses cache!
         self.assertIn("Hegemony means leadership.", context_str2)
 

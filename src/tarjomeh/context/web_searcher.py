@@ -59,6 +59,8 @@ class WebContextSearcher:
         prompt = WEB_CONTEXT_PROMPT.format(text=chunk.text, known_terms=known_terms)
 
         try:
+            if hasattr(self.llm_client, "set_operation"):
+                self.llm_client.set_operation("web_context_term_detection")
             response = await self.llm_client.chat(prompt)
             cleaned = response.strip()
             if cleaned.startswith("```"):

@@ -164,6 +164,10 @@ class MemoryManager:
             prompt = INCREMENTAL_NER_PROMPT.format(known_entities=known, text=text)
 
         try:
+            if hasattr(llm_client, "set_operation"):
+                llm_client.set_operation(
+                    "proper_noun_incremental" if known else "proper_noun_initial"
+                )
             response = await llm_client.chat(prompt)
             # Clean possible markdown fences
             cleaned = response.strip()
@@ -210,6 +214,8 @@ class MemoryManager:
         )
 
         try:
+            if hasattr(llm_client, "set_operation"):
+                llm_client.set_operation("bilingual_summary_update")
             response = await llm_client.chat(prompt)
             self.bilingual_summary.update(response)
         except Exception as exc:

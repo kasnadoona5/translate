@@ -770,6 +770,7 @@ def _register_api(app: Flask) -> None:
         glossary_config = job_config.get("glossary", {})
         output_config = job_config.get("output", {})
         search_config = job_config.get("web_search", {})
+        recovery_config = job_config.get("llm", {}).get("recovery", {})
         critic_config = job_config.get("llm", {}).get("critic", {})
         lines.extend([
             "Job Configuration:",
@@ -781,6 +782,10 @@ def _register_api(app: Flask) -> None:
             f"  critic_recovery_attempts={critic_config.get('recovery_max_attempts')} "
             f"fallback={critic_config.get('recovery_model') or '(same model)'} "
             f"final_tokens={critic_config.get('recovery_max_tokens')}",
+            f"  predictive_budget={recovery_config.get('predictive_first_attempt')} "
+            f"minimum={recovery_config.get('predictive_min_tokens')} "
+            f"bootstrap_reasoning={recovery_config.get('bootstrap_reasoning_tokens')} "
+            f"ceiling={recovery_config.get('adaptive_max_tokens')}",
             f"  integrity_gate={translation_config.get('enable_integrity_gate')}",
             f"  back_translation={translation_config.get('enable_back_translation')} "
             f"sample_pct={translation_config.get('back_translation_sample_pct')}",

@@ -177,6 +177,7 @@ class TestMemoryManager(unittest.IsolatedAsyncioTestCase):
         # 1. Test update_proper_nouns
         mock_llm.chat.return_value = '[{"term": "Hegemony", "suggested_persian": "هژمونی"}]'
         await self.manager.update_proper_nouns(mock_llm, "English text discussing Hegemony")
+        mock_llm.set_operation.assert_called_with("proper_noun_initial")
         self.assertEqual(
             self.manager.proper_nouns.serialize()["nouns"].get("Hegemony"), "هژمونی"
         )
@@ -189,6 +190,7 @@ class TestMemoryManager(unittest.IsolatedAsyncioTestCase):
             "مقدمه‌ای بر فلسفه سیاسی.\n"
         )
         await self.manager.update_bilingual_summary(mock_llm, "new source text", "new translation text")
+        mock_llm.set_operation.assert_called_with("bilingual_summary_update")
         self.assertEqual(self.manager.bilingual_summary.english_summary, "Political philosophy introduction.")
         self.assertEqual(self.manager.bilingual_summary.persian_summary, "مقدمه‌ای بر فلسفه سیاسی.")
 

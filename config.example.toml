@@ -1,4 +1,4 @@
-# Tarjomeh v9.3 configuration template
+# Tarjomeh v9.4 configuration template
 #
 # 1. Copy this file to config.toml.
 # 2. Keep API keys and UI secrets in .env.
@@ -30,12 +30,15 @@ max_tokens = 24000
 # Estimate enough answer/reasoning room before Attempt 1. Reserved tokens are a
 # ceiling; providers normally bill only tokens actually generated.
 predictive_first_attempt = true
-bootstrap_reasoning_tokens = 16000
+# First attempts never fall below this allowance when context capacity permits.
+predictive_min_tokens = 50000
+bootstrap_reasoning_tokens = 24000
 # Absolute adaptive output ceiling and model context-window guardrail. Override
 # context_window_tokens when the configured model has a smaller context window.
 adaptive_max_tokens = 65536
 context_window_tokens = 131072
 context_safety_tokens = 2048
+# Cap the diagnostic sample counter; the high-water mark never decays.
 history_window = 20
 expanded_final_attempt = false
 final_reasoning_effort = "none"

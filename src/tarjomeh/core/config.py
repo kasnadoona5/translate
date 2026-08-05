@@ -145,7 +145,8 @@ class LLMRecoveryConfig:
     reasoning_effort: str = "low"
     max_tokens: int = 24000
     predictive_first_attempt: bool = True
-    bootstrap_reasoning_tokens: int = 16000
+    predictive_min_tokens: int = 50000
+    bootstrap_reasoning_tokens: int = 24000
     adaptive_max_tokens: int = 65536
     context_window_tokens: int = 131072
     context_safety_tokens: int = 2048
@@ -722,9 +723,20 @@ class TarjomehConfig:
             errors.append("llm.recovery.max_tokens must be >= 512")
         if self.llm.recovery.bootstrap_reasoning_tokens < 0:
             errors.append("llm.recovery.bootstrap_reasoning_tokens must be >= 0")
+        if self.llm.recovery.predictive_min_tokens < self.llm.max_tokens:
+            errors.append(
+                "llm.recovery.predictive_min_tokens must be >= llm.max_tokens"
+            )
         if self.llm.recovery.adaptive_max_tokens < self.llm.max_tokens:
             errors.append(
                 "llm.recovery.adaptive_max_tokens must be >= llm.max_tokens"
+            )
+        if (
+            self.llm.recovery.predictive_min_tokens
+            > self.llm.recovery.adaptive_max_tokens
+        ):
+            errors.append(
+                "llm.recovery.predictive_min_tokens must be <= adaptive_max_tokens"
             )
         if self.llm.recovery.context_safety_tokens < 0:
             errors.append("llm.recovery.context_safety_tokens must be >= 0")

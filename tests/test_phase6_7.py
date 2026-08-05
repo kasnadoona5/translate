@@ -415,7 +415,11 @@ class TestBookResearcher(unittest.IsolatedAsyncioTestCase):
         self.assertIn("TruncatedCompletionError", result.error)
         self.assertEqual(
             [call.args[0] for call in llm.set_operation.call_args_list],
-            ["book_research", "book_research_batch", "book_research_synthesis"],
+            [
+                "book_research_initial",
+                "book_research_batch",
+                "book_research_synthesis",
+            ],
         )
 
 

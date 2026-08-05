@@ -176,15 +176,17 @@ CRITIC_RECOVERY_MAX_TOKENS=24000
 The normal request keeps the same prompt, model, temperature, and reasoning
 policy, but its output allowance is sized before sending. Tarjomeh combines an
 answer estimate, a conservative first-chunk reasoning reserve, model/operation
-history, and a 1.25 uncertainty margin. The 12,000-token setting remains the
-minimum allowance rather than forcing every first request to stop there.
+history, and a 1.25 uncertainty margin. Predictive calls receive at least the
+configured 50,000-token allowance when context capacity permits. Successful
+short calls never reduce that floor or an operation's learned high-water mark.
 
 Configure the adaptive guardrails in `config.toml`:
 
 ```toml
 [llm.recovery]
 predictive_first_attempt = true
-bootstrap_reasoning_tokens = 16000
+predictive_min_tokens = 50000
+bootstrap_reasoning_tokens = 24000
 adaptive_max_tokens = 65536
 context_window_tokens = 131072
 context_safety_tokens = 2048
@@ -192,7 +194,10 @@ history_window = 20
 ```
 
 After a length failure, Attempt 2 recalculates from that request's direct usage
-evidence and must request a larger allowance when context capacity permits.
+evidence and must request a 50% larger allowance when context capacity permits.
+That lower bound becomes the operation's monotonic high-water mark for later
+calls. Proper-noun extraction, memory summaries, web-term detection, research,
+translation, critique, and refinement maintain separate histories.
 Provider reasoning counters are normalized when a gateway reports them in a
 different token scale. A configured translator fallback adds one final bounded
 model rung. Repeated truncation activates validated paragraph recovery, then
@@ -845,10 +850,11 @@ python -m pytest -q
 python -m compileall -q src tests
 ```
 
-The v9.3 suite contains 183 passing tests.
+The v9.4 suite contains 185 passing tests.
 
 ## Release History
 
+- v9.4: 50K monotonic first-attempt floor and operation-isolated budgeting
 - v9.3: predictive first-attempt budgets, evidence-based recovery, prompt diagnostics
 - v9.2: validated adaptive translation recovery and assembly integrity
 - v9.0: per-issue MQM refinement decisions

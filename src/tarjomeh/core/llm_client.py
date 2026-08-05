@@ -35,6 +35,8 @@ _FULL_QUALITY_LENGTH_RECOVERY_OPERATIONS = {
     "translation",
     "translation_split_recovery",
     "book_research",
+    "book_research_initial",
+    "book_research_followup",
     "book_research_batch",
     "book_research_synthesis",
 }
@@ -106,7 +108,7 @@ class LLMClient:
         self._api_key_index = 0
         self._api_key_lock = threading.Lock()
         self._attempt_observer: Any = None
-        self._budget_history: dict[tuple[str, str], list[int]] = {}
+        self._budget_history: dict[tuple[str, str], dict[str, int]] = {}
         self._budget_lock = threading.Lock()
 
     @property
@@ -232,14 +234,11 @@ class LLMClient:
             "visible_tokens": visible,
         }
 
-    def _history_percentile(self, model: str, operation: str) -> tuple[int, int]:
+    def _history_high_water(self, model: str, operation: str) -> tuple[int, int]:
         key = (model, operation)
         with self._budget_lock:
-            values = sorted(self._budget_history.get(key, []))
-        if not values:
-            return 0, 0
-        index = max(0, math.ceil(len(values) * 0.90) - 1)
-        return values[index], len(values)
+            stats = dict(self._budget_history.get(key, {}))
+        return int(stats.get("high_water", 0)), int(stats.get("samples", 0))
 
     def _record_budget_observation(
         self,
@@ -253,15 +252,20 @@ class LLMClient:
         evidence = self._usage_evidence(usage, content)
         consumed = max(evidence["completion_tokens"], evidence["visible_tokens"])
         if finish_reason == "length":
-            consumed = max(consumed, int(payload.get("max_tokens", 0)))
+            failed_budget = int(payload.get("max_tokens", 0))
+            consumed = max(consumed, math.ceil(failed_budget * 1.50))
         if consumed <= 0:
             return
         key = (str(payload.get("model", "")), operation)
-        window = max(3, int(self.config.llm.recovery.history_window))
         with self._budget_lock:
-            values = self._budget_history.setdefault(key, [])
-            values.append(consumed)
-            del values[:-window]
+            stats = self._budget_history.setdefault(
+                key, {"high_water": 0, "samples": 0}
+            )
+            stats["high_water"] = max(int(stats["high_water"]), consumed)
+            stats["samples"] = min(
+                int(self.config.llm.recovery.history_window),
+                int(stats["samples"]) + 1,
+            )
 
     def _answer_estimate(
         self,
@@ -300,22 +304,31 @@ class LLMClient:
         answer_estimate, answer_evidence = self._answer_estimate(
             payload, expected_output_tokens
         )
-        historical_total, history_samples = self._history_percentile(
+        historical_total, history_samples = self._history_high_water(
             str(payload.get("model", "")), operation
         )
-        if history_samples >= 3:
-            reasoning_estimate = max(0, historical_total - answer_estimate)
-            reasoning_evidence = "model_operation_p90"
-        else:
-            reasoning_estimate = max(0, int(recovery.bootstrap_reasoning_tokens))
-            reasoning_evidence = "bootstrap"
+        reasoning_estimate = max(
+            int(recovery.bootstrap_reasoning_tokens),
+            historical_total - answer_estimate,
+        )
+        reasoning_evidence = (
+            "model_operation_high_water" if historical_total else "bootstrap"
+        )
 
         answer_headroom = math.ceil(answer_estimate * 1.35) + 512
         reasoning_headroom = math.ceil(reasoning_estimate * 1.20)
         calculated = math.ceil((answer_headroom + reasoning_headroom) * 1.25)
         original_max = int(payload.get("max_tokens", self.config.llm.max_tokens))
         ceiling, prompt_tokens = self._adaptive_ceiling(payload)
-        requested = min(max(original_max, calculated), ceiling)
+        requested = min(
+            max(
+                original_max,
+                int(recovery.predictive_min_tokens),
+                historical_total,
+                calculated,
+            ),
+            ceiling,
+        )
         payload["max_tokens"] = requested
         return payload, {
             "stage": "preflight",
@@ -324,7 +337,7 @@ class LLMClient:
             "reasoning_estimate_tokens": reasoning_estimate,
             "reasoning_evidence": reasoning_evidence,
             "history_samples": history_samples,
-            "historical_p90_completion_tokens": historical_total,
+            "historical_high_water_tokens": historical_total,
             "answer_headroom_tokens": answer_headroom,
             "reasoning_headroom_tokens": reasoning_headroom,
             "uncertainty_multiplier": 1.25,
@@ -650,7 +663,7 @@ class LLMClient:
         ):
             calculated = max(calculated, int(recovery.max_tokens))
         ceiling, prompt_tokens = self._adaptive_ceiling(payload)
-        minimum_growth = max(1024, math.ceil(original_max * 0.15))
+        minimum_growth = max(1024, math.ceil(original_max * 0.50))
         requested = min(max(original_max + minimum_growth, calculated), ceiling)
         payload["max_tokens"] = requested
         calculation = {

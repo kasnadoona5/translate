@@ -152,7 +152,11 @@ class BookResearcher:
                     self._evidence_text(sources),
                     allow_follow_ups=allow_follow_ups,
                 ),
-                "book_research",
+                (
+                    "book_research_initial"
+                    if allow_follow_ups
+                    else "book_research_followup"
+                ),
             )
             return data, False, ""
         except Exception as exc:
