@@ -246,6 +246,18 @@ class TestPhase7Persistence(unittest.TestCase):
 
 
 class TestBookResearcher(unittest.IsolatedAsyncioTestCase):
+    def test_follow_up_query_objects_use_query_text_not_python_repr(self) -> None:
+        queries = BookResearcher._normalise_follow_ups(
+            [
+                {"query": "author concept", "rationale": "resolve ambiguity"},
+                {"query": "author concept", "rationale": "duplicate"},
+                {"rationale": "missing query"},
+            ],
+            existing=[],
+            limit=3,
+        )
+        self.assertEqual(queries, ["author concept"])
+
     async def test_research_is_bounded_reviewable_and_source_checked(self) -> None:
         config = TarjomehConfig()
         llm = MagicMock()

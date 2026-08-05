@@ -111,6 +111,51 @@ class TestBoundedRecovery(unittest.TestCase):
             calculation["applied_max_tokens"], payloads[1]["max_tokens"]
         )
 
+    def test_second_critic_and_refiner_attempts_change_only_budget(self) -> None:
+        for operation in ("critique", "refinement"):
+            payloads = []
+            responses = iter([
+                _response("partial", "length"),
+                _response("complete", "stop"),
+            ])
+
+            def post(*args, **kwargs):
+                payloads.append(json.loads(json.dumps(kwargs["json"])))
+                return next(responses)
+
+            self.client._client.post = post
+            self.client.complete(
+                messages=[{"role": "user", "content": "Quality request."}],
+                response_format={"type": "json_object"},
+                _operation=operation,
+            )
+            first_contract = {
+                key: value for key, value in payloads[0].items()
+                if key != "max_tokens"
+            }
+            second_contract = {
+                key: value for key, value in payloads[1].items()
+                if key != "max_tokens"
+            }
+            self.assertEqual(second_contract, first_contract)
+            self.assertGreater(payloads[1]["max_tokens"], payloads[0]["max_tokens"])
+
+    def test_structured_helper_uses_compact_non_reasoning_contract(self) -> None:
+        payloads = []
+
+        def post(*args, **kwargs):
+            payloads.append(json.loads(json.dumps(kwargs["json"])))
+            return _response('{"book_context":"ok","terms":[]}', "stop")
+
+        self.client._client.post = post
+        self.client.complete(
+            messages=[{"role": "user", "content": "Return JSON only."}],
+            _operation="book_research_initial",
+        )
+        self.assertEqual(payloads[0]["max_tokens"], self.config.llm.max_tokens)
+        self.assertEqual(payloads[0]["reasoning"]["effort"], "none")
+        self.assertEqual(payloads[0]["response_format"], {"type": "json_object"})
+
     def test_translation_recovery_uses_evidence_based_budget_formula(self) -> None:
         self.config.llm.recovery.max_tokens = 50000
         source = "Academic source sentence. " * 200
@@ -234,8 +279,10 @@ class TestBoundedRecovery(unittest.TestCase):
         self.client.complete(messages=messages, _operation="proper_noun_incremental")
         self.client.complete(messages=messages, _operation="web_context_term_detection")
 
-        self.assertEqual(payloads[1]["max_tokens"], 65536)
-        self.assertEqual(payloads[2]["max_tokens"], 50000)
+        self.assertEqual(payloads[1]["max_tokens"], 18000)
+        self.assertEqual(payloads[2]["max_tokens"], self.config.llm.max_tokens)
+        self.assertEqual(payloads[1]["reasoning"]["effort"], "none")
+        self.assertEqual(payloads[2]["reasoning"]["effort"], "none")
 
     def test_second_translation_attempt_uses_configured_fallback(self) -> None:
         self.config.llm.recovery.model = "recovery-combo"
@@ -322,7 +369,7 @@ class TestBoundedRecovery(unittest.TestCase):
         self.assertEqual(result, "recovered")
         self.assertGreater(payloads[0]["max_tokens"], 12000)
         self.assertNotEqual(payloads[0].get("reasoning", {}).get("effort"), "none")
-        self.assertEqual(payloads[1]["reasoning"]["effort"], "low")
+        self.assertEqual(payloads[1]["reasoning"], payloads[0]["reasoning"])
         self.assertEqual(payloads[2]["reasoning"]["effort"], "none")
         self.assertGreaterEqual(payloads[2]["max_tokens"], 24000)
 

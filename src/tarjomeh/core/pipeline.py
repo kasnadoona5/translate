@@ -37,7 +37,10 @@ from tarjomeh.glossary.compliance import (
     term_occurs_only_in_citations,
 )
 from tarjomeh.persian.typography import PersianTypographer
-from tarjomeh.persian.orthography import apply_safe_persian_orthography
+from tarjomeh.persian.orthography import (
+    apply_safe_persian_orthography,
+    orthography_issue_count,
+)
 from tarjomeh.core.term_notes import (
     apply_term_notes,
     audit_inline_english_originals,
@@ -933,6 +936,14 @@ class TranslationPipeline:
         if not job_id:
             return
         if chunk_index is None:
+            # Keep the human-readable log while also retaining the full
+            # sanitized evidence used by VPS audits and QA diagnostics.
+            self.db.log_chunk_event(
+                job_id,
+                -1,
+                "llm_call_attempt",
+                payload,
+            )
             self.db.log_event(
                 job_id,
                 "INFO" if payload.get("success") else "WARNING",
@@ -1822,12 +1833,24 @@ class TranslationPipeline:
                     "paragraph_index": p.index,
                     **edit,
                 })
+        remaining_orthography_issues = sum(
+            orthography_issue_count(p.translated_text)
+            for p in trans_doc.paragraphs
+        )
         self.db.save_job_artifact(job_id, "persian_orthography_audit", {
             "edit_count": sum(
                 int(edit.get("count", 0)) for edit in final_orthography_edits
             ),
+            "remaining_issue_count": remaining_orthography_issues,
             "edits": final_orthography_edits,
         })
+        if remaining_orthography_issues:
+            warning = (
+                "Persian orthography audit found "
+                f"{remaining_orthography_issues} unresolved deterministic issue(s)."
+            )
+            self.warnings.append(warning)
+            self.db.log_event(job_id, "WARNING", warning)
 
         requested_note_mode = self.config.output.term_notes
         note_mode = effective_term_notes_mode(

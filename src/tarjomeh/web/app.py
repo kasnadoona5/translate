@@ -188,8 +188,9 @@ def _register_routes(app: Flask) -> None:
         runtime_config = app.config["TARJOMEH_CONFIG"]
         return render_template("index.html", ui_defaults={
             "qa_json_retries": runtime_config.translation.qa_json_retries,
-            "critic_recovery_tokens": (
-                runtime_config.llm.critic.recovery_max_tokens
+            "critic_recovery_tokens": max(
+                runtime_config.llm.critic.recovery_max_tokens,
+                runtime_config.llm.recovery.predictive_min_tokens,
             ),
             "predictive_min_tokens": (
                 runtime_config.llm.recovery.predictive_min_tokens

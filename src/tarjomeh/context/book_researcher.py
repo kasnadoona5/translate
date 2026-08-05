@@ -277,6 +277,8 @@ class BookResearcher:
         seen = {" ".join(query.casefold().split()) for query in existing}
         follow_ups: list[str] = []
         for value in raw_queries:
+            if isinstance(value, dict):
+                value = value.get("query", "")
             query = " ".join(str(value).split()).strip()[:300]
             key = query.casefold()
             if not query or key in seen:

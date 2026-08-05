@@ -13,7 +13,10 @@ from tarjomeh.core.term_notes import (
     normalize_adjacent_original_citations,
 )
 from tarjomeh.exporters.base import TranslatedDocument, TranslatedParagraph
-from tarjomeh.persian.orthography import apply_safe_persian_orthography
+from tarjomeh.persian.orthography import (
+    apply_safe_persian_orthography,
+    orthography_issue_count,
+)
 from tarjomeh.persian.typography import PersianTypographer
 from tarjomeh.quality.critique import CritiqueResult, TranslationCritique
 from tarjomeh.quality.grounding import indexed_source, resolve_source_segment
@@ -44,6 +47,18 @@ def test_safe_orthography_repairs_only_known_noncanonical_forms() -> None:
         "بررسی شدند (Marx 1973, 408)."
     )
     assert sum(edit["count"] for edit in edits) == 5
+
+
+def test_safe_orthography_preserves_plural_hay_and_repairs_old_corruption() -> None:
+    correct = "نظام‌های اجتماعی و عملیات‌های سرمایه"
+    assert apply_safe_persian_orthography(correct) == (correct, [])
+
+    malformed = "نظام‌ه‌ای اجتماعی و عملیات‌ه‌ای سرمایه"
+    repaired, edits = apply_safe_persian_orthography(malformed)
+    assert repaired == correct
+    assert sum(edit["count"] for edit in edits) == 2
+    assert orthography_issue_count(repaired) == 0
+    assert apply_safe_persian_orthography(repaired) == (repaired, [])
 
 
 def test_publication_original_moves_from_lowercase_concept_to_title() -> None:
@@ -89,6 +104,19 @@ def test_citation_merging_requires_source_grounding() -> None:
     assert document.paragraphs[0].translated_text.startswith(
         "مارکس (Marx, 1973, 408)"
     )
+    assert report["normalized_count"] == 1
+
+
+def test_bare_author_year_is_merged_only_when_source_grounded() -> None:
+    document = TranslatedDocument(paragraphs=[TranslatedParagraph(
+        index=0,
+        source_text="Cáceres 2014 discusses the campaign.",
+        translated_text="کاسرس (Cáceres) 2014 کارزار را بررسی می‌کند.",
+    )])
+    report = normalize_adjacent_original_citations(
+        document, {"Cáceres": "کاسرس"}
+    )
+    assert "کاسرس (Cáceres, 2014)" in document.paragraphs[0].translated_text
     assert report["normalized_count"] == 1
 
 
@@ -217,3 +245,17 @@ def test_web_recovery_controls_follow_runtime_defaults() -> None:
     assert 'id="cfgCriticRecoveryTokens"' in page
     assert 'value="50000"' in page
     assert "Optional 24K recovery model or combo" not in page
+
+
+def test_web_critic_allowance_never_displays_below_effective_floor() -> None:
+    from tarjomeh.web.app import create_app
+
+    app = create_app()
+    app.config["TESTING"] = True
+    runtime = app.config["TARJOMEH_CONFIG"]
+    runtime.llm.critic.recovery_max_tokens = 24000
+    runtime.llm.recovery.predictive_min_tokens = 50000
+
+    page = app.test_client().get("/").get_data(as_text=True)
+    assert 'id="cfgCriticRecoveryTokens"' in page
+    assert 'value="50000"' in page

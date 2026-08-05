@@ -149,6 +149,10 @@ _ADJACENT_ORIGINAL_CITATION_RE = re.compile(
     r"\((?P<original>[A-Za-zÀ-ž][^()]{0,120}?)\)\s+"
     r"\((?P<citation>[^()]*\d[^()]*)\)"
 )
+_ORIGINAL_BARE_YEAR_RE = re.compile(
+    r"\((?P<original>[A-Za-zÀ-ž][^()]{0,120}?)\)\s+"
+    r"(?P<citation>(?:1[5-9]|20)\d{2}[a-z]?(?:\s*,\s*\d+(?:[-–]\d+)?)?)"
+)
 
 
 def normalize_adjacent_original_citations(
@@ -182,6 +186,31 @@ def normalize_adjacent_original_citations(
 
         paragraph.translated_text = _ADJACENT_ORIGINAL_CITATION_RE.sub(
             replace, paragraph.translated_text or ""
+        )
+
+        def replace_bare_year(match: re.Match[str]) -> str:
+            original = " ".join(match.group("original").split())
+            citation = " ".join(match.group("citation").split())
+            if original.casefold() not in authorized:
+                return match.group(0)
+            source_pattern = re.compile(
+                rf"{re.escape(original)}\s+{re.escape(citation)}",
+                re.IGNORECASE,
+            )
+            if not source_pattern.search(paragraph.source_text or ""):
+                return match.group(0)
+            combined = f"({original}, {citation})"
+            changes.append({
+                "paragraph_index": paragraph.index,
+                "before": match.group(0),
+                "after": combined,
+                "original": original,
+                "citation": citation,
+            })
+            return combined
+
+        paragraph.translated_text = _ORIGINAL_BARE_YEAR_RE.sub(
+            replace_bare_year, paragraph.translated_text or ""
         )
     return {"normalized_count": len(changes), "changes": changes}
 

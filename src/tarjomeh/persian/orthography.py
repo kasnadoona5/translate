@@ -27,15 +27,22 @@ _SAFE_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
         re.compile(r"(?<![\w\u200c])صورت\s+بندی(?=$|[\s،؛:,.!?؟])"),
         "صورت\u200cبندی",
     ),
+    # Repair only the known missing-heh spelling. A former broad ``های`` rule
+    # corrupted every correct plural (e.g. نظام‌های -> نظام‌ه‌ای).
     (
-        "heh_ezafe_zwnj",
-        re.compile(r"های(?=تر(?:\b|$)|(?:\b|$))"),
-        "ه\u200cای",
+        "marginal_ezafe_zwnj",
+        re.compile(r"حاشیهای(?=تر(?:\b|$)|(?:\b|$))"),
+        "حاشیه\u200cای",
     ),
     (
         "comparative_after_ezafe_zwnj",
         re.compile(r"ه\u200cایتر(?=\b|$)"),
         "ه\u200cای\u200cتر",
+    ),
+    (
+        "malformed_plural_heh_ezafe",
+        re.compile(r"(?<!ه)(?<=[\u0600-\u06ff])\u200cه\u200cای(?=\b|$)"),
+        "\u200cهای",
     ),
 )
 

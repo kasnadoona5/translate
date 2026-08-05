@@ -31,14 +31,47 @@ _SCHEMA_REPAIR_OPERATIONS = {
     "refinement_json_repair",
 }
 
-_FULL_QUALITY_LENGTH_RECOVERY_OPERATIONS = {
-    "translation",
-    "translation_split_recovery",
+# Bounded JSON helpers do not benefit from long hidden reasoning traces. Keeping
+# them separate also prevents their budgets from contaminating translation and
+# QA history for the same model.
+_STRUCTURED_HELPER_OPERATIONS = {
+    "auto_term_extraction",
     "book_research",
     "book_research_initial",
     "book_research_followup",
     "book_research_batch",
     "book_research_synthesis",
+    "proper_noun_initial",
+    "proper_noun_incremental",
+    "web_context_term_detection",
+}
+_JSON_OBJECT_HELPER_OPERATIONS = {
+    "auto_term_extraction",
+    "book_research",
+    "book_research_initial",
+    "book_research_followup",
+    "book_research_batch",
+    "book_research_synthesis",
+}
+
+# For these quality-bearing operations, a length-only retry must preserve the
+# exact request contract. Attempt 2 may increase only max_tokens.
+_UNCHANGED_SECOND_ATTEMPT_OPERATIONS = {
+    "translation",
+    "translation_split_recovery",
+    "critique",
+    "refinement",
+}
+_PRESERVE_REASONING_ON_ALL_LENGTH_RETRIES = {
+    "translation",
+    "translation_split_recovery",
+} | _STRUCTURED_HELPER_OPERATIONS
+
+_FULL_QUALITY_LENGTH_RECOVERY_OPERATIONS = {
+    "translation",
+    "translation_split_recovery",
+    "critique",
+    "refinement",
 }
 _QUALITY_RECOVERY_OPERATIONS = {
     "critique",
@@ -299,6 +332,18 @@ class LLMClient:
         recovery = self.config.llm.recovery
         if not recovery.enabled or not recovery.predictive_first_attempt:
             return original, {}
+
+        # Structured helpers have tightly bounded JSON answers. Applying the
+        # 50K quality floor here lets reasoning-heavy models spend the entire
+        # allowance internally without improving the requested artifact.
+        if operation in _STRUCTURED_HELPER_OPERATIONS:
+            return original, {
+                "stage": "preflight",
+                "policy": "bounded_structured_helper",
+                "applied_max_tokens": int(
+                    original.get("max_tokens", self.config.llm.max_tokens)
+                ),
+            }
 
         payload = dict(original)
         answer_estimate, answer_evidence = self._answer_estimate(
@@ -616,9 +661,16 @@ class LLMClient:
         if failure_reason != "length":
             return payload, calculation
 
+        preserve_second_request = (
+            attempt == 1
+            and operation in _UNCHANGED_SECOND_ATTEMPT_OPERATIONS
+        )
+        final_expanded = False
+        no_reasoning_recovery = False
         if (
             self.config.llm.provider.lower() == "openrouter"
-            and operation not in _FULL_QUALITY_LENGTH_RECOVERY_OPERATIONS
+            and operation not in _PRESERVE_REASONING_ON_ALL_LENGTH_RETRIES
+            and not preserve_second_request
         ):
             final_expanded = bool(
                 recovery.expanded_final_attempt
@@ -658,7 +710,7 @@ class LLMClient:
         calculated = math.ceil((answer_headroom + reasoning_headroom) * 1.25)
         if (
             self.config.llm.provider.lower() == "openrouter"
-            and operation not in _FULL_QUALITY_LENGTH_RECOVERY_OPERATIONS
+            and operation not in _PRESERVE_REASONING_ON_ALL_LENGTH_RETRIES
             and (final_expanded or no_reasoning_recovery)
         ):
             calculated = max(calculated, int(recovery.max_tokens))
@@ -691,11 +743,16 @@ class LLMClient:
         original: dict[str, Any],
         operation: str,
     ) -> dict[str, Any]:
-        """Constrain schema-repair calls without changing normal operations."""
-        if (
-            self.config.llm.provider.lower() != "openrouter"
-            or operation not in _SCHEMA_REPAIR_OPERATIONS
-        ):
+        """Constrain bounded JSON helpers without changing quality operations."""
+        if self.config.llm.provider.lower() != "openrouter":
+            return original
+        if operation in _STRUCTURED_HELPER_OPERATIONS:
+            payload = dict(original)
+            payload["reasoning"] = {"effort": "none", "exclude": True}
+            if operation in _JSON_OBJECT_HELPER_OPERATIONS:
+                payload["response_format"] = {"type": "json_object"}
+            return payload
+        if operation not in _SCHEMA_REPAIR_OPERATIONS:
             return original
         payload = dict(original)
         payload["reasoning"] = {
