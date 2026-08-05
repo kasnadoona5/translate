@@ -898,8 +898,8 @@ class TranslationPipeline:
             # (e.g. translator via 9router, judge via OpenRouter directly).
             critic_config.llm.openrouter.api_base = critic.api_base.strip()
         critic_config.llm.temperature = critic.temperature
-        # Critic recovery is independent from translator recovery. Its normal
-        # request is unchanged; only bounded follow-up attempts use these.
+        # Critic recovery is independent from translator recovery. Predictive
+        # sizing may change only the allowance; bounded follow-ups use these.
         critic_config.llm.recovery.model = critic.recovery_model.strip()
         critic_config.llm.recovery.max_attempts = critic.recovery_max_attempts
         critic_config.llm.recovery.max_tokens = max(

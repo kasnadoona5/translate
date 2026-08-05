@@ -64,8 +64,10 @@ class TestBoundedRecovery(unittest.TestCase):
         self.assertEqual(defaults.llm.recovery.max_attempts, 2)
         self.assertEqual(defaults.llm.max_tokens, 12000)
         self.assertEqual(defaults.llm.recovery.max_tokens, 24000)
+        self.assertTrue(defaults.llm.recovery.predictive_first_attempt)
+        self.assertEqual(defaults.llm.recovery.adaptive_max_tokens, 65536)
 
-    def test_first_attempt_payload_is_unchanged_then_length_recovers(self) -> None:
+    def test_first_attempt_changes_only_budget_then_length_recovers(self) -> None:
         messages = [{"role": "user", "content": "Translate this paragraph."}]
         _, _, expected = self.client._prepare_request(messages)
         payloads = []
@@ -84,13 +86,23 @@ class TestBoundedRecovery(unittest.TestCase):
         result = self.client.complete(messages=messages, _operation="translation")
 
         self.assertEqual(result, "complete")
-        self.assertEqual(payloads[0], expected)
+        self.assertEqual(payloads[0]["messages"], expected["messages"])
+        self.assertEqual(payloads[0]["model"], expected["model"])
+        self.assertEqual(payloads[0]["temperature"], expected["temperature"])
+        self.assertEqual(payloads[0]["reasoning"], expected["reasoning"])
+        self.assertGreater(payloads[0]["max_tokens"], expected["max_tokens"])
         self.assertEqual(payloads[1]["reasoning"], expected["reasoning"])
         self.assertGreater(payloads[1]["max_tokens"], payloads[0]["max_tokens"])
-        self.assertLessEqual(payloads[1]["max_tokens"], 24000)
+        self.assertLessEqual(payloads[1]["max_tokens"], 65536)
         self.assertEqual([event["success"] for event in events], [False, True])
         self.assertEqual(events[0]["failure_reason"], "length")
         self.assertTrue(events[0]["normal_attempt"])
+        self.assertEqual(
+            events[0]["prompt_sha256"], events[1]["prompt_sha256"]
+        )
+        self.assertEqual(
+            events[0]["preflight_calculation"]["stage"], "preflight"
+        )
         calculation = events[1]["recovery_calculation"]
         self.assertEqual(calculation["uncertainty_multiplier"], 1.25)
         self.assertEqual(
@@ -132,8 +144,52 @@ class TestBoundedRecovery(unittest.TestCase):
             * 1.25
         )
         self.assertEqual(calc["calculated_max_tokens"], expected)
-        self.assertEqual(payloads[1]["max_tokens"], expected)
+        minimum = payloads[0]["max_tokens"] + max(
+            1024, __import__("math").ceil(payloads[0]["max_tokens"] * 0.15)
+        )
+        self.assertEqual(payloads[1]["max_tokens"], max(expected, minimum))
         self.assertNotIn("_recovery_source_text", payloads[0])
+
+    def test_recovery_normalizes_mismatched_reasoning_token_units(self) -> None:
+        source = "Academic source sentence. " * 100
+        first = _response("partial", "length")
+        body = json.loads(first.text)
+        body["usage"] = {
+            "prompt_tokens": 4000,
+            "completion_tokens": 12000,
+            "total_tokens": 16000,
+            "completion_tokens_details": {"reasoning_tokens": 20888},
+        }
+        first.text = json.dumps(body)
+        responses = iter([first, _response("complete", "stop")])
+        events = []
+        self.client._client.post = lambda *args, **kwargs: next(responses)
+        self.client.set_attempt_observer(events.append)
+
+        self.client.complete(
+            messages=[{"role": "user", "content": "Translate."}],
+            _operation="translation",
+            _recovery_source_text=source,
+        )
+
+        calculation = events[1]["recovery_calculation"]
+        self.assertEqual(calculation["reported_reasoning_tokens"], 20888)
+        self.assertEqual(calculation["reasoning_estimate_tokens"], 12000)
+
+    def test_success_history_adapts_later_first_attempt_budget(self) -> None:
+        payloads = []
+
+        def post(*args, **kwargs):
+            payloads.append(json.loads(json.dumps(kwargs["json"])))
+            return _response("short complete answer", "stop")
+
+        self.client._client.post = post
+        messages = [{"role": "user", "content": "Extract proper nouns."}]
+        for _ in range(4):
+            self.client.complete(messages=messages, _operation="chat")
+
+        self.assertGreater(payloads[0]["max_tokens"], 12000)
+        self.assertEqual(payloads[3]["max_tokens"], 12000)
 
     def test_second_translation_attempt_uses_configured_fallback(self) -> None:
         self.config.llm.recovery.model = "recovery-combo"
@@ -187,13 +243,15 @@ class TestBoundedRecovery(unittest.TestCase):
         result = self.client.complete(messages=messages, _operation="critique")
 
         self.assertEqual(result, "recovered")
-        self.assertEqual(payloads[0], expected)
+        self.assertEqual(payloads[0]["messages"], expected["messages"])
+        self.assertEqual(payloads[0]["reasoning"], expected["reasoning"])
+        self.assertGreater(payloads[0]["max_tokens"], expected["max_tokens"])
         self.assertEqual(payloads[1]["model"], self.config.llm.model)
-        self.assertEqual(payloads[1]["max_tokens"], 12000)
+        self.assertGreater(payloads[1]["max_tokens"], payloads[0]["max_tokens"])
         self.assertEqual(payloads[2]["model"], "critic-fallback")
-        self.assertEqual(payloads[2]["max_tokens"], 12000)
+        self.assertGreaterEqual(payloads[2]["max_tokens"], payloads[1]["max_tokens"])
         self.assertEqual(payloads[3]["model"], "critic-fallback")
-        self.assertEqual(payloads[3]["max_tokens"], 24000)
+        self.assertGreaterEqual(payloads[3]["max_tokens"], 24000)
         self.assertEqual(payloads[3]["reasoning"]["effort"], "none")
         self.assertEqual(events[3]["recovery_stage"], "final_expanded")
 
@@ -216,11 +274,11 @@ class TestBoundedRecovery(unittest.TestCase):
         )
 
         self.assertEqual(result, "recovered")
-        self.assertEqual(payloads[0]["max_tokens"], 12000)
+        self.assertGreater(payloads[0]["max_tokens"], 12000)
         self.assertNotEqual(payloads[0].get("reasoning", {}).get("effort"), "none")
         self.assertEqual(payloads[1]["reasoning"]["effort"], "low")
         self.assertEqual(payloads[2]["reasoning"]["effort"], "none")
-        self.assertEqual(payloads[2]["max_tokens"], 24000)
+        self.assertGreaterEqual(payloads[2]["max_tokens"], 24000)
 
     def test_glossary_recovery_disables_reasoning_after_length(self) -> None:
         payloads = []
@@ -242,7 +300,7 @@ class TestBoundedRecovery(unittest.TestCase):
         self.assertEqual(result, "recovered")
         self.assertNotEqual(payloads[0].get("reasoning", {}).get("effort"), "none")
         self.assertEqual(payloads[1]["reasoning"]["effort"], "none")
-        self.assertEqual(payloads[1]["max_tokens"], 24000)
+        self.assertGreaterEqual(payloads[1]["max_tokens"], 24000)
 
     def test_json_repair_is_compact_from_its_first_request(self) -> None:
         payloads = []
@@ -258,7 +316,7 @@ class TestBoundedRecovery(unittest.TestCase):
         )
 
         self.assertEqual(payloads[0]["reasoning"]["effort"], "none")
-        self.assertEqual(payloads[0]["max_tokens"], 24000)
+        self.assertGreaterEqual(payloads[0]["max_tokens"], 24000)
 
     def test_partial_length_response_is_never_returned(self) -> None:
         self.config.llm.recovery.max_attempts = 1

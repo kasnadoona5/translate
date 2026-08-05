@@ -137,13 +137,19 @@ class LLMCriticConfig:
 
 @dataclass
 class LLMRecoveryConfig:
-    """Bounded recovery used only after the unchanged normal request fails."""
+    """Adaptive output budgeting and bounded recovery settings."""
 
     enabled: bool = True
     max_attempts: int = 2
     model: str = ""
     reasoning_effort: str = "low"
     max_tokens: int = 24000
+    predictive_first_attempt: bool = True
+    bootstrap_reasoning_tokens: int = 16000
+    adaptive_max_tokens: int = 65536
+    context_window_tokens: int = 131072
+    context_safety_tokens: int = 2048
+    history_window: int = 20
     expanded_final_attempt: bool = False
     final_reasoning_effort: str = "none"
 
@@ -714,6 +720,22 @@ class TarjomehConfig:
             errors.append("llm.recovery.reasoning_effort must be none, low, or medium")
         if self.llm.recovery.max_tokens < 512:
             errors.append("llm.recovery.max_tokens must be >= 512")
+        if self.llm.recovery.bootstrap_reasoning_tokens < 0:
+            errors.append("llm.recovery.bootstrap_reasoning_tokens must be >= 0")
+        if self.llm.recovery.adaptive_max_tokens < self.llm.max_tokens:
+            errors.append(
+                "llm.recovery.adaptive_max_tokens must be >= llm.max_tokens"
+            )
+        if self.llm.recovery.context_safety_tokens < 0:
+            errors.append("llm.recovery.context_safety_tokens must be >= 0")
+        if self.llm.recovery.context_window_tokens <= (
+            self.llm.recovery.context_safety_tokens + self.llm.max_tokens
+        ):
+            errors.append(
+                "llm.recovery.context_window_tokens must leave room for the prompt"
+            )
+        if not 3 <= self.llm.recovery.history_window <= 100:
+            errors.append("llm.recovery.history_window must be 3-100")
         if not 1 <= self.llm.critic.recovery_max_attempts <= 4:
             errors.append("llm.critic.recovery_max_attempts must be 1-4")
         if self.llm.critic.recovery_max_tokens < 512:

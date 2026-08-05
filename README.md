@@ -161,34 +161,51 @@ flag is omitted.
 ### Recovery settings
 
 ```dotenv
-# Translator: normal 12K request, then one calculated full-quality recovery
+# Translator: 12K legacy floor with predictive first-attempt sizing
 TRANSLATOR_MAX_TOKENS=12000
 TRANSLATOR_RECOVERY_MODEL=
 TRANSLATOR_RECOVERY_MAX_ATTEMPTS=2
 TRANSLATOR_RECOVERY_MAX_TOKENS=24000
 
-# Critic: unchanged normal attempt plus bounded recovery
+# Critic: predictive normal attempt plus bounded recovery
 CRITIC_RECOVERY_MODEL=
 CRITIC_RECOVERY_MAX_ATTEMPTS=4
 CRITIC_RECOVERY_MAX_TOKENS=24000
 ```
 
-The normal request uses a 12,000-token ceiling and remains unchanged. After a
-length failure, Tarjomeh estimates answer and reasoning headroom from the source
-and provider usage, applies a 1.25 uncertainty margin, and requests only that
-calculated allowance up to `TRANSLATOR_RECOVERY_MAX_TOKENS`. Attempt 2 keeps the
-same model and reasoning policy. A configured translator fallback adds one final
-bounded model rung. Repeated truncation activates validated paragraph recovery,
-then sentence-group recovery only when necessary; recovered parts never receive
-the complete source chunk as context.
+The normal request keeps the same prompt, model, temperature, and reasoning
+policy, but its output allowance is sized before sending. Tarjomeh combines an
+answer estimate, a conservative first-chunk reasoning reserve, model/operation
+history, and a 1.25 uncertainty margin. The 12,000-token setting remains the
+minimum allowance rather than forcing every first request to stop there.
+
+Configure the adaptive guardrails in `config.toml`:
+
+```toml
+[llm.recovery]
+predictive_first_attempt = true
+bootstrap_reasoning_tokens = 16000
+adaptive_max_tokens = 65536
+context_window_tokens = 131072
+context_safety_tokens = 2048
+history_window = 20
+```
+
+After a length failure, Attempt 2 recalculates from that request's direct usage
+evidence and must request a larger allowance when context capacity permits.
+Provider reasoning counters are normalized when a gateway reports them in a
+different token scale. A configured translator fallback adds one final bounded
+model rung. Repeated truncation activates validated paragraph recovery, then
+sentence-group recovery only when necessary; recovered parts never receive the
+complete source chunk as context.
 
 Recommended critic recovery sequence:
 
-1. Normal configured critic request
+1. Predictively sized configured critic request
 2. Same critic with low reasoning after a length failure
 3. Optional critic-specific fallback model, or a no-reasoning recovery when no
    fallback is configured
-4. Final no-reasoning attempt, up to the configured 24,000-token ceiling
+4. Final no-reasoning attempt within the adaptive context and output ceiling
 
 No-reasoning mode is limited to recovery and compact JSON repair. It does not
 replace the normal translator, critic, or refiner request.
@@ -784,9 +801,10 @@ docker-compose up -d --no-deps tarjomeh
 
 ### `finish_reason=length`
 
-The completion reached its provider output limit. Tarjomeh retries within a
-bounded budget. Critic recovery can use a separate fallback and a larger final
-allowance. Partial translations are never accepted as complete.
+The completion reached its provider output limit. Tarjomeh records a prompt hash
+and token evidence, then retries with a larger evidence-based bounded budget.
+Critic recovery can use a separate fallback. Partial translations are never
+accepted as complete.
 
 ### `malformed_response` containing `data:`
 
@@ -827,10 +845,13 @@ python -m pytest -q
 python -m compileall -q src tests
 ```
 
-The v8.7.1 suite contains 157 passing tests.
+The v9.3 suite contains 183 passing tests.
 
 ## Release History
 
+- v9.3: predictive first-attempt budgets, evidence-based recovery, prompt diagnostics
+- v9.2: validated adaptive translation recovery and assembly integrity
+- v9.0: per-issue MQM refinement decisions
 - v8.7.1: complete installation, environment, VPS, and 9router documentation
 - v8.7: OpenAI-compatible SSE response assembly while retaining normal JSON
 - v8.6: bounded critic recovery, QA failure containment, sequential continuity

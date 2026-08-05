@@ -924,8 +924,27 @@ def _register_api(app: Flask) -> None:
                         f"finish={payload.get('finish_reason')} "
                         f"failure={payload.get('failure_reason', '')} "
                         f"model={payload.get('model')} "
+                        f"response_model={payload.get('response_model', '')} "
+                        f"max_tokens={payload.get('max_tokens')} "
+                        f"prompt_tokens={payload.get('prompt_tokens', 0)} "
+                        f"prompt_hash={str(payload.get('prompt_sha256', ''))[:12]} "
                         f"tokens={payload.get('completion_tokens', 0)}"
                     )
+                    preflight = payload.get("preflight_calculation") or {}
+                    if preflight:
+                        lines.append(
+                            "    Preflight budget: answer={answer} reasoning={reasoning} "
+                            "evidence={evidence} samples={samples} "
+                            "calculated={calculated} applied={applied} ceiling={ceiling}".format(
+                                answer=preflight.get("answer_headroom_tokens"),
+                                reasoning=preflight.get("reasoning_headroom_tokens"),
+                                evidence=preflight.get("reasoning_evidence"),
+                                samples=preflight.get("history_samples"),
+                                calculated=preflight.get("calculated_max_tokens"),
+                                applied=preflight.get("applied_max_tokens"),
+                                ceiling=preflight.get("configured_ceiling"),
+                            )
+                        )
                     calculation = payload.get("recovery_calculation") or {}
                     if calculation:
                         lines.append(

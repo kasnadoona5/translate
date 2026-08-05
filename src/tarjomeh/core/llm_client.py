@@ -8,6 +8,7 @@ to OpenRouter and Ollama.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -105,6 +106,8 @@ class LLMClient:
         self._api_key_index = 0
         self._api_key_lock = threading.Lock()
         self._attempt_observer: Any = None
+        self._budget_history: dict[tuple[str, str], list[int]] = {}
+        self._budget_lock = threading.Lock()
 
     @property
     def _aclient(self) -> httpx.AsyncClient:
@@ -172,6 +175,165 @@ class LLMClient:
             # Add a 5% safety margin for fallback token count
             return int(raw_count * 1.05) + 1
         return raw_count
+
+    def _prompt_metrics(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Return stable prompt evidence without persisting prompt contents."""
+        messages = [
+            message for message in payload.get("messages", [])
+            if isinstance(message, dict)
+        ]
+        canonical = json.dumps(
+            messages,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        prompt_text = "\n".join(str(message.get("content", "")) for message in messages)
+        return {
+            "prompt_sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+            "prompt_characters": len(prompt_text),
+            "message_count": len(messages),
+            "estimated_prompt_tokens": self.count_tokens(prompt_text),
+        }
+
+    def _usage_evidence(
+        self,
+        usage: dict[str, Any],
+        content: str = "",
+    ) -> dict[str, int]:
+        """Normalize provider usage counters onto the completion-token scale."""
+        details = usage.get("completion_tokens_details") or {}
+        if not isinstance(details, dict):
+            details = {}
+        completion = int(
+            usage.get("completion_tokens")
+            or usage.get("output_tokens")
+            or 0
+        )
+        reported_reasoning = int(
+            details.get("reasoning_tokens")
+            or usage.get("reasoning_tokens")
+            or 0
+        )
+        visible = self.count_tokens(content) if content else 0
+        # Some OpenAI-compatible routers report reasoning in a converted token
+        # scale larger than completion_tokens. Do not mix those units.
+        normalized_reasoning = (
+            min(reported_reasoning, completion)
+            if reported_reasoning > 0 and completion > 0
+            else max(0, reported_reasoning)
+        )
+        if normalized_reasoning <= 0 and completion > 0:
+            normalized_reasoning = max(0, completion - visible)
+        return {
+            "completion_tokens": completion,
+            "reported_reasoning_tokens": reported_reasoning,
+            "reasoning_tokens": normalized_reasoning,
+            "visible_tokens": visible,
+        }
+
+    def _history_percentile(self, model: str, operation: str) -> tuple[int, int]:
+        key = (model, operation)
+        with self._budget_lock:
+            values = sorted(self._budget_history.get(key, []))
+        if not values:
+            return 0, 0
+        index = max(0, math.ceil(len(values) * 0.90) - 1)
+        return values[index], len(values)
+
+    def _record_budget_observation(
+        self,
+        *,
+        payload: dict[str, Any],
+        operation: str,
+        usage: dict[str, Any],
+        content: str,
+        finish_reason: str | None,
+    ) -> None:
+        evidence = self._usage_evidence(usage, content)
+        consumed = max(evidence["completion_tokens"], evidence["visible_tokens"])
+        if finish_reason == "length":
+            consumed = max(consumed, int(payload.get("max_tokens", 0)))
+        if consumed <= 0:
+            return
+        key = (str(payload.get("model", "")), operation)
+        window = max(3, int(self.config.llm.recovery.history_window))
+        with self._budget_lock:
+            values = self._budget_history.setdefault(key, [])
+            values.append(consumed)
+            del values[:-window]
+
+    def _answer_estimate(
+        self,
+        payload: dict[str, Any],
+        expected_output_tokens: int,
+    ) -> tuple[int, str]:
+        if expected_output_tokens > 0:
+            return int(expected_output_tokens), "source_token_estimate"
+        prompt_tokens = self._prompt_metrics(payload)["estimated_prompt_tokens"]
+        return max(512, int(prompt_tokens) // 3), "prompt_token_fallback"
+
+    def _adaptive_ceiling(self, payload: dict[str, Any]) -> tuple[int, int]:
+        recovery = self.config.llm.recovery
+        prompt_tokens = self._prompt_metrics(payload)["estimated_prompt_tokens"]
+        context_room = max(
+            int(payload.get("max_tokens", self.config.llm.max_tokens)),
+            int(recovery.context_window_tokens)
+            - prompt_tokens
+            - int(recovery.context_safety_tokens),
+        )
+        ceiling = min(int(recovery.adaptive_max_tokens), context_room)
+        return max(int(payload.get("max_tokens", 0)), ceiling), prompt_tokens
+
+    def _preflight_payload(
+        self,
+        original: dict[str, Any],
+        operation: str,
+        expected_output_tokens: int,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Size Attempt 1 without changing its prompt, model, or reasoning policy."""
+        recovery = self.config.llm.recovery
+        if not recovery.enabled or not recovery.predictive_first_attempt:
+            return original, {}
+
+        payload = dict(original)
+        answer_estimate, answer_evidence = self._answer_estimate(
+            payload, expected_output_tokens
+        )
+        historical_total, history_samples = self._history_percentile(
+            str(payload.get("model", "")), operation
+        )
+        if history_samples >= 3:
+            reasoning_estimate = max(0, historical_total - answer_estimate)
+            reasoning_evidence = "model_operation_p90"
+        else:
+            reasoning_estimate = max(0, int(recovery.bootstrap_reasoning_tokens))
+            reasoning_evidence = "bootstrap"
+
+        answer_headroom = math.ceil(answer_estimate * 1.35) + 512
+        reasoning_headroom = math.ceil(reasoning_estimate * 1.20)
+        calculated = math.ceil((answer_headroom + reasoning_headroom) * 1.25)
+        original_max = int(payload.get("max_tokens", self.config.llm.max_tokens))
+        ceiling, prompt_tokens = self._adaptive_ceiling(payload)
+        requested = min(max(original_max, calculated), ceiling)
+        payload["max_tokens"] = requested
+        return payload, {
+            "stage": "preflight",
+            "answer_estimate_tokens": answer_estimate,
+            "answer_evidence": answer_evidence,
+            "reasoning_estimate_tokens": reasoning_estimate,
+            "reasoning_evidence": reasoning_evidence,
+            "history_samples": history_samples,
+            "historical_p90_completion_tokens": historical_total,
+            "answer_headroom_tokens": answer_headroom,
+            "reasoning_headroom_tokens": reasoning_headroom,
+            "uncertainty_multiplier": 1.25,
+            "calculated_max_tokens": calculated,
+            "estimated_prompt_tokens": prompt_tokens,
+            "configured_ceiling": ceiling,
+            "applied_max_tokens": requested,
+            "ceiling_applied": requested < calculated,
+        }
 
     def _prepare_request(
         self,
@@ -438,75 +600,13 @@ class LLMClient:
         if attempt >= fallback_attempt and recovery.model.strip():
             payload["model"] = recovery.model.strip()
 
-        if (
-            failure_reason == "length"
-            and operation in _FULL_QUALITY_LENGTH_RECOVERY_OPERATIONS
-        ):
-            usage = failure_usage or {}
-            details = usage.get("completion_tokens_details") or {}
-            if not isinstance(details, dict):
-                details = {}
-            reasoning_tokens = int(
-                details.get("reasoning_tokens")
-                or usage.get("reasoning_tokens")
-                or 0
-            )
-            completion_tokens = int(
-                usage.get("completion_tokens")
-                or usage.get("output_tokens")
-                or 0
-            )
-            visible_tokens = self.count_tokens(failure_content) if failure_content else 0
-            if reasoning_tokens <= 0:
-                if completion_tokens > 0:
-                    reasoning_tokens = max(0, completion_tokens - visible_tokens)
-                else:
-                    reasoning_tokens = max(
-                        0,
-                        int(original.get("max_tokens", self.config.llm.max_tokens))
-                        - visible_tokens,
-                    )
-
-            if expected_output_tokens > 0:
-                answer_estimate = int(expected_output_tokens)
-                answer_evidence = "source_token_estimate"
-            else:
-                prompt_text = "\n".join(
-                    str(message.get("content", ""))
-                    for message in original.get("messages", [])
-                    if isinstance(message, dict)
-                )
-                answer_estimate = max(512, self.count_tokens(prompt_text) // 3)
-                answer_evidence = "prompt_token_fallback"
-
-            answer_headroom = math.ceil(answer_estimate * 1.35) + 512
-            reasoning_headroom = math.ceil(reasoning_tokens * 1.20)
-            calculated = math.ceil(
-                (answer_headroom + reasoning_headroom) * 1.25
-            )
-            original_max = int(
-                original.get("max_tokens", self.config.llm.max_tokens)
-            )
-            ceiling = max(original_max, int(recovery.max_tokens))
-            requested = min(max(original_max + 512, calculated), ceiling)
-            payload["max_tokens"] = requested
-            calculation = {
-                "answer_estimate_tokens": answer_estimate,
-                "answer_evidence": answer_evidence,
-                "visible_output_tokens": visible_tokens,
-                "reported_completion_tokens": completion_tokens,
-                "reasoning_estimate_tokens": reasoning_tokens,
-                "answer_headroom_tokens": answer_headroom,
-                "reasoning_headroom_tokens": reasoning_headroom,
-                "uncertainty_multiplier": 1.25,
-                "calculated_max_tokens": calculated,
-                "configured_ceiling": ceiling,
-                "applied_max_tokens": requested,
-                "ceiling_applied": requested < calculated,
-            }
+        if failure_reason != "length":
             return payload, calculation
 
-        if self.config.llm.provider.lower() == "openrouter" and failure_reason == "length":
+        if (
+            self.config.llm.provider.lower() == "openrouter"
+            and operation not in _FULL_QUALITY_LENGTH_RECOVERY_OPERATIONS
+        ):
             final_expanded = bool(
                 recovery.expanded_final_attempt
                 and max_attempts >= 4
@@ -528,21 +628,49 @@ class LLMClient:
                 "effort": reasoning_effort,
                 "exclude": True,
             }
-            prompt_chars = sum(
-                len(str(message.get("content", "")))
-                for message in payload.get("messages", [])
-                if isinstance(message, dict)
+
+        evidence = self._usage_evidence(failure_usage or {}, failure_content)
+        original_max = int(original.get("max_tokens", self.config.llm.max_tokens))
+        reasoning_tokens = evidence["reasoning_tokens"]
+        if reasoning_tokens <= 0:
+            reasoning_tokens = max(
+                0,
+                original_max - evidence["visible_tokens"],
             )
-            estimated_visible = max(2048, int(prompt_chars / 2.5) + 1024)
-            original_max = int(
-                original.get("max_tokens", self.config.llm.max_tokens)
-            )
-            recovery_ceiling = max(original_max, int(recovery.max_tokens))
-            payload["max_tokens"] = (
-                recovery_ceiling
-                if final_expanded or no_reasoning_recovery
-                else max(original_max, min(estimated_visible, recovery_ceiling))
-            )
+        answer_estimate, answer_evidence = self._answer_estimate(
+            original, expected_output_tokens
+        )
+        answer_headroom = math.ceil(answer_estimate * 1.35) + 512
+        reasoning_headroom = math.ceil(reasoning_tokens * 1.20)
+        calculated = math.ceil((answer_headroom + reasoning_headroom) * 1.25)
+        if (
+            self.config.llm.provider.lower() == "openrouter"
+            and operation not in _FULL_QUALITY_LENGTH_RECOVERY_OPERATIONS
+            and (final_expanded or no_reasoning_recovery)
+        ):
+            calculated = max(calculated, int(recovery.max_tokens))
+        ceiling, prompt_tokens = self._adaptive_ceiling(payload)
+        minimum_growth = max(1024, math.ceil(original_max * 0.15))
+        requested = min(max(original_max + minimum_growth, calculated), ceiling)
+        payload["max_tokens"] = requested
+        calculation = {
+            "stage": "recovery",
+            "answer_estimate_tokens": answer_estimate,
+            "answer_evidence": answer_evidence,
+            "visible_output_tokens": evidence["visible_tokens"],
+            "reported_completion_tokens": evidence["completion_tokens"],
+            "reported_reasoning_tokens": evidence["reported_reasoning_tokens"],
+            "reasoning_estimate_tokens": reasoning_tokens,
+            "answer_headroom_tokens": answer_headroom,
+            "reasoning_headroom_tokens": reasoning_headroom,
+            "uncertainty_multiplier": 1.25,
+            "calculated_max_tokens": calculated,
+            "minimum_growth_tokens": minimum_growth,
+            "estimated_prompt_tokens": prompt_tokens,
+            "configured_ceiling": ceiling,
+            "applied_max_tokens": requested,
+            "ceiling_applied": requested < max(original_max + minimum_growth, calculated),
+        }
         return payload, calculation
 
     def _initial_payload_for_operation(
@@ -595,9 +723,13 @@ class LLMClient:
         finish_reason: str | None,
         status_code: int | None,
         usage: dict[str, Any],
+        content: str = "",
+        response_model: str = "",
         failure_reason: str = "",
         error: str = "",
     ) -> dict[str, Any]:
+        prompt_metrics = self._prompt_metrics(payload)
+        usage_evidence = self._usage_evidence(usage, content)
         event = {
             "operation": operation,
             "attempt": attempt + 1,
@@ -625,12 +757,17 @@ class LLMClient:
             "finish_reason": finish_reason,
             "status_code": status_code,
             "model": payload.get("model"),
+            "response_model": response_model,
             "max_tokens": payload.get("max_tokens"),
             "reasoning": payload.get("reasoning"),
             "prompt_tokens": usage.get("prompt_tokens", 0),
             "completion_tokens": usage.get("completion_tokens", 0),
             "total_tokens": usage.get("total_tokens", 0),
             "duration_seconds": round(time.monotonic() - started, 3),
+            "reported_reasoning_tokens": usage_evidence["reported_reasoning_tokens"],
+            "normalized_reasoning_tokens": usage_evidence["reasoning_tokens"],
+            "visible_completion_tokens": usage_evidence["visible_tokens"],
+            **prompt_metrics,
         }
         if failure_reason:
             event["failure_reason"] = failure_reason
@@ -656,6 +793,9 @@ class LLMClient:
         )
         original_payload = self._initial_payload_for_operation(
             original_payload, operation
+        )
+        original_payload, preflight_calculation = self._preflight_payload(
+            original_payload, operation, expected_output_tokens
         )
         max_attempts = self._max_call_attempts()
         if (
@@ -689,11 +829,13 @@ class LLMClient:
             status_code = None
             content: Any = None
             usage: dict[str, Any] = {}
+            response_model = ""
             try:
                 response = self._client.post(url, headers=headers, json=payload)
                 status_code = response.status_code
                 response.raise_for_status()
                 res_json = self._parse_response_json(response.text)
+                response_model = str(res_json.get("model", "") or "")
                 self._update_usage(response, res_json)
                 raw_usage = res_json.get("usage", {})
                 usage = raw_usage if isinstance(raw_usage, dict) else {}
@@ -718,6 +860,14 @@ class LLMClient:
                         "LLM returned an empty or null translation completion."
                     )
 
+                self._record_budget_observation(
+                    payload=payload,
+                    operation=operation,
+                    usage=usage,
+                    content=content,
+                    finish_reason=finish_reason,
+                )
+
                 event = self._attempt_event(
                     operation=operation,
                     attempt=attempt,
@@ -728,7 +878,11 @@ class LLMClient:
                     finish_reason=finish_reason,
                     status_code=status_code,
                     usage=usage,
+                    content=content,
+                    response_model=response_model,
                 )
+                if attempt == 0 and preflight_calculation:
+                    event["preflight_calculation"] = preflight_calculation
                 if recovery_calculation:
                     event["recovery_calculation"] = recovery_calculation
                 self._emit_attempt(event)
@@ -760,6 +914,13 @@ class LLMClient:
 
                 failure_usage = dict(usage)
                 failure_content = content if isinstance(content, str) else ""
+                self._record_budget_observation(
+                    payload=payload,
+                    operation=operation,
+                    usage=usage,
+                    content=failure_content,
+                    finish_reason=finish_reason,
+                )
 
                 event = self._attempt_event(
                     operation=operation,
@@ -771,9 +932,13 @@ class LLMClient:
                     finish_reason=finish_reason,
                     status_code=status_code,
                     usage=usage,
+                    content=failure_content,
+                    response_model=response_model,
                     failure_reason=failure_reason,
                     error=str(exc),
                 )
+                if attempt == 0 and preflight_calculation:
+                    event["preflight_calculation"] = preflight_calculation
                 if recovery_calculation:
                     event["recovery_calculation"] = recovery_calculation
                 self._emit_attempt(event)
@@ -830,6 +995,9 @@ class LLMClient:
         original_payload = self._initial_payload_for_operation(
             original_payload, operation
         )
+        original_payload, preflight_calculation = self._preflight_payload(
+            original_payload, operation, expected_output_tokens
+        )
         max_attempts = self._max_call_attempts()
         if (
             max_attempts >= 2
@@ -862,6 +1030,7 @@ class LLMClient:
             status_code = None
             content: Any = None
             usage: dict[str, Any] = {}
+            response_model = ""
             try:
                 response = await self._aclient.post(
                     url, headers=headers, json=payload
@@ -869,6 +1038,7 @@ class LLMClient:
                 status_code = response.status_code
                 response.raise_for_status()
                 res_json = self._parse_response_json(response.text)
+                response_model = str(res_json.get("model", "") or "")
                 self._update_usage(response, res_json)
                 raw_usage = res_json.get("usage", {})
                 usage = raw_usage if isinstance(raw_usage, dict) else {}
@@ -893,6 +1063,14 @@ class LLMClient:
                         "LLM returned an empty or null translation completion."
                     )
 
+                self._record_budget_observation(
+                    payload=payload,
+                    operation=operation,
+                    usage=usage,
+                    content=content,
+                    finish_reason=finish_reason,
+                )
+
                 event = self._attempt_event(
                     operation=operation,
                     attempt=attempt,
@@ -903,7 +1081,11 @@ class LLMClient:
                     finish_reason=finish_reason,
                     status_code=status_code,
                     usage=usage,
+                    content=content,
+                    response_model=response_model,
                 )
+                if attempt == 0 and preflight_calculation:
+                    event["preflight_calculation"] = preflight_calculation
                 if recovery_calculation:
                     event["recovery_calculation"] = recovery_calculation
                 self._emit_attempt(event)
@@ -935,6 +1117,13 @@ class LLMClient:
 
                 failure_usage = dict(usage)
                 failure_content = content if isinstance(content, str) else ""
+                self._record_budget_observation(
+                    payload=payload,
+                    operation=operation,
+                    usage=usage,
+                    content=failure_content,
+                    finish_reason=finish_reason,
+                )
 
                 event = self._attempt_event(
                     operation=operation,
@@ -946,9 +1135,13 @@ class LLMClient:
                     finish_reason=finish_reason,
                     status_code=status_code,
                     usage=usage,
+                    content=failure_content,
+                    response_model=response_model,
                     failure_reason=failure_reason,
                     error=str(exc),
                 )
+                if attempt == 0 and preflight_calculation:
+                    event["preflight_calculation"] = preflight_calculation
                 if recovery_calculation:
                     event["recovery_calculation"] = recovery_calculation
                 self._emit_attempt(event)
