@@ -120,6 +120,10 @@ Iranian Persian. Evaluate the translation rigorously and return a structured JSO
 ### Source (English)
 {source_text}
 
+Sentence labels such as [p1:s2] are stable review coordinates. Copy the label
+for the sentence containing each source quote into source_segment_id. Never
+copy these labels into the Persian translation.
+
 ### Translation (Persian)
 {translation}
 
@@ -148,6 +152,7 @@ Return a JSON object with exactly this schema:
         "name" | "number" | "citation" | "fluency" | "register" | "typography",
       "severity": "critical" | "major" | "minor",
       "confidence": <0-1>,
+      "source_segment_id": "<stable label such as p1:s2>",
       "source_quote": "<exact short quote copied from the current English source>",
       "current_persian_quote": "<exact short quote copied from the current Persian translation>",
       "suggested_correction": "<compact improved Persian span>",
@@ -170,6 +175,7 @@ MQM rules:
   accuracy/terminology issues are blocking.
 - Minor style preferences must stay minor and must not be inflated to force edits.
 - Every quote must occur verbatim in the current source or translation.
+- Every source_segment_id must identify the sentence containing source_quote.
 - Do not praise, repeat the full source, repeat the full translation, or provide
   commentary outside the JSON. Keep each rationale under 60 words.
 
@@ -210,6 +216,8 @@ Instructions:
    citations, years, and page numbers in Latin script and Western digits.
 7. Return exactly one compact decision for every issue ID. A serious issue must
    be evaluated, but the critic's suggested wording is never mandatory.
+   Use source_segment_id only to locate the issue; never reproduce sentence
+   labels in the Persian translation.
 8. Include the complete Persian translation exactly once. Do not repeat it in
    issue decisions or rationales.
 9. Return ONLY valid JSON with this schema:

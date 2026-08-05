@@ -128,7 +128,7 @@ class LLMCriticConfig:
     api_base: str = ""
     recovery_model: str = ""
     recovery_max_attempts: int = 4
-    recovery_max_tokens: int = 24000
+    recovery_max_tokens: int = 50000
 
     @property
     def is_active(self) -> bool:

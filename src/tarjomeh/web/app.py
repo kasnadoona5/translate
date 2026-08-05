@@ -114,6 +114,9 @@ def create_app(config: Any = None) -> Flask:
     Returns:
         Configured Flask application.
     """
+    if config is None:
+        from tarjomeh.core.config import TarjomehConfig
+        config = TarjomehConfig()
     _install_request_log_redaction()
     app = Flask(
         __name__,
@@ -182,7 +185,19 @@ def _register_routes(app: Flask) -> None:
     @_require_auth
     def index():
         """Serve the main dashboard."""
-        return render_template("index.html")
+        runtime_config = app.config["TARJOMEH_CONFIG"]
+        return render_template("index.html", ui_defaults={
+            "qa_json_retries": runtime_config.translation.qa_json_retries,
+            "critic_recovery_tokens": (
+                runtime_config.llm.critic.recovery_max_tokens
+            ),
+            "predictive_min_tokens": (
+                runtime_config.llm.recovery.predictive_min_tokens
+            ),
+            "adaptive_max_tokens": (
+                runtime_config.llm.recovery.adaptive_max_tokens
+            ),
+        })
 
 
 def _register_api(app: Flask) -> None:
@@ -708,6 +723,21 @@ def _register_api(app: Flask) -> None:
                 for e in chunk_events
                 if e["event_type"] == "back_translation_completed"
             )
+            concept_risks: list[dict[str, Any]] = []
+            concept_keys: set[tuple[str, str, str]] = set()
+            for event in chunk_events:
+                if event["event_type"] != "high_risk_concepts_flagged":
+                    continue
+                for concept in event["payload"].get("concepts", []):
+                    key = (
+                        str(concept.get("term", "")).casefold(),
+                        str(concept.get("reason", "")),
+                        str(concept.get("source_segment_id", "")),
+                    )
+                    if key in concept_keys:
+                        continue
+                    concept_keys.add(key)
+                    concept_risks.append(concept)
             low_score = bool(scores and min(scores) < critique_threshold)
             flagged = (
                 chunk["status"] != "completed"
@@ -719,6 +749,7 @@ def _register_api(app: Flask) -> None:
                 or bool(integrity_final_failures)
                 or glossary_violations > 0
                 or bt_flagged
+                or bool(concept_risks)
             )
             review_chunks.append({
                 "chunk_index": idx,
@@ -740,6 +771,7 @@ def _register_api(app: Flask) -> None:
                 "integrity_final_failures": len(integrity_final_failures),
                 "glossary_violations": glossary_violations,
                 "back_translation_flagged": bt_flagged,
+                "high_risk_concepts": concept_risks,
                 "flagged": flagged,
                 "qa_issues": issues_by_chunk.get(idx, []),
                 "issue_decisions": decisions_by_chunk.get(idx, []),
@@ -841,6 +873,35 @@ def _register_api(app: Flask) -> None:
                 f"  authorized={original_audit.get('authorized_count', 0)} kept={original_audit.get('kept_authorized', 0)}",
                 f"  unauthorized_removed={original_audit.get('removed_unauthorized_count', 0)} duplicates_removed={original_audit.get('removed_duplicate_count', 0)}",
                 f"  citations_preserved={original_audit.get('preserved_citation_count', 0)}",
+                "",
+            ])
+        anchor_audit = db.get_job_artifact(
+            job_id, "english_original_anchor_audit"
+        )
+        if anchor_audit is not None:
+            lines.extend([
+                "English-original anchors:",
+                f"  anchored={anchor_audit.get('anchored_count', 0)} "
+                f"inserted={anchor_audit.get('inserted_count', 0)} "
+                f"repositioned={anchor_audit.get('repositioned_count', 0)} "
+                f"ambiguous={anchor_audit.get('ambiguous_count', 0)}",
+                "",
+            ])
+        citation_audit = db.get_job_artifact(job_id, "citation_format_audit")
+        if citation_audit is not None:
+            lines.extend([
+                "Citation formatting:",
+                f"  adjacent_originals_normalized="
+                f"{citation_audit.get('normalized_count', 0)}",
+                "",
+            ])
+        orthography_audit = db.get_job_artifact(
+            job_id, "persian_orthography_audit"
+        )
+        if orthography_audit is not None:
+            lines.extend([
+                "Persian orthography:",
+                f"  final_safe_edits={orthography_audit.get('edit_count', 0)}",
                 "",
             ])
         all_events = db.get_chunk_events(job_id)
@@ -1023,6 +1084,27 @@ def _register_api(app: Flask) -> None:
                         lines.append(
                             "      Suggested: "
                             f"{issue.get('suggested_correction', '')}"
+                        )
+                        if issue.get("source_segment_id"):
+                            lines.append(
+                                "      Segment: "
+                                f"{issue.get('source_segment_id')}"
+                            )
+                        for risk in issue.get("risk_flags", []) or []:
+                            lines.append(
+                                "      Concept risk: "
+                                f"{risk.get('term')} ({risk.get('reason')})"
+                            )
+                elif event["event_type"] == "high_risk_concepts_flagged":
+                    lines.append(
+                        f"  Concept review queue: {payload.get('count', 0)} "
+                        "non-blocking item(s)"
+                    )
+                    for concept in payload.get("concepts", []):
+                        lines.append(
+                            "    "
+                            f"{concept.get('source_segment_id')}: "
+                            f"{concept.get('term')} [{concept.get('reason')}]"
                         )
                 elif event["event_type"] == "refinement_completed":
                     lines.append(

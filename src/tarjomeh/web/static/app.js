@@ -717,6 +717,17 @@ async function openReview(jobId) {
             const score = chunk.critique_average === null || chunk.critique_average === undefined
                 ? "n/a"
                 : Number(chunk.critique_average).toFixed(1);
+            const conceptRisks = chunk.high_risk_concepts || [];
+            const conceptRiskHtml = conceptRisks.length
+                ? `<details class="review-risks">
+                    <summary>Concept review queue (${conceptRisks.length})</summary>
+                    <ul>${conceptRisks.map(risk => `
+                        <li><strong>${escapeHtml(risk.term || "Concept")}</strong>
+                        <span>${escapeHtml(risk.source_segment_id || "")}</span>
+                        <small>${escapeHtml(risk.reason || "context-sensitive")}</small></li>
+                    `).join("")}</ul>
+                </details>`
+                : "";
             div.innerHTML = `
                 <div class="review-head">
                     <strong>Chunk ${chunk.chunk_index}</strong>
@@ -729,12 +740,14 @@ async function openReview(jobId) {
                     <span>Final integrity: ${chunk.integrity_final_failures ? "review" : "clear"}</span>
                     <span>Glossary: ${chunk.glossary_violations}</span>
                     <span>Back-check: ${chunk.back_translation_flagged ? "flagged" : "ok/unsampled"}</span>
+                    <span>Concept risks: ${conceptRisks.length}</span>
                     <button class="btn" onclick="retranslateChunk('${jobId}', ${chunk.chunk_index})">Retranslate</button>
                 </div>
                 <div class="review-columns">
                     <pre>${escapeHtml(chunk.source || "")}</pre>
                     <pre dir="rtl">${escapeHtml(chunk.translation || "")}</pre>
                 </div>
+                ${conceptRiskHtml}
             `;
             list.appendChild(div);
         });

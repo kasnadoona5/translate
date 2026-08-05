@@ -37,11 +37,13 @@ from tarjomeh.glossary.compliance import (
     term_occurs_only_in_citations,
 )
 from tarjomeh.persian.typography import PersianTypographer
+from tarjomeh.persian.orthography import apply_safe_persian_orthography
 from tarjomeh.core.term_notes import (
     apply_term_notes,
     audit_inline_english_originals,
     effective_term_notes_mode,
     ensure_inline_proper_noun_originals,
+    normalize_adjacent_original_citations,
 )
 from tarjomeh.exporters import get_exporter
 from tarjomeh.exporters.base import TranslatedDocument, TranslatedParagraph
@@ -567,6 +569,87 @@ def _filter_critique_policy_conflicts(
     return conflicts
 
 
+def _filter_critique_glossary_conflicts(
+    critique: Any,
+    entries: list[Any],
+) -> list[dict[str, Any]]:
+    """Withhold only terminology advice that removes a curated rendering."""
+    details = list(getattr(critique, "issue_details", []) or [])
+    if not details:
+        return []
+    curated = [
+        entry for entry in entries
+        if not bool(getattr(entry, "is_auto", False))
+        and str(getattr(entry, "source", "")).strip()
+        and str(getattr(entry, "target", "")).strip()
+    ]
+    kept: list[dict[str, Any]] = []
+    conflicts: list[dict[str, Any]] = []
+    for detail in details:
+        category = str(detail.get("category", "")).lower()
+        source_quote = str(detail.get("source_quote", ""))
+        current = str(detail.get("current_persian_quote", ""))
+        suggested = str(detail.get("suggested_correction", ""))
+        conflict_entries = []
+        if category in {"terminology", "name"}:
+            for entry in curated:
+                source = str(entry.source)
+                target = str(entry.target)
+                if (
+                    re.search(rf"(?<!\w){re.escape(source)}(?!\w)", source_quote, re.I)
+                    and target in current
+                    and target not in suggested
+                ):
+                    conflict_entries.append({"source": source, "target": target})
+        if conflict_entries:
+            conflict = {
+                **detail,
+                "ignored_reason": "curated_glossary_conflict",
+                "curated_entries": conflict_entries,
+            }
+            conflicts.append(conflict)
+        else:
+            kept.append(detail)
+    if conflicts:
+        critique.issue_details = kept
+        critique.issues = [
+            str(detail.get("formatted", "")) for detail in kept
+            if str(detail.get("formatted", "")).strip()
+        ]
+        critique.ignored_issue_details = list(
+            getattr(critique, "ignored_issue_details", []) or []
+        ) + conflicts
+    return conflicts
+
+
+def _high_risk_concepts(critique: Any) -> list[dict[str, Any]]:
+    """Collect grounded, review-only concept risks from validated issues."""
+    risks: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for detail in list(getattr(critique, "issue_details", []) or []):
+        for risk in list(detail.get("risk_flags", []) or []):
+            key = (
+                str(risk.get("term", "")).casefold(),
+                str(risk.get("reason", "")),
+                str(detail.get("source_segment_id", "")),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            risks.append({
+                "term": risk.get("term", ""),
+                "reason": risk.get("reason", ""),
+                "source_segment_id": detail.get("source_segment_id", ""),
+                "source_quote": detail.get("source_quote", ""),
+                "current_persian_quote": detail.get("current_persian_quote", ""),
+                "suggested_correction": detail.get("suggested_correction", ""),
+                "issue_id": detail.get("issue_id", ""),
+                "severity": detail.get("severity", ""),
+                "category": detail.get("category", ""),
+            })
+    return risks
+
+
 def _inline_eligible_nouns_from_state(noun_state: Any) -> dict[str, str]:
     """Read eligible noun mappings from current or legacy memory checkpoints."""
     if not isinstance(noun_state, dict):
@@ -655,8 +738,10 @@ def _critique_for_event(critique: Any, threshold: float, iteration: int) -> dict
                 key: detail.get(key)
                 for key in (
                     "issue_id", "category", "severity", "confidence",
-                    "source_quote", "current_persian_quote",
-                    "suggested_correction", "rationale",
+                    "source_segment_id", "source_quote", "current_persian_quote",
+                    "suggested_correction", "rationale", "risk_flags",
+                    "suggestion_orthography_normalized",
+                    "source_segment_id_corrected",
                 )
             }
             for detail in list(getattr(critique, "issue_details", []) or [])
@@ -1727,8 +1812,22 @@ class TranslationPipeline:
             progress_callback("Typography", 0.95, "Applying Persian typography rules...")
 
         typographer = PersianTypographer(self.config.to_dict().get("persian"))
+        final_orthography_edits: list[dict[str, Any]] = []
         for p in trans_doc.paragraphs:
-            p.translated_text = typographer.process(p.translated_text)
+            p.translated_text, edits = typographer.process_with_report(
+                p.translated_text
+            )
+            for edit in edits:
+                final_orthography_edits.append({
+                    "paragraph_index": p.index,
+                    **edit,
+                })
+        self.db.save_job_artifact(job_id, "persian_orthography_audit", {
+            "edit_count": sum(
+                int(edit.get("count", 0)) for edit in final_orthography_edits
+            ),
+            "edits": final_orthography_edits,
+        })
 
         requested_note_mode = self.config.output.term_notes
         note_mode = effective_term_notes_mode(
@@ -1737,15 +1836,33 @@ class TranslationPipeline:
         note_formats = {"docx", "epub", "markdown"}
         noun_state = memory_manager.proper_nouns.serialize()
         proper_nouns = memory_manager.proper_nouns.inline_eligible_nouns()
+        noun_categories = dict(noun_state.get("categories", {}))
         if note_mode in {"inline", "both"}:
-            restored = ensure_inline_proper_noun_originals(
-                trans_doc, proper_nouns, typographer
+            anchor_audit = ensure_inline_proper_noun_originals(
+                trans_doc,
+                proper_nouns,
+                typographer,
+                noun_categories,
+                return_report=True,
             )
-            if restored:
+            self.db.save_job_artifact(
+                job_id, "english_original_anchor_audit", anchor_audit
+            )
+            restored = int(anchor_audit.get("inserted_count", 0))
+            if restored or anchor_audit.get("repositioned_count"):
                 self.db.log_event(
                     job_id, "INFO",
-                    f"Restored {restored} first-occurrence English original(s).",
+                    "Anchored first-occurrence English originals: "
+                    f"inserted={restored}, "
+                    f"repositioned={anchor_audit.get('repositioned_count', 0)}, "
+                    f"ambiguous={anchor_audit.get('ambiguous_count', 0)}.",
                 )
+        citation_audit = normalize_adjacent_original_citations(
+            trans_doc, proper_nouns
+        )
+        self.db.save_job_artifact(
+            job_id, "citation_format_audit", citation_audit
+        )
         original_audit = audit_inline_english_originals(
             trans_doc,
             proper_nouns if note_mode in {"inline", "both"} else {},
@@ -1862,12 +1979,27 @@ class TranslationPipeline:
         memory_state = self.db.get_memory_state(job_id) or {}
         noun_state = memory_state.get("proper_nouns", {})
         proper_nouns = _inline_eligible_nouns_from_state(noun_state)
+        noun_categories = dict(noun_state.get("categories", {})) \
+            if isinstance(noun_state, dict) else {}
 
         typographer = PersianTypographer(self.config.to_dict().get("persian"))
         if note_mode in {"inline", "both"}:
-            ensure_inline_proper_noun_originals(
-                trans_doc, dict(proper_nouns), typographer
+            anchor_audit = ensure_inline_proper_noun_originals(
+                trans_doc,
+                dict(proper_nouns),
+                typographer,
+                noun_categories,
+                return_report=True,
             )
+            self.db.save_job_artifact(
+                job_id, "english_original_anchor_audit", anchor_audit
+            )
+        citation_audit = normalize_adjacent_original_citations(
+            trans_doc, dict(proper_nouns)
+        )
+        self.db.save_job_artifact(
+            job_id, "citation_format_audit", citation_audit
+        )
         original_audit = audit_inline_english_originals(
             trans_doc,
             dict(proper_nouns) if note_mode in {"inline", "both"} else {},
@@ -2688,6 +2820,19 @@ class TranslationPipeline:
                         )
         if not translation or not translation.strip():
             raise ValueError(f"LLM returned an empty or whitespace-only translation for chunk {idx}.")
+        translation, orthography_edits = apply_safe_persian_orthography(
+            translation
+        )
+        if orthography_edits:
+            self.db.log_chunk_event(
+                job_id, idx, "persian_orthography_normalized", {
+                    "stage": "initial_translation",
+                    "edits": orthography_edits,
+                    "edit_count": sum(
+                        int(edit.get("count", 0)) for edit in orthography_edits
+                    ),
+                },
+            )
         self.db.update_chunk(job_id, idx, ChunkStatus.TRANSLATED, translation)
         self.db.log_chunk_event(job_id, idx, "translation_completed", {
             "translation_chars": len(translation),
@@ -2755,9 +2900,13 @@ class TranslationPipeline:
                         job_id, idx, "critic_response_retried", retry_payload
                     )
                 policy_conflicts = []
+                glossary_conflicts = []
                 if getattr(critique_rep, "valid", True):
                     policy_conflicts = _filter_critique_policy_conflicts(
                         critique_rep, chunk.text, allowed_inline_originals
+                    )
+                    glossary_conflicts = _filter_critique_glossary_conflicts(
+                        critique_rep, enforced_entries
                     )
                 ignored_issues = list(
                     getattr(critique_rep, "ignored_issue_details", []) or []
@@ -2797,6 +2946,32 @@ class TranslationPipeline:
                             "message": (
                                 "Only critic instructions contradicting the deterministic "
                                 "English-original policy were withheld from refinement."
+                            ),
+                        }
+                    )
+                if glossary_conflicts:
+                    self.db.log_chunk_event(
+                        job_id, idx, "critique_glossary_conflicts_filtered", {
+                            "iteration": ref_iter,
+                            "count": len(glossary_conflicts),
+                            "conflicts": glossary_conflicts,
+                            "message": (
+                                "Critic terminology advice that removed a curated "
+                                "rendering was withheld from refinement."
+                            ),
+                        }
+                    )
+                concept_risks = _high_risk_concepts(critique_rep)
+                if concept_risks:
+                    self.db.log_chunk_event(
+                        job_id, idx, "high_risk_concepts_flagged", {
+                            "iteration": ref_iter,
+                            "count": len(concept_risks),
+                            "concepts": concept_risks,
+                            "blocking": False,
+                            "message": (
+                                "Context-sensitive concepts were queued for review; "
+                                "no translation was forced or paused."
                             ),
                         }
                     )
@@ -2953,6 +3128,21 @@ class TranslationPipeline:
                     break
 
                 proposed_translation = refinement.translation
+                proposed_translation, orthography_edits = (
+                    apply_safe_persian_orthography(proposed_translation)
+                )
+                if orthography_edits:
+                    self.db.log_chunk_event(
+                        job_id, idx, "persian_orthography_normalized", {
+                            "stage": "refinement",
+                            "iteration": ref_iter + 1,
+                            "edits": orthography_edits,
+                            "edit_count": sum(
+                                int(edit.get("count", 0))
+                                for edit in orthography_edits
+                            ),
+                        },
+                    )
                 edit_accepted = True
                 integrity_payload: dict[str, Any] | None = None
                 if integrity_enabled:
@@ -3150,6 +3340,21 @@ Output ONLY the corrected Persian translation.
                                 ),
                             )
                             break
+                        proposed_correction, orthography_edits = (
+                            apply_safe_persian_orthography(proposed_correction)
+                        )
+                        if orthography_edits:
+                            self.db.log_chunk_event(
+                                job_id, idx, "persian_orthography_normalized", {
+                                    "stage": "glossary_auto_correction",
+                                    "attempt": attempts,
+                                    "edits": orthography_edits,
+                                    "edit_count": sum(
+                                        int(edit.get("count", 0))
+                                        for edit in orthography_edits
+                                    ),
+                                },
+                            )
                         correction_changed = (
                             (proposed_correction or "").strip()
                             != (before_correction or "").strip()

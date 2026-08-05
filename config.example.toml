@@ -1,4 +1,4 @@
-# Tarjomeh v9.4 configuration template
+# Tarjomeh v9.5 configuration template
 #
 # 1. Copy this file to config.toml.
 # 2. Keep API keys and UI secrets in .env.
@@ -78,7 +78,7 @@ temperature = 0.0
 # Critic-specific bounded recovery.
 recovery_model = ""
 recovery_max_attempts = 4
-recovery_max_tokens = 24000
+recovery_max_tokens = 50000
 
 [translation]
 source_lang = "English"

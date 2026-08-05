@@ -170,7 +170,7 @@ TRANSLATOR_RECOVERY_MAX_TOKENS=24000
 # Critic: predictive normal attempt plus bounded recovery
 CRITIC_RECOVERY_MODEL=
 CRITIC_RECOVERY_MAX_ATTEMPTS=4
-CRITIC_RECOVERY_MAX_TOKENS=24000
+CRITIC_RECOVERY_MAX_TOKENS=50000
 ```
 
 The normal request keeps the same prompt, model, temperature, and reasoning
@@ -850,10 +850,13 @@ python -m pytest -q
 python -m compileall -q src tests
 ```
 
-The v9.4 suite contains 185 passing tests.
+The v9.5 suite contains 193 passing tests.
 
 ## Release History
 
+- v9.5: grounded sentence-level QA, conservative Persian orthography, exact
+  first-occurrence anchoring, deterministic citation cleanup, curated-glossary
+  critic guards, and a non-blocking high-risk concept review queue
 - v9.4: 50K monotonic first-attempt floor and operation-isolated budgeting
 - v9.3: predictive first-attempt budgets, evidence-based recovery, prompt diagnostics
 - v9.2: validated adaptive translation recovery and assembly integrity

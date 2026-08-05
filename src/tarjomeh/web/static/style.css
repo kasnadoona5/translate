@@ -795,6 +795,34 @@ select {
     white-space: pre-wrap;
 }
 
+.review-risks {
+    margin-top: 10px;
+    padding-top: 9px;
+    border-top: 1px solid var(--line);
+}
+
+.review-risks summary {
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.review-risks ul {
+    margin: 8px 0 0;
+    padding-left: 18px;
+}
+
+.review-risks li {
+    margin: 4px 0;
+    font-size: 11px;
+}
+
+.review-risks li span,
+.review-risks li small {
+    margin-left: 7px;
+    color: var(--muted);
+}
+
 .evaluation-summary,
 .evaluation-actions {
     display: flex;

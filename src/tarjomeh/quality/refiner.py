@@ -134,7 +134,7 @@ class TranslationRefiner:
                 key: detail.get(key)
                 for key in (
                     "issue_id", "category", "severity", "confidence",
-                    "source_quote", "current_persian_quote",
+                    "source_segment_id", "source_quote", "current_persian_quote",
                     "suggested_correction", "rationale",
                 )
             }

@@ -24,42 +24,166 @@ def ensure_inline_proper_noun_originals(
     document: TranslatedDocument,
     proper_nouns: dict[str, str],
     typographer: PersianTypographer,
-) -> int:
-    """Deterministically retain first-occurrence English proper nouns."""
+    categories: dict[str, str] | None = None,
+    *,
+    return_report: bool = False,
+) -> int | dict[str, Any]:
+    """Anchor one English original to its exact source occurrence."""
     inserted = 0
+    repositioned = 0
     seen: set[str] = set()
+    anchors: list[dict[str, Any]] = []
+    ambiguous: list[dict[str, Any]] = []
+    categories = categories or {}
     for paragraph in document.paragraphs:
-        source_folded = paragraph.source_text.casefold()
         candidates = []
         for source, raw_target in proper_nouns.items():
             key = source.casefold().strip()
-            position = source_folded.find(key)
-            if not key or key in seen or position < 0:
+            if not key or key in seen:
+                continue
+            category = str(categories.get(source, "proper_noun")).lower()
+            flags = 0 if category == "publication" else re.IGNORECASE
+            source_match = re.search(
+                rf"(?<!\w){re.escape(source)}(?!\w)",
+                paragraph.source_text,
+                flags=flags,
+            )
+            if source_match is None:
                 continue
             target = typographer.process(raw_target).strip()
             if target:
-                candidates.append((position, source, target, key))
+                candidates.append(
+                    (source_match.start(), source, target, key, category)
+                )
 
         text = paragraph.translated_text
-        for _, source, target, key in sorted(candidates):
-            target_offset = text.find(target)
-            if target_offset < 0:
+        for source_position, source, target, key, category in sorted(candidates):
+            target_offsets = [
+                match.start() for match in re.finditer(re.escape(target), text)
+            ]
+            if not target_offsets:
                 continue
+            expected = int(
+                source_position / max(len(paragraph.source_text), 1) * len(text)
+            )
+            ranked = sorted(target_offsets, key=lambda value: abs(value - expected))
+            if (
+                len(ranked) > 1
+                and abs(abs(ranked[0] - expected) - abs(ranked[1] - expected)) <= 3
+            ):
+                ambiguous.append({
+                    "paragraph_index": paragraph.index,
+                    "source": source,
+                    "target": target,
+                    "category": category,
+                    "reason": "ambiguous_target_occurrence",
+                })
+                continue
+            target_offset = ranked[0]
             target_end = target_offset + len(target)
             insertion_at = target_end
             if insertion_at < len(text) and text[insertion_at] in "»”":
                 insertion_at += 1
-            nearby = text[insertion_at:insertion_at + len(source) + 8]
-            if source.casefold() not in nearby.casefold():
+            original_re = re.compile(
+                rf"\s*\(\s*{re.escape(source)}\s*\)", re.IGNORECASE
+            )
+            existing = list(original_re.finditer(text))
+            correctly_placed = any(
+                abs(match.start() - insertion_at) <= 2 for match in existing
+            )
+            if not correctly_placed:
+                if existing:
+                    repositioned += 1
+                    text = original_re.sub("", text)
+                    target_offsets = [
+                        match.start() for match in re.finditer(re.escape(target), text)
+                    ]
+                    if not target_offsets:
+                        continue
+                    target_offset = min(
+                        target_offsets, key=lambda value: abs(value - expected)
+                    )
+                    insertion_at = target_offset + len(target)
+                    if insertion_at < len(text) and text[insertion_at] in "»”":
+                        insertion_at += 1
                 text = (
                     text[:insertion_at]
                     + f" ({source})"
                     + text[insertion_at:]
                 )
                 inserted += 1
+            elif len(existing) > 1:
+                kept = False
+
+                def dedupe(match: re.Match[str]) -> str:
+                    nonlocal kept
+                    if not kept and abs(match.start() - insertion_at) <= 2:
+                        kept = True
+                        return match.group(0)
+                    return ""
+
+                text = original_re.sub(dedupe, text)
+            anchors.append({
+                "paragraph_index": paragraph.index,
+                "source": source,
+                "target": target,
+                "category": category,
+                "source_offset": source_position,
+                "target_offset": target_offset,
+                "repositioned": bool(existing and not correctly_placed),
+            })
             seen.add(key)
         paragraph.translated_text = text
-    return inserted
+    report = {
+        "inserted_count": inserted,
+        "repositioned_count": repositioned,
+        "anchored_count": len(anchors),
+        "ambiguous_count": len(ambiguous),
+        "anchors": anchors,
+        "ambiguous": ambiguous,
+    }
+    return report if return_report else inserted
+
+
+_ADJACENT_ORIGINAL_CITATION_RE = re.compile(
+    r"\((?P<original>[A-Za-zÀ-ž][^()]{0,120}?)\)\s+"
+    r"\((?P<citation>[^()]*\d[^()]*)\)"
+)
+
+
+def normalize_adjacent_original_citations(
+    document: TranslatedDocument,
+    authorized_originals: dict[str, str],
+) -> dict[str, Any]:
+    """Merge only source-grounded adjacent original and citation spans."""
+    authorized = {source.casefold().strip() for source in authorized_originals}
+    changes: list[dict[str, Any]] = []
+    for paragraph in document.paragraphs:
+        source_folded = (paragraph.source_text or "").casefold()
+
+        def replace(match: re.Match[str]) -> str:
+            original = " ".join(match.group("original").split())
+            citation = " ".join(match.group("citation").split())
+            if original.casefold() not in authorized:
+                return match.group(0)
+            if original.casefold() not in source_folded:
+                return match.group(0)
+            if f"({citation})".casefold() not in source_folded:
+                return match.group(0)
+            combined = f"({original}, {citation})"
+            changes.append({
+                "paragraph_index": paragraph.index,
+                "before": match.group(0),
+                "after": combined,
+                "original": original,
+                "citation": citation,
+            })
+            return combined
+
+        paragraph.translated_text = _ADJACENT_ORIGINAL_CITATION_RE.sub(
+            replace, paragraph.translated_text or ""
+        )
+    return {"normalized_count": len(changes), "changes": changes}
 
 
 _LATIN_PARENTHETICAL_RE = re.compile(r"\s*\(([^()\n]{1,160})\)")
@@ -97,6 +221,9 @@ def audit_inline_english_originals(
             key = content.casefold()
             exact_source_parenthetical = f"({content})".casefold() in source_folded
             if any(char.isdigit() for char in content) or exact_source_parenthetical:
+                leading_original = content.split(",", 1)[0].casefold().strip()
+                if leading_original in authorized:
+                    seen.add(leading_original)
                 preserved_citations += 1
                 return match.group(0)
 

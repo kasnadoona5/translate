@@ -18,6 +18,12 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from tarjomeh.core.prompts import CRITIQUE_PROMPT
+from tarjomeh.persian.orthography import apply_safe_persian_orthography
+from tarjomeh.quality.grounding import (
+    concept_risks,
+    indexed_source,
+    resolve_source_segment,
+)
 
 
 _MQM_CATEGORIES = {
@@ -156,7 +162,7 @@ class TranslationCritique:
             Structured scores and issue list.
         """
         prompt = CRITIQUE_PROMPT.format(
-            source_text=source_text,
+            source_text=indexed_source(source_text),
             translation=translation,
             terminology=terminology or "(no glossary terms apply to this chunk)",
             review_context=review_context or "(no additional review context)",
@@ -201,8 +207,8 @@ Validation errors: {json.dumps(errors, ensure_ascii=False)}
 Previous response:
 {raw_preview}
 
-Current source for exact quote repair:
-{source_text[:6000]}
+Current source for exact quote repair (stable sentence IDs included):
+{indexed_source(source_text)[:7000]}
 
 Current Persian translation for exact quote repair:
 {translation[:6000]}
@@ -210,8 +216,8 @@ Current Persian translation for exact quote repair:
 Return ONLY a corrected JSON object with numeric 1-10 scores for accuracy,
 fluency, terminology, and register; an optional numeric overall score; and at
 most {_MAX_MQM_ISSUES} compact MQM issues. Every issue must contain category,
-severity, confidence (0-1), an exact source_quote, an exact
-current_persian_quote, suggested_correction, and rationale. Do not add praise,
+severity, confidence (0-1), an exact source_quote, its source_segment_id, an
+exact current_persian_quote, suggested_correction, and rationale. Do not add praise,
 markdown fences, or commentary."""
 
     # ── response parsing ─────────────────────────────────────────────
@@ -299,6 +305,9 @@ markdown fences, or commentary."""
                 segment = str(
                     issue.get("source_quote", issue.get("source_segment", ""))
                 ).strip()
+                requested_segment_id = str(
+                    issue.get("source_segment_id", "")
+                ).strip()
                 current = str(
                     issue.get(
                         "current_persian_quote",
@@ -310,6 +319,7 @@ markdown fences, or commentary."""
                         "suggested_correction", issue.get("suggested_fix", "")
                     )
                 ).strip()
+                fix, fix_orthography_edits = apply_safe_persian_orthography(fix)
                 explanation = str(
                     issue.get("rationale", issue.get("explanation", ""))
                 ).strip()
@@ -318,6 +328,7 @@ markdown fences, or commentary."""
                     "category": category,
                     "severity": severity,
                     "source_quote": segment,
+                    "source_segment_id": requested_segment_id,
                     "current_persian_quote": current,
                     "suggested_correction": fix,
                     "rationale": explanation,
@@ -326,6 +337,10 @@ markdown fences, or commentary."""
                     "suggested_fix": fix,
                     "explanation": explanation,
                 }
+                if fix_orthography_edits:
+                    preliminary_detail["suggestion_orthography_normalized"] = (
+                        fix_orthography_edits
+                    )
                 if _is_noop_issue(preliminary_detail):
                     ignored_issue_details.append({
                         **preliminary_detail,
@@ -350,6 +365,19 @@ markdown fences, or commentary."""
                     issue_errors.append("issue_source_quote_too_long")
                 elif source_text and not _span_is_grounded(segment, source_text):
                     issue_errors.append("issue_source_quote_not_found")
+                resolved_segment_id = requested_segment_id
+                segment_errors: list[str] = []
+                if segment and source_text:
+                    resolved_segment_id, segment_errors = resolve_source_segment(
+                        source_text, segment, requested_segment_id
+                    )
+                    issue_errors.extend(
+                        error for error in segment_errors
+                        if error not in {
+                            "issue_source_segment_ambiguous",
+                            "issue_source_segment_id_corrected",
+                        }
+                    )
                 if not current and (source_text or translation):
                     issue_errors.append("issue_current_persian_quote_required")
                 elif len(current) > _MAX_QUOTE_CHARS:
@@ -390,6 +418,7 @@ markdown fences, or commentary."""
                     "severity": severity,
                     "confidence": confidence,
                     "source_quote": segment,
+                    "source_segment_id": resolved_segment_id,
                     "current_persian_quote": current,
                     "suggested_correction": fix,
                     "rationale": explanation,
@@ -399,6 +428,15 @@ markdown fences, or commentary."""
                     "suggested_fix": fix,
                     "explanation": explanation,
                 }
+                if fix_orthography_edits:
+                    detail["suggestion_orthography_normalized"] = (
+                        fix_orthography_edits
+                    )
+                if "issue_source_segment_id_corrected" in segment_errors:
+                    detail["source_segment_id_corrected"] = True
+                risks = concept_risks(detail)
+                if risks:
+                    detail["risk_flags"] = risks
                 if rationale_truncated:
                     detail["rationale_truncated"] = True
                 text = f"[{severity.upper()}/{category}]"

@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from tarjomeh.persian.orthography import apply_safe_persian_orthography
+
 # ── Western → Persian digit mapping ──────────────────────────────────
 _WESTERN_TO_PERSIAN: dict[str, str] = {
     "0": "۰",
@@ -144,7 +146,24 @@ class PersianTypographer:
         if protected_spans:
             text = self._restore_scholarly(text, protected_spans)
 
+        # Hazm deliberately avoids some lexical compounds. Finish with a very
+        # small boundary-aware rule set whose edits are always orthographic.
+        text, _ = apply_safe_persian_orthography(text)
+
         return text
+
+    def process_with_report(
+        self,
+        text: str,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Process text and return the conservative orthography edit ledger."""
+        if not text:
+            return text, []
+        processed = self.process(text)
+        # Report only edits still recognizable from the input. Other enabled
+        # typography behavior remains unchanged and is covered by its tests.
+        _, edits = apply_safe_persian_orthography(text)
+        return processed, edits
 
     # ── scholarly apparatus protection ───────────────────────────────
 
