@@ -50,15 +50,30 @@ def test_safe_orthography_repairs_only_known_noncanonical_forms() -> None:
 
 
 def test_safe_orthography_preserves_plural_hay_and_repairs_old_corruption() -> None:
-    correct = "نظام‌های اجتماعی و عملیات‌های سرمایه"
-    assert apply_safe_persian_orthography(correct) == (correct, [])
+    preserved = (
+        "نظام‌های اجتماعی و عملیات‌های سرمایه؛ پیامدهای نظری، "
+        "تنهایی، رهایی، نهایی، بهایی، خانه‌ای و خانهای"
+    )
+    assert apply_safe_persian_orthography(preserved) == (preserved, [])
+    assert orthography_issue_count(preserved) == 0
 
     malformed = "نظام‌ه‌ای اجتماعی و عملیات‌ه‌ای سرمایه"
     repaired, edits = apply_safe_persian_orthography(malformed)
-    assert repaired == correct
+    assert repaired == "نظام‌های اجتماعی و عملیات‌های سرمایه"
     assert sum(edit["count"] for edit in edits) == 2
     assert orthography_issue_count(repaired) == 0
     assert apply_safe_persian_orthography(repaired) == (repaired, [])
+
+
+def test_safe_orthography_requires_whitespace_for_indefinite_heh() -> None:
+    original = "خانه ای، نکته‌ ای، پیامدهای، تنهایی و خانهای"
+    normalized, edits = apply_safe_persian_orthography(original)
+
+    assert normalized == "خانه‌ای، نکته‌ای، پیامدهای، تنهایی و خانهای"
+    assert [edit["rule_id"] for edit in edits] == [
+        "separated_final_heh_indefinite_zwnj"
+    ]
+    assert edits[0]["count"] == 2
 
 
 def test_publication_original_moves_from_lowercase_concept_to_title() -> None:

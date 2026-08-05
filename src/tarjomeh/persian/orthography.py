@@ -33,9 +33,9 @@ _SAFE_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
         "‌ها",
     ),
     (
-        "final_heh_indefinite_zwnj",
+        "separated_final_heh_indefinite_zwnj",
         re.compile(
-            rf"(?<!\u200c)ه\s*ای"
+            rf"ه\u200c?[ \t]+ای"
             rf"(?=(?:\u200c?تر(?:ین)?)?(?![{_PERSIAN_LETTERS}]))"
         ),
         "ه‌ای",

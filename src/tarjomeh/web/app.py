@@ -903,6 +903,10 @@ def _register_api(app: Flask) -> None:
             lines.extend([
                 "Persian orthography:",
                 f"  final_safe_edits={orthography_audit.get('edit_count', 0)}",
+                f"  remaining_deterministic_issues="
+                f"{orthography_audit.get('remaining_issue_count', 0)}",
+                "  coverage=deterministic patterns only; ambiguous forms are "
+                "not auto-classified",
                 "",
             ])
         all_events = db.get_chunk_events(job_id)

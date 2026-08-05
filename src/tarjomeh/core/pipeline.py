@@ -1856,6 +1856,8 @@ class TranslationPipeline:
                 int(edit.get("count", 0)) for edit in final_orthography_edits
             ),
             "remaining_issue_count": remaining_orthography_issues,
+            "coverage": "deterministic_patterns_only",
+            "ambiguous_forms_auto_classified": False,
             "edits": final_orthography_edits,
         })
         if remaining_orthography_issues:

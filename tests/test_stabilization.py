@@ -67,7 +67,7 @@ class TestBoundedRecovery(unittest.TestCase):
         self.assertTrue(defaults.llm.recovery.predictive_first_attempt)
         self.assertEqual(defaults.llm.recovery.predictive_min_tokens, 50000)
         self.assertEqual(defaults.llm.recovery.bootstrap_reasoning_tokens, 24000)
-        self.assertEqual(defaults.llm.recovery.adaptive_max_tokens, 65536)
+        self.assertEqual(defaults.llm.recovery.adaptive_max_tokens, 85000)
 
     def test_first_attempt_changes_only_budget_then_length_recovers(self) -> None:
         messages = [{"role": "user", "content": "Translate this paragraph."}]
@@ -95,7 +95,7 @@ class TestBoundedRecovery(unittest.TestCase):
         self.assertEqual(payloads[0]["max_tokens"], 50000)
         self.assertEqual(payloads[1]["reasoning"], expected["reasoning"])
         self.assertGreater(payloads[1]["max_tokens"], payloads[0]["max_tokens"])
-        self.assertLessEqual(payloads[1]["max_tokens"], 65536)
+        self.assertLessEqual(payloads[1]["max_tokens"], 85000)
         self.assertEqual([event["success"] for event in events], [False, True])
         self.assertEqual(events[0]["failure_reason"], "length")
         self.assertTrue(events[0]["normal_attempt"])
@@ -268,8 +268,11 @@ class TestBoundedRecovery(unittest.TestCase):
         self.client.complete(messages=messages, _operation="translation")
 
         self.assertEqual(payloads[0]["max_tokens"], 50000)
-        self.assertEqual(payloads[1]["max_tokens"], 65536)
-        self.assertEqual(payloads[2]["max_tokens"], 65536)
+        self.assertEqual(payloads[1]["max_tokens"], 75000)
+        self.assertEqual(
+            payloads[2]["max_tokens"],
+            self.config.llm.recovery.adaptive_max_tokens,
+        )
 
     def test_budget_high_water_is_isolated_by_operation(self) -> None:
         responses = iter([
@@ -288,10 +291,7 @@ class TestBoundedRecovery(unittest.TestCase):
         self.client.complete(messages=messages, _operation="proper_noun_incremental")
         self.client.complete(messages=messages, _operation="web_context_term_detection")
 
-        self.assertEqual(
-            payloads[1]["max_tokens"],
-            self.config.llm.recovery.adaptive_max_tokens,
-        )
+        self.assertEqual(payloads[1]["max_tokens"], 75000)
         self.assertEqual(
             payloads[2]["max_tokens"],
             self.config.llm.recovery.predictive_min_tokens,

@@ -187,7 +187,7 @@ Configure the adaptive guardrails in `config.toml`:
 predictive_first_attempt = true
 predictive_min_tokens = 50000
 bootstrap_reasoning_tokens = 24000
-adaptive_max_tokens = 65536
+adaptive_max_tokens = 85000
 context_window_tokens = 131072
 context_safety_tokens = 2048
 history_window = 20
@@ -850,10 +850,12 @@ python -m pytest -q
 python -m compileall -q src tests
 ```
 
-The v9.5 suite contains 193 passing tests.
+The v9.5.5 suite contains 206 passing tests.
 
 ## Release History
 
+- v9.5.5: ambiguity-safe Persian indefinite normalization, explicit audit
+  coverage, and an 85K adaptive output ceiling
 - v9.5: grounded sentence-level QA, conservative Persian orthography, exact
   first-occurrence anchoring, deterministic citation cleanup, curated-glossary
   critic guards, and a non-blocking high-risk concept review queue

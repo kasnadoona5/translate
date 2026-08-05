@@ -147,7 +147,7 @@ class LLMRecoveryConfig:
     predictive_first_attempt: bool = True
     predictive_min_tokens: int = 50000
     bootstrap_reasoning_tokens: int = 24000
-    adaptive_max_tokens: int = 65536
+    adaptive_max_tokens: int = 85000
     context_window_tokens: int = 131072
     context_safety_tokens: int = 2048
     history_window: int = 20
