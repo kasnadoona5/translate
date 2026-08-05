@@ -146,7 +146,7 @@ class TestBoundedRecovery(unittest.TestCase):
                 events[0]["request_contract_sha256"],
             )
 
-    def test_structured_helper_uses_compact_non_reasoning_contract(self) -> None:
+    def test_structured_helper_keeps_global_floor_and_non_reasoning_contract(self) -> None:
         payloads = []
 
         def post(*args, **kwargs):
@@ -158,7 +158,10 @@ class TestBoundedRecovery(unittest.TestCase):
             messages=[{"role": "user", "content": "Return JSON only."}],
             _operation="book_research_initial",
         )
-        self.assertEqual(payloads[0]["max_tokens"], self.config.llm.max_tokens)
+        self.assertEqual(
+            payloads[0]["max_tokens"],
+            self.config.llm.recovery.predictive_min_tokens,
+        )
         self.assertEqual(payloads[0]["reasoning"]["effort"], "none")
         self.assertEqual(payloads[0]["response_format"], {"type": "json_object"})
 
@@ -285,8 +288,14 @@ class TestBoundedRecovery(unittest.TestCase):
         self.client.complete(messages=messages, _operation="proper_noun_incremental")
         self.client.complete(messages=messages, _operation="web_context_term_detection")
 
-        self.assertEqual(payloads[1]["max_tokens"], 18000)
-        self.assertEqual(payloads[2]["max_tokens"], self.config.llm.max_tokens)
+        self.assertEqual(
+            payloads[1]["max_tokens"],
+            self.config.llm.recovery.adaptive_max_tokens,
+        )
+        self.assertEqual(
+            payloads[2]["max_tokens"],
+            self.config.llm.recovery.predictive_min_tokens,
+        )
         self.assertEqual(payloads[1]["reasoning"]["effort"], "none")
         self.assertEqual(payloads[2]["reasoning"]["effort"], "none")
 

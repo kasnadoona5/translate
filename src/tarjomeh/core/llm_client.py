@@ -31,9 +31,9 @@ _SCHEMA_REPAIR_OPERATIONS = {
     "refinement_json_repair",
 }
 
-# Bounded JSON helpers do not benefit from long hidden reasoning traces. Keeping
-# them separate also prevents their budgets from contaminating translation and
-# QA history for the same model.
+# Bounded JSON helpers do not benefit from long hidden reasoning traces. Their
+# output contract is specialized, but they retain the same global predictive
+# token floor and operation-isolated budget history as every other call.
 _STRUCTURED_HELPER_OPERATIONS = {
     "auto_term_extraction",
     "book_research",
@@ -332,18 +332,6 @@ class LLMClient:
         recovery = self.config.llm.recovery
         if not recovery.enabled or not recovery.predictive_first_attempt:
             return original, {}
-
-        # Structured helpers have tightly bounded JSON answers. Applying the
-        # 50K quality floor here lets reasoning-heavy models spend the entire
-        # allowance internally without improving the requested artifact.
-        if operation in _STRUCTURED_HELPER_OPERATIONS:
-            return original, {
-                "stage": "preflight",
-                "policy": "bounded_structured_helper",
-                "applied_max_tokens": int(
-                    original.get("max_tokens", self.config.llm.max_tokens)
-                ),
-            }
 
         payload = dict(original)
         answer_estimate, answer_evidence = self._answer_estimate(
