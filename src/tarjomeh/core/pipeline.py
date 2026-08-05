@@ -56,7 +56,9 @@ from tarjomeh.quality.refiner import TranslationRefiner
 from tarjomeh.quality.back_translator import BackTranslator
 from tarjomeh.quality.integrity import (
     PostEditIntegrityGate,
+    normalize_for_match,
     protected_english_originals,
+    protected_source_apparatus,
 )
 from tarjomeh.core.prompts import (
     TRANSLATE_SYSTEM_PROMPT,
@@ -552,12 +554,24 @@ def _filter_critique_policy_conflicts(
             current_originals[value] for value in removed
             if any(char.isdigit() for char in value)
         )
-        if removed_authorized or added_unauthorized or removed_citations:
+        current_apparatus = protected_source_apparatus(source_text, current)
+        suggested_normalized = normalize_for_match(suggested)
+        removed_source_apparatus = sorted(
+            value for value in current_apparatus
+            if normalize_for_match(value) not in suggested_normalized
+        )
+        if (
+            removed_authorized
+            or added_unauthorized
+            or removed_citations
+            or removed_source_apparatus
+        ):
             conflicts.append({
                 "issue": detail.get("formatted", ""),
                 "removed_authorized": removed_authorized,
                 "added_unauthorized": added_unauthorized,
                 "removed_citations": removed_citations,
+                "removed_source_apparatus": removed_source_apparatus,
             })
         else:
             kept_details.append(detail)
@@ -2967,8 +2981,9 @@ class TranslationPipeline:
                             "allowed_originals": allowed_inline_originals,
                             "conflicts": policy_conflicts,
                             "message": (
-                                "Only critic instructions contradicting the deterministic "
-                                "English-original policy were withheld from refinement."
+                                "Only critic instructions contradicting deterministic "
+                                "inline-original or source-apparatus policy were withheld "
+                                "from refinement."
                             ),
                         }
                     )
@@ -3523,7 +3538,9 @@ Output ONLY the corrected Persian translation.
                     )
                     back_translated = ""
                 bt_result = (
-                    back_translator.compare(chunk.text, back_translated)
+                    back_translator.compare(
+                        chunk.text, back_translated, translation
+                    )
                     if back_translated else None
                 )
                 if bt_result is not None:

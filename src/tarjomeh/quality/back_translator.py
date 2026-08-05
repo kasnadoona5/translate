@@ -137,6 +137,7 @@ class BackTranslator:
         self,
         original_english: str,
         back_translated: str,
+        translated_text: str = "",
     ) -> BackTranslationResult:
         """Compare the original English with a back-translation.
 
@@ -156,6 +157,9 @@ class BackTranslator:
             The original English source text.
         back_translated:
             The English text produced by back-translating the Persian.
+        translated_text:
+            Optional final Persian text. Source entities visibly preserved there
+            in Latin script are not falsely reported as lost by back-translation.
 
         Returns
         -------
@@ -184,10 +188,15 @@ class BackTranslator:
         added_numbers = list((back_numbers - source_numbers).elements())
 
         source_entities = _extract_entities(original_english)
+        preserved_inline_entities = [
+            entity for entity in source_entities
+            if translated_text and _entity_is_present(entity, translated_text)
+        ]
         missing_entities = [
             entity
             for entity in source_entities
             if not _entity_is_present(entity, back_translated)
+            and entity not in preserved_inline_entities
         ]
         source_negations = _negations(original_english)
         back_negations = _negations(back_translated)
@@ -220,6 +229,7 @@ class BackTranslator:
             "missing_numbers": missing_numbers,
             "added_numbers": added_numbers,
             "missing_entities": missing_entities,
+            "entities_preserved_inline": preserved_inline_entities,
             "source_negations": source_negations,
             "back_translation_negations": back_negations,
             "negation_mismatch": negation_mismatch,

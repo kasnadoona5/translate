@@ -38,13 +38,13 @@ class RecordingLLM:
 
 def test_safe_orthography_repairs_only_known_noncanonical_forms() -> None:
     original = (
-        "سرمایهداری و الگوریتمها در صورت بندی حاشیهایتر "
-        "بررسی شدند (Marx 1973, 408)."
+        "او می نویسد و کتاب ها را در خانه ای تر کنار تابلوئی بررسی کرد "
+        "(Author 2018, 12)."
     )
     normalized, edits = apply_safe_persian_orthography(original)
     assert normalized == (
-        "سرمایه‌داری و الگوریتم‌ها در صورت‌بندی حاشیه‌ای‌تر "
-        "بررسی شدند (Marx 1973, 408)."
+        "او می‌نویسد و کتاب‌ها را در خانه‌ای‌تر کنار تابلویی بررسی کرد "
+        "(Author 2018, 12)."
     )
     assert sum(edit["count"] for edit in edits) == 5
 
@@ -65,12 +65,12 @@ def test_publication_original_moves_from_lowercase_concept_to_title() -> None:
     document = TranslatedDocument(paragraphs=[TranslatedParagraph(
         index=0,
         source_text=(
-            "The concept politics of operations matters. "
-            "We introduce The Politics of Operations."
+            "The concept methods of inquiry matters. "
+            "We introduce Methods of Inquiry."
         ),
         translated_text=(
-            "مفهوم سیاست عملیات (The Politics of Operations) مهم است. "
-            "کتاب سیاست عملیات معرفی می‌شود."
+            "مفهوم روش‌های پژوهش (Methods of Inquiry) مهم است. "
+            "کتاب روش‌های پژوهش معرفی می‌شود."
         ),
     )])
     typographer = PersianTypographer({
@@ -80,29 +80,29 @@ def test_publication_original_moves_from_lowercase_concept_to_title() -> None:
     })
     report = ensure_inline_proper_noun_originals(
         document,
-        {"The Politics of Operations": "سیاست عملیات"},
+        {"Methods of Inquiry": "روش‌های پژوهش"},
         typographer,
-        {"The Politics of Operations": "publication"},
+        {"Methods of Inquiry": "publication"},
         return_report=True,
     )
     text = document.paragraphs[0].translated_text
-    assert text.count("(The Politics of Operations)") == 1
-    assert "مفهوم سیاست عملیات مهم است" in text
-    assert "کتاب سیاست عملیات (The Politics of Operations)" in text
+    assert text.count("(Methods of Inquiry)") == 1
+    assert "مفهوم روش‌های پژوهش مهم است" in text
+    assert "کتاب روش‌های پژوهش (Methods of Inquiry)" in text
     assert report["repositioned_count"] == 1
 
 
 def test_citation_merging_requires_source_grounding() -> None:
     document = TranslatedDocument(paragraphs=[TranslatedParagraph(
         index=0,
-        source_text="Marx (1973, 408) discusses capital.",
-        translated_text="مارکس (Marx) (1973, 408) سرمایه را بررسی می‌کند.",
+        source_text="Arendt (1958, 24) discusses judgment.",
+        translated_text="آرنت (Arendt) (1958, 24) داوری را بررسی می‌کند.",
     )])
     report = normalize_adjacent_original_citations(
-        document, {"Marx": "مارکس"}
+        document, {"Arendt": "آرنت"}
     )
     assert document.paragraphs[0].translated_text.startswith(
-        "مارکس (Marx, 1973, 408)"
+        "آرنت (Arendt, 1958, 24)"
     )
     assert report["normalized_count"] == 1
 
@@ -110,13 +110,13 @@ def test_citation_merging_requires_source_grounding() -> None:
 def test_bare_author_year_is_merged_only_when_source_grounded() -> None:
     document = TranslatedDocument(paragraphs=[TranslatedParagraph(
         index=0,
-        source_text="Cáceres 2014 discusses the campaign.",
-        translated_text="کاسرس (Cáceres) 2014 کارزار را بررسی می‌کند.",
+        source_text="Rahman 2012 discusses the archive.",
+        translated_text="رحمان (Rahman) 2012 بایگانی را بررسی می‌کند.",
     )])
     report = normalize_adjacent_original_citations(
-        document, {"Cáceres": "کاسرس"}
+        document, {"Rahman": "رحمان"}
     )
-    assert "کاسرس (Cáceres, 2014)" in document.paragraphs[0].translated_text
+    assert "رحمان (Rahman, 2012)" in document.paragraphs[0].translated_text
     assert report["normalized_count"] == 1
 
 
@@ -133,21 +133,21 @@ def test_grounded_critique_infers_segment_and_normalizes_suggestion() -> None:
             "category": "terminology",
             "severity": "major",
             "confidence": 0.9,
-            "source_quote": "contemporary capitalism",
-            "current_persian_quote": "سرمایه‌داری معاصر",
-            "suggested_correction": "کاپیتالیسم معاصر",
+            "source_quote": "institutional authority",
+            "current_persian_quote": "اقتدار نهادی",
+            "suggested_correction": "مرجعیت نهادی",
             "rationale": "Use consistent terminology.",
         }],
     }, ensure_ascii=False)
     result = TranslationCritique._parse_response(
         raw,
-        "The book examines contemporary capitalism. Another sentence follows.",
-        "کتاب سرمایه‌داری معاصر را بررسی می‌کند. جمله‌ای دیگر می‌آید.",
+        "The report examines institutional authority. Another sentence follows.",
+        "گزارش اقتدار نهادی را بررسی می‌کند. جمله‌ای دیگر می‌آید.",
     )
     assert result.valid
     issue = result.issue_details[0]
     assert issue["source_segment_id"] == "p1:s1"
-    assert issue["suggested_correction"] == "کاپیتالیسم معاصر"
+    assert issue["suggested_correction"] == "مرجعیت نهادی"
     assert _high_risk_concepts(result)
 
 
@@ -163,14 +163,14 @@ def test_orthography_only_critic_regression_becomes_noop() -> None:
             "category": "typography",
             "severity": "minor",
             "confidence": 0.9,
-            "source_quote": "capitalism",
-            "current_persian_quote": "سرمایه‌داری",
-            "suggested_correction": "سرمایهداری",
-            "rationale": "Remove the half-space.",
+            "source_quote": "writes",
+            "current_persian_quote": "می‌نویسد",
+            "suggested_correction": "می نویسد",
+            "rationale": "Use a regular space.",
         }],
     }, ensure_ascii=False)
     result = TranslationCritique._parse_response(
-        raw, "capitalism", "سرمایه‌داری"
+        raw, "writes", "می‌نویسد"
     )
     assert result.valid
     assert result.issue_details == []
@@ -185,16 +185,16 @@ def test_curated_glossary_conflict_is_withheld_without_invalidating_critique() -
         "issue_id": "mqm-test",
         "category": "terminology",
         "severity": "major",
-        "source_quote": "capitalism",
-        "current_persian_quote": "سرمایه‌داری",
-        "suggested_correction": "کاپیتالیسم",
+        "source_quote": "institution",
+        "current_persian_quote": "نهاد",
+        "suggested_correction": "مؤسسه",
         "formatted": "issue",
     }
     critique = CritiqueResult(
         issues=["issue"], issue_details=[detail], valid=True
     )
     entry = SimpleNamespace(
-        source="capitalism", target="سرمایه‌داری", is_auto=False
+        source="institution", target="نهاد", is_auto=False
     )
     conflicts = _filter_critique_glossary_conflicts(critique, [entry])
     assert len(conflicts) == 1

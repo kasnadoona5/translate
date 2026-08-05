@@ -9,6 +9,23 @@ Templates use ``str.format()`` for variable injection.
 
 from __future__ import annotations
 
+
+GENERAL_EDITORIAL_CONTRACT: str = """\
+### General editorial contract
+- Resolve meaning from the current proposition, neighboring discourse, book context,
+  domain, and approved terminology; never force an isolated dictionary equivalent.
+- Preserve semantic roles and relations, including agency, possession, attribution,
+  negation, modality, quantity, comparison, causality, and temporal orientation.
+- Preserve source-authored multilingual expressions, titles, labels, quotations,
+  citations, and note markers. These are scholarly apparatus, not optional inline
+  English originals. Translate ordinary quoted prose unless the source presents it
+  as an original-language expression or title.
+- Write idiomatic formal Iranian Persian. Avoid English calques; use standard ezafe,
+  clitics, affixes, verb agreement, punctuation, and ZWNJ conventions.
+- Treat only the supplied glossary and established name renderings as mandatory.
+  For every unlisted expression, choose the rendering supported by its actual context.
+"""
+
 # ---------------------------------------------------------------------------
 # 1. System-level translation prompt
 # ---------------------------------------------------------------------------
@@ -41,7 +58,7 @@ Core directives:
 • Use standard Persian punctuation: «» for quotation marks, ؛ for semicolons, etc.
 • Do NOT add personal commentary, footnotes, or translator's notes unless
   explicitly instructed.
-"""
+""" + "\n" + GENERAL_EDITORIAL_CONTRACT
 
 ACADEMIC_REGISTER_MODIFIER: str = """\
 Use a highly formal, precise, and scholarly academic register. \
@@ -137,6 +154,8 @@ Use this only to resolve discourse, style, and reference ambiguity. Do not
 criticize text outside the current source/translation pair:
 {review_context}
 
+""" + GENERAL_EDITORIAL_CONTRACT + """
+
 Return a JSON object with exactly this schema:
 {{
   "scores": {{
@@ -176,6 +195,8 @@ MQM rules:
 - Minor style preferences must stay minor and must not be inflated to force edits.
 - Every quote must occur verbatim in the current source or translation.
 - Every source_segment_id must identify the sentence containing source_quote.
+- For semantic issues, the rationale must identify the affected relation or
+  proposition in context, not merely offer a different dictionary synonym.
 - Do not praise, repeat the full source, repeat the full translation, or provide
   commentary outside the JSON. Keep each rationale under 60 words.
 
@@ -203,6 +224,8 @@ The critique identifies high-risk passages; it is not automatically authoritativ
 
 ### Bounded review context
 {review_context}
+
+""" + GENERAL_EDITORIAL_CONTRACT + """
 
 Instructions:
 1. Evaluate each critique issue in severity order: "critical", then "major", then "minor".

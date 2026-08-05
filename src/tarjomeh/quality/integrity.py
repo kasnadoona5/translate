@@ -20,6 +20,11 @@ _PERSIAN_RE = re.compile(r"[\u0600-\u06ff]")
 _ASCII_WORD_RE = re.compile(r"[A-Za-z]{2,}")
 _JSON_LEAK_RE = re.compile(r'(^\s*\{|"(?:translation|decision|rationale)"\s*:)', re.IGNORECASE)
 _ENGLISH_PAREN_RE = re.compile(r"\(([A-Za-z][A-Za-z0-9 .,&':;\u2019\-]{1,80})\)")
+_SOURCE_PAREN_RE = re.compile(r"\(([^()\n]{2,240})\)")
+_SOURCE_QUOTE_RE = re.compile(
+    r'(?:[\u201c\u201e"]([^\u201c\u201d\u201e"\n]{2,240})[\u201d"]'
+    r"|\u2018([^\u2018\u2019\n]{2,240})\u2019)"
+)
 
 
 def normalize_for_match(text: str) -> str:
@@ -70,6 +75,27 @@ def protected_source_citations(source: str, translation: str) -> list[str]:
         value for value in protected_english_originals(source, translation)
         if any(char.isdigit() for char in value)
     ]
+
+
+def protected_source_apparatus(source: str, translation: str) -> list[str]:
+    """Return source-delimited Latin spans retained verbatim in a translation.
+
+    This is structural protection, not a vocabulary list. Ordinary English prose
+    that was translated is absent from the result; only parenthetical or quoted
+    source material already carried into the prior valid translation is retained.
+    """
+    translation_folded = normalize_for_match(translation)
+    values: list[str] = []
+    candidates = list(_SOURCE_PAREN_RE.findall(source or ""))
+    for match in _SOURCE_QUOTE_RE.finditer(source or ""):
+        candidates.append(match.group(1) or match.group(2) or "")
+    for value in candidates:
+        cleaned = " ".join(value.split()).strip()
+        if not cleaned or not re.search(r"[A-Za-z]", cleaned):
+            continue
+        if normalize_for_match(cleaned) in translation_folded:
+            values.append(cleaned)
+    return sorted(set(values), key=str.casefold)
 
 
 @dataclass
@@ -173,6 +199,17 @@ class PostEditIntegrityGate:
                     "edit_content_growth", "blocking",
                     "The edit added a suspicious amount of text.",
                     ratio=round(edit_ratio, 4), maximum=self.max_growth_ratio,
+                )
+
+            missing_apparatus = [
+                value for value in protected_source_apparatus(source, previous)
+                if normalize_for_match(value) not in normalize_for_match(candidate)
+            ]
+            if missing_apparatus:
+                add(
+                    "source_apparatus_removed", "blocking",
+                    "Source-authored multilingual or scholarly material was removed.",
+                    missing=missing_apparatus,
                 )
 
         source_numbers = extract_numbers(source)

@@ -11,38 +11,64 @@ import re
 from typing import Any
 
 
+_PERSIAN_LETTERS = (
+    r"\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff"
+)
+
+
 _SAFE_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     (
-        "capitalism_zwnj",
-        re.compile(r"(?<![\w\u200c])سرمایه\s*داری(?![\w\u200c])"),
-        "سرمایه\u200cداری",
+        "verb_prefix_zwnj",
+        re.compile(
+            rf"(?<![{_PERSIAN_LETTERS}\u200c])(ن?می)\s+(?=[{_PERSIAN_LETTERS}])"
+        ),
+        r"\1‌",
     ),
     (
-        "algorithm_plural_zwnj",
-        re.compile(r"(?<![\w\u200c])الگوریتم\s*ها(?![\w\u200c])"),
-        "الگوریتم\u200cها",
+        "separated_plural_suffix_zwnj",
+        re.compile(
+            rf"(?<=[{_PERSIAN_LETTERS}])\s+ها"
+            rf"(?=(?:ی(?:ی|م|ت|ش|مان|تان|شان)?)?(?![{_PERSIAN_LETTERS}]))"
+        ),
+        "‌ها",
     ),
     (
-        "formation_compound_zwnj",
-        re.compile(r"(?<![\w\u200c])صورت\s+بندی(?=$|[\s،؛:,.!?؟])"),
-        "صورت\u200cبندی",
-    ),
-    # Repair only the known missing-heh spelling. A former broad ``های`` rule
-    # corrupted every correct plural (e.g. نظام‌های -> نظام‌ه‌ای).
-    (
-        "marginal_ezafe_zwnj",
-        re.compile(r"حاشیهای(?=تر(?:\b|$)|(?:\b|$))"),
-        "حاشیه\u200cای",
+        "final_heh_indefinite_zwnj",
+        re.compile(
+            rf"(?<!\u200c)ه\s*ای"
+            rf"(?=(?:\u200c?تر(?:ین)?)?(?![{_PERSIAN_LETTERS}]))"
+        ),
+        "ه‌ای",
     ),
     (
-        "comparative_after_ezafe_zwnj",
-        re.compile(r"ه\u200cایتر(?=\b|$)"),
-        "ه\u200cای\u200cتر",
+        "separated_comparative_suffix_zwnj",
+        re.compile(
+            rf"(?<=[{_PERSIAN_LETTERS}])\s+(تر(?:ین)?)(?![{_PERSIAN_LETTERS}])"
+        ),
+        r"‌\1",
+    ),
+    (
+        "comparative_after_indefinite_zwnj",
+        re.compile(r"(?<=ه\u200cای)تر(?=(?:ین)?(?:\b|$))"),
+        "‌تر",
+    ),
+    (
+        "modern_ye_after_waw",
+        re.compile(rf"(?<=[{_PERSIAN_LETTERS}])وئی"),
+        "ویی",
     ),
     (
         "malformed_plural_heh_ezafe",
         re.compile(r"(?<!ه)(?<=[\u0600-\u06ff])\u200cه\u200cای(?=\b|$)"),
         "\u200cهای",
+    ),
+)
+
+
+_ADVISORY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "separated_derivational_suffix",
+        re.compile(rf"(?<=[{_PERSIAN_LETTERS}])\s+مندی(?![{_PERSIAN_LETTERS}])"),
     ),
 )
 
@@ -72,5 +98,9 @@ def apply_safe_persian_orthography(
 
 
 def orthography_issue_count(text: str) -> int:
-    """Count safely recognizable noncanonical forms without changing text."""
-    return sum(len(pattern.findall(text or "")) for _, pattern, _ in _SAFE_RULES)
+    """Count safe corrections plus conservative review-only suspicions."""
+    safe = sum(len(pattern.findall(text or "")) for _, pattern, _ in _SAFE_RULES)
+    advisory = sum(
+        len(pattern.findall(text or "")) for _, pattern in _ADVISORY_PATTERNS
+    )
+    return safe + advisory

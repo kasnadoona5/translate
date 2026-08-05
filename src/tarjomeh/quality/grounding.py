@@ -8,15 +8,31 @@ from typing import Any
 
 _SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+(?=[\"'“‘(\[]*[A-Z0-9])")
 
-_HIGH_RISK_CONCEPTS: tuple[tuple[re.Pattern[str], str, str], ...] = (
-    (re.compile(r"\bprospectiv(?:e|ely)\b", re.I), "prospectively", "temporal_orientation"),
-    (re.compile(r"\bground\b", re.I), "ground", "conceptual_polysemy"),
-    (re.compile(r"\boperations?\b", re.I), "operation", "domain_term"),
-    (re.compile(r"\bimplications?\b", re.I), "implication", "conceptual_polysemy"),
-    (re.compile(r"\bengagements?\b", re.I), "engagement", "context_sensitive_relation"),
-    (re.compile(r"\bconstellations?\b", re.I), "constellation", "metaphorical_term"),
-    (re.compile(r"\bfield\b", re.I), "field", "domain_polysemy"),
-    (re.compile(r"\bcapital\b", re.I), "capital", "core_theoretical_term"),
+_SEMANTIC_RELATION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(?:['’]s\b|\bof\b)", re.I), "possession_or_attribution"),
+    (re.compile(r"\b(?:not|no|never|without|neither|nor)\b", re.I), "negation"),
+    (
+        re.compile(
+            r"\b(?:may|might|must|can|could|should|would|need|ought)\b",
+            re.I,
+        ),
+        "modality",
+    ),
+    (
+        re.compile(r"\b(?:all|each|every|some|many|few|more|less|than)\b", re.I),
+        "quantity_or_comparison",
+    ),
+    (
+        re.compile(
+            r"\b(?:because|therefore|thus|hence|due\s+to|leads?\s+to|results?\s+in)\b",
+            re.I,
+        ),
+        "causal_relation",
+    ),
+    (
+        re.compile(r"\b(?:before|after|during|while|until|since|already|still)\b", re.I),
+        "temporal_relation",
+    ),
 )
 
 
@@ -96,12 +112,12 @@ def resolve_source_segment(
 
 
 def concept_risks(issue: dict[str, Any]) -> list[dict[str, str]]:
-    """Return review-only risks for a grounded critic issue."""
+    """Return general, review-only relation risks for a grounded issue."""
     source_quote = str(issue.get("source_quote", ""))
     risks: list[dict[str, str]] = []
-    for pattern, term, reason in _HIGH_RISK_CONCEPTS:
+    for pattern, reason in _SEMANTIC_RELATION_PATTERNS:
         if pattern.search(source_quote):
-            risks.append({"term": term, "reason": reason})
+            risks.append({"term": source_quote[:120], "reason": reason})
 
     severity = str(issue.get("severity", "")).lower()
     category = str(issue.get("category", "")).lower()
