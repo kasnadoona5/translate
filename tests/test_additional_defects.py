@@ -218,6 +218,33 @@ class TestGlossaryFeatures(unittest.TestCase):
         self.assertEqual(len(report.violations), 1)
         self.assertEqual(report.violations[0].status, "wrong")
 
+    def test_advisory_auto_terms_are_excluded_from_mandatory_compliance(self) -> None:
+        manager = GlossaryManager()
+        manager.add_term("institution", "نهاد", is_auto=False)
+        manager.add_term("social formation", "صورت‌بندی اجتماعی", is_auto=True)
+        mandatory = [entry for entry in manager.entries if not entry.is_auto]
+
+        checker = GlossaryComplianceChecker()
+        report = checker.check(
+            "نهاد در متن بررسی می‌شود.",
+            "The institution shapes the social formation.",
+            manager,
+            entries=mandatory,
+        )
+
+        self.assertTrue(report.compliant)
+        self.assertEqual(report.total_checked, 1)
+
+    def test_auto_term_prompt_has_explicit_non_binding_policy(self) -> None:
+        manager = GlossaryManager()
+        manager.add_term("social formation", "صورت‌بندی اجتماعی", is_auto=True)
+
+        prompt = manager.format_advisory_for_prompt(manager.entries)
+
+        self.assertIn("advisory only", prompt)
+        self.assertIn("may be used, revised, or rejected", prompt)
+        self.assertNotIn("Mandatory glossary", prompt)
+
     def test_is_auto_and_csv_export(self) -> None:
         manager = GlossaryManager()
         # Add normal term
@@ -463,6 +490,64 @@ class TestBalancedRefinementPolicy(unittest.TestCase):
         self.assertEqual(result.translation, "ترجمه حفظ شد")
         self.assertEqual(result.decision, "preserved")
         self.assertIn("less accurate", result.rationale)
+
+    def test_refiner_continues_bounded_repair_after_provider_exception(self) -> None:
+        issue = {
+            "issue_id": "mqm-general",
+            "category": "accuracy",
+            "severity": "major",
+            "source_quote": "the relation",
+            "current_persian_quote": "رابطه",
+            "suggested_correction": "این رابطه",
+            "rationale": "Restore the demonstrative.",
+        }
+
+        class RecoveringLLM:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.operations: list[str] = []
+
+            def set_operation(self, operation: str) -> None:
+                self.operations.append(operation)
+
+            def limit_next_call_attempts(self, attempts: int) -> None:
+                self.limited_attempts = attempts
+
+            async def chat(self, prompt: str) -> str:
+                self.calls += 1
+                if self.calls == 1:
+                    return "not json"
+                if self.calls == 2:
+                    raise RuntimeError("temporary provider failure")
+                return json.dumps({
+                    "translation": "این رابطه حفظ شد.",
+                    "decision": "revised",
+                    "rationale": "The grounded issue was accepted.",
+                    "issue_decisions": [{
+                        "issue_id": "mqm-general",
+                        "decision": "accepted",
+                        "resulting_span": "این رابطه",
+                        "rationale": "The source contains the demonstrative.",
+                    }],
+                }, ensure_ascii=False)
+
+        llm = RecoveringLLM()
+        critique = CritiqueResult(
+            average=8,
+            issues=["[MAJOR/accuracy] relation"],
+            issue_details=[issue],
+        )
+        result = asyncio.run(
+            TranslationRefiner(llm, max_parse_retries=2).refine_with_decision(
+                "the relation remains", "رابطه حفظ شد.", critique
+            )
+        )
+
+        self.assertTrue(result.valid)
+        self.assertEqual(result.attempts, 3)
+        self.assertEqual(llm.calls, 3)
+        self.assertEqual(llm.operations.count("refinement_json_repair"), 2)
+        self.assertIn("repair_call_error:RuntimeError", result.validation_errors)
 
     def test_chunk_needs_review_uses_latest_attempt_only(self) -> None:
         temp_dir = tempfile.mkdtemp()

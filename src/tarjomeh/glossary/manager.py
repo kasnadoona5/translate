@@ -331,14 +331,18 @@ class GlossaryManager:
         include_namespace = any(e.sense or e.author for e in entries)
         if include_namespace:
             lines = [
-                "## Glossary — Use these exact translations",
+                "## Mandatory glossary — Use these lexical renderings",
+                "Standard Persian orthography and ZWNJ placement take precedence "
+                "over spacing-only CSV variants.",
                 "",
                 "| English | Persian (فارسی) | Sense | Author/School | Context | Domain |",
                 "|---------|----------------|-------|---------------|---------|--------|",
             ]
         else:
             lines = [
-                "## Glossary — Use these exact translations",
+                "## Mandatory glossary — Use these lexical renderings",
+                "Standard Persian orthography and ZWNJ placement take precedence "
+                "over spacing-only CSV variants.",
                 "",
                 "| English | Persian (فارسی) | Context | Domain |",
                 "|---------|----------------|---------|--------|",
@@ -360,6 +364,32 @@ class GlossaryManager:
                     f"| {_table_cell(e.source)} | {_table_cell(e.target)} | "
                     f"{context_str} | {domain_str} |"
                 )
+        lines.append("")
+        return "\n".join(lines)
+
+    def format_advisory_for_prompt(
+        self,
+        terms: list[GlossaryEntry] | None = None,
+    ) -> str:
+        """Format unapproved discovered terms as non-binding context."""
+        entries = terms if terms is not None else []
+        if not entries:
+            return ""
+        lines = [
+            "## Auto-extracted terminology suggestions — advisory only",
+            "Evaluate each candidate in its full source context. It may be used, "
+            "revised, or rejected; it must not override a curated glossary entry "
+            "or source meaning.",
+            "",
+            "| English | Suggested Persian | Context | Domain |",
+            "|---------|-------------------|---------|--------|",
+        ]
+        for entry in entries:
+            lines.append(
+                f"| {_table_cell(entry.source)} | {_table_cell(entry.target)} | "
+                f"{_table_cell(entry.context or '—')} | "
+                f"{_table_cell(entry.domain or '—')} |"
+            )
         lines.append("")
         return "\n".join(lines)
 

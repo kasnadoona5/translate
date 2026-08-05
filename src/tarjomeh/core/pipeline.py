@@ -589,14 +589,16 @@ def _filter_critique_policy_conflicts(
 def _filter_critique_glossary_conflicts(
     critique: Any,
     entries: list[Any],
+    *,
+    include_auto: bool = False,
 ) -> list[dict[str, Any]]:
-    """Withhold only terminology advice that removes a curated rendering."""
+    """Withhold terminology advice that removes a mandatory rendering."""
     details = list(getattr(critique, "issue_details", []) or [])
     if not details:
         return []
-    curated = [
+    mandatory_entries = [
         entry for entry in entries
-        if not bool(getattr(entry, "is_auto", False))
+        if (include_auto or not bool(getattr(entry, "is_auto", False)))
         and str(getattr(entry, "source", "")).strip()
         and str(getattr(entry, "target", "")).strip()
     ]
@@ -609,13 +611,15 @@ def _filter_critique_glossary_conflicts(
         suggested = str(detail.get("suggested_correction", ""))
         conflict_entries = []
         if category in {"terminology", "name"}:
-            for entry in curated:
+            for entry in mandatory_entries:
                 source = str(entry.source)
                 target = str(entry.target)
                 if (
                     re.search(rf"(?<!\w){re.escape(source)}(?!\w)", source_quote, re.I)
-                    and target in current
-                    and target not in suggested
+                    and GlossaryComplianceChecker._target_present(target, current)
+                    and not GlossaryComplianceChecker._target_present(
+                        target, suggested
+                    )
                 ):
                     conflict_entries.append({"source": source, "target": target})
         if conflict_entries:
@@ -2482,13 +2486,35 @@ class TranslationPipeline:
         citation_exempt_sources = {
             entry.source.casefold() for entry in citation_exempt_entries
         }
-        enforced_entries = [
+        active_entries = [
             entry
             for entry in matched_entries
             if entry.source.casefold() not in citation_exempt_sources
         ]
+        enforce_auto_terms = bool(
+            getattr(
+                self.config.glossary,
+                "enforce_auto_extracted_terms",
+                False,
+            )
+        )
+        enforced_entries = [
+            entry
+            for entry in active_entries
+            if not bool(getattr(entry, "is_auto", False)) or enforce_auto_terms
+        ]
+        advisory_entries = [
+            entry
+            for entry in active_entries
+            if bool(getattr(entry, "is_auto", False)) and not enforce_auto_terms
+        ]
         self.db.log_chunk_event(job_id, idx, "glossary_matches", {
             "matched_count": len(matched_entries),
+            "mandatory_count": len(enforced_entries),
+            "advisory_count": len(advisory_entries),
+            "auto_term_policy": (
+                "mandatory" if enforce_auto_terms else "advisory"
+            ),
             "entries": _glossary_entries_for_event(matched_entries),
             "citation_exemptions": [
                 entry.source for entry in citation_exempt_entries
@@ -2498,7 +2524,10 @@ class TranslationPipeline:
             str(getattr(entry, "target", "")).strip()
             for entry in enforced_entries
             if str(getattr(entry, "target", "")).strip()
-            and not bool(getattr(entry, "is_auto", False))
+            and (
+                not bool(getattr(entry, "is_auto", False))
+                or enforce_auto_terms
+            )
         ]
         integrity_enabled = bool(
             getattr(self.config.translation, "enable_integrity_gate", True)
@@ -2513,8 +2542,17 @@ class TranslationPipeline:
         )
         # Context-aware glossary table: includes each term's Context column
         # (author-specific sense, e.g. Marx's vs Bourdieu's "capital").
-        glossary_terms_str = glossary_manager.format_for_prompt(enforced_entries) \
-            or "(no glossary terms matched in this chunk)"
+        glossary_prompt_parts = [
+            glossary_manager.format_for_prompt(enforced_entries),
+            (
+                glossary_manager.format_advisory_for_prompt(advisory_entries)
+                if advisory_entries
+                else ""
+            ),
+        ]
+        glossary_terms_str = "\n\n".join(
+            part for part in glossary_prompt_parts if part
+        ) or "(no glossary terms matched in this chunk)"
 
         style_register = self.config.translation.style_register
         if style_register == "academic":
@@ -2627,7 +2665,8 @@ class TranslationPipeline:
         terminology_ctx = glossary_terms_str
         if mem_context.proper_nouns:
             terminology_ctx += (
-                "\n\n### Established proper-noun renderings\n" + mem_context.proper_nouns
+                "\n\n### Mandatory established proper-noun renderings\n"
+                + mem_context.proper_nouns
             )
         terminology_ctx += (
             "\n\n### First-occurrence English-original policy\n"
@@ -2945,7 +2984,9 @@ class TranslationPipeline:
                         critique_rep, chunk.text, allowed_inline_originals
                     )
                     glossary_conflicts = _filter_critique_glossary_conflicts(
-                        critique_rep, enforced_entries
+                        critique_rep,
+                        enforced_entries,
+                        include_auto=enforce_auto_terms,
                     )
                 ignored_issues = list(
                     getattr(critique_rep, "ignored_issue_details", []) or []
@@ -3300,6 +3341,7 @@ class TranslationPipeline:
                 source_text=chunk.text,
                 glossary_manager=glossary_manager,
                 chunk_location=f"Chunk {idx}",
+                entries=enforced_entries,
             )
             self.db.log_chunk_event(
                 job_id,
@@ -3353,7 +3395,9 @@ Authorized first-occurrence English originals already present:
 
 Do not add English parentheticals for any other term.
 
-Please re-translate the text, ensuring that you use the expected glossary terms exactly as prescribed.
+Please re-translate the text, ensuring that you use each required glossary term's
+lexical rendering. Use standard Persian orthography and ZWNJ placement even if a
+listed spacing variant is malformed; spacing-only equivalents remain compliant.
 Preserve every protected English original above exactly once. Do not remove or relocate
 those parentheticals while correcting glossary terminology. Preserve paragraph structure,
 citations, numbers, names, and all text unrelated to the listed violations.
@@ -3442,6 +3486,7 @@ Output ONLY the corrected Persian translation.
                                 source_text=chunk.text,
                                 glossary_manager=glossary_manager,
                                 chunk_location=f"Chunk {idx}",
+                                entries=enforced_entries,
                             )
                             if not report.compliant:
                                 remaining_terms = "; ".join(

@@ -179,13 +179,28 @@ class TranslationRefiner:
                 self._llm.limit_next_call_attempts(1)
             if hasattr(self._llm, "set_operation"):
                 self._llm.set_operation("refinement_json_repair")
-            raw = await self._llm.chat(
-                self._repair_prompt(
-                    raw, result.validation_errors, compact_issues
+            repair_attempt = retry + 2
+            try:
+                repaired_raw = await self._llm.chat(
+                    self._repair_prompt(
+                        raw, result.validation_errors, compact_issues
+                    )
                 )
-            )
+            except Exception as exc:
+                error = f"repair_call_error:{type(exc).__name__}"
+                logger.warning(
+                    "Refiner JSON repair call failed (%s); bounded repair may continue.",
+                    type(exc).__name__,
+                )
+                all_errors.append(error)
+                result.validation_errors = list(
+                    dict.fromkeys([*result.validation_errors, error])
+                )
+                result.attempts = repair_attempt
+                continue
+            raw = repaired_raw
             result = self._parse_response(raw, expected_issue_ids)
-            result.attempts = retry + 2
+            result.attempts = repair_attempt
             all_errors.extend(result.validation_errors)
 
         if not result.valid:

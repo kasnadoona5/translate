@@ -341,6 +341,12 @@ markdown fences, or commentary."""
                     preliminary_detail["suggestion_orthography_normalized"] = (
                         fix_orthography_edits
                     )
+                if _is_terminology_orthography_equivalent(preliminary_detail):
+                    ignored_issue_details.append({
+                        **preliminary_detail,
+                        "ignored_reason": "terminology_orthography_equivalent",
+                    })
+                    continue
                 if _is_noop_issue(preliminary_detail):
                     ignored_issue_details.append({
                         **preliminary_detail,
@@ -510,6 +516,29 @@ def _is_noop_issue(detail: dict[str, Any]) -> bool:
                 "keep the current",
             )
         )
+    )
+
+
+def _persian_terminology_key(value: Any) -> str:
+    """Compare lexical Persian forms without treating joiners as semantics."""
+    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    normalized = normalized.replace("ي", "ی").replace("ك", "ک")
+    normalized = re.sub(r"[\u064b-\u065f\u0670\u0640]", "", normalized)
+    return re.sub(r"[\s\u200c\u200d]+", "", normalized).strip(" .;:!?\"'")
+
+
+def _is_terminology_orthography_equivalent(detail: dict[str, Any]) -> bool:
+    """Ignore terminology advice that changes only Persian joining/spacing."""
+    if str(detail.get("category", "")).strip().lower() != "terminology":
+        return False
+    current = str(detail.get("current_translation", "")).strip()
+    suggested = str(detail.get("suggested_fix", "")).strip()
+    return bool(
+        current
+        and suggested
+        and current != suggested
+        and _persian_terminology_key(current)
+        == _persian_terminology_key(suggested)
     )
 
 

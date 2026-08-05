@@ -134,6 +134,26 @@ def test_missing_refiner_issue_decision_is_rejected() -> None:
     assert "missing_issue_decision:mqm-required" in result.validation_errors
 
 
+def test_refiner_decision_span_must_exist_in_returned_translation() -> None:
+    raw = json.dumps({
+        "translation": "ترجمه نهایی معتبر است.",
+        "decision": "revised",
+        "rationale": "Applied the grounded concern.",
+        "issue_decisions": [{
+            "issue_id": "mqm-required",
+            "decision": "accepted",
+            "resulting_span": "عبارتی که برگردانده نشد",
+            "rationale": "Claimed to be present.",
+        }],
+    }, ensure_ascii=False)
+    result = TranslationRefiner._parse_response(raw, ["mqm-required"])
+
+    assert not result.valid
+    assert "resulting_span_not_in_translation:mqm-required" in (
+        result.validation_errors
+    )
+
+
 def test_q3_tables_persist_issues_and_decisions_additively() -> None:
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
         db = JobDatabase(Path(temp_dir) / "jobs.db")

@@ -188,6 +188,9 @@ def _register_routes(app: Flask) -> None:
         runtime_config = app.config["TARJOMEH_CONFIG"]
         return render_template("index.html", ui_defaults={
             "qa_json_retries": runtime_config.translation.qa_json_retries,
+            "enforce_auto_extracted_terms": (
+                runtime_config.glossary.enforce_auto_extracted_terms
+            ),
             "critic_recovery_tokens": max(
                 runtime_config.llm.critic.recovery_max_tokens,
                 runtime_config.llm.recovery.predictive_min_tokens,
@@ -311,6 +314,9 @@ def _register_api(app: Flask) -> None:
             "enable_integrity_gate": "translation.enable_integrity_gate",
             "enable_web_context": "translation.enable_web_context",
             "enable_auto_extraction": "glossary.enable_auto_extraction",
+            "enforce_auto_extracted_terms": (
+                "glossary.enforce_auto_extracted_terms"
+            ),
             "enable_compliance_check": "glossary.enable_compliance_check",
             "enable_auto_correction": "glossary.enable_auto_correction",
             "scholarly_mode": "persian.scholarly_mode",
@@ -828,7 +834,13 @@ def _register_api(app: Flask) -> None:
             f"stop_after={translation_config.get('stop_after_chapter') or 0} "
             f"pause_each={translation_config.get('pause_after_each_chapter', False)}",
             f"  glossary_compliance={glossary_config.get('enable_compliance_check')} "
-            f"auto_correction={glossary_config.get('enable_auto_correction')}",
+            f"auto_correction={glossary_config.get('enable_auto_correction')} "
+            "auto_terms="
+            + (
+                "mandatory"
+                if glossary_config.get("enforce_auto_extracted_terms", False)
+                else "advisory"
+            ),
             f"  search_provider={search_config.get('provider')} "
             f"research_queries={search_config.get('phase7_max_queries')} "
             f"chunk_queries={search_config.get('max_queries_per_chunk')} "

@@ -94,6 +94,7 @@ class GlossaryComplianceChecker:
         source_text: str,
         glossary_manager: GlossaryManager,
         chunk_location: str = "",
+        entries: list[GlossaryEntry] | None = None,
     ) -> ComplianceReport:
         """Run compliance check and return a :class:`ComplianceReport`.
 
@@ -102,12 +103,18 @@ class GlossaryComplianceChecker:
             source_text:      The English source text of the same chunk.
             glossary_manager: Active glossary with prescribed terms.
             chunk_location:   Optional location string for diagnostics.
+            entries:          Optional preselected mandatory entries. When
+                              omitted, matching uses the complete glossary.
 
         Returns:
             A :class:`ComplianceReport` with any violations.
         """
         # Step 1: find which glossary terms appear in the source.
-        matched_entries = glossary_manager.find_terms(source_text)
+        matched_entries = (
+            list(entries)
+            if entries is not None
+            else glossary_manager.find_terms(source_text)
+        )
 
         violations: list[Violation] = []
         citation_exemptions: list[str] = []

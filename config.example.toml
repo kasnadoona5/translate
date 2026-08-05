@@ -150,6 +150,9 @@ path = "glossary/academic_political_theory.csv"
 paths = []
 
 enable_auto_extraction = true
+# false: discovered/unapproved terms are advisory; true: enforce them like
+# curated or explicitly approved glossary entries.
+enforce_auto_extracted_terms = false
 enable_compliance_check = true
 enable_auto_correction = true
 

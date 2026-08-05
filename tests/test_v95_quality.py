@@ -195,6 +195,63 @@ def test_orthography_only_critic_regression_becomes_noop() -> None:
     assert result.ignored_issue_details[0]["suggestion_orthography_normalized"]
 
 
+def test_terminology_zwnj_variant_is_not_a_semantic_violation() -> None:
+    raw = json.dumps({
+        "scores": {
+            "accuracy": 9,
+            "fluency": 9,
+            "terminology": 8,
+            "register": 9,
+        },
+        "issues": [{
+            "category": "terminology",
+            "severity": "major",
+            "confidence": 0.95,
+            "source_quote": "capitalism",
+            "current_persian_quote": "سرمایه‌داری",
+            "suggested_correction": "سرمایهداری",
+            "rationale": "Match the glossary spacing.",
+        }],
+    }, ensure_ascii=False)
+
+    result = TranslationCritique._parse_response(
+        raw, "capitalism", "سرمایه‌داری"
+    )
+
+    assert result.valid
+    assert result.issue_details == []
+    assert result.ignored_issue_details[0]["ignored_reason"] == (
+        "terminology_orthography_equivalent"
+    )
+
+
+def test_terminology_semantic_change_remains_actionable() -> None:
+    raw = json.dumps({
+        "scores": {
+            "accuracy": 8,
+            "fluency": 9,
+            "terminology": 7,
+            "register": 9,
+        },
+        "issues": [{
+            "category": "terminology",
+            "severity": "major",
+            "confidence": 0.95,
+            "source_quote": "capitalism",
+            "current_persian_quote": "سرمایه‌داری",
+            "suggested_correction": "اقتصاد بازار",
+            "rationale": "A different lexical rendering is required.",
+        }],
+    }, ensure_ascii=False)
+
+    result = TranslationCritique._parse_response(
+        raw, "capitalism", "سرمایه‌داری"
+    )
+
+    assert result.valid
+    assert len(result.issue_details) == 1
+
+
 def test_curated_glossary_conflict_is_withheld_without_invalidating_critique() -> None:
     detail = {
         "issue_id": "mqm-test",
@@ -218,6 +275,35 @@ def test_curated_glossary_conflict_is_withheld_without_invalidating_critique() -
     assert critique.ignored_issue_details[0]["ignored_reason"] == (
         "curated_glossary_conflict"
     )
+
+
+def test_auto_glossary_conflict_is_protected_only_in_mandatory_mode() -> None:
+    detail = {
+        "issue_id": "mqm-auto",
+        "category": "terminology",
+        "severity": "major",
+        "source_quote": "capitalism",
+        "current_persian_quote": "سرمایه‌داری",
+        "suggested_correction": "اقتصاد بازار",
+        "formatted": "issue",
+    }
+    entry = SimpleNamespace(
+        source="capitalism", target="سرمایهداری", is_auto=True
+    )
+    advisory = CritiqueResult(
+        issues=["issue"], issue_details=[dict(detail)], valid=True
+    )
+    mandatory = CritiqueResult(
+        issues=["issue"], issue_details=[dict(detail)], valid=True
+    )
+
+    assert _filter_critique_glossary_conflicts(advisory, [entry]) == []
+    conflicts = _filter_critique_glossary_conflicts(
+        mandatory, [entry], include_auto=True
+    )
+
+    assert len(conflicts) == 1
+    assert mandatory.issue_details == []
 
 
 def test_critic_source_is_indexed_once_without_extra_llm_call() -> None:

@@ -558,6 +558,8 @@ Recommended production academic settings:
 - Refinement attempts: `2`
 - Integrity gate: enabled
 - Glossary compliance and guarded auto-correction: enabled
+- Auto-extracted term policy: advisory until reviewed; enable mandatory mode
+  only when you intentionally trust the discovered candidates
 - Back-translation sample: `15-20%`
 - Book research: enabled when external search is configured
 - Critic fallback: an independent reliable model/combo when available
@@ -720,10 +722,15 @@ paths = [
   "glossary/analytic_philosophy.csv",
   "glossary/islamic_philosophy.csv",
 ]
+enforce_auto_extracted_terms = false
 ```
 
 The primary glossary has highest precedence. Auto-extracted/research terms do
-not overwrite curated entries.
+not overwrite curated entries. With the default `false` value, unapproved
+auto-extracted terms are visible to the translator, critic, and refiner as
+advisory context, but glossary compliance and auto-correction do not enforce
+them. The Web UI's **Enforce auto terms** toggle sets this per job. Approved
+terms are curated entries and remain mandatory regardless of the toggle.
 
 ## Review and Quality Regression
 

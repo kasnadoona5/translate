@@ -238,6 +238,9 @@ class GlossaryConfig:
     # existing projects keep their precedence and behaviour.
     paths: list[str] = field(default_factory=list)
     enable_auto_extraction: bool = True
+    # Auto-extracted terms remain reviewable suggestions by default. Enable
+    # this only when the user wants unapproved discoveries enforced exactly.
+    enforce_auto_extracted_terms: bool = False
     enable_compliance_check: bool = True
     enable_auto_correction: bool = True
 

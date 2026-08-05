@@ -22,8 +22,9 @@ GENERAL_EDITORIAL_CONTRACT: str = """\
   as an original-language expression or title.
 - Write idiomatic formal Iranian Persian. Avoid English calques; use standard ezafe,
   clitics, affixes, verb agreement, punctuation, and ZWNJ conventions.
-- Treat only the supplied glossary and established name renderings as mandatory.
-  For every unlisted expression, choose the rendering supported by its actual context.
+- Treat only glossary entries explicitly marked mandatory and established name
+  renderings as mandatory. Advisory candidates may be revised or rejected. For
+  every unlisted expression, choose the rendering supported by its actual context.
 """
 
 # ---------------------------------------------------------------------------
@@ -45,7 +46,8 @@ Core directives:
   - For transliteration, use the accepted Iranian academic standard.
   - {term_notes_instruction}
 • Preserve the author's argumentative structure and rhetorical style.
-• Use the provided glossary terms consistently throughout.
+• Use entries marked mandatory consistently. Evaluate advisory glossary candidates
+  against the source context before using, revising, or rejecting them.
 • Use Iranian Persian vocabulary and conventions — not Dari or Afghan Persian.
 • Output must be valid right-to-left (RTL) Persian text with correct ZWNJ placement.
 • Convert Western numerals to Persian numerals (۰۱۲۳۴۵۶۷۸۹) in running prose ONLY.
@@ -94,7 +96,7 @@ TRANSLATE_CHUNK_PROMPT: str = """\
 Translate the following English academic text into Persian (فارسی).
 
 {exemplars}
-### Glossary — mandatory terms (use exactly these translations)
+### Terminology policy (mandatory entries and advisory candidates are labeled below)
 {glossary_terms}
 
 ### Context from translation memory (previous chunks / running summary)
@@ -111,7 +113,8 @@ Translate the following English academic text into Persian (فارسی).
 
 Instructions:
 1. Translate the entire source text faithfully into academic Persian.
-2. Apply every glossary term exactly as listed above.
+2. Apply every entry marked mandatory using its prescribed lexical rendering and
+   standard Persian orthography. Treat entries marked advisory as non-binding context.
 3. Ensure stylistic and terminological continuity with the preceding translation.
 4. Maintain paragraph structure; do not merge or split paragraphs. The source text contains
    exactly {paragraph_count} paragraph(s) — your translation MUST also contain exactly
@@ -144,9 +147,11 @@ copy these labels into the Persian translation.
 ### Translation (Persian)
 {translation}
 
-### Mandatory terminology (glossary + established proper-noun renderings)
-Judge the "terminology" dimension against THIS list — a rendering that deviates
-from it is a terminology violation even if otherwise acceptable Persian:
+### Terminology policy (glossary + established proper-noun renderings)
+Only entries explicitly marked mandatory may cause a terminology violation.
+Advisory auto-extracted candidates are contextual suggestions and may be rejected.
+For mandatory entries, enforce the lexical rendering while accepting equivalent
+standard Persian ZWNJ/spacing forms; never prefer malformed typography:
 {terminology}
 
 ### Bounded review context
@@ -197,6 +202,8 @@ MQM rules:
 - Every source_segment_id must identify the sentence containing source_quote.
 - For semantic issues, the rationale must identify the affected relation or
   proposition in context, not merely offer a different dictionary synonym.
+- A ZWNJ/spacing-only difference is not a terminology error. Use typography only
+  when the current Persian itself violates standard orthography.
 - Do not praise, repeat the full source, repeat the full translation, or provide
   commentary outside the JSON. Keep each rationale under 60 words.
 
@@ -219,7 +226,7 @@ The critique identifies high-risk passages; it is not automatically authoritativ
 ### Editorial critique (JSON)
 {critique}
 
-### Mandatory terminology (glossary + established proper-noun renderings)
+### Terminology policy (mandatory glossary + advisory discovered candidates)
 {terminology}
 
 ### Bounded review context
@@ -233,8 +240,9 @@ Instructions:
 3. If the current translation is more accurate in context, preserve it; do not change a
    correct rendering merely because the critic suggested an alternative.
 4. Preserve every part of the translation that has no validated issue.
-5. Apply the mandatory terminology above exactly; do not introduce new renderings for
-   listed terms while fixing other issues.
+5. Apply entries marked mandatory using their prescribed lexical rendering, with
+   standard Persian orthography. Treat advisory candidates as optional context and
+   do not let them override source meaning or a mandatory entry.
 6. Ensure correct ZWNJ placement, Persian numerals in prose, and RTL punctuation — but keep
    citations, years, and page numbers in Latin script and Western digits.
 7. Return exactly one compact decision for every issue ID. A serious issue must
@@ -243,6 +251,7 @@ Instructions:
    labels in the Persian translation.
 8. Include the complete Persian translation exactly once. Do not repeat it in
    issue decisions or rationales.
+   Every resulting_span must be copied verbatim from that returned translation.
 9. Return ONLY valid JSON with this schema:
 {{
   "translation": "<the final Persian translation only>",

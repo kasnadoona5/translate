@@ -253,6 +253,7 @@ async function startTranslation() {
     formData.append("enable_integrity_gate", String(document.getElementById("cfgIntegrityGate").checked));
     formData.append("enable_web_context", String(document.getElementById("cfgWebContext").checked));
     formData.append("enable_auto_extraction", String(document.getElementById("cfgAutoExtraction").checked));
+    formData.append("enforce_auto_extracted_terms", String(document.getElementById("cfgEnforceAutoTerms").checked));
     formData.append("enable_compliance_check", String(document.getElementById("cfgCompliance").checked));
     formData.append("enable_auto_correction", String(document.getElementById("cfgAutoCorrection").checked));
     formData.append("scholarly_mode", String(document.getElementById("cfgScholarly").checked));

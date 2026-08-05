@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-import json
 import io
+import inspect
+import json
+import os
 import queue
-import time
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-import os
 
 try:
     import flask
@@ -54,6 +55,7 @@ class TestWebUI(unittest.TestCase):
             "cfgTermNotes",
             "cfgBookResearch",
             "cfgAutoExtraction",
+            "cfgEnforceAutoTerms",
             "cfgCritique",
             "cfgBackTranslation",
             "cfgWebContext",
@@ -234,6 +236,7 @@ class TestWebUI(unittest.TestCase):
                 "glossary": {
                     "enable_compliance_check": True,
                     "enable_auto_correction": True,
+                    "enforce_auto_extracted_terms": False,
                 },
                 "output": {"format": "docx", "term_notes": "inline"},
                 "llm": {
@@ -324,6 +327,7 @@ class TestWebUI(unittest.TestCase):
         self.assertIn("source=100 output=90", report)
         self.assertIn("reasons=chunk_needs_review", report)
         self.assertIn("threshold=9.0 refinements=2", report)
+        self.assertIn("auto_terms=advisory", report)
         self.assertIn(
             "critic_recovery_attempts=4 fallback=critic-fallback final_tokens=16384",
             report,
@@ -414,7 +418,8 @@ class TestWebUI(unittest.TestCase):
             "file": (open("pyproject.toml", "rb"), "book.pdf"),
             "mode": "fast",
             "format": "txt",
-            "bilingual_mode": "target_only"
+            "bilingual_mode": "target_only",
+            "enforce_auto_extracted_terms": "true",
         }
 
         response = self.client.post("/api/translate", data=data, headers=headers)
@@ -425,6 +430,11 @@ class TestWebUI(unittest.TestCase):
         self.assertTrue(resp_data["job_id"])
         self.assertIn("stream_url", resp_data)
         mock_submit.assert_called_once()
+        submitted_job = mock_submit.call_args.args[0]
+        overrides = inspect.getclosurevars(submitted_job).nonlocals[
+            "config_overrides"
+        ]
+        self.assertTrue(overrides["glossary.enforce_auto_extracted_terms"])
 
     @patch("tarjomeh.web.app._executor.submit")
     @patch("tarjomeh.jobs.database.JobDatabase")
