@@ -903,6 +903,44 @@ def _critique_passes_quality_gate(critique: Any, threshold: float) -> bool:
     )
 
 
+_HIGH_CONFIDENCE_MINOR_CATEGORIES = frozenset({
+    "accuracy",
+    "omission",
+    "terminology",
+})
+_HIGH_CONFIDENCE_MINOR_THRESHOLD = 0.85
+
+
+def _high_confidence_semantic_minor_issues(critique: Any) -> list[dict[str, Any]]:
+    """Return grounded minor semantic concerns worth one bounded review pass."""
+    routed: list[dict[str, Any]] = []
+    for detail in list(getattr(critique, "issue_details", []) or []):
+        severity = str(detail.get("severity", "")).strip().lower()
+        category = str(detail.get("category", "")).strip().lower()
+        try:
+            confidence = float(detail.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        source_quote = str(detail.get("source_quote", "")).strip()
+        current = " ".join(
+            str(detail.get("current_persian_quote", "")).split()
+        )
+        suggested = " ".join(
+            str(detail.get("suggested_correction", "")).split()
+        )
+        if (
+            severity == "minor"
+            and category in _HIGH_CONFIDENCE_MINOR_CATEGORIES
+            and confidence >= _HIGH_CONFIDENCE_MINOR_THRESHOLD
+            and source_quote
+            and current
+            and suggested
+            and current != suggested
+        ):
+            routed.append(detail)
+    return routed
+
+
 def _critique_requires_refinement(critique: Any, threshold: float) -> bool:
     """Apply Q3 severity routing while preserving legacy score-only critiques."""
     if not getattr(critique, "valid", True):
@@ -918,11 +956,18 @@ def _critique_requires_refinement(critique: Any, threshold: float) -> bool:
         str(detail.get("severity", "")).strip().lower() in {"critical", "major"}
         for detail in details
     )
-    return bool(has_substantive_nonblocking and not critique.passes_threshold(threshold))
+    return bool(
+        _high_confidence_semantic_minor_issues(critique)
+        or (
+            has_substantive_nonblocking
+            and not critique.passes_threshold(threshold)
+        )
+    )
 
 
 def _critique_for_event(critique: Any, threshold: float, iteration: int) -> dict[str, Any]:
     blocking_issues = _blocking_critique_issues(critique)
+    routed_minor_issues = _high_confidence_semantic_minor_issues(critique)
     return {
         "iteration": iteration,
         "valid": bool(getattr(critique, "valid", True)),
@@ -932,6 +977,10 @@ def _critique_for_event(critique: Any, threshold: float, iteration: int) -> dict
         "passes_average_threshold": bool(critique.passes_threshold(threshold)),
         "passes_threshold": not _critique_requires_refinement(critique, threshold),
         "force_refinement": _critique_requires_refinement(critique, threshold),
+        "high_confidence_minor_refinement_count": len(routed_minor_issues),
+        "high_confidence_minor_refinement_issue_ids": [
+            detail.get("issue_id") for detail in routed_minor_issues
+        ],
         "scores": {
             "accuracy": critique.accuracy,
             "fluency": critique.fluency,

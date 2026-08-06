@@ -910,8 +910,19 @@ def _register_api(app: Flask) -> None:
                 f"repositioned={anchor_audit.get('repositioned_count', 0)} "
                 f"ambiguous={anchor_audit.get('ambiguous_count', 0)} "
                 f"missing_target={anchor_audit.get('missing_target_count', 0)}",
-                "",
             ])
+            for missing in anchor_audit.get("missing_targets", []) or []:
+                lines.append(
+                    "  MISSING TARGET: paragraph={paragraph} source={source!r} "
+                    "target={target!r} category={category} reason={reason}".format(
+                        paragraph=missing.get("paragraph_index"),
+                        source=missing.get("source", ""),
+                        target=missing.get("target", ""),
+                        category=missing.get("category", ""),
+                        reason=missing.get("reason", ""),
+                    )
+                )
+            lines.append("")
         citation_audit = db.get_job_artifact(job_id, "citation_format_audit")
         if citation_audit is not None:
             lines.extend([
@@ -952,6 +963,11 @@ def _register_api(app: Flask) -> None:
             events_by_chunk.setdefault(int(event["chunk_index"]), []).append(event)
 
         review_reasons: set[str] = set()
+        if (
+            anchor_audit is not None
+            and int(anchor_audit.get("missing_target_count", 0) or 0) > 0
+        ):
+            review_reasons.add("first_occurrence_target_missing")
         if job.get("status") != "completed":
             review_reasons.add(f"job_{job.get('status')}")
         if any(chunk.get("status") == "needs_review" for chunk in all_chunks):
@@ -1105,6 +1121,15 @@ def _register_api(app: Flask) -> None:
                             blocking=payload.get("blocking_issue_count", 0),
                         )
                     )
+                    routed_minor_count = payload.get(
+                        "high_confidence_minor_refinement_count", 0
+                    )
+                    if routed_minor_count:
+                        lines.append(
+                            "    High-confidence semantic minor routed for "
+                            f"bounded refinement: {routed_minor_count} "
+                            f"issue(s) {payload.get('high_confidence_minor_refinement_issue_ids', [])}"
+                        )
                     for issue in payload.get("issue_details", []):
                         lines.append(
                             "    MQM {issue_id}: {severity}/{category} "
@@ -1240,9 +1265,12 @@ def _register_api(app: Flask) -> None:
 
         report = "\n".join(lines)
         return Response(
-            report,
-            mimetype="text/plain; charset=utf-8",
-            headers={"Content-Disposition": f"attachment; filename={job_id}_qa_report.txt"},
+            report.encode("utf-8-sig"),
+            content_type="text/plain; charset=utf-8",
+            headers={
+                "Content-Disposition":
+                    f'attachment; filename="{job_id}_qa_report.txt"'
+            },
         )
 
     @app.route("/api/jobs/<job_id>/chunks/<int:chunk_index>/retranslate", methods=["POST"])

@@ -318,6 +318,8 @@ class TestWebUI(unittest.TestCase):
         report = response.get_data(as_text=True)
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content_type, "text/plain; charset=utf-8")
+        self.assertTrue(response.get_data().startswith(b"\xef\xbb\xbf"))
         self.assertIn("Job Configuration:", report)
         self.assertIn("QA Verdict:", report)
         self.assertIn("status=quality_fail", report)
@@ -339,6 +341,54 @@ class TestWebUI(unittest.TestCase):
             report,
         )
         self.assertIn("Citation preserved (not terminology): Caceres", report)
+
+    @patch("tarjomeh.jobs.database.JobDatabase")
+    def test_qa_report_lists_missing_original_targets_as_review_signals(
+        self, mock_db_cls: MagicMock
+    ) -> None:
+        mock_db = mock_db_cls.return_value
+        mock_db.get_job.return_value = {
+            "id": "job-anchor",
+            "input_path": "book.pdf",
+            "status": "completed",
+            "config": {},
+        }
+
+        def artifact(_job_id: str, name: str):
+            if name == "english_original_anchor_audit":
+                return {
+                    "anchored_count": 1,
+                    "missing_target_count": 1,
+                    "missing_targets": [{
+                        "paragraph_index": 3,
+                        "source": "operative surface",
+                        "target": "سطح عملیاتی",
+                        "category": "term",
+                        "reason": "known_target_not_found",
+                    }],
+                }
+            return None
+
+        mock_db.get_job_artifact.side_effect = artifact
+        mock_db.get_chunks.return_value = [{
+            "chunk_index": 0,
+            "status": "completed",
+            "translation": "ترجمه کامل",
+        }]
+        mock_db.get_chunk_events.return_value = []
+
+        response = self.client.get(
+            "/api/jobs/job-anchor/qa-report",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        report = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("status=review_required", report)
+        self.assertIn("first_occurrence_target_missing", report)
+        self.assertIn("MISSING TARGET: paragraph=3", report)
+        self.assertIn("source='operative surface'", report)
+        self.assertIn("target='سطح عملیاتی'", report)
 
     @patch("tarjomeh.jobs.database.JobDatabase")
     def test_qa_report_distinguishes_missing_output_from_quality_failure(

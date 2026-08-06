@@ -80,6 +80,42 @@ def test_minor_only_mqm_issue_does_not_force_refinement() -> None:
     assert _critique_passes_quality_gate(critique, 9.0)
 
 
+def _minor_critique(*, category: str, confidence: float) -> CritiqueResult:
+    return CritiqueResult(
+        accuracy=9,
+        fluency=9,
+        terminology=9,
+        register=9,
+        average=9,
+        issues=[f"[MINOR/{category}] grounded concern"],
+        issue_details=[{
+            "issue_id": f"mqm-minor-{category}",
+            "category": category,
+            "severity": "minor",
+            "confidence": confidence,
+            "source_quote": "capital's tendency",
+            "current_persian_quote": "تمایل سرمایه",
+            "suggested_correction": "گرایش سرمایه",
+        }],
+    )
+
+
+def test_high_confidence_semantic_minor_requests_bounded_refinement() -> None:
+    for category in ("accuracy", "omission", "terminology"):
+        critique = _minor_critique(category=category, confidence=0.85)
+
+        assert _critique_requires_refinement(critique, 9.0)
+        assert not _critique_passes_quality_gate(critique, 9.0)
+
+
+def test_minor_routing_excludes_low_confidence_and_style_preferences() -> None:
+    low_confidence = _minor_critique(category="accuracy", confidence=0.84)
+    style_preference = _minor_critique(category="fluency", confidence=0.99)
+
+    assert not _critique_requires_refinement(low_confidence, 9.0)
+    assert not _critique_requires_refinement(style_preference, 9.0)
+
+
 def test_refiner_requires_one_balanced_decision_per_issue() -> None:
     issue = {
         "issue_id": "mqm-field",
