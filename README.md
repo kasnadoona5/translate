@@ -395,8 +395,10 @@ For example: `http://172.17.0.1:20128/v1`.
 Port `20128` should not be left publicly accessible without authentication and
 network restrictions. Tarjomeh only needs internal access to it.
 
-Tarjomeh v8.7 accepts both ordinary JSON and OpenAI-compatible SSE
-`chat.completion.chunk` responses from gateways such as 9router.
+Tarjomeh accepts ordinary JSON, OpenAI-compatible SSE, and Anthropic-style SSE
+from compatible gateways. v9.6 requests streaming by default, separates hidden
+reasoning from visible output, and sends `X-9Router-Token-Saver: off` to a
+recognized 9router endpoint so Tarjomeh retains control of retries and budgets.
 
 ### Updating the standalone 9router container
 
@@ -828,8 +830,17 @@ accepted as complete.
 
 ### `malformed_response` containing `data:`
 
-Confirm the VPS is on v8.7 or later. v8.7 added compatibility for
-OpenAI-style SSE streams returned by OpenAI-compatible gateways.
+Confirm the VPS is on v9.6 or later. v9.6 normalizes OpenAI and Anthropic SSE,
+structured JSON wrapped in markdown or leading reasoning blocks, and common
+OpenAI-compatible non-streaming response envelopes.
+
+### Long-thinking request times out
+
+`[llm.transport].read_timeout_seconds` is an inactivity timeout, not a total
+generation deadline. The default is 900 seconds and streaming is enabled, so a
+provider that continues sending SSE data may think for longer without a false
+180-second client timeout. Ambiguous read-timeout retries are separately bounded
+by `unknown_outcome_retries` to avoid repeated billing.
 
 ### Job paused on a translation failure
 
@@ -870,6 +881,9 @@ releases.
 
 ## Release History
 
+- v9.6: provider-neutral streaming transport, configurable inactivity timeouts,
+  OpenAI/Anthropic response normalization, robust structured-output recovery,
+  partial research preservation, and a final model-protocol export gate
 - v9.5.7: provider-neutral thinking controls, thinking-first structured helper
   calls with bounded no-reasoning recovery, integrity-gated local refinement
   salvage, truthful per-issue commit evidence, and English-only first-occurrence

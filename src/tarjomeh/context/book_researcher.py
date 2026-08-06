@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from tarjomeh.core.config import TarjomehConfig
+from tarjomeh.core.structured_output import parse_structured_output
 from tarjomeh.parsers.base import Document
 
 logger = logging.getLogger(__name__)
@@ -98,7 +99,10 @@ class BookResearcher:
                 recovery_error = recovery_error or follow_up_error
 
             terms = self._normalise_terms(data.get("terms", []), sources)
-            if used_batches or not sources:
+            context = str(data.get("book_context", "")).strip()[:4000]
+            if sources and recovery_error and not context and not terms:
+                status = "partial"
+            elif used_batches or not sources:
                 status = "degraded"
             elif not terms:
                 status = "completed_without_suggestions"
@@ -111,7 +115,7 @@ class BookResearcher:
                 if item.get("status") == "success"
             ))
             return BookResearchResult(
-                book_context=str(data.get("book_context", "")).strip()[:4000],
+                book_context=context,
                 terms=terms,
                 sources=sources,
                 queries=queries,
@@ -129,7 +133,7 @@ class BookResearcher:
                     getattr(self.provider, "diagnostics", [])
                 ),
                 providers_used=self._providers_used(),
-                status="failed",
+                status="partial" if sources else "failed",
                 error=f"{type(exc).__name__}: {exc}",
             )
 
@@ -190,10 +194,12 @@ class BookResearcher:
                 )
 
         if not batch_results:
-            raise RuntimeError(
-                "Book research whole synthesis and every evidence batch failed: "
-                + "; ".join(batch_errors)
-            )
+            details = "; ".join([recovery_error, *batch_errors]).strip("; ")
+            return {
+                "book_context": "",
+                "terms": [],
+                "follow_up_queries": [],
+            }, True, details[:2000]
 
         compact = json.dumps(batch_results, ensure_ascii=False)
         try:
@@ -345,17 +351,7 @@ class BookResearcher:
 
     @staticmethod
     def _parse_json(response: str) -> dict[str, Any]:
-        cleaned = (response or "").strip()
-        fence = chr(96) * 3
-        if cleaned.startswith(fence):
-            cleaned = chr(10).join(
-                line for line in cleaned.splitlines()
-                if not line.strip().startswith(fence)
-            ).strip()
-        data = json.loads(cleaned)
-        if not isinstance(data, dict):
-            raise ValueError("Research response must be a JSON object")
-        return data
+        return parse_structured_output(response, expected=dict)
 
     @staticmethod
     def _prompt(

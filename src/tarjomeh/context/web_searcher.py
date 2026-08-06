@@ -6,11 +6,11 @@ definitions, caches results, and returns them for prompt injection.
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
 from tarjomeh.core.config import TarjomehConfig
+from tarjomeh.core.structured_output import parse_structured_output
 from tarjomeh.chunking.chunker import Chunk
 from tarjomeh.context.search_providers import (
     BaseSearchProvider,
@@ -62,13 +62,7 @@ class WebContextSearcher:
             if hasattr(self.llm_client, "set_operation"):
                 self.llm_client.set_operation("web_context_term_detection")
             response = await self.llm_client.chat(prompt)
-            cleaned = response.strip()
-            if cleaned.startswith("```"):
-                lines = cleaned.splitlines()
-                lines = [ln for ln in lines if not ln.strip().startswith("```")]
-                cleaned = "\n".join(lines).strip()
-
-            items = json.loads(cleaned)
+            items = parse_structured_output(response, expected=list)
             if not isinstance(items, list):
                 return ""
 

@@ -813,6 +813,7 @@ def _register_api(app: Flask) -> None:
         search_config = job_config.get("web_search", {})
         llm_config = job_config.get("llm", {})
         recovery_config = llm_config.get("recovery", {})
+        transport_config = llm_config.get("transport", {})
         critic_config = llm_config.get("critic", {})
         lines.extend([
             "Job Configuration:",
@@ -829,6 +830,11 @@ def _register_api(app: Flask) -> None:
             f"minimum={recovery_config.get('predictive_min_tokens')} "
             f"bootstrap_reasoning={recovery_config.get('bootstrap_reasoning_tokens')} "
             f"ceiling={recovery_config.get('adaptive_max_tokens')}",
+            f"  streaming={transport_config.get('streaming', True)} "
+            f"read_inactivity_timeout="
+            f"{transport_config.get('read_timeout_seconds', 900)}s "
+            f"unknown_outcome_retries="
+            f"{transport_config.get('unknown_outcome_retries', 1)}",
             f"  integrity_gate={translation_config.get('enable_integrity_gate')}",
             f"  back_translation={translation_config.get('enable_back_translation')} "
             f"sample_pct={translation_config.get('back_translation_sample_pct')}",
@@ -925,6 +931,18 @@ def _register_api(app: Flask) -> None:
                 f"{orthography_audit.get('remaining_issue_count', 0)}",
                 "  coverage=deterministic patterns only; ambiguous forms are "
                 "not auto-classified",
+                "",
+            ])
+        protocol_audit = db.get_job_artifact(
+            job_id, "protocol_integrity_audit"
+        )
+        if protocol_audit is not None:
+            lines.extend([
+                "Model protocol integrity:",
+                f"  safe_wrappers_removed="
+                f"{protocol_audit.get('safe_edit_count', 0)}",
+                f"  remaining_artifacts="
+                f"{protocol_audit.get('remaining_artifact_count', 0)}",
                 "",
             ])
         all_events = db.get_chunk_events(job_id)

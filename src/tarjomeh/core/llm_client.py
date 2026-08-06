@@ -22,6 +22,7 @@ import httpx
 import tiktoken
 
 from tarjomeh.core.config import TarjomehConfig
+from tarjomeh.core.structured_output import normalize_model_text
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +131,8 @@ class LLMClient:
 
     def __init__(self, config: TarjomehConfig) -> None:
         self.config = config
-        self._client = httpx.Client(timeout=180.0)
+        self._timeout = self._http_timeout()
+        self._client = httpx.Client(timeout=self._timeout)
         self._thread_local = threading.local()
 
         # Track usage
@@ -160,9 +162,20 @@ class LLMClient:
             self._thread_local.clients = {}
             
         if loop_id not in self._thread_local.clients or self._thread_local.clients[loop_id].is_closed:
-            self._thread_local.clients[loop_id] = httpx.AsyncClient(timeout=180.0)
+            self._thread_local.clients[loop_id] = httpx.AsyncClient(
+                timeout=self._timeout
+            )
             
         return self._thread_local.clients[loop_id]
+
+    def _http_timeout(self) -> httpx.Timeout:
+        transport = self.config.llm.transport
+        return httpx.Timeout(
+            connect=float(transport.connect_timeout_seconds),
+            read=float(transport.read_timeout_seconds),
+            write=float(transport.write_timeout_seconds),
+            pool=float(transport.pool_timeout_seconds),
+        )
 
     def close(self) -> None:
         """Close the sync HTTP client."""
@@ -411,11 +424,17 @@ class LLMClient:
                 "X-Title": self.config.llm.openrouter.app_name,
                 "Content-Type": "application/json",
             }
+            if (
+                self.config.llm.transport.bypass_9router_token_saver
+                and self._is_9router_endpoint(api_base)
+            ):
+                headers["X-9Router-Token-Saver"] = "off"
             payload = {
                 "model": self.config.llm.model,
                 "messages": final_messages,
                 "temperature": self.config.llm.temperature,
                 "max_tokens": self.config.llm.max_tokens,
+                "stream": bool(self.config.llm.transport.streaming),
             }
             if getattr(self.config.llm.openrouter, "exclude_reasoning", True):
                 payload["reasoning"] = {"exclude": True}
@@ -430,6 +449,7 @@ class LLMClient:
                 "messages": final_messages,
                 "temperature": self.config.llm.temperature,
                 "max_tokens": self.config.llm.max_tokens,
+                "stream": bool(self.config.llm.transport.streaming),
             }
         else:
             raise ValueError(f"Unsupported LLM provider: {provider}")
@@ -437,6 +457,11 @@ class LLMClient:
         # Update payload with custom kwargs
         payload.update(kwargs)
         return url, headers, payload
+
+    @staticmethod
+    def _is_9router_endpoint(api_base: str) -> bool:
+        lowered = api_base.casefold()
+        return "9router" in lowered or ":20128" in lowered
 
     def _update_usage(self, response: httpx.Response, response_json: dict[str, Any]) -> None:
         """Update token usage counters and cost metrics."""
@@ -468,18 +493,25 @@ class LLMClient:
 
     @staticmethod
     def _parse_response_json(response_text: str) -> dict[str, Any]:
-        """Parse a JSON response or assemble an OpenAI-compatible SSE stream."""
+        """Parse JSON/SSE and return one canonical chat-completion envelope."""
         res_text = response_text.strip()
         try:
-            return json.loads(res_text)
+            parsed = json.loads(res_text)
+            if not isinstance(parsed, dict):
+                raise MalformedLLMResponseError(
+                    "LLM endpoint returned a non-object response."
+                )
+            return LLMClient._normalize_completion_envelope(parsed)
         except json.JSONDecodeError as first_error:
-            if res_text.startswith("data:"):
+            if res_text.startswith(("data:", "event:")):
                 return LLMClient._assemble_sse_chat_completion(res_text)
 
             last_brace = res_text.rfind("}")
             if last_brace != -1:
                 try:
-                    return json.loads(res_text[:last_brace + 1])
+                    parsed = json.loads(res_text[:last_brace + 1])
+                    if isinstance(parsed, dict):
+                        return LLMClient._normalize_completion_envelope(parsed)
                 except json.JSONDecodeError:
                     pass
 
@@ -489,18 +521,83 @@ class LLMClient:
             ) from first_error
 
     @staticmethod
+    def _normalize_completion_envelope(data: dict[str, Any]) -> dict[str, Any]:
+        """Normalize OpenAI- and Anthropic-shaped non-streaming responses."""
+        if isinstance(data.get("choices"), list):
+            return data
+        blocks = data.get("content")
+        if not isinstance(blocks, list):
+            return data
+
+        visible: list[str] = []
+        reasoning: list[str] = []
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            block_type = str(block.get("type", ""))
+            value = block.get("text", block.get("thinking", ""))
+            if not isinstance(value, str):
+                continue
+            if block_type in {"thinking", "reasoning"}:
+                reasoning.append(value)
+            elif block_type in {"text", "output_text"}:
+                visible.append(value)
+
+        raw_usage = data.get("usage", {})
+        usage = dict(raw_usage) if isinstance(raw_usage, dict) else {}
+        if "input_tokens" in usage and "prompt_tokens" not in usage:
+            usage["prompt_tokens"] = usage.get("input_tokens", 0)
+        if "output_tokens" in usage and "completion_tokens" not in usage:
+            usage["completion_tokens"] = usage.get("output_tokens", 0)
+        usage.setdefault(
+            "total_tokens",
+            int(usage.get("prompt_tokens", 0) or 0)
+            + int(usage.get("completion_tokens", 0) or 0),
+        )
+        return {
+            "id": data.get("id"),
+            "model": data.get("model"),
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "".join(visible),
+                    "reasoning_content": "".join(reasoning),
+                },
+                "finish_reason": LLMClient._canonical_finish_reason(
+                    data.get("stop_reason")
+                ),
+            }],
+            "usage": usage,
+        }
+
+    @staticmethod
+    def _canonical_finish_reason(value: Any) -> Any:
+        """Map common provider stop reasons to the OpenAI-compatible values."""
+        if value in {"max_tokens", "max_output_tokens"}:
+            return "length"
+        if value in {"end_turn", "stop_sequence"}:
+            return "stop"
+        return value
+
+    @staticmethod
     def _assemble_sse_chat_completion(response_text: str) -> dict[str, Any]:
-        """Combine ``chat.completion.chunk`` SSE events into one response."""
+        """Combine OpenAI- or Anthropic-compatible SSE into one response."""
         result: dict[str, Any] = {}
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         finish_reason: str | None = None
         usage: dict[str, Any] = {}
         saw_event = False
         saw_done = False
+        event_name = ""
 
         for raw_line in response_text.splitlines():
             line = raw_line.strip()
-            if not line or line.startswith(":") or line.startswith("event:"):
+            if not line or line.startswith(":"):
+                continue
+            if line.startswith("event:"):
+                event_name = line[6:].strip()
                 continue
             if not line.startswith("data:"):
                 raise MalformedLLMResponseError(
@@ -529,6 +626,53 @@ class LLMClient:
                 )
 
             saw_event = True
+            chunk_type = str(chunk.get("type", event_name))
+            if chunk_type == "message_start":
+                message_data = chunk.get("message", {})
+                if isinstance(message_data, dict):
+                    for key in ("id", "model"):
+                        if message_data.get(key) and key not in result:
+                            result[key] = message_data[key]
+                    start_usage = message_data.get("usage")
+                    if isinstance(start_usage, dict):
+                        usage.update(start_usage)
+                continue
+            if chunk_type == "content_block_start":
+                block = chunk.get("content_block", {})
+                if isinstance(block, dict):
+                    block_text = block.get("text", block.get("thinking", ""))
+                    if isinstance(block_text, str):
+                        if block.get("type") in {"thinking", "reasoning"}:
+                            reasoning_parts.append(block_text)
+                        else:
+                            content_parts.append(block_text)
+                continue
+            if chunk_type == "content_block_delta":
+                delta = chunk.get("delta", {})
+                if isinstance(delta, dict):
+                    if delta.get("type") in {"thinking_delta", "reasoning_delta"}:
+                        part = delta.get("thinking", delta.get("reasoning", ""))
+                        if isinstance(part, str):
+                            reasoning_parts.append(part)
+                    else:
+                        part = delta.get("text", "")
+                        if isinstance(part, str):
+                            content_parts.append(part)
+                continue
+            if chunk_type == "message_delta":
+                delta = chunk.get("delta", {})
+                if isinstance(delta, dict) and delta.get("stop_reason") is not None:
+                    finish_reason = LLMClient._canonical_finish_reason(
+                        delta["stop_reason"]
+                    )
+                delta_usage = chunk.get("usage")
+                if isinstance(delta_usage, dict):
+                    usage.update(delta_usage)
+                continue
+            if chunk_type == "message_stop":
+                saw_done = True
+                continue
+
             for key in ("id", "object", "created", "model", "system_fingerprint"):
                 if key in chunk and key not in result:
                     result[key] = chunk[key]
@@ -548,12 +692,22 @@ class LLMClient:
             part = None
             if isinstance(delta, dict):
                 part = delta.get("content")
+                for reasoning_key in ("reasoning_content", "reasoning", "analysis"):
+                    reasoning_part = delta.get(reasoning_key)
+                    if isinstance(reasoning_part, str):
+                        reasoning_parts.append(reasoning_part)
             elif isinstance(message, dict):
                 part = message.get("content")
+                for reasoning_key in ("reasoning_content", "reasoning", "analysis"):
+                    reasoning_part = message.get(reasoning_key)
+                    if isinstance(reasoning_part, str):
+                        reasoning_parts.append(reasoning_part)
             if isinstance(part, str):
                 content_parts.append(part)
             if choice.get("finish_reason") is not None:
-                finish_reason = choice["finish_reason"]
+                finish_reason = LLMClient._canonical_finish_reason(
+                    choice["finish_reason"]
+                )
 
         if not saw_event:
             raise MalformedLLMResponseError(
@@ -564,9 +718,23 @@ class LLMClient:
                 "LLM SSE stream ended without [DONE] or a finish reason."
             )
 
+        if "input_tokens" in usage and "prompt_tokens" not in usage:
+            usage["prompt_tokens"] = usage.get("input_tokens", 0)
+        if "output_tokens" in usage and "completion_tokens" not in usage:
+            usage["completion_tokens"] = usage.get("output_tokens", 0)
+        if usage:
+            usage.setdefault(
+                "total_tokens",
+                int(usage.get("prompt_tokens", 0) or 0)
+                + int(usage.get("completion_tokens", 0) or 0),
+            )
         result["choices"] = [{
             "index": 0,
-            "message": {"role": "assistant", "content": "".join(content_parts)},
+            "message": {
+                "role": "assistant",
+                "content": "".join(content_parts),
+                "reasoning_content": "".join(reasoning_parts),
+            },
             "finish_reason": finish_reason,
         }]
         if usage:
@@ -856,6 +1024,10 @@ class LLMClient:
             "reasoning": payload.get("reasoning"),
             "temperature": payload.get("temperature"),
             "response_format": payload.get("response_format"),
+            "stream_requested": bool(payload.get("stream", False)),
+            "transport_read_timeout_seconds": (
+                self.config.llm.transport.read_timeout_seconds
+            ),
             "request_contract_sha256": contract_sha256,
             "prompt_tokens": usage.get("prompt_tokens", 0),
             "completion_tokens": usage.get("completion_tokens", 0),
@@ -927,6 +1099,8 @@ class LLMClient:
             content: Any = None
             usage: dict[str, Any] = {}
             response_model = ""
+            normalization: dict[str, Any] = {}
+            response_reasoning_chars = 0
             try:
                 response = self._client.post(url, headers=headers, json=payload)
                 status_code = response.status_code
@@ -943,7 +1117,14 @@ class LLMClient:
                     )
 
                 finish_reason = choices[0].get("finish_reason")
-                content = choices[0].get("message", {}).get("content")
+                message = choices[0].get("message", {})
+                content = message.get("content")
+                reasoning_content = message.get("reasoning_content", "")
+                response_reasoning_chars = (
+                    len(reasoning_content)
+                    if isinstance(reasoning_content, str) else 0
+                )
+                content, normalization = normalize_model_text(content)
                 if finish_reason == "length":
                     raise TruncatedCompletionError(
                         "Provider stopped the completion at the output limit."
@@ -982,6 +1163,8 @@ class LLMClient:
                     event["preflight_calculation"] = preflight_calculation
                 if recovery_calculation:
                     event["recovery_calculation"] = recovery_calculation
+                event["response_normalization"] = normalization
+                event["response_reasoning_chars"] = response_reasoning_chars
                 self._emit_attempt(event)
                 return content
             except (
@@ -1005,9 +1188,14 @@ class LLMClient:
                 elif isinstance(exc, MalformedLLMResponseError):
                     failure_reason = "malformed_response"
                 else:
-                    failure_reason = (
-                        f"http_{status_code}" if status_code else "transport_error"
-                    )
+                    if isinstance(exc, httpx.ReadTimeout):
+                        failure_reason = "read_timeout"
+                    elif isinstance(exc, httpx.ConnectTimeout):
+                        failure_reason = "connect_timeout"
+                    else:
+                        failure_reason = (
+                            f"http_{status_code}" if status_code else "transport_error"
+                        )
 
                 failure_usage = dict(usage)
                 failure_content = content if isinstance(content, str) else ""
@@ -1043,6 +1231,10 @@ class LLMClient:
                     attempt + 1 < max_attempts
                     and self._retryable_exception(exc, status_code)
                 )
+                if isinstance(exc, httpx.ReadTimeout):
+                    should_retry = should_retry and attempt < int(
+                        self.config.llm.transport.unknown_outcome_retries
+                    )
                 if not should_retry:
                     logger.error(
                         "LLM call failed permanently after %d attempt(s): %s",
@@ -1128,6 +1320,8 @@ class LLMClient:
             content: Any = None
             usage: dict[str, Any] = {}
             response_model = ""
+            normalization: dict[str, Any] = {}
+            response_reasoning_chars = 0
             try:
                 response = await self._aclient.post(
                     url, headers=headers, json=payload
@@ -1146,7 +1340,14 @@ class LLMClient:
                     )
 
                 finish_reason = choices[0].get("finish_reason")
-                content = choices[0].get("message", {}).get("content")
+                message = choices[0].get("message", {})
+                content = message.get("content")
+                reasoning_content = message.get("reasoning_content", "")
+                response_reasoning_chars = (
+                    len(reasoning_content)
+                    if isinstance(reasoning_content, str) else 0
+                )
+                content, normalization = normalize_model_text(content)
                 if finish_reason == "length":
                     raise TruncatedCompletionError(
                         "Provider stopped the completion at the output limit."
@@ -1185,6 +1386,8 @@ class LLMClient:
                     event["preflight_calculation"] = preflight_calculation
                 if recovery_calculation:
                     event["recovery_calculation"] = recovery_calculation
+                event["response_normalization"] = normalization
+                event["response_reasoning_chars"] = response_reasoning_chars
                 self._emit_attempt(event)
                 return content
             except (
@@ -1208,9 +1411,14 @@ class LLMClient:
                 elif isinstance(exc, MalformedLLMResponseError):
                     failure_reason = "malformed_response"
                 else:
-                    failure_reason = (
-                        f"http_{status_code}" if status_code else "transport_error"
-                    )
+                    if isinstance(exc, httpx.ReadTimeout):
+                        failure_reason = "read_timeout"
+                    elif isinstance(exc, httpx.ConnectTimeout):
+                        failure_reason = "connect_timeout"
+                    else:
+                        failure_reason = (
+                            f"http_{status_code}" if status_code else "transport_error"
+                        )
 
                 failure_usage = dict(usage)
                 failure_content = content if isinstance(content, str) else ""
@@ -1246,6 +1454,10 @@ class LLMClient:
                     attempt + 1 < max_attempts
                     and self._retryable_exception(exc, status_code)
                 )
+                if isinstance(exc, httpx.ReadTimeout):
+                    should_retry = should_retry and attempt < int(
+                        self.config.llm.transport.unknown_outcome_retries
+                    )
                 if not should_retry:
                     logger.error(
                         "LLM call failed permanently after %d attempt(s): %s",

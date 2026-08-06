@@ -156,6 +156,23 @@ class LLMRecoveryConfig:
 
 
 @dataclass
+class LLMTransportConfig:
+    """Portable HTTP/SSE behavior for OpenAI-compatible model endpoints."""
+
+    streaming: bool = True
+    connect_timeout_seconds: float = 30.0
+    read_timeout_seconds: float = 900.0
+    write_timeout_seconds: float = 120.0
+    pool_timeout_seconds: float = 30.0
+    # A read timeout has an unknown provider outcome and must not fan out into
+    # the full quality retry budget. One means one bounded follow-up attempt.
+    unknown_outcome_retries: int = 1
+    # 9router's token-saver mode can alter the response contract. Tarjomeh
+    # already owns retry/budget policy, so disable that gateway feature.
+    bypass_9router_token_saver: bool = True
+
+
+@dataclass
 class LLMConfig:
     """LLM provider settings."""
 
@@ -171,6 +188,7 @@ class LLMConfig:
     ollama: LLMOllamaConfig = field(default_factory=LLMOllamaConfig)
     critic: LLMCriticConfig = field(default_factory=LLMCriticConfig)
     recovery: LLMRecoveryConfig = field(default_factory=LLMRecoveryConfig)
+    transport: LLMTransportConfig = field(default_factory=LLMTransportConfig)
 
 
 @dataclass
@@ -448,6 +466,7 @@ class TarjomehConfig:
         _populate_dataclass(config.llm.ollama, raw.get("llm", {}).get("ollama", {}))
         _populate_dataclass(config.llm.critic, raw.get("llm", {}).get("critic", {}))
         _populate_dataclass(config.llm.recovery, raw.get("llm", {}).get("recovery", {}))
+        _populate_dataclass(config.llm.transport, raw.get("llm", {}).get("transport", {}))
         _populate_dataclass(config.translation, raw.get("translation", {}))
         _populate_dataclass(config.web_search, raw.get("web_search", {}))
         _populate_dataclass(config.chunking, raw.get("chunking", {}))
@@ -513,6 +532,20 @@ class TarjomehConfig:
         value = env("TRANSLATOR_RECOVERY_MAX_TOKENS", "").strip()
         if value.isdigit():
             self.llm.recovery.max_tokens = int(value)
+
+        value = env("LLM_STREAMING", "").strip().lower()
+        if value in ("1", "true", "yes", "on"):
+            self.llm.transport.streaming = True
+        elif value in ("0", "false", "no", "off"):
+            self.llm.transport.streaming = False
+        value = env("LLM_READ_TIMEOUT_SECONDS", "").strip()
+        if value:
+            try:
+                self.llm.transport.read_timeout_seconds = float(value)
+            except ValueError:
+                logger.warning(
+                    "Ignoring invalid LLM_READ_TIMEOUT_SECONDS=%r", value
+                )
 
         value = env("CRITIC_ENABLED", "").strip().lower()
         if value in ("1", "true", "yes", "on"):
@@ -770,6 +803,14 @@ class TarjomehConfig:
             errors.append("llm.critic.recovery_max_attempts must be 1-4")
         if self.llm.critic.recovery_max_tokens < 512:
             errors.append("llm.critic.recovery_max_tokens must be >= 512")
+        for field_name in (
+            "connect_timeout_seconds", "read_timeout_seconds",
+            "write_timeout_seconds", "pool_timeout_seconds",
+        ):
+            if getattr(self.llm.transport, field_name) <= 0:
+                errors.append(f"llm.transport.{field_name} must be > 0")
+        if not 0 <= self.llm.transport.unknown_outcome_retries <= 2:
+            errors.append("llm.transport.unknown_outcome_retries must be 0-2")
 
         if self.translation.back_translation_sample_pct < 0 or \
            self.translation.back_translation_sample_pct > 100:

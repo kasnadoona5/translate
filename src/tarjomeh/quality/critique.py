@@ -18,6 +18,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from tarjomeh.core.prompts import CRITIQUE_PROMPT
+from tarjomeh.core.structured_output import parse_structured_output
 from tarjomeh.persian.orthography import apply_safe_persian_orthography
 from tarjomeh.quality.grounding import (
     concept_risks,
@@ -247,13 +248,21 @@ markdown fences, or commentary."""
             cleaned = "\n".join(lines)
 
         try:
-            data: dict[str, Any] = json.loads(cleaned)
+            data: dict[str, Any] = parse_structured_output(
+                cleaned, expected=dict
+            )
         except json.JSONDecodeError as exc:
             logger.warning("Failed to parse critique JSON.")
             return CritiqueResult(
                 raw_response=raw,
                 valid=False,
                 validation_errors=[f"invalid_json: {exc.msg}"],
+            )
+        except ValueError as exc:
+            return CritiqueResult(
+                raw_response=raw,
+                valid=False,
+                validation_errors=[f"invalid_json: {exc}"],
             )
 
         if not isinstance(data, dict):

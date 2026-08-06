@@ -19,6 +19,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from tarjomeh.core.config import TarjomehConfig
+from tarjomeh.core.structured_output import (
+    normalize_model_text,
+    parse_structured_output,
+    protocol_artifacts,
+)
 from tarjomeh.core.llm_client import (
     EmptyCompletionError,
     IncompleteCompletionError,
@@ -123,6 +128,36 @@ def apply_chapter_selection(
         metadata=dict(document.metadata),
         raw_toc=document.raw_toc,
     )
+
+
+def sanitize_document_protocol_artifacts(
+    document: TranslatedDocument,
+) -> dict[str, Any]:
+    """Remove safe leading model wrappers and reject unresolved protocol tags."""
+    edits: list[dict[str, Any]] = []
+    unresolved: list[dict[str, Any]] = []
+    for paragraph in document.paragraphs:
+        original = paragraph.translated_text
+        cleaned, report = normalize_model_text(original)
+        removed = int(report.get("removed_reasoning_wrappers", 0))
+        if removed:
+            paragraph.translated_text = cleaned
+            edits.append({
+                "paragraph_index": paragraph.index,
+                "removed_reasoning_wrappers": removed,
+            })
+        artifacts = protocol_artifacts(paragraph.translated_text)
+        if artifacts:
+            unresolved.append({
+                "paragraph_index": paragraph.index,
+                "artifacts": artifacts,
+            })
+    return {
+        "safe_edit_count": len(edits),
+        "remaining_artifact_count": len(unresolved),
+        "edits": edits,
+        "unresolved": unresolved,
+    }
 
 
 _QUALITY_STAGE_ERRORS = (
@@ -1264,12 +1299,12 @@ class TranslationPipeline:
         artifact = result.to_dict()
         self.db.save_job_artifact(job_id, "book_research", artifact)
         if artifact.get("status") in {
-            "completed", "completed_without_suggestions", "degraded"
+            "completed", "completed_without_suggestions", "degraded", "partial"
         }:
             status = artifact.get("status")
             self.db.log_event(
                 job_id,
-                "WARNING" if status == "degraded" else "INFO",
+                "WARNING" if status in {"degraded", "partial"} else "INFO",
                 f"Book research {status} with "
                 f"{len(artifact.get('terms', []))} reviewable suggestion(s) "
                 f"and {len(artifact.get('sources', []))} source result(s).",
@@ -1449,7 +1484,9 @@ class TranslationPipeline:
                     response_format={"type": "json_object"},
                     _operation="auto_term_extraction",
                 )
-                ner_data = json.loads(ner_response)
+                ner_data = parse_structured_output(
+                    ner_response, expected=(list, dict)
+                )
                 # The model may return either a JSON object ({"terms": [...]})
                 # or a bare JSON array of term objects — handle both shapes.
                 if isinstance(ner_data, list):
@@ -1520,7 +1557,7 @@ class TranslationPipeline:
             progress_callback,
         )
         if research_artifact and research_artifact.get("status") in {
-            "completed", "completed_without_suggestions", "degraded"
+            "completed", "completed_without_suggestions", "degraded", "partial"
         }:
             memory_manager.book_context = _research_context_for_memory(
                 research_artifact
@@ -1594,7 +1631,15 @@ class TranslationPipeline:
                         
                         if self.config.memory.enable_4layer:
                             try:
-                                self._run_async(memory_manager.update_proper_nouns(self.llm_client, chunk.text))
+                                noun_report = self._run_async(
+                                    memory_manager.update_proper_nouns(
+                                        self.llm_client, chunk.text
+                                    )
+                                )
+                                self.db.log_chunk_event(
+                                    job_id, idx, "proper_noun_extraction",
+                                    noun_report,
+                                )
                                 memory_manager.proper_nouns.mark_seen_in_text(chunk.text)
                             except Exception as e:
                                 logger.warning("Incremental proper noun extraction failed: %s", e)
@@ -1731,7 +1776,15 @@ class TranslationPipeline:
 
                         if self.config.memory.enable_4layer:
                             try:
-                                self._run_async(memory_manager.update_proper_nouns(self.llm_client, chunk.text))
+                                noun_report = self._run_async(
+                                    memory_manager.update_proper_nouns(
+                                        self.llm_client, chunk.text
+                                    )
+                                )
+                                self.db.log_chunk_event(
+                                    job_id, idx, "proper_noun_extraction",
+                                    noun_report,
+                                )
                                 memory_manager.proper_nouns.mark_seen_in_text(chunk.text)
                             except Exception as e:
                                 logger.warning("Incremental proper noun extraction failed: %s", e)
@@ -2026,6 +2079,23 @@ class TranslationPipeline:
             self.warnings.append(warning)
             self.db.log_event(job_id, "WARNING", warning)
 
+        protocol_audit = sanitize_document_protocol_artifacts(trans_doc)
+        self.db.save_job_artifact(
+            job_id, "protocol_integrity_audit", protocol_audit
+        )
+        if protocol_audit["safe_edit_count"]:
+            self.db.log_event(
+                job_id,
+                "WARNING",
+                "Removed recognized leading model-protocol wrapper(s) from "
+                f"{protocol_audit['safe_edit_count']} paragraph(s).",
+            )
+        if protocol_audit["remaining_artifact_count"]:
+            raise RuntimeError(
+                "Export blocked: unresolved model-protocol artifacts remain "
+                "in translated text."
+            )
+
         requested_note_mode = self.config.output.term_notes
         note_mode = effective_term_notes_mode(
             requested_note_mode, self.config.output.format
@@ -2174,6 +2244,15 @@ class TranslationPipeline:
             )
 
         trans_doc = self._assemble_translated_document(document, chunks, translations)
+        protocol_audit = sanitize_document_protocol_artifacts(trans_doc)
+        self.db.save_job_artifact(
+            job_id, "protocol_integrity_audit", protocol_audit
+        )
+        if protocol_audit["remaining_artifact_count"]:
+            raise RuntimeError(
+                "Re-export blocked: unresolved model-protocol artifacts remain "
+                "in translated text."
+            )
         note_mode = effective_term_notes_mode(self.config.output.term_notes, fmt)
         memory_state = self.db.get_memory_state(job_id) or {}
         noun_state = memory_state.get("proper_nouns", {})

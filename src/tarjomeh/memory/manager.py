@@ -6,12 +6,12 @@ long-term memory, and short-term memory for cohesive book-length translation.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from typing import Any
 
 from tarjomeh.core.config import TarjomehConfig
+from tarjomeh.core.structured_output import parse_structured_output
 from tarjomeh.core.term_notes import effective_term_notes_mode
 from tarjomeh.chunking.chunker import Chunk
 from tarjomeh.memory.proper_nouns import ProperNouns
@@ -142,7 +142,9 @@ class MemoryManager:
             f"Representative early translation samples:\n{samples}"
         )
 
-    async def update_proper_nouns(self, llm_client: Any, text: str) -> None:
+    async def update_proper_nouns(
+        self, llm_client: Any, text: str
+    ) -> dict[str, Any]:
         """Incrementally identify new proper nouns in the text and add them."""
         from tarjomeh.core.prompts import INCREMENTAL_NER_PROMPT, GLOSSARY_EXTRACT_PROMPT
 
@@ -169,14 +171,11 @@ class MemoryManager:
                     "proper_noun_incremental" if known else "proper_noun_initial"
                 )
             response = await llm_client.chat(prompt)
-            # Clean possible markdown fences
-            cleaned = response.strip()
-            if cleaned.startswith("```"):
-                lines = cleaned.splitlines()
-                lines = [ln for ln in lines if not ln.strip().startswith("```")]
-                cleaned = "\n".join(lines).strip()
-
-            items = json.loads(cleaned)
+            items = parse_structured_output(response, expected=(list, dict))
+            candidates = items if isinstance(items, list) else (
+                items.get("terms", []) or items.get("extracted_terms", []) or []
+            )
+            accepted = 0
             if isinstance(items, list):
                 for item in items:
                     term = item.get("term")
@@ -187,6 +186,7 @@ class MemoryManager:
                             persian,
                             category=str(item.get("category", "term")),
                         )
+                        accepted += 1
             elif isinstance(items, dict):
                 # Handle unexpected single dict object wrapping the list
                 terms_list = items.get("terms", []) or items.get("extracted_terms", []) or []
@@ -199,8 +199,22 @@ class MemoryManager:
                             persian,
                             category=str(item.get("category", "term")),
                         )
+                        accepted += 1
+            return {
+                "status": (
+                    "completed" if accepted else "completed_without_suggestions"
+                ),
+                "candidate_count": len(candidates),
+                "accepted_count": accepted,
+            }
         except Exception as exc:
             logger.warning("Failed to extract proper nouns incrementally: %s", exc)
+            return {
+                "status": "failed",
+                "candidate_count": 0,
+                "accepted_count": 0,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
 
     async def update_bilingual_summary(self, llm_client: Any, new_content: str, translation: str) -> None:
         """Call the LLM to update the running bilingual summary of translated chapters."""

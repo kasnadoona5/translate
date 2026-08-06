@@ -1,4 +1,4 @@
-# Tarjomeh v9.5.7 configuration template
+# Tarjomeh v9.6 configuration template
 #
 # 1. Copy this file to config.toml.
 # 2. Keep API keys and UI secrets in .env.
@@ -46,6 +46,21 @@ context_safety_tokens = 2048
 history_window = 20
 expanded_final_attempt = false
 final_reasoning_effort = "none"
+
+[llm.transport]
+# Request SSE from OpenAI-compatible endpoints so long-thinking models keep
+# the connection active. The read timeout is an inactivity timeout, not a
+# total generation deadline.
+streaming = true
+connect_timeout_seconds = 30
+read_timeout_seconds = 900
+write_timeout_seconds = 120
+pool_timeout_seconds = 30
+# Read timeouts have an unknown provider outcome; allow only one bounded retry.
+unknown_outcome_retries = 1
+# Tarjomeh owns retry and output-budget policy. Disable 9router token-saver
+# transformations when the configured endpoint is recognized as 9router.
+bypass_9router_token_saver = true
 
 [llm.openrouter]
 # For one key, normally use TRANSLATOR_API_KEY in .env.

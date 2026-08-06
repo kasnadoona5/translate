@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 import json
 from tarjomeh.core.prompts import REFINE_PROMPT
+from tarjomeh.core.structured_output import parse_structured_output
 
 # ── Mode → max iterations mapping ───────────────────────────────────
 _MODE_MAX_ITERATIONS: dict[str, int] = {
@@ -234,11 +235,16 @@ class TranslationRefiner:
             lines = [line for line in cleaned.splitlines() if not line.strip().startswith("```")]
             cleaned = "\n".join(lines).strip()
         try:
-            data = json.loads(cleaned)
+            data = parse_structured_output(cleaned, expected=dict)
         except json.JSONDecodeError as exc:
             return RefinementResult(
                 translation="", raw_response=raw, valid=False,
                 validation_errors=[f"invalid_json: {exc.msg}"],
+            )
+        except ValueError as exc:
+            return RefinementResult(
+                translation="", raw_response=raw, valid=False,
+                validation_errors=[f"invalid_json: {exc}"],
             )
         if not isinstance(data, dict):
             return RefinementResult(
