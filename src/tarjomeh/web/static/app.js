@@ -324,16 +324,20 @@ async function startTranslation() {
     }
 }
 
-// Connect to SSE stream for real-time logs
-function trackJobProgress(jobId) {
+// Restore the persisted job snapshot, then follow new SSE progress events.
+async function trackJobProgress(jobId) {
     if (currentEventSource) {
         currentEventSource.close();
+        currentEventSource = null;
     }
 
     const logContainer = document.getElementById("progressLog");
     const progressBar = document.getElementById("progressBar");
     const progressPct = document.getElementById("progressPct");
     const progressStage = document.getElementById("progressStage");
+
+    document.getElementById("uploadSection").hidden = true;
+    document.getElementById("progressSection").hidden = false;
     
     // Clear logs
     logContainer.innerHTML = "";
@@ -343,13 +347,12 @@ function trackJobProgress(jobId) {
 
     const params = new URLSearchParams(window.location.search);
     const token = params.get("token");
+    let detailUrl = `/api/jobs/${jobId}`;
     let streamUrl = `/api/jobs/${jobId}/stream`;
     if (token) {
+        detailUrl += `?token=${encodeURIComponent(token)}`;
         streamUrl += `?token=${token}`;
     }
-
-    currentEventSource = new EventSource(streamUrl);
-    appendLog("Connecting to translation pipeline stream...", "info");
 
     let jobFinished = false;
 
@@ -372,13 +375,43 @@ function trackJobProgress(jobId) {
         }, 3000);
     };
 
+    try {
+        const response = await fetch(detailUrl);
+        if (!response.ok) throw new Error("Failed to load current job state");
+        const snapshot = await response.json();
+        const job = snapshot.job || {};
+        const chunks = snapshot.chunks || {};
+        const pct = Math.max(0, Math.min(100, Math.round(Number(job.pct || 0) * 100)));
+        progressBar.style.width = `${pct}%`;
+        progressPct.innerText = `${pct}%`;
+        progressStage.innerText = `Tracking ${chunks.completed || 0}/${chunks.total || 0} completed chunks`;
+        appendLog(`Restored current job state: ${pct}% complete.`, "info");
+
+        const status = job.raw_status || job.status;
+        if (status === "completed") { finish("complete"); return; }
+        if (status === "paused") { finish("paused"); return; }
+        if (status === "failed" || status === "paused_error") { finish("error"); return; }
+    } catch (error) {
+        appendLog(`Could not restore the current snapshot: ${error.message}`, "warning");
+    }
+
+    currentEventSource = new EventSource(streamUrl);
+    appendLog("Connected to the live translation stream.", "info");
+
     currentEventSource.onmessage = (event) => {
         try {
             const data = JSON.parse(event.data);
 
             // Ignore keepalives and stream-closed notices (no real content).
             if (data.stage === "keepalive") return;
-            if (data.stage === "closed") { if (!jobFinished) finish("complete"); return; }
+            if (data.stage === "closed") {
+                if (!jobFinished) {
+                    appendLog("Live stream is unavailable; refresh the job list to verify its state.", "warning");
+                    if (currentEventSource) { currentEventSource.close(); currentEventSource = null; }
+                    fetchJobs();
+                }
+                return;
+            }
 
             // Progress: the server sends `progress` (0.0–1.0).
             if (typeof data.progress === "number") {

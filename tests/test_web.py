@@ -72,6 +72,23 @@ class TestWebUI(unittest.TestCase):
         ):
             self.assertIn(f'id="{control_id}"', html)
 
+    def test_tracking_restores_visible_job_snapshot_before_streaming(self) -> None:
+        script_path = (
+            Path(__file__).parents[1] / "src/tarjomeh/web/static/app.js"
+        )
+        script = script_path.read_text(encoding="utf-8")
+
+        self.assertIn("async function trackJobProgress(jobId)", script)
+        self.assertIn(
+            'document.getElementById("progressSection").hidden = false',
+            script,
+        )
+        self.assertIn("const response = await fetch(detailUrl)", script)
+        self.assertLess(
+            script.index("const response = await fetch(detailUrl)"),
+            script.index("currentEventSource = new EventSource(streamUrl)"),
+        )
+
     def test_bearer_header_auth(self) -> None:
         headers = {"Authorization": "Bearer test-token"}
         response = self.client.get("/api/jobs", headers=headers)

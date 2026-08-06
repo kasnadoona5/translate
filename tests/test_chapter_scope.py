@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from tarjomeh.chunking.chunker import SemanticChunker
 from tarjomeh.core.config import TarjomehConfig
@@ -145,6 +145,44 @@ class TestChapterPipeline(unittest.TestCase):
                 "checkpoint-job", "chapter_checkpoints"
             )
             self.assertEqual(checkpoints["reached_positions"], [1])
+
+    def test_checkpoint_resume_restores_web_search_state(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            root = Path(temp_dir)
+            source = root / "book.txt"
+            source.write_text(
+                "Chapter 1: Opening\nFirst chapter text.\n\n"
+                "Chapter 2: Argument\nSecond chapter text.",
+                encoding="utf-8",
+            )
+            output = root / "translated.txt"
+            config = self._config()
+            config.translation.stop_after_chapter = 1
+            pipeline = TranslationPipeline(config)
+            pipeline.db = JobDatabase(root / "jobs.db")
+            pipeline._translate_single_chunk = MagicMock(
+                side_effect=self._fake_translation
+            )
+            first_searcher = MagicMock()
+            first_searcher.export_state.return_value = {
+                "provider": {"queries_used": 7, "cache": {}},
+            }
+            resumed_searcher = MagicMock()
+            resumed_searcher.export_state.return_value = {
+                "provider": {"queries_used": 7, "cache": {}},
+            }
+
+            with patch(
+                "tarjomeh.core.pipeline.WebContextSearcher",
+                side_effect=[first_searcher, resumed_searcher],
+            ):
+                pipeline.run(source, output, job_id="search-resume-job")
+                saved_state = pipeline.db.get_job_artifact(
+                    "search-resume-job", "web_search_state"
+                )
+                pipeline.run(source, output, job_id="search-resume-job")
+
+            resumed_searcher.import_state.assert_called_once_with(saved_state)
 
 
 if __name__ == "__main__":

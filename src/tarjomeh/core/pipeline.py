@@ -1626,6 +1626,12 @@ class TranslationPipeline:
         max_errors = self.config.retry.max_consecutive_errors
 
         web_searcher = WebContextSearcher(self.config, self.llm_client)
+        if is_resume:
+            saved_search_state = self.db.get_job_artifact(
+                job_id, "web_search_state"
+            )
+            if saved_search_state:
+                web_searcher.import_state(saved_search_state)
         compliance_checker = GlossaryComplianceChecker()
         # Critique and back-translation QA run on the independent judge model
         # (critic_client); translation and refinement stay on the translator.
