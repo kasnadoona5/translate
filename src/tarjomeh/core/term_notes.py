@@ -11,6 +11,12 @@ from tarjomeh.persian.typography import PersianTypographer
 
 
 NOTE_CAPABLE_FORMATS = {"docx", "epub", "markdown"}
+_DIGIT_VARIANTS = {
+    "0": "0\u06f0\u0660", "1": "1\u06f1\u0661", "2": "2\u06f2\u0662",
+    "3": "3\u06f3\u0663", "4": "4\u06f4\u0664", "5": "5\u06f5\u0665",
+    "6": "6\u06f6\u0666", "7": "7\u06f7\u0667", "8": "8\u06f8\u0668",
+    "9": "9\u06f9\u0669",
+}
 
 
 def effective_term_notes_mode(mode: str, output_format: str) -> str:
@@ -18,6 +24,32 @@ def effective_term_notes_mode(mode: str, output_format: str) -> str:
     if mode != "inline" and output_format.lower() not in NOTE_CAPABLE_FORMATS:
         return "inline"
     return mode
+
+
+def _source_original_pattern(source: str) -> re.Pattern[str]:
+    """Match a Latin original despite harmless spacing/digit normalization."""
+    parts: list[str] = []
+    previous_kind = ""
+    for char in source.strip():
+        if char.isspace():
+            if not parts or parts[-1] != r"\s+":
+                parts.append(r"\s+")
+            previous_kind = "space"
+            continue
+        kind = "digit" if char in _DIGIT_VARIANTS else "letter" if char.isalpha() else "other"
+        if {kind, previous_kind} == {"digit", "letter"}:
+            parts.append(r"\s*")
+        if kind == "digit":
+            parts.append(f"[{_DIGIT_VARIANTS[char]}]")
+        else:
+            parts.append(re.escape(char))
+        previous_kind = kind
+    return re.compile(rf"(?<!\w){''.join(parts)}(?!\w)", re.IGNORECASE)
+
+
+def _inside_parenthetical(text: str, offset: int) -> bool:
+    """Return true when an offset is inside an unmatched round parenthesis."""
+    return text.rfind("(", 0, offset) > text.rfind(")", 0, offset)
 
 
 def ensure_inline_proper_noun_originals(
@@ -31,9 +63,11 @@ def ensure_inline_proper_noun_originals(
     """Anchor one English original to its exact source occurrence."""
     inserted = 0
     repositioned = 0
+    paired_repaired = 0
     seen: set[str] = set()
     anchors: list[dict[str, Any]] = []
     ambiguous: list[dict[str, Any]] = []
+    missing_targets: list[dict[str, Any]] = []
     categories = categories or {}
     for paragraph in document.paragraphs:
         candidates = []
@@ -62,7 +96,38 @@ def ensure_inline_proper_noun_originals(
                 match.start() for match in re.finditer(re.escape(target), text)
             ]
             if not target_offsets:
-                continue
+                bare_originals = [
+                    match
+                    for match in _source_original_pattern(source).finditer(text)
+                    if not _inside_parenthetical(text, match.start())
+                ]
+                if len(bare_originals) == 1:
+                    original_match = bare_originals[0]
+                    text = (
+                        text[:original_match.start()]
+                        + f"{target} ({source})"
+                        + text[original_match.end():]
+                    )
+                    paired_repaired += 1
+                    target_offsets = [original_match.start()]
+                elif len(bare_originals) > 1:
+                    ambiguous.append({
+                        "paragraph_index": paragraph.index,
+                        "source": source,
+                        "target": target,
+                        "category": category,
+                        "reason": "ambiguous_english_only_occurrence",
+                    })
+                    continue
+                else:
+                    missing_targets.append({
+                        "paragraph_index": paragraph.index,
+                        "source": source,
+                        "target": target,
+                        "category": category,
+                        "reason": "known_target_not_found",
+                    })
+                    continue
             expected = int(
                 source_position / max(len(paragraph.source_text), 1) * len(text)
             )
@@ -137,10 +202,13 @@ def ensure_inline_proper_noun_originals(
     report = {
         "inserted_count": inserted,
         "repositioned_count": repositioned,
+        "paired_repair_count": paired_repaired,
         "anchored_count": len(anchors),
         "ambiguous_count": len(ambiguous),
+        "missing_target_count": len(missing_targets),
         "anchors": anchors,
         "ambiguous": ambiguous,
+        "missing_targets": missing_targets,
     }
     return report if return_report else inserted
 

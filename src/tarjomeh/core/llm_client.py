@@ -31,9 +31,9 @@ _SCHEMA_REPAIR_OPERATIONS = {
     "refinement_json_repair",
 }
 
-# Bounded JSON helpers do not benefit from long hidden reasoning traces. Their
-# output contract is specialized, but they retain the same global predictive
-# token floor and operation-isolated budget history as every other call.
+# Structured helpers may benefit from normal model reasoning on their first
+# attempt. If their bounded output contract fails, recovery disables reasoning
+# so the model can spend the remaining allowance on valid JSON.
 _STRUCTURED_HELPER_OPERATIONS = {
     "auto_term_extraction",
     "book_research",
@@ -65,7 +65,7 @@ _UNCHANGED_SECOND_ATTEMPT_OPERATIONS = {
 _PRESERVE_REASONING_ON_ALL_LENGTH_RETRIES = {
     "translation",
     "translation_split_recovery",
-} | _STRUCTURED_HELPER_OPERATIONS
+}
 
 _FULL_QUALITY_LENGTH_RECOVERY_OPERATIONS = {
     "translation",
@@ -90,6 +90,8 @@ def _use_no_reasoning_recovery(
     final_expanded: bool,
 ) -> bool:
     """Select no-reasoning recovery only after a normal request fails."""
+    if operation in _STRUCTURED_HELPER_OPERATIONS:
+        return True
     if final_expanded or operation == "glossary_auto_correction":
         return True
     if operation not in _QUALITY_RECOVERY_OPERATIONS:
@@ -646,6 +648,16 @@ class LLMClient:
         if attempt >= fallback_attempt and recovery.model.strip():
             payload["model"] = recovery.model.strip()
 
+        # Helper Attempt 1 keeps normal model reasoning. Any bounded recovery
+        # uses the portable OpenRouter/9router no-reasoning request so strict
+        # JSON is emitted instead of consuming the allowance as hidden thought.
+        helper_no_reasoning = (
+            self.config.llm.provider.lower() == "openrouter"
+            and operation in _STRUCTURED_HELPER_OPERATIONS
+        )
+        if helper_no_reasoning:
+            payload["reasoning"] = {"effort": "none", "exclude": True}
+
         if failure_reason != "length":
             return payload, calculation
 
@@ -731,15 +743,24 @@ class LLMClient:
         original: dict[str, Any],
         operation: str,
     ) -> dict[str, Any]:
-        """Constrain bounded JSON helpers without changing quality operations."""
+        """Apply operation policy without changing the default request flow."""
         if self.config.llm.provider.lower() != "openrouter":
             return original
         if operation in _STRUCTURED_HELPER_OPERATIONS:
             payload = dict(original)
-            payload["reasoning"] = {"effort": "none", "exclude": True}
             if operation in _JSON_OBJECT_HELPER_OPERATIONS:
                 payload["response_format"] = {"type": "json_object"}
             return payload
+        if operation in {"translation", "translation_split_recovery"}:
+            mode = self.config.llm.translation_reasoning
+            if mode == "enabled":
+                payload = dict(original)
+                payload["reasoning"] = {"enabled": True, "exclude": True}
+                return payload
+            if mode == "disabled":
+                payload = dict(original)
+                payload["reasoning"] = {"effort": "none", "exclude": True}
+                return payload
         if operation not in _SCHEMA_REPAIR_OPERATIONS:
             return original
         payload = dict(original)

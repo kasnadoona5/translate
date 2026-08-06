@@ -163,6 +163,7 @@ flag is omitted.
 ```dotenv
 # Translator: 12K legacy floor with predictive first-attempt sizing
 TRANSLATOR_MAX_TOKENS=12000
+TRANSLATOR_REASONING=auto
 TRANSLATOR_RECOVERY_MODEL=
 TRANSLATOR_RECOVERY_MAX_ATTEMPTS=2
 TRANSLATOR_RECOVERY_MAX_TOKENS=24000
@@ -173,8 +174,10 @@ CRITIC_RECOVERY_MAX_ATTEMPTS=4
 CRITIC_RECOVERY_MAX_TOKENS=50000
 ```
 
-The normal request keeps the same prompt, model, temperature, and reasoning
-policy, but its output allowance is sized before sending. Tarjomeh combines an
+The default `TRANSLATOR_REASONING=auto` keeps each model and endpoint's normal
+thinking behavior. The Web UI can explicitly enable or disable translator
+thinking for a job. The prompt, model role, and pipeline stay unchanged, while
+the output allowance is sized before sending. Tarjomeh combines an
 answer estimate, a conservative first-chunk reasoning reserve, model/operation
 history, and a 1.25 uncertainty margin. Predictive calls receive at least the
 configured 50,000-token allowance when context capacity permits. Successful
@@ -212,8 +215,13 @@ Recommended critic recovery sequence:
    fallback is configured
 4. Final no-reasoning attempt within the adaptive context and output ceiling
 
-No-reasoning mode is limited to recovery and compact JSON repair. It does not
-replace the normal translator, critic, or refiner request.
+Quality-sensitive structured helpers such as book-research synthesis and
+proper-noun extraction keep normal model thinking on Attempt 1. After a helper
+length, empty, or malformed response, bounded recovery requests no reasoning so
+the model can emit the required JSON. This is sent through the generic
+OpenRouter-compatible contract used by OpenRouter, 9router, and compatible
+gateways; it is not tied to a model name. Critic and refiner first attempts are
+unchanged.
 
 If all critic attempts fail, a valid translation is retained and marked for
 human review. An initial translation failure remains strict and prevents
@@ -857,10 +865,15 @@ python -m pytest -q
 python -m compileall -q src tests
 ```
 
-The v9.5.5 suite contains 206 passing tests.
+Run the suite before deployment; the exact test count may grow between patch
+releases.
 
 ## Release History
 
+- v9.5.7: provider-neutral thinking controls, thinking-first structured helper
+  calls with bounded no-reasoning recovery, integrity-gated local refinement
+  salvage, truthful per-issue commit evidence, and English-only first-occurrence
+  pairing repair
 - v9.5.5: ambiguity-safe Persian indefinite normalization, explicit audit
   coverage, and an 85K adaptive output ceiling
 - v9.5: grounded sentence-level QA, conservative Persian orthography, exact

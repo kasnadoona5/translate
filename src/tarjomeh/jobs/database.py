@@ -664,7 +664,14 @@ class JobDatabase:
                     (
                         (
                             str(decision.get("decision", ""))
-                            if candidate_accepted else "candidate_rejected"
+                            if str(decision.get("commit_status", "")).startswith(
+                                "committed"
+                            )
+                            else str(decision.get("commit_status", ""))
+                            or (
+                                str(decision.get("decision", ""))
+                                if candidate_accepted else "candidate_rejected"
+                            )
                         ),
                         job_id,
                         chunk_index, critique_iteration, issue_id,

@@ -188,6 +188,7 @@ def _register_routes(app: Flask) -> None:
         runtime_config = app.config["TARJOMEH_CONFIG"]
         return render_template("index.html", ui_defaults={
             "qa_json_retries": runtime_config.translation.qa_json_retries,
+            "translation_reasoning": runtime_config.llm.translation_reasoning,
             "enforce_auto_extracted_terms": (
                 runtime_config.glossary.enforce_auto_extracted_terms
             ),
@@ -302,6 +303,7 @@ def _register_api(app: Flask) -> None:
             "search_provider": "web_search.provider",
             "recovery_model": "llm.recovery.model",
             "critic_recovery_model": "llm.critic.recovery_model",
+            "translation_reasoning": "llm.translation_reasoning",
         }
         for form_key, dotted_key in _form_field_map.items():
             value = request.form.get(form_key)
@@ -809,12 +811,14 @@ def _register_api(app: Flask) -> None:
         glossary_config = job_config.get("glossary", {})
         output_config = job_config.get("output", {})
         search_config = job_config.get("web_search", {})
-        recovery_config = job_config.get("llm", {}).get("recovery", {})
-        critic_config = job_config.get("llm", {}).get("critic", {})
+        llm_config = job_config.get("llm", {})
+        recovery_config = llm_config.get("recovery", {})
+        critic_config = llm_config.get("critic", {})
         lines.extend([
             "Job Configuration:",
             f"  mode={translation_config.get('mode')}",
             f"  output={output_config.get('format')} term_notes={output_config.get('term_notes')}",
+            f"  translator_reasoning={llm_config.get('translation_reasoning', 'auto')}",
             f"  critique={translation_config.get('enable_critique')} "
             f"threshold={translation_config.get('critique_threshold')} "
             f"refinements={translation_config.get('max_refine_iterations')}",
@@ -896,8 +900,10 @@ def _register_api(app: Flask) -> None:
                 "English-original anchors:",
                 f"  anchored={anchor_audit.get('anchored_count', 0)} "
                 f"inserted={anchor_audit.get('inserted_count', 0)} "
+                f"paired_repaired={anchor_audit.get('paired_repair_count', 0)} "
                 f"repositioned={anchor_audit.get('repositioned_count', 0)} "
-                f"ambiguous={anchor_audit.get('ambiguous_count', 0)}",
+                f"ambiguous={anchor_audit.get('ambiguous_count', 0)} "
+                f"missing_target={anchor_audit.get('missing_target_count', 0)}",
                 "",
             ])
         citation_audit = db.get_job_artifact(job_id, "citation_format_audit")
@@ -1129,13 +1135,20 @@ def _register_api(app: Flask) -> None:
                         f"decision={payload.get('decision')} "
                         f"before={payload.get('before_chars')} after={payload.get('after_chars')}"
                     )
+                    lines.append(
+                        f"    Commit: mode={payload.get('commit_mode', 'legacy')} "
+                        f"committed_issues={payload.get('committed_edit_count', 0)} "
+                        f"candidate_integrity={payload.get('candidate_integrity_accepted')}"
+                    )
                     if payload.get("rationale"):
                         lines.append(f"    Rationale: {payload.get('rationale')}")
                     for decision in payload.get("issue_decisions", []):
                         lines.append(
                             f"    Decision {decision.get('issue_id')}: "
                             f"{decision.get('decision')} -> "
-                            f"{decision.get('resulting_span')}"
+                            f"{decision.get('resulting_span')} "
+                            f"[commit={decision.get('commit_status', 'legacy')}; "
+                            f"integrity={decision.get('integrity_status', 'legacy')}]"
                         )
                         if decision.get("rationale"):
                             lines.append(

@@ -1,4 +1,4 @@
-# Tarjomeh v9.5.5 configuration template
+# Tarjomeh v9.5.7 configuration template
 #
 # 1. Copy this file to config.toml.
 # 2. Keep API keys and UI secrets in .env.
@@ -16,6 +16,10 @@ temperature = 0.3
 
 # Output budget for the unchanged normal request.
 max_tokens = 12000
+# "auto" preserves each model/endpoint's normal thinking behavior.
+# "enabled" explicitly requests thinking; "disabled" requests no reasoning.
+# This setting applies to translation and adaptive translation recovery only.
+translation_reasoning = "auto"
 
 [llm.recovery]
 # Predictive first-attempt sizing plus bounded recovery. Prompts, reasoning,

@@ -163,6 +163,10 @@ class LLMConfig:
     model: str = "anthropic/claude-sonnet-4-5-20250514"
     temperature: float = 0.3
     max_tokens: int = 12000
+    # Controls translator/recovery requests only. "auto" preserves the
+    # endpoint/model default, while explicit values use the portable
+    # OpenRouter-compatible reasoning contract.
+    translation_reasoning: str = "auto"
     openrouter: LLMOpenRouterConfig = field(default_factory=LLMOpenRouterConfig)
     ollama: LLMOllamaConfig = field(default_factory=LLMOllamaConfig)
     critic: LLMCriticConfig = field(default_factory=LLMCriticConfig)
@@ -468,6 +472,7 @@ class TarjomehConfig:
             TRANSLATOR_API_KEY    API key
             TRANSLATOR_MODEL      model id or 9router combo name
             TRANSLATOR_MAX_TOKENS optional output budget (default 12000)
+            TRANSLATOR_REASONING  auto / enabled / disabled
             TRANSLATOR_RECOVERY_MAX_ATTEMPTS bounded whole-request attempts
             TRANSLATOR_RECOVERY_MAX_TOKENS recovery output budget (default 24000)
 
@@ -495,6 +500,9 @@ class TarjomehConfig:
         value = env("TRANSLATOR_MAX_TOKENS", "").strip()
         if value.isdigit():
             self.llm.max_tokens = int(value)
+        value = env("TRANSLATOR_REASONING", "").strip().lower()
+        if value:
+            self.llm.translation_reasoning = value
 
         value = env("TRANSLATOR_RECOVERY_MODEL", "").strip()
         if value:
@@ -648,6 +656,13 @@ class TarjomehConfig:
         # Model must be set
         if not self.llm.model:
             errors.append("llm.model must be specified")
+
+        valid_reasoning_modes = ("auto", "enabled", "disabled")
+        if self.llm.translation_reasoning not in valid_reasoning_modes:
+            errors.append(
+                "llm.translation_reasoning must be one of "
+                f"{valid_reasoning_modes}"
+            )
 
         # Mode must be known
         if self.translation.mode not in _MODE_PRESETS:

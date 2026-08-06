@@ -146,12 +146,16 @@ class TestBoundedRecovery(unittest.TestCase):
                 events[0]["request_contract_sha256"],
             )
 
-    def test_structured_helper_keeps_global_floor_and_non_reasoning_contract(self) -> None:
+    def test_structured_helper_thinks_normally_then_recovers_without_reasoning(self) -> None:
         payloads = []
+        responses = iter([
+            _response("partial", "length"),
+            _response('{"book_context":"ok","terms":[]}', "stop"),
+        ])
 
         def post(*args, **kwargs):
             payloads.append(json.loads(json.dumps(kwargs["json"])))
-            return _response('{"book_context":"ok","terms":[]}', "stop")
+            return next(responses)
 
         self.client._client.post = post
         self.client.complete(
@@ -162,8 +166,10 @@ class TestBoundedRecovery(unittest.TestCase):
             payloads[0]["max_tokens"],
             self.config.llm.recovery.predictive_min_tokens,
         )
-        self.assertEqual(payloads[0]["reasoning"]["effort"], "none")
+        self.assertNotIn("effort", payloads[0]["reasoning"])
         self.assertEqual(payloads[0]["response_format"], {"type": "json_object"})
+        self.assertEqual(payloads[1]["reasoning"]["effort"], "none")
+        self.assertEqual(payloads[1]["response_format"], {"type": "json_object"})
 
     def test_translation_recovery_uses_evidence_based_budget_formula(self) -> None:
         self.config.llm.recovery.max_tokens = 50000
@@ -297,7 +303,7 @@ class TestBoundedRecovery(unittest.TestCase):
             self.config.llm.recovery.predictive_min_tokens,
         )
         self.assertEqual(payloads[1]["reasoning"]["effort"], "none")
-        self.assertEqual(payloads[2]["reasoning"]["effort"], "none")
+        self.assertNotIn("effort", payloads[2]["reasoning"])
 
     def test_second_translation_attempt_uses_configured_fallback(self) -> None:
         self.config.llm.recovery.model = "recovery-combo"

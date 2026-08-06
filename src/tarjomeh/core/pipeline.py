@@ -692,6 +692,160 @@ def _normalized_translation_version(value: str) -> str:
     return " ".join((value or "").split()).casefold()
 
 
+def _refinement_decisions_with_commit_state(
+    decisions: list[dict[str, Any]],
+    issue_details: list[dict[str, Any]],
+    candidate: str,
+    *,
+    candidate_accepted: bool,
+) -> list[dict[str, Any]]:
+    """Describe what was actually committed for each refiner decision."""
+    issues = {
+        str(issue.get("issue_id", "")).strip(): issue
+        for issue in issue_details
+        if str(issue.get("issue_id", "")).strip()
+    }
+    enriched: list[dict[str, Any]] = []
+    for raw in decisions:
+        decision = dict(raw)
+        issue_id = str(decision.get("issue_id", "")).strip()
+        choice = str(decision.get("decision", "")).strip().lower()
+        current_span = str(
+            issues.get(issue_id, {}).get("current_persian_quote", "")
+        ).strip()
+        resulting_span = str(decision.get("resulting_span", "")).strip()
+        if choice == "rejected":
+            status, integrity_status, reason = (
+                "not_committed", "not_applicable", "refiner_rejected"
+            )
+        elif not candidate_accepted:
+            status, integrity_status, reason = (
+                "not_committed", "rejected", "candidate_integrity_rejected"
+            )
+        elif (
+            current_span
+            and resulting_span
+            and normalize_for_match(current_span) == normalize_for_match(resulting_span)
+        ):
+            status, integrity_status, reason = (
+                "not_committed", "accepted", "no_textual_change"
+            )
+        elif resulting_span and resulting_span in candidate:
+            status, integrity_status, reason = (
+                "committed_full_candidate", "accepted", "candidate_committed"
+            )
+        else:
+            status, integrity_status, reason = (
+                "not_committed", "accepted", "resulting_span_not_found"
+            )
+        decision.update({
+            "commit_status": status,
+            "integrity_status": integrity_status,
+            "commit_reason": reason,
+        })
+        enriched.append(decision)
+    return enriched
+
+
+def _salvage_local_refinement_edits(
+    *,
+    source: str,
+    previous: str,
+    proposed: str,
+    issue_details: list[dict[str, Any]],
+    issue_decisions: list[dict[str, Any]],
+    integrity_gate: PostEditIntegrityGate,
+    protected_terms: list[str],
+    protect_inline_english: bool,
+    allowed_inline_originals: list[str],
+) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+    """Recover only unique, local refiner edits that independently pass integrity."""
+    issues = {
+        str(issue.get("issue_id", "")).strip(): issue
+        for issue in issue_details
+        if str(issue.get("issue_id", "")).strip()
+    }
+    current = previous
+    enriched: list[dict[str, Any]] = []
+    attempts: list[dict[str, Any]] = []
+    committed = 0
+
+    for raw in issue_decisions:
+        decision = dict(raw)
+        issue_id = str(decision.get("issue_id", "")).strip()
+        choice = str(decision.get("decision", "")).strip().lower()
+        current_span = str(
+            issues.get(issue_id, {}).get("current_persian_quote", "")
+        ).strip()
+        resulting_span = str(decision.get("resulting_span", "")).strip()
+        resulting_span = apply_safe_persian_orthography(resulting_span)[0]
+        reason = ""
+        integrity_payload: dict[str, Any] | None = None
+
+        if choice not in {"accepted", "partially_applied"}:
+            reason = "refiner_rejected"
+        elif not current_span or not resulting_span:
+            reason = "missing_local_span"
+        elif normalize_for_match(current_span) == normalize_for_match(resulting_span):
+            reason = "no_textual_change"
+        elif current.count(current_span) != 1:
+            reason = "current_span_not_unique"
+        elif resulting_span not in proposed:
+            reason = "resulting_span_not_in_candidate"
+        elif "\n\n" in current_span or "\n\n" in resulting_span:
+            reason = "paragraph_boundary_edit"
+        elif len(current_span) > 320 or len(resulting_span) > 480:
+            reason = "edit_not_local"
+        elif not 0.5 <= len(resulting_span) / max(1, len(current_span)) <= 2.0:
+            reason = "local_size_ratio_out_of_bounds"
+        else:
+            candidate = current.replace(current_span, resulting_span, 1)
+            integrity = integrity_gate.evaluate(
+                source,
+                candidate,
+                previous=current,
+                stage="refinement_local_salvage",
+                protected_terms=protected_terms,
+                protect_inline_english=protect_inline_english,
+                allowed_inline_originals=allowed_inline_originals,
+            )
+            integrity_payload = integrity.to_dict()
+            if integrity.accepted:
+                current = candidate
+                committed += 1
+                reason = "local_edit_committed"
+            else:
+                reason = "local_integrity_rejected"
+
+        was_committed = reason == "local_edit_committed"
+        decision.update({
+            "resulting_span": resulting_span,
+            "commit_status": "committed_local" if was_committed else "not_committed",
+            "integrity_status": (
+                "accepted" if was_committed
+                else "rejected" if integrity_payload is not None
+                else "not_applicable"
+            ),
+            "commit_reason": reason,
+        })
+        enriched.append(decision)
+        attempts.append({
+            "issue_id": issue_id,
+            "decision": choice,
+            "committed": was_committed,
+            "reason": reason,
+            "before_chars": len(current_span),
+            "after_chars": len(resulting_span),
+            "integrity": integrity_payload,
+        })
+
+    return current, enriched, {
+        "attempted_count": len(attempts),
+        "committed_count": committed,
+        "attempts": attempts,
+    }
+
+
 def _critique_candidate_rank(critique: Any) -> tuple[float, float, float, float]:
     scores = [
         float(getattr(critique, name, 0.0))
@@ -1892,11 +2046,13 @@ class TranslationPipeline:
                 job_id, "english_original_anchor_audit", anchor_audit
             )
             restored = int(anchor_audit.get("inserted_count", 0))
-            if restored or anchor_audit.get("repositioned_count"):
+            paired_repaired = int(anchor_audit.get("paired_repair_count", 0))
+            if restored or paired_repaired or anchor_audit.get("repositioned_count"):
                 self.db.log_event(
                     job_id, "INFO",
                     "Anchored first-occurrence English originals: "
                     f"inserted={restored}, "
+                    f"paired_repaired={paired_repaired}, "
                     f"repositioned={anchor_audit.get('repositioned_count', 0)}, "
                     f"ambiguous={anchor_audit.get('ambiguous_count', 0)}.",
                 )
@@ -3226,6 +3382,14 @@ class TranslationPipeline:
                     )
                 edit_accepted = True
                 integrity_payload: dict[str, Any] | None = None
+                issue_details = list(
+                    getattr(critique_rep, "issue_details", []) or []
+                )
+                issue_decisions = list(
+                    getattr(refinement, "issue_decisions", []) or []
+                )
+                local_salvage: dict[str, Any] | None = None
+                salvaged_translation = before_translation
                 if integrity_enabled:
                     edit_integrity = integrity_gate.evaluate(
                         chunk.text,
@@ -3245,9 +3409,52 @@ class TranslationPipeline:
                         self.db.log_chunk_event(
                             job_id, idx, "integrity_edit_rejected", integrity_payload
                         )
-                convergence_reason = ""
+                        (
+                            salvaged_translation,
+                            issue_decisions,
+                            local_salvage,
+                        ) = _salvage_local_refinement_edits(
+                            source=chunk.text,
+                            previous=before_translation,
+                            proposed=proposed_translation,
+                            issue_details=issue_details,
+                            issue_decisions=issue_decisions,
+                            integrity_gate=integrity_gate,
+                            protected_terms=protected_targets,
+                            protect_inline_english=protect_inline_english,
+                            allowed_inline_originals=allowed_inline_originals,
+                        )
+                        if local_salvage["committed_count"]:
+                            self.db.log_chunk_event(
+                                job_id,
+                                idx,
+                                "refinement_local_edits_recovered",
+                                {
+                                    "iteration": ref_iter + 1,
+                                    **local_salvage,
+                                },
+                            )
                 if edit_accepted:
-                    proposed_key = _normalized_translation_version(proposed_translation)
+                    issue_decisions = _refinement_decisions_with_commit_state(
+                        issue_decisions,
+                        issue_details,
+                        proposed_translation,
+                        candidate_accepted=True,
+                    )
+                convergence_reason = ""
+                translation = (
+                    proposed_translation
+                    if edit_accepted
+                    else salvaged_translation
+                    if (local_salvage or {}).get("committed_count")
+                    else before_translation
+                )
+                translation_changed = (
+                    _normalized_translation_version(translation)
+                    != _normalized_translation_version(before_translation)
+                )
+                if translation_changed:
+                    proposed_key = _normalized_translation_version(translation)
                     current_key = _normalized_translation_version(before_translation)
                     prior_keys = [
                         _normalized_translation_version(value)
@@ -3258,13 +3465,12 @@ class TranslationPipeline:
                     elif proposed_key in prior_keys[:-1]:
                         convergence_reason = "refinement_oscillation"
 
-                translation = proposed_translation if edit_accepted else before_translation
                 self.db.save_issue_decisions(
                     job_id,
                     idx,
                     ref_iter + 1,
                     ref_iter,
-                    list(getattr(refinement, "issue_decisions", []) or []),
+                    issue_decisions,
                     candidate_accepted=edit_accepted,
                 )
                 if convergence_reason == "refinement_oscillation":
@@ -3290,7 +3496,7 @@ class TranslationPipeline:
                             ),
                         },
                     )
-                elif edit_accepted and not convergence_reason:
+                elif translation_changed and not convergence_reason:
                     accepted_versions.append(translation)
 
                 self.db.update_chunk(job_id, idx, ChunkStatus.REFINED, translation)
@@ -3301,13 +3507,23 @@ class TranslationPipeline:
                     "blocking_issue_count": len(_blocking_critique_issues(critique_rep)),
                     "decision": refinement.decision,
                     "rationale": _truncate_for_event(refinement.rationale, 1000),
-                    "issue_decisions": list(
-                        getattr(refinement, "issue_decisions", []) or []
-                    ),
+                    "issue_decisions": issue_decisions,
                     "before_chars": before_chars,
                     "after_chars": len(translation),
                     "proposed_chars": len(proposed_translation),
                     "integrity_accepted": edit_accepted,
+                    "candidate_integrity_accepted": edit_accepted,
+                    "committed_edit_count": sum(
+                        1 for decision in issue_decisions
+                        if str(decision.get("commit_status", "")).startswith("committed")
+                    ),
+                    "commit_mode": (
+                        "full_candidate" if edit_accepted
+                        else "local_salvage"
+                        if (local_salvage or {}).get("committed_count")
+                        else "preserved"
+                    ),
+                    "local_salvage": local_salvage,
                     "integrity": integrity_payload,
                     "paragraphs_after": _paragraph_count(translation),
                     "convergence_reason": convergence_reason or None,
