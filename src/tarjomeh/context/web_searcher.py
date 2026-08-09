@@ -16,6 +16,7 @@ from tarjomeh.context.search_providers import (
     BaseSearchProvider,
     SearchProviderChain,
     build_search_provider,
+    rank_search_results,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ class WebContextSearcher:
         self.config = config
         self.llm_client = llm_client
         self.cache: dict[str, str] = {}  # term_lower -> definition_str
+        self.result_audit: dict[str, list[dict[str, Any]]] = {}
 
         phase7_reserve = (
             config.web_search.phase7_max_queries
@@ -67,6 +69,8 @@ class WebContextSearcher:
                 return ""
 
             query_count = 0
+            accepted_count = 0
+            rejected_count = 0
             diagnostic_start = len(
                 self.provider.diagnostics
                 if isinstance(self.provider, SearchProviderChain) else []
@@ -87,8 +91,23 @@ class WebContextSearcher:
                 # Run search query
                 query_count += 1
                 results = await self.provider.search(search_query)
-                if results:
-                    def_str = "\n".join(f"- {r.snippet} (source: {r.url})" for r in results[:3])
+                ranked, result_diagnostics = rank_search_results(
+                    search_query,
+                    results,
+                    identity=term,
+                )
+                self.result_audit[term_lower] = result_diagnostics
+                accepted_count += sum(
+                    1 for item in result_diagnostics if item.get("accepted")
+                )
+                rejected_count += sum(
+                    1 for item in result_diagnostics if not item.get("accepted")
+                )
+                if ranked:
+                    def_str = "\n".join(
+                        f"- {r.snippet[:650]} (source: {r.url})"
+                        for r in ranked[:3]
+                    )
                     self.cache[term_lower] = def_str
                 else:
                     self.cache[term_lower] = ""
@@ -100,6 +119,12 @@ class WebContextSearcher:
             self.last_report = {
                 "candidate_count": len(items),
                 "new_query_count": query_count,
+                "accepted_result_count": accepted_count,
+                "rejected_result_count": rejected_count,
+                "result_relevance": {
+                    term: audit for term, audit in self.result_audit.items()
+                    if term in {str(item.get("term", "")).strip().lower() for item in items}
+                },
                 "diagnostics": diagnostics,
                 "budget_used": getattr(self.provider, "queries_used", None),
                 "budget_limit": getattr(self.provider, "query_budget", None),
@@ -125,7 +150,11 @@ class WebContextSearcher:
                 )
 
         if matched_definitions:
-            return "### Web Context Definitions (for term disambiguation):\n\n" + "\n\n".join(matched_definitions)
+            context = "\n\n".join(matched_definitions)
+            return (
+                "### Web Context Definitions (advisory, relevance-filtered):\n\n"
+                + context[:6000]
+            )
         
         return ""
 
@@ -133,6 +162,7 @@ class WebContextSearcher:
         """Return resume-safe context and provider caches."""
         return {
             "term_cache": dict(self.cache),
+            "result_audit": dict(self.result_audit),
             "provider": (
                 self.provider.export_state()
                 if isinstance(self.provider, SearchProviderChain) else {}
@@ -144,6 +174,11 @@ class WebContextSearcher:
         self.cache = {
             str(key): str(value)
             for key, value in state.get("term_cache", {}).items()
+        }
+        self.result_audit = {
+            str(key): list(value)
+            for key, value in state.get("result_audit", {}).items()
+            if isinstance(value, list)
         }
         if isinstance(self.provider, SearchProviderChain):
             self.provider.import_state(state.get("provider", {}))

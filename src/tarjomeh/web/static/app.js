@@ -257,6 +257,7 @@ async function startTranslation() {
     formData.append("enable_compliance_check", String(document.getElementById("cfgCompliance").checked));
     formData.append("enable_auto_correction", String(document.getElementById("cfgAutoCorrection").checked));
     formData.append("scholarly_mode", String(document.getElementById("cfgScholarly").checked));
+    formData.append("chapter_page_breaks", String(document.getElementById("cfgChapterPageBreaks").checked));
     formData.append("max_refine_iterations", document.getElementById("cfgRefineIterations").value);
     formData.append("critique_threshold", document.getElementById("cfgCritiqueThreshold").value);
     formData.append("qa_json_retries", document.getElementById("cfgQaJsonRetries").value);

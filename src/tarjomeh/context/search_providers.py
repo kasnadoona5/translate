@@ -27,6 +27,84 @@ class SearchResult:
     snippet: str
 
 
+_SEARCH_STOPWORDS = {
+    "about", "academic", "and", "book", "concept", "concepts", "definition",
+    "for", "from", "into", "key", "of", "or", "persian", "review", "scholarship",
+    "search", "summary", "term", "terminology", "the", "theory", "translation",
+    "with",
+}
+_LOW_AUTHORITY_HOSTS = {
+    "amazon.com", "coursehero.com", "facebook.com", "fandom.com", "studocu.com",
+    "youtube.com",
+}
+
+
+def _search_tokens(value: str) -> set[str]:
+    return {
+        token.casefold()
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9'-]{2,}", value or "")
+        if token.casefold() not in _SEARCH_STOPWORDS
+    }
+
+
+def rank_search_results(
+    query: str,
+    results: list[SearchResult],
+    *,
+    identity: str = "",
+    strict_identity: bool = True,
+) -> tuple[list[SearchResult], list[dict[str, Any]]]:
+    """Rank search evidence conservatively and reject clear identity mismatches."""
+    query_tokens = _search_tokens(query)
+    identity_tokens = _search_tokens(identity)
+    ranked: list[tuple[float, SearchResult]] = []
+    diagnostics: list[dict[str, Any]] = []
+    for result in results:
+        host = urllib.parse.urlparse(result.url).netloc.casefold().removeprefix("www.")
+        haystack = " ".join((result.title, result.snippet, result.url)).casefold()
+        haystack_tokens = _search_tokens(haystack)
+        identity_coverage = (
+            len(identity_tokens & haystack_tokens) / len(identity_tokens)
+            if identity_tokens else 1.0
+        )
+        required_identity_coverage = (
+            (1.0 if len(identity_tokens) <= 3 else 0.7)
+            if strict_identity else 0.5
+        )
+        query_coverage = (
+            len(query_tokens & haystack_tokens) / len(query_tokens)
+            if query_tokens else 0.0
+        )
+        authority = 0.0
+        if host.endswith((".edu", ".ac.uk", ".edu.au", ".gov")):
+            authority += 0.18
+        if any(
+            marker in host
+            for marker in ("cambridge.org", "oup.com", "politybooks.com", "jstor.org")
+        ):
+            authority += 0.18
+        if any(host == value or host.endswith("." + value) for value in _LOW_AUTHORITY_HOSTS):
+            authority -= 0.18
+        score = 0.55 * identity_coverage + 0.30 * query_coverage + authority
+        reasons: list[str] = []
+        if identity_tokens and identity_coverage < required_identity_coverage:
+            reasons.append("identity_mismatch")
+        if query_tokens and query_coverage < 0.15:
+            reasons.append("low_query_relevance")
+        accepted = not reasons and score >= 0.32
+        diagnostics.append({
+            "title": result.title[:300],
+            "url": result.url[:1000],
+            "score": round(score, 4),
+            "accepted": accepted,
+            "reasons": reasons or (["below_relevance_threshold"] if not accepted else []),
+        })
+        if accepted:
+            ranked.append((score, result))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return [result for _score, result in ranked], diagnostics
+
+
 class BaseSearchProvider:
     """Abstract base class for web search providers."""
 

@@ -30,6 +30,7 @@ class _Paragraph(Protocol):
     """Minimal paragraph-like object expected inside a Section."""
 
     text: str
+    metadata: dict[str, object]
 
 
 class _Section(Protocol):
@@ -173,6 +174,8 @@ class SemanticChunker:
                 buffer: list[str] = []
                 buffer_tokens = 0
                 buffer_para_indices: list[int] = []
+                buffer_roles: list[str] = []
+                buffer_style_eligible: list[bool] = []
 
                 for para in section.paragraphs:
                     para_text = para.text.strip()
@@ -194,6 +197,8 @@ class SemanticChunker:
                             chapter_metadata=chapter_metadata,
                             previous_sentences=previous_sentences,
                             para_indices=buffer_para_indices,
+                            structural_roles=buffer_roles,
+                            style_eligible=all(buffer_style_eligible),
                         )
                         chunks.append(chunk)
                         previous_sentences = _split_sentences(chunk.text)[
@@ -202,10 +207,21 @@ class SemanticChunker:
                         buffer = []
                         buffer_tokens = 0
                         buffer_para_indices = []
+                        buffer_roles = []
+                        buffer_style_eligible = []
 
                     buffer.append(para_text)
                     buffer_tokens += para_tokens
                     buffer_para_indices.append(para_to_idx[id(para)])
+                    metadata = getattr(para, "metadata", {}) or {}
+                    role = str(metadata.get("structure_role", "body"))
+                    buffer_roles.append(role)
+                    buffer_style_eligible.append(
+                        role == "body"
+                        and not bool(metadata.get("is_footnote"))
+                        and not bool(metadata.get("is_table"))
+                        and not bool(metadata.get("heading_level"))
+                    )
 
                 # Flush remaining buffer for this section.
                 if buffer:
@@ -220,6 +236,8 @@ class SemanticChunker:
                         chapter_metadata=chapter_metadata,
                         previous_sentences=previous_sentences,
                         para_indices=buffer_para_indices,
+                        structural_roles=buffer_roles,
+                        style_eligible=all(buffer_style_eligible),
                     )
                     chunks.append(chunk)
                     previous_sentences = _split_sentences(chunk.text)[
@@ -243,12 +261,17 @@ class SemanticChunker:
         chapter_metadata: dict[str, object],
         previous_sentences: list[str],
         para_indices: list[int],
+        structural_roles: list[str],
+        style_eligible: bool,
     ) -> Chunk:
         combined = "\n\n".join(texts)
         metadata: dict[str, object] = {}
         if previous_sentences and self.overlap_sentences > 0:
             metadata["overlap_prefix"] = " ".join(previous_sentences)
         metadata["paragraph_indices"] = list(para_indices)
+        metadata["paragraph_protocol_version"] = 1
+        metadata["structural_roles"] = list(structural_roles)
+        metadata["style_eligible"] = bool(style_eligible)
         metadata["chapter_position"] = chapter_position
         metadata["chapter_number"] = chapter_number
         for key in ("start_page", "end_page"):

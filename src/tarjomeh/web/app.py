@@ -325,6 +325,7 @@ def _register_api(app: Flask) -> None:
             "pause_after_each_chapter": (
                 "translation.pause_after_each_chapter"
             ),
+            "chapter_page_breaks": "output.chapter_page_breaks",
         }
         for form_key, dotted_key in _boolean_field_map.items():
             value = request.form.get(form_key, "").lower()
@@ -818,7 +819,8 @@ def _register_api(app: Flask) -> None:
         lines.extend([
             "Job Configuration:",
             f"  mode={translation_config.get('mode')}",
-            f"  output={output_config.get('format')} term_notes={output_config.get('term_notes')}",
+            f"  output={output_config.get('format')} term_notes={output_config.get('term_notes')} "
+            f"chapter_page_breaks={output_config.get('chapter_page_breaks', True)}",
             f"  translator_reasoning={llm_config.get('translation_reasoning', 'auto')}",
             f"  critique={translation_config.get('enable_critique')} "
             f"threshold={translation_config.get('critique_threshold')} "
@@ -858,6 +860,7 @@ def _register_api(app: Flask) -> None:
             "",
         ])
         research = db.get_job_artifact(job_id, "book_research")
+        structure_audit = db.get_job_artifact(job_id, "pdf_structure_audit")
         chapter_manifest = db.get_job_artifact(job_id, "chapter_manifest")
         chapter_checkpoints = db.get_job_artifact(job_id, "chapter_checkpoints")
         if chapter_manifest is not None:
@@ -887,6 +890,19 @@ def _register_api(app: Flask) -> None:
                 + ", ".join(research.get("providers_used", [])),
                 f"  suggestions={len(suggested)} approved={len(approved)}",
                 f"  context={research.get('book_context', '')}",
+                "",
+            ])
+        if structure_audit is not None:
+            lines.extend([
+                "PDF Structure:",
+                f"  recurrent_furniture_removed="
+                f"{structure_audit.get('removed_furniture_count', 0)}",
+                f"  table_blocks_detected="
+                f"{structure_audit.get('table_block_count', 0)}",
+                f"  recurrence_minimum_pages="
+                f"{structure_audit.get('recurrence_minimum_pages', 0)}",
+                "  complex_tables=preserved in reading order; manual DOCX "
+                "formatting may be required",
                 "",
             ])
         original_audit = db.get_job_artifact(job_id, "english_original_audit")
@@ -1103,6 +1119,26 @@ def _register_api(app: Flask) -> None:
                         "  RECOVERY ASSEMBLY REJECTED: "
                         f"blocking={payload.get('blocking_count')} "
                         f"action={payload.get('action')}"
+                    )
+                elif event["event_type"] in {
+                    "paragraph_protocol_checked", "paragraph_protocol_repair"
+                }:
+                    lines.append(
+                        f"  Paragraph identity: stage={payload.get('stage')} "
+                        f"valid={payload.get('valid')} "
+                        f"errors={payload.get('errors', [])}"
+                    )
+                elif event["event_type"] == "memory_update_policy":
+                    lines.append(
+                        "  Memory update: short_term={short} "
+                        "long_term_reliable={long} style_sample={style} "
+                        "structure_eligible={structure} quality_approved={quality}".format(
+                            short=payload.get("short_term_added"),
+                            long=payload.get("long_term_reliable"),
+                            style=payload.get("style_sample_added"),
+                            structure=payload.get("structure_eligible"),
+                            quality=payload.get("quality_approved"),
+                        )
                     )
                 elif event["event_type"] == "critique_completed":
                     scores = payload.get("scores", {})

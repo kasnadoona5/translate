@@ -6,6 +6,17 @@ to preserve thematic and argumentative progression.
 
 from __future__ import annotations
 
+import html
+import re
+
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _clean_summary_line(value: str) -> str:
+    clean = html.unescape(_HTML_TAG_RE.sub("", value or ""))
+    return " ".join(clean.replace("\u200e", "").replace("\u200f", "").split())
+
 
 class BilingualSummary:
     """Running bilingual chapter summary memory layer.
@@ -31,7 +42,7 @@ class BilingualSummary:
         current_section: str | None = None
 
         for line in raw_llm_output.splitlines():
-            line_str = line.strip()
+            line_str = _clean_summary_line(line)
             if not line_str:
                 continue
             if line_str == "## English Summary":
@@ -67,9 +78,17 @@ class BilingualSummary:
 
         parts = []
         if self.english_summary:
-            parts.append(f"## English Summary\n{self.english_summary}")
+            parts.append(
+                "## English Summary\n"
+                "Provenance: translated content only.\n"
+                f"{self.english_summary}"
+            )
         if self.persian_summary:
-            parts.append(f"## خلاصه فارسی (RTL)\n{self.persian_summary}")
+            parts.append(
+                f"## خلاصه فارسی (RTL)\n"
+                f"منشأ: فقط محتوای ترجمه‌شده.\n"
+                f"{self.persian_summary}"
+            )
         return "\n\n".join(parts)
 
     def serialize(self) -> dict[str, str]:
@@ -81,8 +100,12 @@ class BilingualSummary:
 
     def deserialize(self, data: dict[str, str]) -> None:
         """Restore the layer state from serialized data."""
-        self.english_summary = data.get("english_summary", "")
-        self.persian_summary = data.get("persian_summary", "")
+        self.english_summary = _clean_summary_line(
+            data.get("english_summary", "")
+        )
+        self.persian_summary = _clean_summary_line(
+            data.get("persian_summary", "")
+        )
 
     def __repr__(self) -> str:
         en_len = len(self.english_summary)

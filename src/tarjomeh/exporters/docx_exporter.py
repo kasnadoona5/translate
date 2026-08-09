@@ -59,6 +59,22 @@ class DocxExporter(BaseExporter):
         normal_style.paragraph_format.line_spacing = 1.15
 
         latin_parenthetical = re.compile(r"(\([^()\n]*[A-Za-z][^()\n]*\))")
+        chapter_page_breaks = bool(
+            document.metadata.get("chapter_page_breaks", True)
+        )
+        seen_chapters: set[int] = set()
+
+        def apply_chapter_break(p_obj, metadata: dict) -> None:
+            if not chapter_page_breaks:
+                return
+            position = metadata.get("chapter_position")
+            if not isinstance(position, int):
+                return
+            if position in seen_chapters:
+                return
+            if seen_chapters:
+                p_obj.paragraph_format.page_break_before = True
+            seen_chapters.add(position)
 
         def set_on_off(parent, tag: str, enabled: bool) -> None:
             element = parent.find(qn(tag))
@@ -130,6 +146,7 @@ class DocxExporter(BaseExporter):
                 
                 # Left Column: English (LTR)
                 p_en = cell_en.paragraphs[0]
+                apply_chapter_break(p_en, p.metadata)
                 if p.heading_level is not None:
                     p_en.style = doc.styles[f'Heading {min(p.heading_level, 9)}']
                 run_en = p_en.add_run(p.source_text)
@@ -141,6 +158,8 @@ class DocxExporter(BaseExporter):
                 add_target_runs(p_fa, p.translated_text, p.metadata)
                 
                 make_paragraph_rtl(p_fa, heading=p.heading_level is not None)
+                if p.metadata.get("is_table"):
+                    p_fa.paragraph_format.first_line_indent = Cm(0)
                 
         else:
             for p in document.paragraphs:
@@ -153,6 +172,9 @@ class DocxExporter(BaseExporter):
                     
                     add_target_runs(p_fa, p.translated_text, p.metadata)
                     make_paragraph_rtl(p_fa, heading=p.heading_level is not None)
+                    apply_chapter_break(p_fa, p.metadata)
+                    if p.metadata.get("is_table"):
+                        p_fa.paragraph_format.first_line_indent = Cm(0)
                     
                 elif bilingual_mode == "inline":
                     # English paragraph (LTR)
@@ -161,6 +183,7 @@ class DocxExporter(BaseExporter):
                     else:
                         p_en = doc.add_paragraph()
                     p_en.add_run(p.source_text)
+                    apply_chapter_break(p_en, p.metadata)
                     
                     # Persian paragraph (RTL)
                     if p.heading_level is not None:
@@ -169,6 +192,8 @@ class DocxExporter(BaseExporter):
                         p_fa = doc.add_paragraph()
                     add_target_runs(p_fa, p.translated_text, p.metadata)
                     make_paragraph_rtl(p_fa, heading=p.heading_level is not None)
+                    if p.metadata.get("is_table"):
+                        p_fa.paragraph_format.first_line_indent = Cm(0)
 
         notes = document_term_notes(document)
         if notes:

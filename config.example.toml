@@ -184,6 +184,7 @@ bilingual_mode = "inline"
 
 # inline | footnote | endnote | both
 term_notes = "inline"
+chapter_page_breaks = true       # DOCX: start each detected chapter on a new page
 
 [persian]
 convert_numerals = true

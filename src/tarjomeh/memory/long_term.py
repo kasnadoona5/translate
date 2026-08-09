@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
+from typing import Any
 
 
 
@@ -28,18 +29,37 @@ class LongTermMemory:
 
     def __init__(self, retrieval_k: int = 5) -> None:
         self.retrieval_k = retrieval_k
-        self._pairs: list[dict[str, str]] = []
+        self._pairs: list[dict[str, Any]] = []
 
-    def add(self, source: str, translation: str) -> None:
+    def add(
+        self,
+        source: str,
+        translation: str,
+        *,
+        reliable: bool = True,
+        chapter_title: str = "",
+    ) -> None:
         """Add a new translated pair to the memory database."""
         src = source.strip()
         trans = translation.strip()
         if src and trans:
-            self._pairs.append({"source": src, "translation": trans})
+            self._pairs.append({
+                "entry_id": len(self._pairs),
+                "source": src,
+                "translation": trans,
+                "reliable": bool(reliable),
+                "chapter_title": chapter_title,
+            })
 
     def get_relevant(self, query_text: str) -> list[dict[str, str]]:
         """Retrieve top-K translation pairs that are relevant to query_text."""
         if not self._pairs:
+            return []
+
+        eligible_pairs = [
+            pair for pair in self._pairs if pair.get("reliable", True)
+        ]
+        if not eligible_pairs:
             return []
 
         query_tokens = _tokenize_english(query_text)
@@ -47,9 +67,9 @@ class LongTermMemory:
             return []
 
         query_counter = Counter(query_tokens)
-        num_docs = len(self._pairs)
+        num_docs = len(eligible_pairs)
 
-        doc_tokens_list = [_tokenize_english(p["source"]) for p in self._pairs]
+        doc_tokens_list = [_tokenize_english(p["source"]) for p in eligible_pairs]
         doc_counters = [Counter(tokens) for tokens in doc_tokens_list]
 
         # Gather all unique terms
@@ -90,7 +110,7 @@ class LongTermMemory:
             else:
                 sim = 0.0
 
-            scores.append((sim, self._pairs[idx]))
+            scores.append((sim, eligible_pairs[idx]))
 
         # Sort by similarity score descending
         scores.sort(key=lambda x: x[0], reverse=True)
@@ -115,13 +135,20 @@ class LongTermMemory:
             lines.append(f"EN: {p['source']}\nFA: {p['translation']}")
         return "\n\n".join(lines)
 
-    def serialize(self) -> list[dict[str, str]]:
+    def serialize(self) -> list[dict[str, Any]]:
         """Serialize the layer state for database checkpointing."""
         return list(self._pairs)
 
-    def deserialize(self, data: list[dict[str, str]]) -> None:
+    def deserialize(self, data: list[dict[str, Any]]) -> None:
         """Restore the layer state from serialized data."""
-        self._pairs = list(data)
+        self._pairs = []
+        for index, item in enumerate(data):
+            if not isinstance(item, dict):
+                continue
+            restored = dict(item)
+            restored.setdefault("entry_id", index)
+            restored.setdefault("reliable", True)
+            self._pairs.append(restored)
 
     def clear(self) -> None:
         """Clear the memory state."""

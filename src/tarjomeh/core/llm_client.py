@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 _SCHEMA_REPAIR_OPERATIONS = {
     "critique_json_repair",
     "refinement_json_repair",
+    "translation_paragraph_repair",
 }
 
 # Structured helpers may benefit from normal model reasoning on their first

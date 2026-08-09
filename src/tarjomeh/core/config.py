@@ -275,6 +275,9 @@ class OutputConfig:
     bilingual_mode: str = "inline"
     # "inline" keeps the historical Persian (English) behaviour unchanged.
     term_notes: str = "inline"
+    # Start each detected source chapter on a new DOCX page. Other exporters
+    # ignore this flag and retain their established behavior.
+    chapter_page_breaks: bool = True
 
 
 @dataclass

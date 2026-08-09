@@ -3,7 +3,7 @@
 English-to-Persian academic book translation with persistent terminology,
 book-level memory, independent quality review, and RTL document export.
 
-This README documents release **v8.7.1**. Tarjomeh is licensed under AGPL-3.0.
+This README documents release **v9.7.0**. Tarjomeh is licensed under AGPL-3.0.
 
 ## What Tarjomeh Does
 
@@ -30,7 +30,11 @@ Current capabilities include:
 - Post-edit integrity checks that reject lossy model edits
 - First-occurrence English originals inline or as document notes
 - Citation, number, footnote-marker, and scholarly-apparatus protection
+- Recurrent PDF header/page-number removal with cross-page prose reconstruction
+- Stable paragraph identity through translation, refinement, and correction
+- QA-approved style memory that excludes front matter and uncertain output
 - Correct Persian RTL DOCX/PDF/EPUB formatting
+- Optional new-page starts for detected chapters in DOCX
 - SQLite checkpoints, pause/resume, and incomplete-export protection
 - Web review, chunk retranslation, QA reports, glossary approval, and re-export
 - Quality regression comparison between completed jobs
@@ -559,6 +563,13 @@ Heading 1 styles, Markdown `#` headings, and explicit `Chapter N` TXT lines.
 Review the detected list before starting because unstructured or scanned PDFs
 may appear as a single chapter.
 
+For text PDFs, Tarjomeh removes only recurrent edge headers/page numbers and
+joins body prose that demonstrably continues across adjacent pages. It keeps
+tables in reading order and marks them for conservative export; complex table
+layout may still need manual DOCX editing. Existing paused jobs resume safely
+from their stored legacy chunks; start a new job after upgrading when you want
+the new PDF reconstruction and paragraph-identity behavior.
+
 Recommended production academic settings:
 
 - Mode: Academic
@@ -573,6 +584,7 @@ Recommended production academic settings:
 - Back-translation sample: `15-20%`
 - Book research: enabled when external search is configured
 - Critic fallback: an independent reliable model/combo when available
+- Chapter page breaks: enabled for book-like DOCX output
 
 A threshold of `10` is useful for stress testing but can trigger unnecessary
 stylistic reversals.
@@ -881,6 +893,9 @@ releases.
 
 ## Release History
 
+- v9.7: recurrent PDF furniture removal, cross-page prose reconstruction,
+  stable paragraph identity, source-ranked research evidence, QA-qualified
+  style memory, and DOCX chapter page breaks
 - v9.6: provider-neutral streaming transport, configurable inactivity timeouts,
   OpenAI/Anthropic response normalization, robust structured-output recovery,
   partial research preservation, and a final model-protocol export gate

@@ -376,6 +376,9 @@ Instructions:
    - Place ZWNJ correctly in compound verbs and affixed words.
 4. Keep both halves semantically aligned but naturally phrased in each language.
 5. Focus on: main arguments, key concepts, named entities, and chapter progression.
+6. Summarize only claims supported by the current summary and new translated content.
+   Do not extrapolate from a table of contents, book research, or future chapter titles.
+7. Return plain text under the required headers. Do not emit HTML or XML tags.
 
 Output format (use these exact headers):
 

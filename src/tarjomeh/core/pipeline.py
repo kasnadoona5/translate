@@ -24,6 +24,12 @@ from tarjomeh.core.structured_output import (
     parse_structured_output,
     protocol_artifacts,
 )
+from tarjomeh.core.paragraph_protocol import (
+    decode_paragraphs,
+    encode_paragraphs,
+    protocol_instruction,
+    repair_prompt as paragraph_repair_prompt,
+)
 from tarjomeh.core.llm_client import (
     EmptyCompletionError,
     IncompleteCompletionError,
@@ -1085,6 +1091,7 @@ def _align_chunk_translation(
     para_indices: list[int],
     tgt_paras: list[str],
     chunk_translation: str,
+    strict_paragraph_identity: bool = False,
 ) -> list[tuple[int, str]]:
     """Align translated paragraphs to source paragraph ids, protecting headings.
 
@@ -1097,6 +1104,13 @@ def _align_chunk_translation(
         and original_paragraphs[pid].heading_level is not None
         for pid in para_indices
     )
+    if strict_paragraph_identity:
+        if len(para_indices) != len(tgt_paras):
+            raise ValueError(
+                "Stable paragraph identity failed during assembly: "
+                f"expected {len(para_indices)}, received {len(tgt_paras)}."
+            )
+        return list(zip(para_indices, tgt_paras))
     if not has_heading:
         if len(para_indices) == len(tgt_paras):
             return list(zip(para_indices, tgt_paras))
@@ -1484,6 +1498,32 @@ class TranslationPipeline:
             chunks = chunker.chunk(document)
             self.db.save_chunks(job_id, chunks)
 
+        structure_audit = research_document.metadata.get(
+            "pdf_structure_audit"
+        )
+        if isinstance(structure_audit, dict):
+            self.db.save_job_artifact(
+                job_id, "pdf_structure_audit", structure_audit
+            )
+            removed_count = int(
+                structure_audit.get("removed_furniture_count", 0)
+            )
+            table_count = int(structure_audit.get("table_block_count", 0))
+            self.db.log_event(
+                job_id,
+                "INFO",
+                "PDF structure analysis removed "
+                f"{removed_count} recurrent header/footer item(s) and detected "
+                f"{table_count} table block(s).",
+            )
+            if table_count:
+                self.db.log_event(
+                    job_id,
+                    "WARNING",
+                    "Detected table-like PDF content is preserved in reading order; "
+                    "complex table layout may require manual DOCX formatting.",
+                )
+
         total_chunks = len(chunks)
         if total_chunks == 0:
             raise ValueError("Document contains no translatable content.")
@@ -1682,7 +1722,16 @@ class TranslationPipeline:
                     # Update shared memory and database safely under lock
                     with lock:
                         translations[idx] = translation
-                        memory_manager.update_after_translation(chunk, translation)
+                        memory_policy = memory_manager.update_after_translation(
+                            chunk,
+                            translation,
+                            quality_approved=not _chunk_needs_review(
+                                self.db, job_id, idx
+                            ),
+                        )
+                        self.db.log_chunk_event(
+                            job_id, idx, "memory_update_policy", memory_policy
+                        )
                         
                         if self.config.memory.enable_4layer:
                             try:
@@ -1827,7 +1876,16 @@ class TranslationPipeline:
                         translations[idx] = translation
                         consecutive_errors = 0
 
-                        memory_manager.update_after_translation(chunk, translation)
+                        memory_policy = memory_manager.update_after_translation(
+                            chunk,
+                            translation,
+                            quality_approved=not _chunk_needs_review(
+                                self.db, job_id, idx
+                            ),
+                        )
+                        self.db.log_chunk_event(
+                            job_id, idx, "memory_update_policy", memory_policy
+                        )
 
                         if self.config.memory.enable_4layer:
                             try:
@@ -2018,6 +2076,9 @@ class TranslationPipeline:
                     para_indices=para_indices,
                     tgt_paras=tgt_paras,
                     chunk_translation=chunk_translation,
+                    strict_paragraph_identity=bool(
+                        chunk.metadata.get("paragraph_protocol_version")
+                    ),
                 )
                 if len(para_indices) != len(tgt_paras):
                     logger.warning(
@@ -2095,7 +2156,12 @@ class TranslationPipeline:
             title=document.title,
             author=document.author,
             paragraphs=final_translated_paragraphs,
-            metadata=document.metadata,
+            metadata={
+                **document.metadata,
+                "chapter_page_breaks": bool(
+                    self.config.output.chapter_page_breaks
+                ),
+            },
         )
 
         # 8. Persian Typography Post-Processing
@@ -2511,7 +2577,14 @@ class TranslationPipeline:
             else ChunkStatus.COMPLETED
         )
         self.db.update_chunk(job_id, chunk_index, final_status, translation)
-        memory_manager.update_after_translation(chunks[chunk_index], translation)
+        memory_policy = memory_manager.update_after_translation(
+            chunks[chunk_index],
+            translation,
+            quality_approved=final_status == ChunkStatus.COMPLETED,
+        )
+        self.db.log_chunk_event(
+            job_id, chunk_index, "memory_update_policy", memory_policy
+        )
         self.db.save_memory_state(job_id, memory_manager.to_dict())
         self.db.log_event(job_id, "INFO", f"Retranslated chunk {chunk_index}.")
         return translation
@@ -2607,6 +2680,9 @@ class TranslationPipeline:
                     para_indices=para_indices,
                     tgt_paras=tgt_paras,
                     chunk_translation=chunk_translation,
+                    strict_paragraph_identity=bool(
+                        chunk.metadata.get("paragraph_protocol_version")
+                    ),
                 )
                 for pid, t in aligned:
                     if pid < len(original_paragraphs):
@@ -2668,7 +2744,12 @@ class TranslationPipeline:
             title=document.title,
             author=document.author,
             paragraphs=final_translated_paragraphs,
-            metadata=document.metadata,
+            metadata={
+                **document.metadata,
+                "chapter_page_breaks": bool(
+                    self.config.output.chapter_page_breaks
+                ),
+            },
         )
 
     def _translate_single_chunk(
@@ -2740,6 +2821,7 @@ class TranslationPipeline:
             "long_term_preview": _truncate_for_event(mem_context.long_term, 1000),
             "short_term_preview": _truncate_for_event(mem_context.short_term, 1000),
             "bilingual_summary_preview": _truncate_for_event(mem_context.bilingual_summary, 1000),
+            "references": dict(mem_context.references),
         })
 
         # Web context (Aphra-style)
@@ -2909,6 +2991,11 @@ class TranslationPipeline:
         ]
         n_source_paras = len(chunk.metadata.get("paragraph_indices", [])) or \
             len(source_paragraphs)
+        encoded_source, paragraph_markers = encode_paragraphs(chunk.text)
+        use_paragraph_protocol = bool(
+            len(paragraph_markers) > 1
+            and int(chunk.metadata.get("paragraph_protocol_version", 0)) >= 1
+        )
 
         def build_translation_prompt(
             source_text: str,
@@ -2948,6 +3035,9 @@ class TranslationPipeline:
             return prompt
 
         user_content = build_translation_prompt(chunk.text, prev_trans)
+        if use_paragraph_protocol:
+            user_content = build_translation_prompt(encoded_source, prev_trans)
+            user_content += protocol_instruction(paragraph_markers)
 
         # Terminology context for the judge & refiner: matched glossary terms
         # plus the established proper-noun renderings, so the "terminology"
@@ -2983,6 +3073,51 @@ class TranslationPipeline:
                 _operation="translation",
                 _recovery_source_text=chunk.text,
             )
+            if use_paragraph_protocol:
+                protocol_result = decode_paragraphs(
+                    translation, paragraph_markers
+                )
+                self.db.log_chunk_event(
+                    job_id, idx, "paragraph_protocol_checked", {
+                        "stage": "initial_translation",
+                        "valid": protocol_result.valid,
+                        "expected_markers": paragraph_markers,
+                        "errors": protocol_result.errors,
+                    },
+                )
+                if not protocol_result.valid:
+                    repaired = self.llm_client.complete(
+                        messages=[{
+                            "role": "user",
+                            "content": paragraph_repair_prompt(
+                                translation,
+                                paragraph_markers,
+                                protocol_result.errors,
+                            ),
+                        }],
+                        system_prompt=(
+                            "You repair paragraph labels only. Preserve every word "
+                            "of the supplied Persian translation."
+                        ),
+                        _operation="translation_paragraph_repair",
+                        _recovery_source_text=chunk.text,
+                    )
+                    protocol_result = decode_paragraphs(
+                        repaired, paragraph_markers
+                    )
+                    self.db.log_chunk_event(
+                        job_id, idx, "paragraph_protocol_repair", {
+                            "stage": "initial_translation",
+                            "valid": protocol_result.valid,
+                            "errors": protocol_result.errors,
+                        },
+                    )
+                if not protocol_result.valid:
+                    raise TruncatedCompletionError(
+                        "Multi-paragraph output failed stable paragraph identity; "
+                        "using bounded paragraph recovery."
+                    )
+                translation = protocol_result.text
         except TruncatedCompletionError:
             recovery_paragraphs = source_paragraphs or [chunk.text.strip()]
             self.db.log_chunk_event(
@@ -3435,14 +3570,34 @@ class TranslationPipeline:
                     break
                 before_translation = translation
                 before_chars = len(before_translation)
+                refinement_source = chunk.text
+                refinement_translation = translation
+                refinement_context = qa_context
+                refinement_markers: list[str] = []
+                source_for_refinement, source_refinement_markers = (
+                    encode_paragraphs(chunk.text)
+                )
+                translation_for_refinement, target_refinement_markers = (
+                    encode_paragraphs(translation)
+                )
+                if (
+                    len(source_refinement_markers) > 1
+                    and source_refinement_markers == target_refinement_markers
+                ):
+                    refinement_source = source_for_refinement
+                    refinement_translation = translation_for_refinement
+                    refinement_markers = source_refinement_markers
+                    refinement_context = (
+                        qa_context + protocol_instruction(refinement_markers)
+                    )
                 try:
                     refinement = self._run_async(
                         refiner_tool.refine_with_decision(
-                            chunk.text,
-                            translation,
+                            refinement_source,
+                            refinement_translation,
                             critique_rep,
                             terminology=terminology_ctx,
-                            review_context=qa_context,
+                            review_context=refinement_context,
                         )
                     )
                 except _QUALITY_STAGE_ERRORS as exc:
@@ -3499,6 +3654,38 @@ class TranslationPipeline:
                     break
 
                 proposed_translation = refinement.translation
+                if refinement_markers:
+                    refinement_protocol = decode_paragraphs(
+                        proposed_translation, refinement_markers
+                    )
+                    self.db.log_chunk_event(
+                        job_id, idx, "paragraph_protocol_checked", {
+                            "stage": "refinement",
+                            "iteration": ref_iter + 1,
+                            "valid": refinement_protocol.valid,
+                            "expected_markers": refinement_markers,
+                            "errors": refinement_protocol.errors,
+                        },
+                    )
+                    if not refinement_protocol.valid:
+                        self.db.log_chunk_event(
+                            job_id, idx, "integrity_edit_rejected", {
+                                "stage": "refinement_paragraph_protocol",
+                                "accepted": False,
+                                "blocking_count": 1,
+                                "findings": [{
+                                    "check_id": "paragraph_identity_changed",
+                                    "severity": "blocking",
+                                    "message": (
+                                        "Refinement changed stable paragraph identity."
+                                    ),
+                                    "errors": refinement_protocol.errors,
+                                }],
+                            },
+                        )
+                        proposed_translation = before_translation
+                    else:
+                        proposed_translation = refinement_protocol.text
                 proposed_translation, orthography_edits = (
                     apply_safe_persian_orthography(proposed_translation)
                 )
@@ -3728,14 +3915,27 @@ class TranslationPipeline:
                             ", ".join(f"({value})" for value in protected_originals)
                             or "(none)"
                         )
+                        correction_source = chunk.text
+                        correction_translation = translation
+                        correction_markers: list[str] = []
+                        marked_source, source_markers = encode_paragraphs(
+                            chunk.text
+                        )
+                        marked_translation, target_markers = encode_paragraphs(
+                            translation
+                        )
+                        if len(source_markers) > 1 and source_markers == target_markers:
+                            correction_source = marked_source
+                            correction_translation = marked_translation
+                            correction_markers = source_markers
                         correction_prompt = f"""\
 The following translation violated the glossary compliance checks.
 
 English Source:
-{chunk.text}
+{correction_source}
 
 Current Translation:
-{translation}
+{correction_translation}
 
 Glossary violations found:
 {violations_text}
@@ -3754,6 +3954,9 @@ citations, numbers, names, and all text unrelated to the listed violations.
 {correction_feedback}
 Output ONLY the corrected Persian translation.
 """
+                        correction_prompt += protocol_instruction(
+                            correction_markers
+                        )
                         before_correction = translation
                         try:
                             proposed_correction = self.llm_client.complete(
@@ -3777,6 +3980,25 @@ Output ONLY the corrected Persian translation.
                         proposed_correction, orthography_edits = (
                             apply_safe_persian_orthography(proposed_correction)
                         )
+                        correction_protocol_valid = True
+                        correction_protocol_errors: list[str] = []
+                        if correction_markers:
+                            correction_protocol = decode_paragraphs(
+                                proposed_correction, correction_markers
+                            )
+                            correction_protocol_valid = correction_protocol.valid
+                            correction_protocol_errors = correction_protocol.errors
+                            self.db.log_chunk_event(
+                                job_id, idx, "paragraph_protocol_checked", {
+                                    "stage": "glossary_auto_correction",
+                                    "attempt": attempts,
+                                    "valid": correction_protocol.valid,
+                                    "expected_markers": correction_markers,
+                                    "errors": correction_protocol.errors,
+                                },
+                            )
+                            if correction_protocol.valid:
+                                proposed_correction = correction_protocol.text
                         if orthography_edits:
                             self.db.log_chunk_event(
                                 job_id, idx, "persian_orthography_normalized", {
@@ -3793,9 +4015,31 @@ Output ONLY the corrected Persian translation.
                             (proposed_correction or "").strip()
                             != (before_correction or "").strip()
                         )
-                        correction_accepted = True
+                        correction_accepted = correction_protocol_valid
                         correction_integrity: dict[str, Any] | None = None
-                        if integrity_enabled:
+                        if not correction_protocol_valid:
+                            correction_feedback = (
+                                "The previous candidate changed paragraph labels: "
+                                + ", ".join(correction_protocol_errors)
+                                + ". Preserve every required label exactly."
+                            )
+                            self.db.log_chunk_event(
+                                job_id, idx, "integrity_edit_rejected", {
+                                    "stage": "glossary_paragraph_protocol",
+                                    "accepted": False,
+                                    "blocking_count": 1,
+                                    "findings": [{
+                                        "check_id": "paragraph_identity_changed",
+                                        "severity": "blocking",
+                                        "message": (
+                                            "Glossary correction changed stable "
+                                            "paragraph identity."
+                                        ),
+                                        "errors": correction_protocol_errors,
+                                    }],
+                                },
+                            )
+                        elif integrity_enabled:
                             correction_result = integrity_gate.evaluate(
                                 chunk.text,
                                 proposed_correction,

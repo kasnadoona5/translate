@@ -7,6 +7,7 @@ long-term memory, and short-term memory for cohesive book-length translation.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,6 +22,12 @@ from tarjomeh.memory.short_term import ShortTermMemory
 
 logger = logging.getLogger(__name__)
 
+_NON_PROSE_RE = re.compile(
+    r"\b(?:copyright|all rights reserved|isbn|contents|tables|abbreviations|"
+    r"index of names|subject index|catalog(?:ue|ing)-in-publication)\b",
+    re.IGNORECASE,
+)
+
 
 @dataclass
 class MemoryContext:
@@ -32,6 +39,11 @@ class MemoryContext:
     bilingual_summary: str = ""
     long_term: str = ""
     short_term: str = ""
+    references: dict[str, Any] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.references is None:
+            self.references = {}
 
     def format(self) -> str:
         """Format the memory layers into a single prompt-ready string."""
@@ -92,7 +104,11 @@ class MemoryManager:
         bilingual_summary_str = self.bilingual_summary.get_context()
 
         # Layer 3: Long-term Memory (TF-IDF)
-        long_term_str = self.long_term.get_context(chunk.text)
+        relevant_long_term = self.long_term.get_relevant(chunk.text)
+        long_term_str = "\n\n".join(
+            f"EN: {pair['source']}\nFA: {pair['translation']}"
+            for pair in relevant_long_term
+        )
 
         # Layer 4: Short-term Memory (Window)
         pairs = self.short_term.get_context()
@@ -110,16 +126,64 @@ class MemoryManager:
             bilingual_summary=bilingual_summary_str,
             long_term=long_term_str,
             short_term=short_term_str,
+            references={
+                "style_profile_version": len(self.style_samples),
+                "long_term_entry_ids": [
+                    pair.get("entry_id") for pair in relevant_long_term
+                ],
+                "short_term_window_size": len(pairs),
+                "proper_noun_count": len(self.proper_nouns),
+                "has_bilingual_summary": bool(bilingual_summary_str),
+            },
         )
 
-    def update_after_translation(self, chunk: Chunk, translation: str) -> None:
+    def update_after_translation(
+        self,
+        chunk: Chunk,
+        translation: str,
+        *,
+        quality_approved: bool = True,
+    ) -> dict[str, Any]:
         """Update synchronous memory layers with a new source-translation pair."""
         self.short_term.add(chunk.text, translation)
-        self.long_term.add(chunk.text, translation)
-        self._update_style_profile(translation)
+        structure_eligible = bool(
+            chunk.metadata.get("style_eligible", True)
+        ) and not _NON_PROSE_RE.search(chunk.text or "")
+        long_term_reliable = bool(quality_approved and structure_eligible)
+        self.long_term.add(
+            chunk.text,
+            translation,
+            reliable=long_term_reliable,
+            chapter_title=chunk.chapter_title,
+        )
+        has_structure_policy = "style_eligible" in chunk.metadata
+        style_eligible = bool(
+            long_term_reliable
+            and (
+                not has_structure_policy
+                or (
+                    len((chunk.text or "").strip()) >= 240
+                    and len((translation or "").strip()) >= 160
+                )
+            )
+        )
+        style_count_before = len(self.style_samples)
+        if style_eligible:
+            self._update_style_profile(translation)
         # Any known proper noun occurring in this chunk has now had its first
         # appearance — later chunks must not repeat the English parenthetical.
         self.proper_nouns.mark_seen_in_text(chunk.text)
+        return {
+            "short_term_added": True,
+            "long_term_added": True,
+            "long_term_reliable": long_term_reliable,
+            "style_sample_added": len(self.style_samples) > style_count_before,
+            "structure_eligible": structure_eligible,
+            "quality_approved": bool(quality_approved),
+            "structural_roles": list(
+                chunk.metadata.get("structural_roles", []) or []
+            ),
+        }
 
     def _update_style_profile(self, translation: str) -> None:
         """Maintain a compact book-level style guide from early translations."""

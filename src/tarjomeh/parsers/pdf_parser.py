@@ -12,6 +12,8 @@ Provides two concrete parsers:
 from __future__ import annotations
 
 import logging
+import math
+import re
 import statistics
 from pathlib import Path
 from typing import Any
@@ -60,8 +62,10 @@ def _median_font_size(blocks: list[dict[str, Any]]) -> float:
 _SOFT_HYPHEN = "­"
 # Edge zone (fraction of page height) where short blocks are treated as
 # running headers / page numbers and dropped.
-_EDGE_ZONE = 0.07
-_EDGE_MAX_CHARS = 40
+_EDGE_ZONE = 0.12
+_EDGE_MAX_CHARS = 100
+_PAGE_NUMBER_RE = re.compile(r"^\s*(?:\d+|[ivxlcdm]+)\s*$", re.IGNORECASE)
+_FURNITURE_NUMBER_RE = re.compile(r"\b(?:\d+|[ivxlcdm]+)\b", re.IGNORECASE)
 
 
 def _join_block_lines(lines: list[str]) -> str:
@@ -96,13 +100,16 @@ def _extract_page_blocks(page: fitz.Page) -> list[dict[str, Any]]:
     """Extract text blocks with font metadata from a single PDF page.
 
     One entry per PDF text BLOCK (visual paragraph) — the block's lines are
-    merged into flowing, dehyphenated prose. Short blocks hugging the very
-    top/bottom edge of the page (running headers, page numbers) are dropped.
+    retained with line geometry so document-level recurrence analysis can
+    distinguish running furniture from legitimate headings.
 
     Returns a list of dicts, each with keys:
     ``text``, ``font_size``, ``bbox``, ``font_name``.
     """
     blocks: list[dict[str, Any]] = []
+    # Keep ASCII hyphens verbatim: PyMuPDF's blanket dehyphenation also turns
+    # legitimate compounds such as "well-defined" into "welldefined".
+    # _join_block_lines still removes unambiguous soft-hyphen line breaks.
     raw_dict = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
     page_height = page.rect.height or 1.0
 
@@ -111,6 +118,7 @@ def _extract_page_blocks(page: fitz.Page) -> list[dict[str, Any]]:
             continue
 
         line_texts: list[str] = []
+        line_records: list[dict[str, Any]] = []
         sizes: list[float] = []
         font_names: list[str] = []
         for line in block.get("lines", []):
@@ -123,20 +131,45 @@ def _extract_page_blocks(page: fitz.Page) -> list[dict[str, Any]]:
                     sizes.append(span.get("size", 0.0))
                     font_names.append(span.get("font", ""))
             if text_parts:
-                line_texts.append("".join(text_parts))
+                line_text = "".join(text_parts).strip()
+                line_texts.append(line_text)
+                line_sizes = [
+                    float(span.get("size", 0.0))
+                    for span in spans if str(span.get("text", "")).strip()
+                ]
+                line_records.append({
+                    "text": line_text,
+                    "bbox": tuple(line.get("bbox", block["bbox"])),
+                    "font_size": (
+                        sum(line_sizes) / len(line_sizes) if line_sizes else 0.0
+                    ),
+                    "has_superscript": any(
+                        int(span.get("flags", 0))
+                        & int(getattr(fitz, "TEXT_FONT_SUPERSCRIPT", 1))
+                        for span in spans
+                        if str(span.get("text", "")).strip()
+                    ),
+                    "span_count": len([
+                        span for span in spans
+                        if str(span.get("text", "")).strip()
+                    ]),
+                    "large_gap_count": sum(
+                        1
+                        for left, right in zip(spans, spans[1:])
+                        if (
+                            str(left.get("text", "")).strip()
+                            and str(right.get("text", "")).strip()
+                            and float(right.get("bbox", (0, 0, 0, 0))[0])
+                            - float(left.get("bbox", (0, 0, 0, 0))[2]) >= 18
+                        )
+                    ),
+                })
 
         merged_text = _join_block_lines(line_texts)
         if not merged_text:
             continue
 
-        # Drop running headers / page numbers: short blocks entirely within
-        # the top or bottom edge zone of the page.
         x0, y0, x1, y1 = block["bbox"]
-        if len(merged_text) <= _EDGE_MAX_CHARS and (
-            y1 < _EDGE_ZONE * page_height or y0 > (1 - _EDGE_ZONE) * page_height
-        ):
-            continue
-
         avg_size = sum(sizes) / len(sizes) if sizes else 0.0
         blocks.append(
             {
@@ -144,9 +177,140 @@ def _extract_page_blocks(page: fitz.Page) -> list[dict[str, Any]]:
                 "font_size": avg_size,
                 "font_name": font_names[0] if font_names else "",
                 "bbox": block["bbox"],  # (x0, y0, x1, y1)
+                "lines": line_records,
+                "page_height": page_height,
+                "has_superscript": any(
+                    bool(line.get("has_superscript")) for line in line_records
+                ),
             }
         )
     return blocks
+
+
+def _normalise_furniture(text: str) -> str:
+    """Return a recurrence signature for a possible running header/footer."""
+    folded = " ".join(text.casefold().split())
+    folded = _FURNITURE_NUMBER_RE.sub("#", folded)
+    return folded.strip(" -–—|·")
+
+
+def _edge_line(line: dict[str, Any], page_height: float) -> bool:
+    text = str(line.get("text", "")).strip()
+    if not text or len(text) > _EDGE_MAX_CHARS:
+        return False
+    _x0, y0, _x1, y1 = line.get("bbox", (0, 0, 0, 0))
+    return y1 <= _EDGE_ZONE * page_height or y0 >= (1 - _EDGE_ZONE) * page_height
+
+
+def _strip_embedded_furniture(
+    text: str,
+    recurring_labels: set[str],
+) -> tuple[str, bool]:
+    """Strip a recurrent header plus page number fused to body text."""
+    clean = " ".join(text.split())
+    for label in sorted(recurring_labels, key=len, reverse=True):
+        if not label or label == "#":
+            continue
+        escaped = re.escape(label).replace(r"\#", r"(?:\d+|[ivxlcdm]+)")
+        patterns = (
+            (rf"^(?:{escaped})\s+(?=[a-z])",)
+            if "#" in label else (
+                rf"^(?:{escaped})\s+(?:\d+|[ivxlcdm]+)\s+(?=[a-z])",
+                rf"^(?:\d+|[ivxlcdm]+)\s+(?:{escaped})\s+(?=[a-z])",
+            )
+        )
+        for pattern in patterns:
+            updated = re.sub(pattern, "", clean, count=1, flags=re.IGNORECASE)
+            if updated != clean:
+                return updated.strip(), True
+    return clean, False
+
+
+def _looks_table_like(block: dict[str, Any]) -> bool:
+    """Cheap table signal based on repeated, widely separated text spans."""
+    lines = list(block.get("lines", []) or [])
+    if len(lines) < 2:
+        return False
+    tabular_lines = sum(
+        1 for line in lines
+        if int(line.get("span_count", 0)) >= 2
+        and int(line.get("large_gap_count", 0)) >= 1
+    )
+    return tabular_lines >= 2 and tabular_lines / len(lines) >= 0.5
+
+
+def _prepare_document_blocks(
+    doc: fitz.Document,
+) -> tuple[list[list[dict[str, Any]]], dict[str, Any]]:
+    """Extract all pages, remove only recurrent edge furniture, and classify blocks."""
+    pages: list[list[dict[str, Any]]] = []
+    edge_occurrences: dict[str, set[int]] = {}
+    for page_num in range(doc.page_count):
+        page = doc[page_num]
+        blocks = _extract_page_blocks(page)
+        for block in blocks:
+            for line in block.get("lines", []):
+                if _edge_line(line, float(block.get("page_height", 1.0))):
+                    signature = _normalise_furniture(str(line.get("text", "")))
+                    if signature:
+                        edge_occurrences.setdefault(signature, set()).add(page_num)
+        pages.append(blocks)
+
+    recurrence_min = max(
+        3, min(8, math.ceil(max(doc.page_count, 1) * 0.02))
+    )
+    recurrent = {
+        signature
+        for signature, page_numbers in edge_occurrences.items()
+        if len(page_numbers) >= recurrence_min
+    }
+    removed: list[dict[str, Any]] = []
+    table_blocks = 0
+    prepared: list[list[dict[str, Any]]] = []
+    for page_num, blocks in enumerate(pages):
+        page_blocks: list[dict[str, Any]] = []
+        for block in blocks:
+            kept_lines: list[dict[str, Any]] = []
+            block_removed = []
+            for line in block.get("lines", []):
+                text = str(line.get("text", "")).strip()
+                signature = _normalise_furniture(text)
+                is_edge = _edge_line(line, float(block.get("page_height", 1.0)))
+                if is_edge and (
+                    signature in recurrent or _PAGE_NUMBER_RE.fullmatch(text)
+                ):
+                    block_removed.append(text)
+                else:
+                    kept_lines.append(line)
+            text = _join_block_lines([
+                str(line.get("text", "")) for line in kept_lines
+            ])
+            text, embedded_removed = _strip_embedded_furniture(text, recurrent)
+            if block_removed or embedded_removed:
+                removed.append({
+                    "page": page_num + 1,
+                    "text": " | ".join(block_removed),
+                    "embedded": embedded_removed,
+                })
+            if not text:
+                continue
+            updated = dict(block)
+            updated["text"] = text
+            updated["lines"] = kept_lines
+            updated["_page"] = page_num
+            updated["is_table"] = _looks_table_like(updated)
+            if updated["is_table"]:
+                table_blocks += 1
+            page_blocks.append(updated)
+        prepared.append(page_blocks)
+    return prepared, {
+        "furniture_signatures": sorted(recurrent),
+        "removed_furniture": removed,
+        "removed_furniture_count": len(removed),
+        "table_block_count": table_blocks,
+        "recurrence_minimum_pages": recurrence_min,
+        "dehyphenation_mode": "soft_hyphen_only",
+    }
 
 
 _SENTENCE_END_CHARS = '.?!:;"”»…'
@@ -170,10 +334,35 @@ def _merge_continuation_paragraphs(paragraphs: list[Paragraph]) -> list[Paragrap
             and not prev.metadata.get("heading_level")
             and not prev.metadata.get("is_footnote")
         )
+        same_role = bool(para.metadata.get("is_table")) == bool(
+            prev.metadata.get("is_table") if prev else False
+        )
+        prev_page = int(prev.metadata.get("page", 0)) if prev else 0
+        page = int(para.metadata.get("page", 0))
+        prev_bbox = prev.metadata.get("bbox", (0, 0, 0, 0)) if prev else (0, 0, 0, 0)
+        bbox = para.metadata.get("bbox", (0, 0, 0, 0))
+        prev_height = float(prev.metadata.get("page_height", 1.0)) if prev else 1.0
+        page_height = float(para.metadata.get("page_height", 1.0))
+        crosses_page = page == prev_page + 1
+        near_page_boundary = (
+            float(prev_bbox[3]) >= 0.65 * prev_height
+            and float(bbox[1]) <= 0.35 * page_height
+        )
+        legacy_without_geometry = bool(
+            prev is not None
+            and "page" not in prev.metadata
+            and "page" not in para.metadata
+        )
         if (
             prev is not None
             and is_body
             and prev_is_body
+            and same_role
+            and not para.metadata.get("is_table")
+            and (
+                legacy_without_geometry
+                or (crosses_page and near_page_boundary)
+            )
             and prev.text
             and para.text
             and prev.text[-1] not in _SENTENCE_END_CHARS
@@ -181,6 +370,8 @@ def _merge_continuation_paragraphs(paragraphs: list[Paragraph]) -> list[Paragrap
         ):
             joiner = "" if prev.text.endswith("-") else " "
             prev.text = prev.text + joiner + para.text
+            prev.metadata["end_page"] = page
+            prev.metadata["cross_page_join"] = True
         else:
             merged.append(para)
     return merged
@@ -244,10 +435,15 @@ class PyMuPDFParser(BaseParser):
             # Warn about scanned pages
             self._check_scanned(doc)
 
+            page_blocks, structure_audit = _prepare_document_blocks(doc)
+            metadata["pdf_structure_audit"] = structure_audit
+
             if toc:
-                chapters = self._parse_with_toc(doc, toc)
+                chapters = self._parse_with_toc(doc, toc, page_blocks)
             else:
-                chapters = self._parse_without_toc(doc)
+                chapters = self._parse_without_toc(doc, page_blocks)
+
+            self._annotate_chapters(chapters)
 
             raw_toc = [entry[1] for entry in toc] if toc else None
 
@@ -320,6 +516,7 @@ class PyMuPDFParser(BaseParser):
         self,
         doc: fitz.Document,
         toc: list[list[Any]],
+        page_blocks: list[list[dict[str, Any]]] | None = None,
     ) -> list[Chapter]:
         """Split the document into chapters using TOC entries."""
         chapters: list[Chapter] = []
@@ -350,7 +547,9 @@ class PyMuPDFParser(BaseParser):
                 level1_entries.append((title, start_page, end_page))
 
         for chap_idx, (title, start_page, end_page) in enumerate(level1_entries, 1):
-            paragraphs = self._extract_pages(doc, start_page, end_page)
+            paragraphs = self._extract_pages(
+                doc, start_page, end_page, page_blocks
+            )
             section = Section(title="", level=2, paragraphs=paragraphs)
             chapters.append(
                 Chapter(
@@ -367,15 +566,22 @@ class PyMuPDFParser(BaseParser):
     # Fallback parsing (no TOC)
     # ------------------------------------------------------------------
 
-    def _parse_without_toc(self, doc: fitz.Document) -> list[Chapter]:
+    def _parse_without_toc(
+        self,
+        doc: fitz.Document,
+        page_blocks: list[list[dict[str, Any]]] | None = None,
+    ) -> list[Chapter]:
         """Parse page-by-page, using font-size heuristics to detect chapters."""
         all_blocks: list[dict[str, Any]] = []
         for page_num in range(doc.page_count):
             page = doc[page_num]
-            page_blocks = _extract_page_blocks(page)
+            current_page_blocks = (
+                page_blocks[page_num]
+                if page_blocks is not None else _extract_page_blocks(page)
+            )
             page_height = page.rect.height
-            median = _median_font_size(page_blocks)
-            for blk in page_blocks:
+            median = _median_font_size(current_page_blocks)
+            for blk in current_page_blocks:
                 blk["_page"] = page_num
                 blk["_page_height"] = page_height
                 blk["_median_size"] = median
@@ -433,6 +639,10 @@ class PyMuPDFParser(BaseParser):
                         metadata={
                             "heading_level": level,
                             "font_size": blk["font_size"],
+                            "page": blk["_page"] + 1,
+                            "bbox": tuple(blk["bbox"]),
+                            "page_height": page_h,
+                            "has_superscript": bool(blk.get("has_superscript")),
                         },
                     )
                 )
@@ -443,15 +653,31 @@ class PyMuPDFParser(BaseParser):
                         metadata={
                             "is_footnote": True,
                             "font_size": blk["font_size"],
+                            "page": blk["_page"] + 1,
+                            "bbox": tuple(blk["bbox"]),
+                            "page_height": page_h,
+                            "has_superscript": bool(blk.get("has_superscript")),
                         },
                     )
                 )
             else:
                 current_paragraphs.append(
-                    Paragraph(
-                        text=blk["text"].strip(),
-                        metadata={"font_size": blk["font_size"]},
-                    )
+                        Paragraph(
+                            text=blk["text"].strip(),
+                            metadata={
+                                "font_size": blk["font_size"],
+                                "page": blk["_page"] + 1,
+                                "bbox": tuple(blk["bbox"]),
+                                "page_height": page_h,
+                                "is_table": bool(blk.get("is_table")),
+                                "structure_role": (
+                                    "table" if blk.get("is_table") else "body"
+                                ),
+                                "has_superscript": bool(
+                                    blk.get("has_superscript")
+                                ),
+                            },
+                        )
                 )
 
         # Flush last chapter
@@ -482,12 +708,16 @@ class PyMuPDFParser(BaseParser):
         doc: fitz.Document,
         start_page: int,
         end_page: int,
+        page_blocks: list[list[dict[str, Any]]] | None = None,
     ) -> list[Paragraph]:
         """Extract paragraphs from *start_page* (inclusive) to *end_page* (exclusive)."""
         paragraphs: list[Paragraph] = []
         for page_num in range(start_page, min(end_page, doc.page_count)):
             page = doc[page_num]
-            blocks = _extract_page_blocks(page)
+            blocks = (
+                page_blocks[page_num]
+                if page_blocks is not None else _extract_page_blocks(page)
+            )
             median = _median_font_size(blocks)
             page_height = page.rect.height
 
@@ -499,6 +729,13 @@ class PyMuPDFParser(BaseParser):
                 meta: dict[str, Any] = {
                     "font_size": blk["font_size"],
                     "page": page_num + 1,
+                    "bbox": tuple(blk["bbox"]),
+                    "page_height": page_height,
+                    "is_table": bool(blk.get("is_table")),
+                    "structure_role": (
+                        "table" if blk.get("is_table") else "body"
+                    ),
+                    "has_superscript": bool(blk.get("has_superscript")),
                 }
 
                 if _is_heading(blk, median):
@@ -512,6 +749,21 @@ class PyMuPDFParser(BaseParser):
 
         # Stitch paragraphs that continue across blocks / pages.
         return _merge_continuation_paragraphs(paragraphs)
+
+    @staticmethod
+    def _annotate_chapters(chapters: list[Chapter]) -> None:
+        """Attach stable chapter identity to every paragraph for export/resume."""
+        for position, chapter in enumerate(chapters, 1):
+            chapter.metadata["tarjomeh_chapter_position"] = position
+            first = True
+            for section in chapter.sections:
+                for paragraph in section.paragraphs:
+                    paragraph.metadata["chapter_position"] = position
+                    paragraph.metadata["chapter_number"] = chapter.number
+                    paragraph.metadata["chapter_title"] = chapter.title
+                    if first:
+                        paragraph.metadata["chapter_start"] = True
+                        first = False
 
 
 # ---------------------------------------------------------------------------

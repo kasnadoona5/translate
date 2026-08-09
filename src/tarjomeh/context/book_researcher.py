@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -253,7 +254,30 @@ class BookResearcher:
         known_urls = {item["url"] for item in sources}
         for query in queries:
             results = await self.provider.search(query)
-            for result in results[:self.config.web_search.max_results]:
+            from tarjomeh.context.search_providers import rank_search_results
+
+            quoted = re.findall(r'"([^"]{3,})"', query)
+            identity = quoted[0] if quoted else " ".join(
+                re.findall(r"\b[A-Z][\w'-]+", query)[:3]
+            )
+            ranked, relevance = rank_search_results(
+                query,
+                results,
+                identity=identity,
+                strict_identity=False,
+            )
+            diagnostics = getattr(self.provider, "diagnostics", None)
+            if isinstance(diagnostics, list):
+                diagnostics.append({
+                    "query": query,
+                    "provider": "relevance_filter",
+                    "status": "filtered",
+                    "identity": identity,
+                    "accepted_count": len(ranked),
+                    "rejected_count": len(results) - len(ranked),
+                    "results": relevance,
+                })
+            for result in ranked[:self.config.web_search.max_results]:
                 if not result.url or result.url in known_urls:
                     continue
                 known_urls.add(result.url)
