@@ -17,6 +17,7 @@ from tarjomeh.memory.manager import MemoryManager
 from tarjomeh.parsers.base import Chapter, Document, Paragraph, Section
 from tarjomeh.parsers.pdf_parser import PyMuPDFParser
 from tarjomeh.parsers.pdf_parser import _join_block_lines
+from tarjomeh.parsers.pdf_parser import _sort_page_blocks_reading_order
 
 
 def _pdf_block(text: str, y0: float, y1: float, *, size: float = 10.0) -> dict:
@@ -36,6 +37,75 @@ class TestPdfStructureReconstruction(unittest.TestCase):
             _join_block_lines(["a well-", "defined arrangement"]),
             "a well-defined arrangement",
         )
+
+    def test_two_column_blocks_read_down_each_column(self) -> None:
+        def block(text: str, bbox: tuple[float, float, float, float]) -> dict:
+            return {"text": text, "bbox": bbox, "orientation": "horizontal"}
+
+        blocks = [
+            block("right two", (320, 200, 500, 240)),
+            block("left one", (40, 100, 220, 140)),
+            block("right one", (320, 100, 500, 140)),
+            block("left two", (40, 200, 220, 240)),
+        ]
+        ordered = _sort_page_blocks_reading_order(blocks, 560)
+        self.assertEqual(
+            [item["text"] for item in ordered],
+            ["left one", "left two", "right one", "right two"],
+        )
+
+    @patch("tarjomeh.parsers.pdf_parser.fitz.open")
+    def test_chapter_heading_is_ordered_once_before_cross_page_body(
+        self, mock_open: MagicMock
+    ) -> None:
+        document = MagicMock()
+        mock_open.return_value = document
+        document.name = "book.pdf"
+        document.metadata = {"title": "Book", "author": "Author"}
+        document.page_count = 2
+        document.get_toc.return_value = [[1, "Preface", 1]]
+
+        page_one = MagicMock()
+        page_one.rect.height = 800
+        page_one.rect.width = 600
+        page_one.get_images.return_value = []
+        page_one.get_text.side_effect = lambda kind, **kwargs: (
+            "body text" if kind == "text" else {"blocks": [
+                _pdf_block("The argument continues through", 600, 750),
+                _pdf_block("Preface", 90, 120, size=18),
+            ]}
+        )
+        page_two = MagicMock()
+        page_two.rect.height = 800
+        page_two.rect.width = 600
+        page_two.get_images.return_value = []
+        page_two.get_text.side_effect = lambda kind, **kwargs: (
+            "body text" if kind == "text" else {"blocks": [
+                _pdf_block("Preface ix", 15, 30),
+                _pdf_block("several institutional settings.", 55, 100),
+            ]}
+        )
+        document.__getitem__.side_effect = lambda index: [page_one, page_two][index]
+
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as handle:
+            path = Path(handle.name)
+        try:
+            parsed = PyMuPDFParser().parse(path)
+        finally:
+            path.unlink()
+
+        self.assertEqual(parsed.all_paragraphs[0].text, "Preface")
+        self.assertEqual(parsed.all_paragraphs[0].heading_level, 1)
+        self.assertEqual(
+            parsed.all_paragraphs[1].text,
+            "The argument continues through several institutional settings.",
+        )
+        self.assertEqual(
+            sum(paragraph.text == "Preface" for paragraph in parsed.all_paragraphs),
+            1,
+        )
+        self.assertTrue(parsed.all_paragraphs[1].metadata["cross_page_join"])
+        self.assertTrue(parsed.all_paragraphs[0].metadata["paragraph_id"])
 
     @patch("tarjomeh.parsers.pdf_parser.fitz.open")
     def test_recurrent_furniture_removed_and_cross_page_prose_joined(
@@ -147,6 +217,54 @@ class TestContextHygiene(unittest.TestCase):
         )
         self.assertTrue(policy["style_sample_added"])
         self.assertEqual(len(manager.style_samples), 1)
+
+    def test_reviewed_chunk_remains_advisory_short_term_context(self) -> None:
+        manager = MemoryManager(TarjomehConfig())
+        chunk = Chunk(
+            index=0,
+            text="The disputed paragraph still carries the argument forward.",
+            chapter_title="Chapter 1",
+            section_title="",
+            metadata={
+                "style_eligible": True,
+                "style_body_paragraphs": [0],
+                "structural_roles": ["body"],
+            },
+        )
+        policy = manager.update_after_translation(
+            chunk,
+            "This translated paragraph remains useful context.",
+            quality_approved=False,
+        )
+        context = manager.get_context_for_chunk(chunk)
+        self.assertEqual(policy["short_term_trust"], "advisory_review")
+        self.assertIn("needs review", context.short_term)
+        self.assertIn("argument and references", context.short_term)
+        self.assertEqual(
+            context.references["short_term_trust"], ["advisory_review"]
+        )
+        self.assertFalse(policy["style_sample_added"])
+
+    def test_style_sample_uses_only_complete_body_sentences(self) -> None:
+        manager = MemoryManager(TarjomehConfig())
+        chunk = Chunk(
+            index=0,
+            text=("Chapter title\n\n" + "Substantive body prose. " * 20),
+            chapter_title="Chapter 1",
+            section_title="",
+            metadata={
+                "style_eligible": False,
+                "style_body_paragraphs": [1],
+                "structural_roles": ["heading", "body"],
+            },
+        )
+        translation = "Translated heading\n\n" + "A complete scholarly sentence. " * 20
+        policy = manager.update_after_translation(
+            chunk, translation, quality_approved=True
+        )
+        self.assertTrue(policy["style_sample_added"])
+        self.assertNotIn("Translated heading", manager.style_samples[0])
+        self.assertTrue(manager.style_samples[0].endswith("."))
 
     def test_html_is_removed_from_running_summary(self) -> None:
         summary = BilingualSummary()

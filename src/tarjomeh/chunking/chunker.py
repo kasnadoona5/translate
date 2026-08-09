@@ -198,7 +198,7 @@ class SemanticChunker:
                             previous_sentences=previous_sentences,
                             para_indices=buffer_para_indices,
                             structural_roles=buffer_roles,
-                            style_eligible=all(buffer_style_eligible),
+                            style_eligibility=buffer_style_eligible,
                         )
                         chunks.append(chunk)
                         previous_sentences = _split_sentences(chunk.text)[
@@ -237,7 +237,7 @@ class SemanticChunker:
                         previous_sentences=previous_sentences,
                         para_indices=buffer_para_indices,
                         structural_roles=buffer_roles,
-                        style_eligible=all(buffer_style_eligible),
+                        style_eligibility=buffer_style_eligible,
                     )
                     chunks.append(chunk)
                     previous_sentences = _split_sentences(chunk.text)[
@@ -262,7 +262,7 @@ class SemanticChunker:
         previous_sentences: list[str],
         para_indices: list[int],
         structural_roles: list[str],
-        style_eligible: bool,
+        style_eligibility: list[bool],
     ) -> Chunk:
         combined = "\n\n".join(texts)
         metadata: dict[str, object] = {}
@@ -271,7 +271,12 @@ class SemanticChunker:
         metadata["paragraph_indices"] = list(para_indices)
         metadata["paragraph_protocol_version"] = 1
         metadata["structural_roles"] = list(structural_roles)
-        metadata["style_eligible"] = bool(style_eligible)
+        metadata["style_eligible"] = bool(
+            style_eligibility and all(style_eligibility)
+        )
+        metadata["style_body_paragraphs"] = [
+            index for index, eligible in enumerate(style_eligibility) if eligible
+        ]
         metadata["chapter_position"] = chapter_position
         metadata["chapter_number"] = chapter_number
         for key in ("start_page", "end_page"):

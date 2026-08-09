@@ -14,7 +14,7 @@ try:
     import docx
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml import OxmlElement
-    from docx.shared import Cm, Pt
+    from docx.shared import Cm, Pt, RGBColor
     from docx.oxml.ns import qn
     HAS_DOCX = True
 except ImportError:
@@ -57,6 +57,14 @@ class DocxExporter(BaseExporter):
         normal_style.font.size = Pt(11)
         normal_style.paragraph_format.space_after = Pt(6)
         normal_style.paragraph_format.line_spacing = 1.15
+
+        for level, size in ((1, 16), (2, 14), (3, 12)):
+            heading_style = doc.styles[f"Heading {level}"]
+            heading_style.font.name = "Vazirmatn"
+            heading_style.font.size = Pt(size)
+            heading_style.font.bold = True
+            heading_style.font.color.rgb = RGBColor(0, 0, 0)
+            heading_style.paragraph_format.keep_with_next = True
 
         latin_parenthetical = re.compile(r"(\([^()\n]*[A-Za-z][^()\n]*\))")
         chapter_page_breaks = bool(
@@ -136,6 +144,16 @@ class DocxExporter(BaseExporter):
                     marker.font.superscript = True
                     set_run_fonts(marker, rtl=True)
 
+        def apply_structural_format(p_obj, metadata: dict) -> None:
+            if not metadata.get("is_table"):
+                return
+            # Preserve table-derived text as a compact reviewable block. Native
+            # cells are emitted only when a parser provides an actual matrix.
+            p_obj.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            p_obj.paragraph_format.first_line_indent = Cm(0)
+            p_obj.paragraph_format.space_after = Pt(2)
+            p_obj.paragraph_format.keep_together = True
+
         if bilingual_mode == "side_by_side":
             table = doc.add_table(rows=0, cols=2)
             table.autofit = False
@@ -158,8 +176,7 @@ class DocxExporter(BaseExporter):
                 add_target_runs(p_fa, p.translated_text, p.metadata)
                 
                 make_paragraph_rtl(p_fa, heading=p.heading_level is not None)
-                if p.metadata.get("is_table"):
-                    p_fa.paragraph_format.first_line_indent = Cm(0)
+                apply_structural_format(p_fa, p.metadata)
                 
         else:
             for p in document.paragraphs:
@@ -173,8 +190,7 @@ class DocxExporter(BaseExporter):
                     add_target_runs(p_fa, p.translated_text, p.metadata)
                     make_paragraph_rtl(p_fa, heading=p.heading_level is not None)
                     apply_chapter_break(p_fa, p.metadata)
-                    if p.metadata.get("is_table"):
-                        p_fa.paragraph_format.first_line_indent = Cm(0)
+                    apply_structural_format(p_fa, p.metadata)
                     
                 elif bilingual_mode == "inline":
                     # English paragraph (LTR)
@@ -192,8 +208,7 @@ class DocxExporter(BaseExporter):
                         p_fa = doc.add_paragraph()
                     add_target_runs(p_fa, p.translated_text, p.metadata)
                     make_paragraph_rtl(p_fa, heading=p.heading_level is not None)
-                    if p.metadata.get("is_table"):
-                        p_fa.paragraph_format.first_line_indent = Cm(0)
+                    apply_structural_format(p_fa, p.metadata)
 
         notes = document_term_notes(document)
         if notes:

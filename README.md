@@ -3,7 +3,7 @@
 English-to-Persian academic book translation with persistent terminology,
 book-level memory, independent quality review, and RTL document export.
 
-This README documents release **v9.7.0**. Tarjomeh is licensed under AGPL-3.0.
+This README documents release **v9.8.0**. Tarjomeh is licensed under AGPL-3.0.
 
 ## What Tarjomeh Does
 
@@ -31,8 +31,9 @@ Current capabilities include:
 - First-occurrence English originals inline or as document notes
 - Citation, number, footnote-marker, and scholarly-apparatus protection
 - Recurrent PDF header/page-number removal with cross-page prose reconstruction
+- Geometry-aware single/two-column PDF reading order and stable chapter headings
 - Stable paragraph identity through translation, refinement, and correction
-- QA-approved style memory that excludes front matter and uncertain output
+- Trust-aware short-term continuity and QA-approved body-prose style memory
 - Correct Persian RTL DOCX/PDF/EPUB formatting
 - Optional new-page starts for detected chapters in DOCX
 - SQLite checkpoints, pause/resume, and incomplete-export protection
@@ -893,6 +894,10 @@ releases.
 
 ## Release History
 
+- v9.8: geometry-aware PDF reading order, canonical chapter headings, safer
+  rotated-table preservation, trust-aware short-term continuity, complete-sentence
+  body-style samples, improved DOCX heading/table formatting, and legacy job
+  structure compatibility for resume, review, and re-export
 - v9.7: recurrent PDF furniture removal, cross-page prose reconstruction,
   stable paragraph identity, source-ranked research evidence, QA-qualified
   style memory, and DOCX chapter page breaks

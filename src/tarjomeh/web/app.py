@@ -899,6 +899,15 @@ def _register_api(app: Flask) -> None:
                 f"{structure_audit.get('removed_furniture_count', 0)}",
                 f"  table_blocks_detected="
                 f"{structure_audit.get('table_block_count', 0)}",
+                f"  structure_version={structure_audit.get('structure_version', 1)}",
+                f"  canonical_chapter_headings="
+                f"{structure_audit.get('canonical_chapter_headings', 0)}",
+                f"  chapter_heading_duplicates_removed="
+                f"{structure_audit.get('chapter_heading_duplicates_removed', 0)}",
+                f"  rotated_table_pages="
+                f"{structure_audit.get('rotated_table_pages', [])}",
+                f"  reading_order_modes="
+                f"{structure_audit.get('reading_order_modes', {})}",
                 f"  recurrence_minimum_pages="
                 f"{structure_audit.get('recurrence_minimum_pages', 0)}",
                 "  complex_tables=preserved in reading order; manual DOCX "
@@ -1130,10 +1139,11 @@ def _register_api(app: Flask) -> None:
                     )
                 elif event["event_type"] == "memory_update_policy":
                     lines.append(
-                        "  Memory update: short_term={short} "
+                        "  Memory update: short_term={short} trust={trust} "
                         "long_term_reliable={long} style_sample={style} "
                         "structure_eligible={structure} quality_approved={quality}".format(
                             short=payload.get("short_term_added"),
+                            trust=payload.get("short_term_trust", "legacy"),
                             long=payload.get("long_term_reliable"),
                             style=payload.get("style_sample_added"),
                             structure=payload.get("structure_eligible"),

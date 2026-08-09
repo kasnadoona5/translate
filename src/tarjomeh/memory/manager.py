@@ -29,6 +29,32 @@ _NON_PROSE_RE = re.compile(
 )
 
 
+def _complete_style_sample(text: str, preferred_limit: int = 900) -> str:
+    """Select complete early sentences without cutting a sample mid-sentence."""
+    normalized = " ".join((text or "").split())
+    if not normalized:
+        return ""
+    sentences = re.findall(r".*?(?:[.!?\u061f]+(?:[\"'\u00bb)]*)|$)", normalized)
+    complete = [
+        sentence.strip() for sentence in sentences
+        if sentence.strip() and re.search(r"[.!?\u061f][\"'\u00bb)]*$", sentence.strip())
+    ]
+    if not complete:
+        return normalized if len(normalized) <= preferred_limit else ""
+
+    selected: list[str] = []
+    for sentence in complete:
+        candidate = " ".join(selected + [sentence])
+        if selected and len(candidate) > preferred_limit:
+            break
+        if not selected and len(sentence) > 1400:
+            return ""
+        selected.append(sentence)
+        if len(candidate) >= preferred_limit:
+            break
+    return " ".join(selected)
+
+
 @dataclass
 class MemoryContext:
     """Consolidated context from all four memory layers."""
@@ -111,13 +137,30 @@ class MemoryManager:
         )
 
         # Layer 4: Short-term Memory (Window)
-        pairs = self.short_term.get_context()
+        pairs = self.short_term.get_entries()
         short_term_str = ""
         if pairs:
-            short_term_str = "\n\n".join(
-                f"EN: {src}\nFA: {tgt}"
-                for src, tgt in pairs
-            )
+            formatted_pairs = []
+            for pair in pairs:
+                if pair.trust == "advisory_review":
+                    guidance = (
+                        "[continuity: needs review; preserve argument and references, "
+                        "but treat disputed wording as advisory]"
+                    )
+                elif pair.trust == "structural_only":
+                    guidance = (
+                        "[structural context only; do not imitate as prose style or "
+                        "mandatory terminology]"
+                    )
+                else:
+                    guidance = "[continuity: trusted prose]"
+                chapter = (
+                    f" Chapter: {pair.chapter_title}." if pair.chapter_title else ""
+                )
+                formatted_pairs.append(
+                    f"{guidance}{chapter}\nEN: {pair.source}\nFA: {pair.translation}"
+                )
+            short_term_str = "\n\n".join(formatted_pairs)
 
         return MemoryContext(
             book_context=self.book_context,
@@ -132,6 +175,7 @@ class MemoryManager:
                     pair.get("entry_id") for pair in relevant_long_term
                 ],
                 "short_term_window_size": len(pairs),
+                "short_term_trust": [pair.trust for pair in pairs],
                 "proper_noun_count": len(self.proper_nouns),
                 "has_bilingual_summary": bool(bilingual_summary_str),
             },
@@ -145,11 +189,34 @@ class MemoryManager:
         quality_approved: bool = True,
     ) -> dict[str, Any]:
         """Update synchronous memory layers with a new source-translation pair."""
-        self.short_term.add(chunk.text, translation)
+        body_indices = list(
+            chunk.metadata.get("style_body_paragraphs", []) or []
+        )
+        has_body_policy = "style_body_paragraphs" in chunk.metadata
         structure_eligible = bool(
-            chunk.metadata.get("style_eligible", True)
+            body_indices if has_body_policy
+            else chunk.metadata.get("style_eligible", True)
         ) and not _NON_PROSE_RE.search(chunk.text or "")
         long_term_reliable = bool(quality_approved and structure_eligible)
+        structural_roles = list(
+            chunk.metadata.get("structural_roles", []) or []
+        )
+        primary_role = (
+            structural_roles[0] if len(set(structural_roles)) == 1
+            else "mixed"
+        ) if structural_roles else "body"
+        short_term_trust = (
+            "trusted"
+            if long_term_reliable
+            else ("advisory_review" if structure_eligible else "structural_only")
+        )
+        self.short_term.add(
+            chunk.text,
+            translation,
+            trust=short_term_trust,
+            structural_role=primary_role,
+            chapter_title=chunk.chapter_title,
+        )
         self.long_term.add(
             chunk.text,
             translation,
@@ -157,6 +224,18 @@ class MemoryManager:
             chapter_title=chunk.chapter_title,
         )
         has_structure_policy = "style_eligible" in chunk.metadata
+        translation_paragraphs = [
+            paragraph.strip() for paragraph in translation.split("\n\n")
+            if paragraph.strip()
+        ]
+        style_translation = translation
+        if has_body_policy:
+            if body_indices and max(body_indices) < len(translation_paragraphs):
+                style_translation = "\n\n".join(
+                    translation_paragraphs[index] for index in body_indices
+                )
+            elif not chunk.metadata.get("style_eligible", False):
+                style_translation = ""
         style_eligible = bool(
             long_term_reliable
             and (
@@ -169,30 +248,29 @@ class MemoryManager:
         )
         style_count_before = len(self.style_samples)
         if style_eligible:
-            self._update_style_profile(translation)
+            self._update_style_profile(style_translation)
         # Any known proper noun occurring in this chunk has now had its first
         # appearance — later chunks must not repeat the English parenthetical.
         self.proper_nouns.mark_seen_in_text(chunk.text)
         return {
             "short_term_added": True,
+            "short_term_trust": short_term_trust,
             "long_term_added": True,
             "long_term_reliable": long_term_reliable,
             "style_sample_added": len(self.style_samples) > style_count_before,
             "structure_eligible": structure_eligible,
             "quality_approved": bool(quality_approved),
-            "structural_roles": list(
-                chunk.metadata.get("structural_roles", []) or []
-            ),
+            "structural_roles": structural_roles,
         }
 
     def _update_style_profile(self, translation: str) -> None:
         """Maintain a compact book-level style guide from early translations."""
-        text = " ".join((translation or "").split())
+        text = _complete_style_sample(translation)
         if not text:
             return
 
         if len(self.style_samples) < 5:
-            self.style_samples.append(text[:500])
+            self.style_samples.append(text)
 
         samples = "\n".join(
             f"{i + 1}. {sample}"

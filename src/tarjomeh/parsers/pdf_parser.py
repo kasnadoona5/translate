@@ -96,7 +96,11 @@ def _join_block_lines(lines: list[str]) -> str:
     return out.replace(_SOFT_HYPHEN, "").strip()
 
 
-def _extract_page_blocks(page: fitz.Page) -> list[dict[str, Any]]:
+def _extract_page_blocks(
+    page: fitz.Page,
+    *,
+    geometry_order: bool = True,
+) -> list[dict[str, Any]]:
     """Extract text blocks with font metadata from a single PDF page.
 
     One entry per PDF text BLOCK (visual paragraph) — the block's lines are
@@ -112,8 +116,9 @@ def _extract_page_blocks(page: fitz.Page) -> list[dict[str, Any]]:
     # _join_block_lines still removes unambiguous soft-hyphen line breaks.
     raw_dict = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
     page_height = page.rect.height or 1.0
+    page_width = page.rect.width or 1.0
 
-    for block in raw_dict.get("blocks", []):
+    for raw_index, block in enumerate(raw_dict.get("blocks", [])):
         if block.get("type") != 0:  # 0 = text block
             continue
 
@@ -140,6 +145,7 @@ def _extract_page_blocks(page: fitz.Page) -> list[dict[str, Any]]:
                 line_records.append({
                     "text": line_text,
                     "bbox": tuple(line.get("bbox", block["bbox"])),
+                    "direction": tuple(line.get("dir", (1.0, 0.0))),
                     "font_size": (
                         sum(line_sizes) / len(line_sizes) if line_sizes else 0.0
                     ),
@@ -179,12 +185,114 @@ def _extract_page_blocks(page: fitz.Page) -> list[dict[str, Any]]:
                 "bbox": block["bbox"],  # (x0, y0, x1, y1)
                 "lines": line_records,
                 "page_height": page_height,
+                "page_width": page_width,
+                "raw_index": raw_index,
+                "orientation": (
+                    "horizontal"
+                    if all(
+                        abs(float(line.get("direction", (1.0, 0.0))[1])) < 0.25
+                        for line in line_records
+                    )
+                    else "rotated"
+                ),
                 "has_superscript": any(
                     bool(line.get("has_superscript")) for line in line_records
                 ),
             }
         )
-    return blocks
+    return (
+        _sort_page_blocks_reading_order(blocks, page_width)
+        if geometry_order else blocks
+    )
+
+
+def _sort_page_blocks_reading_order(
+    blocks: list[dict[str, Any]],
+    page_width: float,
+) -> list[dict[str, Any]]:
+    """Return geometry-based reading order without scrambling rotated tables.
+
+    PDF content-stream order is not visual reading order. Most book pages are
+    single-column, while indexes and reference material may use two columns.
+    Full-width blocks split the page into bands; narrow blocks inside a band
+    are read down the left column and then down the right column. Pages whose
+    text is predominantly rotated retain source order because their geometry
+    usually represents a landscape table embedded in a portrait page.
+    """
+    if len(blocks) < 2:
+        return blocks
+
+    rotated = sum(block.get("orientation") == "rotated" for block in blocks)
+    if rotated / len(blocks) >= 0.5:
+        for order, block in enumerate(blocks):
+            block["reading_order"] = order
+            block["reading_order_mode"] = "source_order_rotated"
+        return blocks
+
+    width = max(float(page_width), 1.0)
+    midpoint = width / 2.0
+    gutter = width * 0.035
+
+    def bbox(block: dict[str, Any]) -> tuple[float, float, float, float]:
+        return tuple(float(value) for value in block["bbox"])  # type: ignore[return-value]
+
+    def geometric(blocks_to_sort: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return sorted(blocks_to_sort, key=lambda item: (bbox(item)[1], bbox(item)[0]))
+
+    left = [block for block in blocks if bbox(block)[2] <= midpoint - gutter]
+    right = [block for block in blocks if bbox(block)[0] >= midpoint + gutter]
+    has_two_columns = len(left) >= 2 and len(right) >= 2
+
+    if not has_two_columns:
+        ordered = geometric(blocks)
+        for order, block in enumerate(ordered):
+            block["reading_order"] = order
+            block["reading_order_mode"] = "geometry_single_column"
+        return ordered
+
+    separators = [
+        block for block in blocks
+        if (
+            bbox(block)[0] < midpoint - gutter
+            and bbox(block)[2] > midpoint + gutter
+        )
+    ]
+    separators = geometric(separators)
+    remaining = [block for block in blocks if block not in separators]
+
+    def column_order(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        band_left = geometric([
+            item for item in items if bbox(item)[2] <= midpoint + gutter
+        ])
+        band_right = geometric([
+            item for item in items if bbox(item)[0] > midpoint - gutter
+        ])
+        assigned = {id(item) for item in band_left + band_right}
+        other = geometric([item for item in items if id(item) not in assigned])
+        return band_left + band_right + other
+
+    ordered: list[dict[str, Any]] = []
+    lower_bound = float("-inf")
+    for separator in separators:
+        separator_y = bbox(separator)[1]
+        band = [
+            item for item in remaining
+            if lower_bound <= bbox(item)[1] < separator_y
+        ]
+        ordered.extend(column_order(band))
+        ordered.append(separator)
+        lower_bound = bbox(separator)[3]
+    ordered.extend(column_order([
+        item for item in remaining if bbox(item)[1] >= lower_bound
+    ]))
+
+    # Defensive completion for unusual overlapping geometry.
+    present = {id(block) for block in ordered}
+    ordered.extend(geometric([block for block in blocks if id(block) not in present]))
+    for order, block in enumerate(ordered):
+        block["reading_order"] = order
+        block["reading_order_mode"] = "geometry_two_column"
+    return ordered
 
 
 def _normalise_furniture(text: str) -> str:
@@ -241,13 +349,17 @@ def _looks_table_like(block: dict[str, Any]) -> bool:
 
 def _prepare_document_blocks(
     doc: fitz.Document,
+    *,
+    structure_version: int = 2,
 ) -> tuple[list[list[dict[str, Any]]], dict[str, Any]]:
     """Extract all pages, remove only recurrent edge furniture, and classify blocks."""
     pages: list[list[dict[str, Any]]] = []
     edge_occurrences: dict[str, set[int]] = {}
     for page_num in range(doc.page_count):
         page = doc[page_num]
-        blocks = _extract_page_blocks(page)
+        blocks = _extract_page_blocks(
+            page, geometry_order=structure_version >= 2
+        )
         for block in blocks:
             for line in block.get("lines", []):
                 if _edge_line(line, float(block.get("page_height", 1.0))):
@@ -266,8 +378,20 @@ def _prepare_document_blocks(
     }
     removed: list[dict[str, Any]] = []
     table_blocks = 0
+    rotated_table_pages: list[int] = []
+    reading_order_modes: dict[str, int] = {}
     prepared: list[list[dict[str, Any]]] = []
     for page_num, blocks in enumerate(pages):
+        rotated_count = sum(
+            block.get("orientation") == "rotated" for block in blocks
+        )
+        rotated_table_page = bool(
+            structure_version >= 2
+            and
+            len(blocks) >= 6 and rotated_count / max(len(blocks), 1) >= 0.5
+        )
+        if rotated_table_page:
+            rotated_table_pages.append(page_num + 1)
         page_blocks: list[dict[str, Any]] = []
         for block in blocks:
             kept_lines: list[dict[str, Any]] = []
@@ -298,7 +422,14 @@ def _prepare_document_blocks(
             updated["text"] = text
             updated["lines"] = kept_lines
             updated["_page"] = page_num
-            updated["is_table"] = _looks_table_like(updated)
+            updated["source_fragment_id"] = (
+                f"pg{page_num + 1:04d}.b{int(block.get('raw_index', 0)):04d}"
+            )
+            updated["is_table"] = bool(
+                rotated_table_page or _looks_table_like(updated)
+            )
+            mode = str(updated.get("reading_order_mode", "source_order"))
+            reading_order_modes[mode] = reading_order_modes.get(mode, 0) + 1
             if updated["is_table"]:
                 table_blocks += 1
             page_blocks.append(updated)
@@ -308,8 +439,11 @@ def _prepare_document_blocks(
         "removed_furniture": removed,
         "removed_furniture_count": len(removed),
         "table_block_count": table_blocks,
+        "rotated_table_pages": rotated_table_pages,
+        "reading_order_modes": reading_order_modes,
         "recurrence_minimum_pages": recurrence_min,
         "dehyphenation_mode": "soft_hyphen_only",
+        "structure_version": structure_version,
     }
 
 
@@ -372,9 +506,135 @@ def _merge_continuation_paragraphs(paragraphs: list[Paragraph]) -> list[Paragrap
             prev.text = prev.text + joiner + para.text
             prev.metadata["end_page"] = page
             prev.metadata["cross_page_join"] = True
+            fragments = list(prev.metadata.get("source_fragment_ids", []) or [])
+            fragments.extend(para.metadata.get("source_fragment_ids", []) or [])
+            prev.metadata["source_fragment_ids"] = list(dict.fromkeys(fragments))
         else:
             merged.append(para)
     return merged
+
+
+_HEADING_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
+_ROMAN_TOKEN_RE = re.compile(r"^[ivxlcdm]+$", re.IGNORECASE)
+
+
+def _heading_tokens(text: str) -> tuple[str, ...]:
+    return tuple(token.casefold() for token in _HEADING_TOKEN_RE.findall(text or ""))
+
+
+def _is_numbering_token(token: str) -> bool:
+    return bool(token.isdigit() or _ROMAN_TOKEN_RE.fullmatch(token))
+
+
+def _heading_variants(text: str) -> set[tuple[str, ...]]:
+    tokens = _heading_tokens(text)
+    variants = {tokens} if tokens else set()
+    if len(tokens) > 1 and _is_numbering_token(tokens[0]):
+        variants.add(tokens[1:])
+    if len(tokens) > 1 and _is_numbering_token(tokens[-1]):
+        variants.add(tokens[:-1])
+    return {variant for variant in variants if variant}
+
+
+def _matches_chapter_heading(candidate: str, chapter_title: str) -> bool:
+    return bool(_heading_variants(candidate) & _heading_variants(chapter_title))
+
+
+def _canonicalize_chapter_heading(
+    chapter_title: str,
+    paragraphs: list[Paragraph],
+) -> tuple[list[Paragraph], dict[str, Any]]:
+    """Create one stable chapter heading and remove matching running headers.
+
+    The TOC supplies the canonical title. Printed books often split a chapter
+    number and title into separate PDF blocks and repeat the title beside page
+    numbers on following pages. This routine consolidates only geometry-near
+    title blocks that match the TOC, leaving ordinary prose untouched.
+    """
+    if not paragraphs or not chapter_title.strip() or chapter_title == "Untitled":
+        return paragraphs, {"canonicalized": False, "duplicates_removed": 0}
+
+    first_page = min(int(p.metadata.get("page", 1)) for p in paragraphs)
+    first_page_indices = [
+        index for index, paragraph in enumerate(paragraphs)
+        if int(paragraph.metadata.get("page", first_page)) == first_page
+        and float(paragraph.metadata.get("bbox", (0, 0, 0, 0))[1])
+        <= 0.55 * float(paragraph.metadata.get("page_height", 1.0))
+    ][:8]
+
+    matched_indices: list[int] = []
+    for start_offset in range(len(first_page_indices)):
+        for width in range(1, min(4, len(first_page_indices) - start_offset) + 1):
+            indices = first_page_indices[start_offset:start_offset + width]
+            if indices != list(range(indices[0], indices[0] + len(indices))):
+                continue
+            combined = " ".join(paragraphs[index].text for index in indices)
+            if _matches_chapter_heading(combined, chapter_title):
+                matched_indices = indices
+                break
+        if matched_indices:
+            break
+
+    if matched_indices:
+        source_parts = [paragraphs[index] for index in matched_indices]
+        metadata = dict(source_parts[0].metadata)
+        bboxes = [part.metadata.get("bbox", (0, 0, 0, 0)) for part in source_parts]
+        metadata["bbox"] = (
+            min(float(box[0]) for box in bboxes),
+            min(float(box[1]) for box in bboxes),
+            max(float(box[2]) for box in bboxes),
+            max(float(box[3]) for box in bboxes),
+        )
+        fragments: list[str] = []
+        for part in source_parts:
+            fragments.extend(part.metadata.get("source_fragment_ids", []) or [])
+        insert_at = matched_indices[0]
+        retained = [
+            paragraph for index, paragraph in enumerate(paragraphs)
+            if index not in set(matched_indices)
+        ]
+    else:
+        metadata = dict(paragraphs[0].metadata)
+        fragments = []
+        insert_at = 0
+        retained = list(paragraphs)
+
+    metadata.update({
+        "heading_level": 1,
+        "structure_role": "heading",
+        "chapter_heading": True,
+        "canonical_chapter_title": True,
+        "source_fragment_ids": list(dict.fromkeys(fragments)),
+    })
+    canonical = Paragraph(text=chapter_title.strip(), metadata=metadata)
+    retained.insert(insert_at, canonical)
+
+    deduplicated: list[Paragraph] = []
+    removed = 0
+    canonical_seen = False
+    for paragraph in retained:
+        if paragraph is canonical:
+            canonical_seen = True
+            deduplicated.append(paragraph)
+            continue
+        page_height = float(paragraph.metadata.get("page_height", 1.0))
+        y0 = float(paragraph.metadata.get("bbox", (0, 0, 0, 0))[1])
+        at_running_edge = y0 <= 0.14 * page_height
+        if (
+            canonical_seen
+            and at_running_edge
+            and _matches_chapter_heading(paragraph.text, chapter_title)
+        ):
+            removed += 1
+            continue
+        deduplicated.append(paragraph)
+
+    return deduplicated, {
+        "canonicalized": True,
+        "source_blocks_consolidated": len(matched_indices),
+        "duplicates_removed": removed,
+        "inserted_from_toc": not bool(matched_indices),
+    }
 
 
 def _is_heading(
@@ -421,6 +681,9 @@ class PyMuPDFParser(BaseParser):
     * Warning when a large fraction of pages appear scanned (image-only).
     """
 
+    def __init__(self, structure_version: int = 2) -> None:
+        self.structure_version = max(1, int(structure_version))
+
     def parse(self, file_path: Path) -> Document:
         """Parse *file_path* and return a :class:`Document`."""
         file_path = self._ensure_file(file_path)
@@ -435,7 +698,9 @@ class PyMuPDFParser(BaseParser):
             # Warn about scanned pages
             self._check_scanned(doc)
 
-            page_blocks, structure_audit = _prepare_document_blocks(doc)
+            page_blocks, structure_audit = _prepare_document_blocks(
+                doc, structure_version=self.structure_version
+            )
             metadata["pdf_structure_audit"] = structure_audit
 
             if toc:
@@ -444,6 +709,18 @@ class PyMuPDFParser(BaseParser):
                 chapters = self._parse_without_toc(doc, page_blocks)
 
             self._annotate_chapters(chapters)
+            heading_audits = [
+                chapter.metadata.get("heading_audit", {}) for chapter in chapters
+            ]
+            structure_audit["canonical_chapter_headings"] = sum(
+                bool(item.get("canonicalized")) for item in heading_audits
+            )
+            structure_audit["chapter_heading_duplicates_removed"] = sum(
+                int(item.get("duplicates_removed", 0)) for item in heading_audits
+            )
+            structure_audit["chapter_headings_inserted_from_toc"] = sum(
+                bool(item.get("inserted_from_toc")) for item in heading_audits
+            )
 
             raw_toc = [entry[1] for entry in toc] if toc else None
 
@@ -550,13 +827,24 @@ class PyMuPDFParser(BaseParser):
             paragraphs = self._extract_pages(
                 doc, start_page, end_page, page_blocks
             )
+            if self.structure_version >= 2:
+                paragraphs, heading_audit = _canonicalize_chapter_heading(
+                    title, paragraphs
+                )
+                paragraphs = _merge_continuation_paragraphs(paragraphs)
+            else:
+                heading_audit = {"canonicalized": False, "legacy_resume": True}
             section = Section(title="", level=2, paragraphs=paragraphs)
             chapters.append(
                 Chapter(
                     title=title,
                     number=chap_idx,
                     sections=[section],
-                    metadata={"start_page": start_page + 1, "end_page": end_page},
+                    metadata={
+                        "start_page": start_page + 1,
+                        "end_page": end_page,
+                        "heading_audit": heading_audit,
+                    },
                 )
             )
 
@@ -585,7 +873,7 @@ class PyMuPDFParser(BaseParser):
                 blk["_page"] = page_num
                 blk["_page_height"] = page_height
                 blk["_median_size"] = median
-            all_blocks.extend(page_blocks)
+            all_blocks.extend(current_page_blocks)
 
         if not all_blocks:
             return [
@@ -638,11 +926,15 @@ class PyMuPDFParser(BaseParser):
                         text=blk["text"].strip(),
                         metadata={
                             "heading_level": level,
+                            "structure_role": "heading",
                             "font_size": blk["font_size"],
                             "page": blk["_page"] + 1,
                             "bbox": tuple(blk["bbox"]),
                             "page_height": page_h,
                             "has_superscript": bool(blk.get("has_superscript")),
+                            "source_fragment_ids": [
+                                str(blk.get("source_fragment_id", ""))
+                            ] if blk.get("source_fragment_id") else [],
                         },
                     )
                 )
@@ -652,11 +944,15 @@ class PyMuPDFParser(BaseParser):
                         text=blk["text"].strip(),
                         metadata={
                             "is_footnote": True,
+                            "structure_role": "footnote",
                             "font_size": blk["font_size"],
                             "page": blk["_page"] + 1,
                             "bbox": tuple(blk["bbox"]),
                             "page_height": page_h,
                             "has_superscript": bool(blk.get("has_superscript")),
+                            "source_fragment_ids": [
+                                str(blk.get("source_fragment_id", ""))
+                            ] if blk.get("source_fragment_id") else [],
                         },
                     )
                 )
@@ -676,6 +972,15 @@ class PyMuPDFParser(BaseParser):
                                 "has_superscript": bool(
                                     blk.get("has_superscript")
                                 ),
+                                "orientation": str(
+                                    blk.get("orientation", "horizontal")
+                                ),
+                                "reading_order": int(
+                                    blk.get("reading_order", 0)
+                                ),
+                                "source_fragment_ids": [
+                                    str(blk.get("source_fragment_id", ""))
+                                ] if blk.get("source_fragment_id") else [],
                             },
                         )
                 )
@@ -694,8 +999,25 @@ class PyMuPDFParser(BaseParser):
 
         # Stitch cross-block/page continuations within each chapter section.
         for chapter in chapters:
-            for section in chapter.sections:
-                section.paragraphs = _merge_continuation_paragraphs(section.paragraphs)
+            if self.structure_version >= 2:
+                canonical, heading_audit = _canonicalize_chapter_heading(
+                    chapter.title, chapter.all_paragraphs
+                )
+                chapter.sections = [Section(
+                    title="",
+                    level=2,
+                    paragraphs=_merge_continuation_paragraphs(canonical),
+                )]
+                chapter.metadata["heading_audit"] = heading_audit
+            else:
+                for section in chapter.sections:
+                    section.paragraphs = _merge_continuation_paragraphs(
+                        section.paragraphs
+                    )
+                chapter.metadata["heading_audit"] = {
+                    "canonicalized": False,
+                    "legacy_resume": True,
+                }
 
         return chapters
 
@@ -736,34 +1058,53 @@ class PyMuPDFParser(BaseParser):
                         "table" if blk.get("is_table") else "body"
                     ),
                     "has_superscript": bool(blk.get("has_superscript")),
+                    "orientation": str(blk.get("orientation", "horizontal")),
+                    "reading_order": int(blk.get("reading_order", 0)),
+                    "reading_order_mode": str(
+                        blk.get("reading_order_mode", "source_order")
+                    ),
+                    "source_fragment_ids": [
+                        str(blk.get("source_fragment_id", ""))
+                    ] if blk.get("source_fragment_id") else [],
                 }
 
                 if _is_heading(blk, median):
                     meta["heading_level"] = _heading_level_from_size(
                         blk["font_size"], median
                     )
+                    meta["structure_role"] = "heading"
                 elif _is_footnote(blk, median, page_height):
                     meta["is_footnote"] = True
+                    meta["structure_role"] = "footnote"
 
                 paragraphs.append(Paragraph(text=text, metadata=meta))
 
-        # Stitch paragraphs that continue across blocks / pages.
-        return _merge_continuation_paragraphs(paragraphs)
+        # Chapter-heading normalization runs before continuation stitching so a
+        # repeated running title cannot interrupt a genuine cross-page paragraph.
+        return (
+            paragraphs
+            if self.structure_version >= 2
+            else _merge_continuation_paragraphs(paragraphs)
+        )
 
     @staticmethod
     def _annotate_chapters(chapters: list[Chapter]) -> None:
         """Attach stable chapter identity to every paragraph for export/resume."""
+        source_order = 0
         for position, chapter in enumerate(chapters, 1):
             chapter.metadata["tarjomeh_chapter_position"] = position
             first = True
             for section in chapter.sections:
                 for paragraph in section.paragraphs:
+                    paragraph.metadata["paragraph_id"] = f"p{source_order:07d}"
+                    paragraph.metadata["source_order"] = source_order
                     paragraph.metadata["chapter_position"] = position
                     paragraph.metadata["chapter_number"] = chapter.number
                     paragraph.metadata["chapter_title"] = chapter.title
                     if first:
                         paragraph.metadata["chapter_start"] = True
                         first = False
+                    source_order += 1
 
 
 # ---------------------------------------------------------------------------

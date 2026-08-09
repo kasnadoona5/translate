@@ -1438,6 +1438,12 @@ class TranslationPipeline:
         if is_resume:
             # Reconstruct document structure and loaded chunks from DB
             parser = self._get_parser(input_path)
+            structure_artifact = self.db.get_job_artifact(
+                job_id, "document_structure_version"
+            ) or {}
+            structure_version = int(structure_artifact.get("version", 1))
+            if hasattr(parser, "structure_version"):
+                parser.structure_version = structure_version
             document = parser.parse(input_path)
             build_chapter_manifest(document)
             research_document = document
@@ -1465,6 +1471,11 @@ class TranslationPipeline:
             # Fresh parse and chunk
             parser = self._get_parser(input_path)
             document = parser.parse(input_path)
+            structure_version = int(getattr(parser, "structure_version", 1))
+            self.db.save_job_artifact(job_id, "document_structure_version", {
+                "version": structure_version,
+                "parser": type(parser).__name__,
+            })
             chapter_manifest = build_chapter_manifest(document)
             research_document = document
             self.db.save_job_artifact(job_id, "chapter_manifest", {
@@ -2349,8 +2360,13 @@ class TranslationPipeline:
         else:
             output_path = Path(output_path)
 
+        structure_artifact = self.db.get_job_artifact(
+            job_id, "document_structure_version"
+        ) or {}
         document, chunks = self._parse_and_chunk(
-            input_path, chapter_positions=chapter_positions
+            input_path,
+            chapter_positions=chapter_positions,
+            structure_version=int(structure_artifact.get("version", 1)),
         )
         translations: dict[int, str] = {}
         for c_record in self.db.get_chunks(job_id):
@@ -2457,7 +2473,13 @@ class TranslationPipeline:
         if not job:
             raise ValueError(f"Job {job_id} not found.")
 
-        document, chunks = self._parse_and_chunk(Path(job["input_path"]))
+        structure_artifact = self.db.get_job_artifact(
+            job_id, "document_structure_version"
+        ) or {}
+        document, chunks = self._parse_and_chunk(
+            Path(job["input_path"]),
+            structure_version=int(structure_artifact.get("version", 1)),
+        )
         if chunk_index < 0 or chunk_index >= len(chunks):
             raise ValueError(f"Chunk {chunk_index} is out of range.")
 
@@ -2632,8 +2654,11 @@ class TranslationPipeline:
         self,
         input_path: Path,
         chapter_positions: list[int] | None = None,
+        structure_version: int = 2,
     ) -> tuple[Document, list[Chunk]]:
         parser = self._get_parser(input_path)
+        if hasattr(parser, "structure_version"):
+            parser.structure_version = max(1, int(structure_version))
         document = parser.parse(input_path)
         selection = (
             chapter_positions
