@@ -18,7 +18,7 @@ import statistics
 from pathlib import Path
 from typing import Any
 
-import fitz  # pymupdf
+import pymupdf as fitz
 
 from tarjomeh.parsers.base import (
     BaseParser,
@@ -347,10 +347,92 @@ def _looks_table_like(block: dict[str, Any]) -> bool:
     return tabular_lines >= 2 and tabular_lines / len(lines) >= 0.5
 
 
+_INDENTED_PARAGRAPH_START_RE = re.compile(r'^[\s\u201c\u2018"\'\(\[]*[A-Z]')
+_PARAGRAPH_BOUNDARY_RE = re.compile(
+    r'[.!?\u2026][\u201d\u2019"\'\)\]\u00bb]*(?:\d+)?$'
+)
+
+
+def _split_indented_paragraph_lines(
+    lines: list[dict[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    """Recover conservative paragraph starts hidden inside one PDF block.
+
+    Recent PyMuPDF releases can group multiple print paragraphs into one text
+    block. A genuine new body paragraph normally combines three independent
+    signals: a first-line indent, a complete preceding sentence, and an
+    uppercase prose start. Lists, tables, rotated text, and ambiguous lines are
+    intentionally left unchanged.
+    """
+    if len(lines) < 3:
+        return [lines]
+    if any(
+        abs(float(line.get("direction", (1.0, 0.0))[1])) >= 0.25
+        for line in lines
+    ):
+        return [lines]
+    first_text = str(lines[0].get("text", "")).strip()
+    if not _INDENTED_PARAGRAPH_START_RE.match(first_text):
+        return [lines]
+
+    x_positions = [float(line.get("bbox", (0, 0, 0, 0))[0]) for line in lines]
+    buckets: dict[float, int] = {}
+    for value in x_positions:
+        key = round(value, 1)
+        buckets[key] = buckets.get(key, 0) + 1
+    highest_frequency = max(buckets.values())
+    dominant_left = min(
+        key for key, frequency in buckets.items()
+        if frequency == highest_frequency
+    )
+    sizes = [
+        float(line.get("font_size", 0.0))
+        for line in lines if float(line.get("font_size", 0.0)) > 0
+    ]
+    body_size = statistics.median(sizes) if sizes else 10.0
+    minimum_indent = max(6.0, body_size * 0.65)
+
+    groups: list[list[dict[str, Any]]] = [[]]
+    for index, line in enumerate(lines):
+        text = str(line.get("text", "")).strip()
+        previous_text = _join_block_lines([
+            str(item.get("text", "")) for item in groups[-1]
+        ])
+        line_size = float(line.get("font_size", body_size) or body_size)
+        starts_paragraph = bool(
+            index > 0
+            and groups[-1]
+            and x_positions[index] - dominant_left >= minimum_indent
+            and 0.8 * body_size <= line_size <= 1.2 * body_size
+            and _INDENTED_PARAGRAPH_START_RE.match(text)
+            and _PARAGRAPH_BOUNDARY_RE.search(previous_text)
+            and not previous_text.endswith(("-", _SOFT_HYPHEN))
+        )
+        if starts_paragraph:
+            groups.append([])
+        groups[-1].append(line)
+    return groups
+
+
+def _line_group_bbox(
+    lines: list[dict[str, Any]],
+    fallback: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    if not lines:
+        return fallback
+    boxes = [tuple(float(value) for value in line.get("bbox", fallback)) for line in lines]
+    return (
+        min(box[0] for box in boxes),
+        min(box[1] for box in boxes),
+        max(box[2] for box in boxes),
+        max(box[3] for box in boxes),
+    )
+
+
 def _prepare_document_blocks(
     doc: fitz.Document,
     *,
-    structure_version: int = 2,
+    structure_version: int = 3,
 ) -> tuple[list[list[dict[str, Any]]], dict[str, Any]]:
     """Extract all pages, remove only recurrent edge furniture, and classify blocks."""
     pages: list[list[dict[str, Any]]] = []
@@ -380,6 +462,7 @@ def _prepare_document_blocks(
     table_blocks = 0
     rotated_table_pages: list[int] = []
     reading_order_modes: dict[str, int] = {}
+    internal_paragraph_splits: list[dict[str, Any]] = []
     prepared: list[list[dict[str, Any]]] = []
     for page_num, blocks in enumerate(pages):
         rotated_count = sum(
@@ -406,33 +489,66 @@ def _prepare_document_blocks(
                     block_removed.append(text)
                 else:
                     kept_lines.append(line)
-            text = _join_block_lines([
-                str(line.get("text", "")) for line in kept_lines
-            ])
-            text, embedded_removed = _strip_embedded_furniture(text, recurrent)
-            if block_removed or embedded_removed:
+            table_like = bool(
+                rotated_table_page
+                or _looks_table_like({**block, "lines": kept_lines})
+            )
+            line_groups = (
+                _split_indented_paragraph_lines(kept_lines)
+                if structure_version >= 3 and not table_like
+                else [kept_lines]
+            )
+            embedded_removed_any = False
+            if len(line_groups) > 1:
+                internal_paragraph_splits.append({
+                    "page": page_num + 1,
+                    "raw_block": int(block.get("raw_index", 0)),
+                    "paragraph_count": len(line_groups),
+                    "starts": [
+                        str(group[0].get("text", ""))[:120]
+                        for group in line_groups if group
+                    ],
+                })
+            for part_index, line_group in enumerate(line_groups):
+                text = _join_block_lines([
+                    str(line.get("text", "")) for line in line_group
+                ])
+                text, embedded_removed = _strip_embedded_furniture(text, recurrent)
+                embedded_removed_any = embedded_removed_any or embedded_removed
+                if not text:
+                    continue
+                updated = dict(block)
+                updated["text"] = text
+                updated["lines"] = line_group
+                updated["bbox"] = _line_group_bbox(
+                    line_group, tuple(float(value) for value in block["bbox"])
+                )
+                group_sizes = [
+                    float(line.get("font_size", 0.0))
+                    for line in line_group
+                    if float(line.get("font_size", 0.0)) > 0
+                ]
+                if group_sizes:
+                    updated["font_size"] = sum(group_sizes) / len(group_sizes)
+                updated["_page"] = page_num
+                fragment_id = (
+                    f"pg{page_num + 1:04d}.b{int(block.get('raw_index', 0)):04d}"
+                )
+                if len(line_groups) > 1:
+                    fragment_id += f".p{part_index + 1:02d}"
+                updated["source_fragment_id"] = fragment_id
+                updated["is_table"] = table_like
+                mode = str(updated.get("reading_order_mode", "source_order"))
+                reading_order_modes[mode] = reading_order_modes.get(mode, 0) + 1
+                if updated["is_table"]:
+                    table_blocks += 1
+                page_blocks.append(updated)
+            if block_removed or embedded_removed_any:
                 removed.append({
                     "page": page_num + 1,
                     "text": " | ".join(block_removed),
-                    "embedded": embedded_removed,
+                    "embedded": embedded_removed_any,
                 })
-            if not text:
-                continue
-            updated = dict(block)
-            updated["text"] = text
-            updated["lines"] = kept_lines
-            updated["_page"] = page_num
-            updated["source_fragment_id"] = (
-                f"pg{page_num + 1:04d}.b{int(block.get('raw_index', 0)):04d}"
-            )
-            updated["is_table"] = bool(
-                rotated_table_page or _looks_table_like(updated)
-            )
-            mode = str(updated.get("reading_order_mode", "source_order"))
-            reading_order_modes[mode] = reading_order_modes.get(mode, 0) + 1
-            if updated["is_table"]:
-                table_blocks += 1
-            page_blocks.append(updated)
         prepared.append(page_blocks)
     return prepared, {
         "furniture_signatures": sorted(recurrent),
@@ -441,6 +557,8 @@ def _prepare_document_blocks(
         "table_block_count": table_blocks,
         "rotated_table_pages": rotated_table_pages,
         "reading_order_modes": reading_order_modes,
+        "internal_paragraph_split_count": len(internal_paragraph_splits),
+        "internal_paragraph_splits": internal_paragraph_splits,
         "recurrence_minimum_pages": recurrence_min,
         "dehyphenation_mode": "soft_hyphen_only",
         "structure_version": structure_version,
@@ -681,7 +799,7 @@ class PyMuPDFParser(BaseParser):
     * Warning when a large fraction of pages appear scanned (image-only).
     """
 
-    def __init__(self, structure_version: int = 2) -> None:
+    def __init__(self, structure_version: int = 3) -> None:
         self.structure_version = max(1, int(structure_version))
 
     def parse(self, file_path: Path) -> Document:
@@ -1186,7 +1304,7 @@ class DocLayoutParser(BaseParser):
 
     def _parse_with_layout(self, file_path: Path) -> Document:
         """Run YOLO layout detection on each page and build a Document."""
-        import fitz as _fitz  # local alias to avoid confusion
+        import pymupdf as _fitz
 
         doc = _fitz.open(str(file_path))
         try:

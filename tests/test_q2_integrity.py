@@ -36,6 +36,45 @@ def test_integrity_gate_rejects_loss_and_preserves_equivalent_percent() -> None:
     assert "edit_content_loss" in checks
 
 
+def test_post_edit_integrity_allows_only_non_regressive_number_omissions() -> None:
+    gate = PostEditIntegrityGate()
+    source = "In 1973 the result was 40 percent and note [12]."
+    previous = "نتیجه ۴۰ درصد بود [12]."
+    improved = "نتیجه دقیقاً ۴۰ درصد بود [12]."
+    regressed = "نتیجه دقیق بود [12]."
+
+    accepted = gate.evaluate(
+        source, improved, previous=previous, stage="refinement"
+    )
+    assert accepted.accepted
+    assert {finding.check_id for finding in accepted.warnings} >= {
+        "numbers_still_missing"
+    }
+
+    rejected = gate.evaluate(
+        source, regressed, previous=previous, stage="refinement"
+    )
+    assert not rejected.accepted
+    missing = next(
+        finding for finding in rejected.blocking
+        if finding.check_id == "numbers_missing"
+    )
+    assert missing.details["missing"] == ["40%"]
+
+
+def test_final_integrity_still_blocks_preexisting_number_omission() -> None:
+    gate = PostEditIntegrityGate()
+    source = "In 1973 the result was 40 percent."
+    candidate = "نتیجه ۴۰ درصد بود."
+
+    result = gate.evaluate(source, candidate, stage="final_translation")
+
+    assert not result.accepted
+    assert "numbers_missing" in {
+        finding.check_id for finding in result.blocking
+    }
+
+
 def test_recovery_envelope_rejects_foreign_segment_marker() -> None:
     raw = (
         "<<<TRANSLATION c1.p0>>>\n"

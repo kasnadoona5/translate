@@ -214,22 +214,51 @@ class PostEditIntegrityGate:
 
         source_numbers = extract_numbers(source)
         candidate_numbers = extract_numbers(candidate)
-        missing_numbers = list((source_numbers - candidate_numbers).elements())
-        if missing_numbers:
+        missing_number_counts = source_numbers - candidate_numbers
+        previous_missing_number_counts = (
+            source_numbers - extract_numbers(previous) if previous else Counter()
+        )
+        newly_missing_number_counts = (
+            missing_number_counts - previous_missing_number_counts
+            if previous else missing_number_counts
+        )
+        newly_missing_numbers = list(newly_missing_number_counts.elements())
+        if newly_missing_numbers:
             add(
                 "numbers_missing", "blocking",
                 "Source numbers, dates, pages, or percentages are missing or changed.",
-                missing=missing_numbers,
+                missing=newly_missing_numbers,
+            )
+        elif missing_number_counts:
+            add(
+                "numbers_still_missing", "warning",
+                "The edit did not introduce numeric loss, but an earlier omission remains.",
+                missing=list(missing_number_counts.elements()),
             )
 
         required_notes = Counter(extract_note_markers(source))
         if previous:
             required_notes |= Counter(extract_note_markers(previous))
-        missing_notes = list((required_notes - Counter(extract_note_markers(candidate))).elements())
-        if missing_notes:
+        missing_note_counts = required_notes - Counter(extract_note_markers(candidate))
+        previous_missing_note_counts = (
+            required_notes - Counter(extract_note_markers(previous))
+            if previous else Counter()
+        )
+        newly_missing_note_counts = (
+            missing_note_counts - previous_missing_note_counts
+            if previous else missing_note_counts
+        )
+        newly_missing_notes = list(newly_missing_note_counts.elements())
+        if newly_missing_notes:
             add(
                 "note_markers_missing", "blocking",
-                "Footnote or endnote markers were removed.", missing=missing_notes,
+                "Footnote or endnote markers were removed.", missing=newly_missing_notes,
+            )
+        elif missing_note_counts:
+            add(
+                "note_markers_still_missing", "warning",
+                "The edit preserved all available note markers, but an earlier omission remains.",
+                missing=list(missing_note_counts.elements()),
             )
 
         source_paragraphs = _paragraphs(source)

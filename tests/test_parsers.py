@@ -24,7 +24,7 @@ except ImportError:
     epub = mock_epub
 
 try:
-    import fitz
+    import pymupdf as fitz
 except ImportError:
     mock_fitz = MagicMock()
     mock_fitz.TEXT_PRESERVE_WHITESPACE = 1

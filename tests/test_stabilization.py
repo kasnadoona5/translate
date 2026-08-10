@@ -507,6 +507,26 @@ class TestStabilizationPolicies(unittest.TestCase):
         self.assertEqual(report["removed_duplicate_count"], 1)
         self.assertEqual(report["preserved_citation_count"], 1)
 
+    def test_final_original_audit_deduplicates_punctuation_variants(self) -> None:
+        document = TranslatedDocument(paragraphs=[TranslatedParagraph(
+            index=0,
+            source_text="The State: Past, Present, Future",
+            translated_text=(
+                "دولت: گذشته، حال، آینده (The State: Past, Present, Future) "
+                "(The State: Past، Present، Future)"
+            ),
+        )])
+
+        report = audit_inline_english_originals(
+            document,
+            {"The State: Past, Present, Future": "دولت: گذشته، حال، آینده"},
+        )
+
+        self.assertEqual(
+            document.paragraphs[0].translated_text.count("The State:"), 1
+        )
+        self.assertEqual(report["removed_duplicate_count"], 1)
+
     def test_noop_critic_issue_is_not_sent_to_refinement(self) -> None:
         result = TranslationCritique._parse_response(json.dumps({
             "scores": {

@@ -17,6 +17,8 @@ from tarjomeh.memory.manager import MemoryManager
 from tarjomeh.parsers.base import Chapter, Document, Paragraph, Section
 from tarjomeh.parsers.pdf_parser import PyMuPDFParser
 from tarjomeh.parsers.pdf_parser import _join_block_lines
+from tarjomeh.parsers.pdf_parser import _prepare_document_blocks
+from tarjomeh.parsers.pdf_parser import _split_indented_paragraph_lines
 from tarjomeh.parsers.pdf_parser import _sort_page_blocks_reading_order
 
 
@@ -52,6 +54,128 @@ class TestPdfStructureReconstruction(unittest.TestCase):
         self.assertEqual(
             [item["text"] for item in ordered],
             ["left one", "left two", "right one", "right two"],
+        )
+
+    def test_indented_print_paragraphs_are_recovered_conservatively(self) -> None:
+        def line(text: str, x0: float, y0: float) -> dict:
+            return {
+                "text": text,
+                "bbox": (x0, y0, 370.0, y0 + 12.0),
+                "direction": (1.0, 0.0),
+                "font_size": 10.0,
+                "span_count": 1,
+                "large_gap_count": 0,
+            }
+
+        lines = [
+            line("Third, institutional approaches begin here and", 67.0, 100.0),
+            line("continue at the dominant margin until they end.", 55.0, 112.0),
+            line("Fourth, agent-centred approaches begin here", 67.0, 124.0),
+            line("and continue without losing their boundary.", 55.0, 136.0),
+        ]
+
+        groups = _split_indented_paragraph_lines(lines)
+
+        self.assertEqual(len(groups), 2)
+        self.assertTrue(groups[0][0]["text"].startswith("Third,"))
+        self.assertTrue(groups[1][0]["text"].startswith("Fourth,"))
+
+    def test_indentation_without_sentence_boundary_is_not_split(self) -> None:
+        lines = [
+            {
+                "text": "A sentence continues through",
+                "bbox": (55.0, 100.0, 370.0, 112.0),
+                "direction": (1.0, 0.0),
+                "font_size": 10.0,
+            },
+            {
+                "text": "Capital despite an incidental indent",
+                "bbox": (67.0, 112.0, 370.0, 124.0),
+                "direction": (1.0, 0.0),
+                "font_size": 10.0,
+            },
+            {
+                "text": "and reaches its actual ending.",
+                "bbox": (55.0, 124.0, 370.0, 136.0),
+                "direction": (1.0, 0.0),
+                "font_size": 10.0,
+            },
+        ]
+
+        self.assertEqual(len(_split_indented_paragraph_lines(lines)), 1)
+
+    def test_structure_v3_splits_without_changing_v2_resume_behavior(self) -> None:
+        page = MagicMock()
+        page.rect.height = 800
+        page.rect.width = 600
+        page.get_text.return_value = {"blocks": [{
+            "type": 0,
+            "bbox": (55.0, 100.0, 370.0, 148.0),
+            "lines": [
+                {
+                    "bbox": (67.0, 100.0, 370.0, 112.0),
+                    "dir": (1.0, 0.0),
+                    "spans": [{
+                        "text": "Third, institutional approaches begin here and",
+                        "size": 10.0,
+                        "font": "Times",
+                        "flags": 0,
+                        "bbox": (67.0, 100.0, 370.0, 112.0),
+                    }],
+                },
+                {
+                    "bbox": (55.0, 112.0, 370.0, 124.0),
+                    "dir": (1.0, 0.0),
+                    "spans": [{
+                        "text": "continue at the dominant margin until they end.",
+                        "size": 10.0,
+                        "font": "Times",
+                        "flags": 0,
+                        "bbox": (55.0, 112.0, 370.0, 124.0),
+                    }],
+                },
+                {
+                    "bbox": (67.0, 124.0, 370.0, 136.0),
+                    "dir": (1.0, 0.0),
+                    "spans": [{
+                        "text": "Fourth, agent-centred approaches begin here",
+                        "size": 10.0,
+                        "font": "Times",
+                        "flags": 0,
+                        "bbox": (67.0, 124.0, 370.0, 136.0),
+                    }],
+                },
+                {
+                    "bbox": (55.0, 136.0, 370.0, 148.0),
+                    "dir": (1.0, 0.0),
+                    "spans": [{
+                        "text": "and continue without losing their boundary.",
+                        "size": 10.0,
+                        "font": "Times",
+                        "flags": 0,
+                        "bbox": (55.0, 136.0, 370.0, 148.0),
+                    }],
+                },
+            ],
+        }]}
+        document = MagicMock()
+        document.page_count = 1
+        document.__getitem__.return_value = page
+
+        legacy_pages, legacy_audit = _prepare_document_blocks(
+            document, structure_version=2
+        )
+        current_pages, current_audit = _prepare_document_blocks(
+            document, structure_version=3
+        )
+
+        self.assertEqual(len(legacy_pages[0]), 1)
+        self.assertEqual(legacy_audit["internal_paragraph_split_count"], 0)
+        self.assertEqual(len(current_pages[0]), 2)
+        self.assertEqual(current_audit["internal_paragraph_split_count"], 1)
+        self.assertEqual(
+            [block["source_fragment_id"] for block in current_pages[0]],
+            ["pg0001.b0000.p01", "pg0001.b0000.p02"],
         )
 
     @patch("tarjomeh.parsers.pdf_parser.fitz.open")

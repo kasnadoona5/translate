@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any
 
 from tarjomeh.exporters.base import TranslatedDocument
@@ -284,6 +285,21 @@ def normalize_adjacent_original_citations(
 
 
 _LATIN_PARENTHETICAL_RE = re.compile(r"\s*\(([^()\n]{1,160})\)")
+_ORIGINAL_PUNCTUATION_MAP = str.maketrans({
+    "\u060c": ",",
+    "\u061b": ";",
+    "\uff0c": ",",
+    "\uff1a": ":",
+    "\u2013": "-",
+    "\u2014": "-",
+})
+
+
+def _original_identity(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value or "")
+    normalized = normalized.translate(_ORIGINAL_PUNCTUATION_MAP)
+    normalized = re.sub(r"\s*([,:;\-])\s*", r"\1", normalized)
+    return " ".join(normalized.casefold().split()).strip()
 
 
 def audit_inline_english_originals(
@@ -296,7 +312,7 @@ def audit_inline_english_originals(
     apparatus and are always preserved.
     """
     authorized = {
-        source.casefold().strip(): source
+        _original_identity(source): source
         for source in authorized_originals
         if source.strip()
     }
@@ -315,10 +331,10 @@ def audit_inline_english_originals(
             if not re.search(r"[A-Za-z]", content):
                 return match.group(0)
 
-            key = content.casefold()
+            key = _original_identity(content)
             exact_source_parenthetical = f"({content})".casefold() in source_folded
             if any(char.isdigit() for char in content) or exact_source_parenthetical:
-                leading_original = content.split(",", 1)[0].casefold().strip()
+                leading_original = _original_identity(content.split(",", 1)[0])
                 if leading_original in authorized:
                     seen.add(leading_original)
                 preserved_citations += 1
