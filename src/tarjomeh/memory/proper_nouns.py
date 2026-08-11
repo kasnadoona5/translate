@@ -25,6 +25,27 @@ _CATEGORY_ALIASES = {
     "work": "publication",
     "named_theory": "theory",
 }
+_PERSIAN_LETTER_RE = re.compile(r"[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]")
+_UNUSABLE_TARGET_RE = re.compile(
+    r"\b(?:n/?a|none|unknown|not available|no persian|no established|"
+    r"not supported|insufficient evidence|untranslated)\b",
+    re.IGNORECASE,
+)
+
+
+def is_usable_memory_mapping(english: str, persian: str) -> bool:
+    """Reject malformed/placeholder auto mappings from prompt-time memory."""
+    source = " ".join((english or "").split()).strip()
+    target = " ".join((persian or "").split()).strip()
+    if not source or not target or "_" in target:
+        return False
+    if source.casefold() == target.casefold():
+        return False
+    if _UNUSABLE_TARGET_RE.search(target):
+        return False
+    if not _PERSIAN_LETTER_RE.search(target):
+        return False
+    return True
 
 
 def _normalise_category(category: str) -> str:
@@ -138,9 +159,14 @@ class ProperNouns:
             return ""
         lines = []
         for en, fa in sorted(self._nouns.items()):
+            if not is_usable_memory_mapping(en, fa):
+                continue
             category = self.category_for(en)
             if not self.is_inline_eligible(en):
-                marker = f"[terminology only; category={category}; never add an English parenthetical]"
+                marker = (
+                    f"[advisory terminology only; category={category}; never add "
+                    "an English parenthetical; glossary and source context override it]"
+                )
             elif en in self._introduced:
                 marker = "[introduced]"
             elif not include_inline_originals:

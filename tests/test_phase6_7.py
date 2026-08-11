@@ -278,9 +278,9 @@ class TestBookResearcher(unittest.IsolatedAsyncioTestCase):
         researcher.provider = MagicMock()
         researcher.provider.search = AsyncMock(return_value=[
             SearchResult(
-                title="Book page",
+                title="The Politics of Operations - Book page",
                 url="https://example.test/book",
-                snippet="A book about operations.",
+                snippet="The Politics of Operations is a book about operations.",
             )
         ])
         document = type("DocumentStub", (), {

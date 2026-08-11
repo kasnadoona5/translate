@@ -16,10 +16,11 @@ GENERAL_EDITORIAL_CONTRACT: str = """\
   domain, and approved terminology; never force an isolated dictionary equivalent.
 - Preserve semantic roles and relations, including agency, possession, attribution,
   negation, modality, quantity, comparison, causality, and temporal orientation.
-- Preserve source-authored multilingual expressions, titles, labels, quotations,
-  citations, and note markers. These are scholarly apparatus, not optional inline
-  English originals. Translate ordinary quoted prose unless the source presents it
-  as an original-language expression or title.
+- Preserve source-authored multilingual expressions, titles, labels, citation atoms
+  (author, year, page), and note markers. These are scholarly apparatus, not optional
+  inline English originals. Translate ordinary quoted prose and ordinary connective
+  prose inside citations (such as "see" or "for discussion") while retaining the
+  cited names, years, pages, and original-language expressions.
 - Write idiomatic formal Iranian Persian. Avoid English calques; use standard ezafe,
   clitics, affixes, verb agreement, punctuation, and ZWNJ conventions.
 - Treat only glossary entries explicitly marked mandatory and established name
@@ -126,7 +127,8 @@ Instructions:
    {term_notes_instruction}
 7. Scholarly apparatus: keep in-text citations, years, page numbers, and footnote markers
    in Latin script and Western digits exactly as in the source (e.g. (Marx 1867, 92)).
-   Translate quoted passages but leave their citations untouched.
+   Translate quoted passages and ordinary citation connective prose, but leave citation
+   atoms (author, year, page) and original-language expressions untouched.
 8. Output ONLY the Persian translation — no commentary, preamble, or labels.
 """
 

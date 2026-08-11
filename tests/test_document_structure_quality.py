@@ -382,12 +382,15 @@ class TestContextHygiene(unittest.TestCase):
                 "structural_roles": ["heading", "body"],
             },
         )
-        translation = "Translated heading\n\n" + "A complete scholarly sentence. " * 20
+        translation = (
+            "\u0639\u0646\u0648\u0627\u0646 \u062a\u0631\u062c\u0645\u0647\u200c\u0634\u062f\u0647\n\n"
+            + "\u0627\u06cc\u0646 \u06cc\u06a9 \u062c\u0645\u0644\u0647 \u06a9\u0627\u0645\u0644 \u0648 \u062f\u0642\u06cc\u0642 \u062f\u0627\u0646\u0634\u06af\u0627\u0647\u06cc \u0627\u0633\u062a. " * 20
+        )
         policy = manager.update_after_translation(
             chunk, translation, quality_approved=True
         )
         self.assertTrue(policy["style_sample_added"])
-        self.assertNotIn("Translated heading", manager.style_samples[0])
+        self.assertNotIn("\u0639\u0646\u0648\u0627\u0646 \u062a\u0631\u062c\u0645\u0647\u200c\u0634\u062f\u0647", manager.style_samples[0])
         self.assertTrue(manager.style_samples[0].endswith("."))
 
     def test_html_is_removed_from_running_summary(self) -> None:

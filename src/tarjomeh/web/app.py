@@ -1006,6 +1006,7 @@ def _register_api(app: Flask) -> None:
             "qa_unavailable": "qa_unavailable",
             "glossary_needs_review": "glossary_needs_review",
             "integrity_final_failed": "integrity_final_failed",
+            "chunk_review_required": "explicit_chunk_review_reason",
         }
         for event in all_events:
             reason = review_event_reasons.get(event["event_type"])
@@ -1300,6 +1301,18 @@ def _register_api(app: Flask) -> None:
                         f"  INTEGRITY FINAL: blocking={payload.get('blocking_count')} "
                         "chunk requires review"
                     )
+                elif event["event_type"] == "chunk_review_required":
+                    lines.append(
+                        "  REVIEW REQUIRED: reasons="
+                        + ", ".join(payload.get("reason_codes", []) or ["unspecified"])
+                    )
+                    for reason in payload.get("reasons", []):
+                        detail = reason.get("detail")
+                        lines.append(
+                            "    "
+                            + str(reason.get("reason", "unspecified"))
+                            + (f" ({detail})" if detail else "")
+                        )
                 elif event["event_type"] == "qa_unavailable":
                     lines.append(
                         f"  QA UNAVAILABLE: component={payload.get('component')} "
@@ -1561,6 +1574,16 @@ def _register_api(app: Flask) -> None:
             return jsonify({"error": "Invalid research term"}), 400
 
         if action == "approve":
+            if (
+                term.get("status") == "context_only"
+                or not str(term.get("target", "")).strip()
+            ):
+                return jsonify({
+                    "error": (
+                        "This research item has no source-supported Persian target "
+                        "and is context-only; it cannot be approved as terminology."
+                    )
+                }), 409
             path = _working_glossary_path(app.config.get("TARJOMEH_CONFIG"))
             gm = GlossaryManager()
             if path.exists():

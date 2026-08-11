@@ -15,7 +15,7 @@ from tarjomeh.core.config import TarjomehConfig
 from tarjomeh.core.structured_output import parse_structured_output
 from tarjomeh.core.term_notes import effective_term_notes_mode
 from tarjomeh.chunking.chunker import Chunk
-from tarjomeh.memory.proper_nouns import ProperNouns
+from tarjomeh.memory.proper_nouns import ProperNouns, is_usable_memory_mapping
 from tarjomeh.memory.bilingual_summary import BilingualSummary
 from tarjomeh.memory.long_term import LongTermMemory
 from tarjomeh.memory.short_term import ShortTermMemory
@@ -27,6 +27,30 @@ _NON_PROSE_RE = re.compile(
     r"index of names|subject index|catalog(?:ue|ing)-in-publication)\b",
     re.IGNORECASE,
 )
+_STYLE_PROTOCOL_RE = re.compile(
+    r"(?:^|\s)(?:source|target|translation|rationale|decision)\s*[:=]|"
+    r"```|</?(?:analysis|answer|tool|assistant)>|\{\s*\"",
+    re.IGNORECASE,
+)
+_UNTRANSLATED_CITATION_PROSE_RE = re.compile(
+    r"\((?:[^()]*(?:\bsee\b|\bcf\.|\be\.g\.|\bi\.e\.|"
+    r"\bon (?:these|this|the)\b)[^()]*)\)",
+    re.IGNORECASE,
+)
+
+
+def _clean_style_sample(text: str) -> str:
+    """Return a safe style-only sample without mutating persisted memory."""
+    sample = _complete_style_sample(text)
+    if not sample or _STYLE_PROTOCOL_RE.search(sample):
+        return ""
+    if _UNTRANSLATED_CITATION_PROSE_RE.search(sample):
+        return ""
+    persian_chars = len(re.findall(r"[\u0600-\u06ff]", sample))
+    latin_words = len(re.findall(r"\b[A-Za-z]{3,}\b", sample))
+    if persian_chars < 8 or latin_words > max(12, persian_chars // 18):
+        return ""
+    return sample
 
 
 def _complete_style_sample(text: str, preferred_limit: int = 900) -> str:
@@ -162,15 +186,20 @@ class MemoryManager:
                 )
             short_term_str = "\n\n".join(formatted_pairs)
 
+        prompt_style_profile = (
+            self._render_style_profile() or self._legacy_style_profile_for_prompt()
+        )
         return MemoryContext(
             book_context=self.book_context,
-            style_profile=self.style_profile,
+            style_profile=prompt_style_profile,
             proper_nouns=proper_nouns_str,
             bilingual_summary=bilingual_summary_str,
             long_term=long_term_str,
             short_term=short_term_str,
             references={
-                "style_profile_version": len(self.style_samples),
+                "style_profile_version": len(
+                    [sample for sample in self.style_samples if _clean_style_sample(sample)]
+                ),
                 "long_term_entry_ids": [
                     pair.get("entry_id") for pair in relevant_long_term
                 ],
@@ -265,23 +294,49 @@ class MemoryManager:
 
     def _update_style_profile(self, translation: str) -> None:
         """Maintain a compact book-level style guide from early translations."""
-        text = _complete_style_sample(translation)
+        text = _clean_style_sample(translation)
         if not text:
             return
 
         if len(self.style_samples) < 5:
             self.style_samples.append(text)
 
+        self.style_profile = self._render_style_profile()
+
+    def _render_style_profile(self) -> str:
+        """Build a prompt-safe style guide from trusted prose samples."""
+        clean_samples = [
+            cleaned for sample in self.style_samples
+            if (cleaned := _clean_style_sample(sample))
+        ][:5]
+        if not clean_samples:
+            return ""
         samples = "\n".join(
             f"{i + 1}. {sample}"
-            for i, sample in enumerate(self.style_samples)
+            for i, sample in enumerate(clean_samples)
         )
-        self.style_profile = (
+        return (
             "Maintain one coherent scholarly Iranian-Persian voice across the book. "
             "Prefer formal academic diction, precise conceptual renderings, stable "
             "citation handling, and the sentence rhythm established in the samples below. "
-            "Do not simplify later chapters into a different register.\n\n"
+            "Do not simplify later chapters into a different register. These samples govern "
+            "register and rhythm only: they are not terminology authority, and the source, "
+            "curated glossary, and current context override every lexical choice. Do not copy "
+            "transliteration artifacts or untranslated citation prose from a sample.\n\n"
             f"Representative early translation samples:\n{samples}"
+        )
+
+    def _legacy_style_profile_for_prompt(self) -> str:
+        """Keep old checkpoints usable when they predate persisted samples."""
+        value = str(self.style_profile or "").strip()
+        if self.style_samples or not value:
+            return ""
+        if _STYLE_PROTOCOL_RE.search(value) or _UNTRANSLATED_CITATION_PROSE_RE.search(value):
+            return ""
+        return (
+            value
+            + "\n\nLegacy profile safety: use this for register and rhythm only; "
+            "the source, curated glossary, and current context override lexical choices."
         )
 
     async def update_proper_nouns(
@@ -322,7 +377,7 @@ class MemoryManager:
                 for item in items:
                     term = item.get("term")
                     persian = item.get("suggested_persian")
-                    if term and persian:
+                    if term and persian and is_usable_memory_mapping(term, persian):
                         self.proper_nouns.add_noun(
                             term,
                             persian,
@@ -335,7 +390,7 @@ class MemoryManager:
                 for item in terms_list:
                     term = item.get("term")
                     persian = item.get("suggested_persian")
-                    if term and persian:
+                    if term and persian and is_usable_memory_mapping(term, persian):
                         self.proper_nouns.add_noun(
                             term,
                             persian,
@@ -348,6 +403,7 @@ class MemoryManager:
                 ),
                 "candidate_count": len(candidates),
                 "accepted_count": accepted,
+                "rejected_count": max(0, len(candidates) - accepted),
             }
         except Exception as exc:
             logger.warning("Failed to extract proper nouns incrementally: %s", exc)

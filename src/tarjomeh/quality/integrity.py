@@ -7,6 +7,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
+from tarjomeh.glossary.compliance import target_present
+
 
 _DIGIT_MAP = str.maketrans(
     "\u06f0\u06f1\u06f2\u06f3\u06f4\u06f5\u06f6\u06f7\u06f8\u06f9"
@@ -25,6 +27,45 @@ _SOURCE_QUOTE_RE = re.compile(
     r'(?:[\u201c\u201e"]([^\u201c\u201d\u201e"\n]{2,240})[\u201d"]'
     r"|\u2018([^\u2018\u2019\n]{2,240})\u2019)"
 )
+_CITATION_YEAR_RE = re.compile(r"\b(?:1[5-9]\d{2}|20\d{2})[a-z]?\b", re.IGNORECASE)
+_CITATION_NAME_RE = re.compile(
+    r"(?:[A-Z](?:[A-Za-z'\u2019.-]*|\.)(?:\s+|$)){1,5}$"
+)
+_NON_ATOMIC_APPARATUS_RE = re.compile(
+    r"^(?:as|cf\.?|e\.g\.?|for|i\.e\.?|on|see|that|which|where)\b",
+    re.IGNORECASE,
+)
+_STRUCTURAL_NUMBER_LABELS = {
+    "chapter": ("\u0641\u0635\u0644",),
+    "part": ("\u0628\u062e\u0634", "\u0642\u0633\u0645\u062a"),
+    "volume": ("\u062c\u0644\u062f",),
+    "vol": ("\u062c\u0644\u062f",),
+    "book": ("\u06a9\u062a\u0627\u0628",),
+    "table": ("\u062c\u062f\u0648\u0644",),
+    "figure": ("\u0634\u06a9\u0644", "\u0646\u0645\u0648\u062f\u0627\u0631"),
+    "section": ("\u0628\u062e\u0634", "\u0642\u0633\u0645\u062a"),
+    "appendix": ("\u067e\u06cc\u0648\u0633\u062a",),
+    "edition": ("\u0648\u06cc\u0631\u0627\u06cc\u0634", "\u0686\u0627\u067e"),
+}
+_PERSIAN_UNITS = (
+    "\u0635\u0641\u0631", "\u06cc\u06a9", "\u062f\u0648", "\u0633\u0647", "\u0686\u0647\u0627\u0631",
+    "\u067e\u0646\u062c", "\u0634\u0634", "\u0647\u0641\u062a", "\u0647\u0634\u062a", "\u0646\u0647",
+)
+_PERSIAN_TEENS = {
+    10: "\u062f\u0647", 11: "\u06cc\u0627\u0632\u062f\u0647", 12: "\u062f\u0648\u0627\u0632\u062f\u0647",
+    13: "\u0633\u06cc\u0632\u062f\u0647", 14: "\u0686\u0647\u0627\u0631\u062f\u0647", 15: "\u067e\u0627\u0646\u0632\u062f\u0647",
+    16: "\u0634\u0627\u0646\u0632\u062f\u0647", 17: "\u0647\u0641\u062f\u0647", 18: "\u0647\u062c\u062f\u0647",
+    19: "\u0646\u0648\u0632\u062f\u0647",
+}
+_PERSIAN_TENS = {
+    20: "\u0628\u06cc\u0633\u062a", 30: "\u0633\u06cc", 40: "\u0686\u0647\u0644", 50: "\u067e\u0646\u062c\u0627\u0647",
+    60: "\u0634\u0635\u062a", 70: "\u0647\u0641\u062a\u0627\u062f", 80: "\u0647\u0634\u062a\u0627\u062f", 90: "\u0646\u0648\u062f",
+}
+_PERSIAN_SPECIAL_ORDINALS = {
+    1: {"\u0646\u062e\u0633\u062a", "\u0627\u0648\u0644"},
+    3: {"\u0633\u0648\u0645"},
+    30: {"\u0633\u06cc \u0627\u0645"},
+}
 
 
 def normalize_for_match(text: str) -> str:
@@ -35,6 +76,7 @@ def normalize_for_match(text: str) -> str:
 def extract_numbers(text: str) -> Counter[str]:
     """Extract comparable Latin/Persian numeric tokens and percentages."""
     normalized = (text or "").translate(_DIGIT_MAP).replace("\u066a", "%")
+    normalized = re.sub(r"(?<=\d)\s*([.\u066b\u066c])\s*(?=\d)", r"\1", normalized)
     # Notes have their own representation-aware check, so [12] and superscript
     # 12 are not incorrectly compared as ordinary prose numbers.
     normalized = _NOTE_RE.sub("", normalized)
@@ -86,9 +128,35 @@ def protected_source_apparatus(source: str, translation: str) -> list[str]:
     """
     translation_folded = normalize_for_match(translation)
     values: list[str] = []
-    candidates = list(_SOURCE_PAREN_RE.findall(source or ""))
+    candidates: list[str] = []
+    for parenthetical in _SOURCE_PAREN_RE.findall(source or ""):
+        years = list(_CITATION_YEAR_RE.finditer(parenthetical))
+        if years:
+            for year in years:
+                prefix = parenthetical[:year.start()]
+                name_match = _CITATION_NAME_RE.search(prefix)
+                name = name_match.group().strip() if name_match else ""
+                name = re.sub(r"^(?:cf\.?|see)\s+", "", name, flags=re.IGNORECASE)
+                candidates.append(" ".join(part for part in (name, year.group()) if part))
+            continue
+        cleaned = " ".join(parenthetical.split()).strip()
+        words = re.findall(r"[A-Za-z][A-Za-z'\u2019-]*", cleaned)
+        if (
+            1 <= len(words) <= 8
+            and not _NON_ATOMIC_APPARATUS_RE.search(cleaned)
+            and not re.search(r"[.!?;]", cleaned)
+        ):
+            candidates.append(cleaned)
     for match in _SOURCE_QUOTE_RE.finditer(source or ""):
-        candidates.append(match.group(1) or match.group(2) or "")
+        value = match.group(1) or match.group(2) or ""
+        prefix = (source or "")[max(0, match.start() - 80):match.start()]
+        if re.search(
+            r"\b(?:called|label(?:led)?(?:\s+reads)?|original(?:-language)?|"
+            r"phrase|term|title|known as)(?:\s+\w+){0,2}\s*$",
+            prefix,
+            re.IGNORECASE,
+        ):
+            candidates.append(value)
     for value in candidates:
         cleaned = " ".join(value.split()).strip()
         if not cleaned or not re.search(r"[A-Za-z]", cleaned):
@@ -96,6 +164,82 @@ def protected_source_apparatus(source: str, translation: str) -> list[str]:
         if normalize_for_match(cleaned) in translation_folded:
             values.append(cleaned)
     return sorted(set(values), key=str.casefold)
+
+
+def _persian_number_forms(value: int) -> set[str]:
+    """Return conservative cardinal/ordinal Persian forms for 0..99."""
+    if not 0 <= value <= 99:
+        return set()
+    if value < 10:
+        cardinal = _PERSIAN_UNITS[value]
+    elif value < 20:
+        cardinal = _PERSIAN_TEENS[value]
+    else:
+        tens, unit = divmod(value, 10)
+        cardinal = _PERSIAN_TENS[tens * 10]
+        if unit:
+            cardinal += " \u0648 " + _PERSIAN_UNITS[unit]
+    forms = {cardinal, cardinal + "\u0645"}
+    forms.update(_PERSIAN_SPECIAL_ORDINALS.get(value, set()))
+    return forms
+
+
+def _structural_number_equivalents(source: str, candidate: str) -> Counter[str]:
+    """Count localized number words only in explicit structural contexts."""
+    normalized_candidate = normalize_for_match(candidate.translate(_DIGIT_MAP))
+    equivalents: Counter[str] = Counter()
+    labels = "|".join(re.escape(label) for label in _STRUCTURAL_NUMBER_LABELS)
+    leading = re.compile(
+        rf"\b(?P<label>{labels})s?\.?\s+(?P<numbers>\d{{1,2}}"
+        rf"(?:\s*(?:,\s*(?:and|or)?|and|or|&)\s*\d{{1,2}})*)",
+        re.IGNORECASE,
+    )
+    trailing = re.compile(
+        rf"\b(?P<number>\d{{1,2}})\s*[- ]\s*(?P<label>{labels})s?\.?\b",
+        re.IGNORECASE,
+    )
+    occurrences: set[tuple[int, str, int]] = set()
+    for match in leading.finditer(source or ""):
+        label = match.group("label").casefold().rstrip(".")
+        for number_text in re.findall(r"\d{1,2}", match.group("numbers")):
+            occurrences.add((match.start(), label, int(number_text)))
+    for match in trailing.finditer(source or ""):
+        occurrences.add((
+            match.start(),
+            match.group("label").casefold().rstrip("."),
+            int(match.group("number")),
+        ))
+    persian_word = r"\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff"
+    for _position, source_label, number in occurrences:
+            target_labels = _STRUCTURAL_NUMBER_LABELS.get(source_label, ())
+            forms = _persian_number_forms(number)
+            for target_label in target_labels:
+                for label_match in re.finditer(
+                    rf"(?<![{persian_word}]){re.escape(target_label)}"
+                    rf"(?:\s*\u0647\u0627(?:\u06cc)?)?(?![{persian_word}])",
+                    normalized_candidate,
+                ):
+                    window = normalized_candidate[
+                        max(0, label_match.start() - 100):label_match.end() + 180
+                    ]
+                    if any(
+                        re.search(
+                            rf"(?<![{persian_word}]){re.escape(form)}(?![{persian_word}])",
+                            window,
+                        )
+                        for form in forms
+                    ):
+                        equivalents[str(number)] += 1
+                        break
+                else:
+                    continue
+                break
+    return equivalents
+
+
+def _missing_numbers(source: str, candidate: str) -> Counter[str]:
+    missing = extract_numbers(source) - extract_numbers(candidate)
+    return missing - _structural_number_equivalents(source, candidate)
 
 
 @dataclass
@@ -212,11 +356,9 @@ class PostEditIntegrityGate:
                     missing=missing_apparatus,
                 )
 
-        source_numbers = extract_numbers(source)
-        candidate_numbers = extract_numbers(candidate)
-        missing_number_counts = source_numbers - candidate_numbers
+        missing_number_counts = _missing_numbers(source, candidate)
         previous_missing_number_counts = (
-            source_numbers - extract_numbers(previous) if previous else Counter()
+            _missing_numbers(source, previous) if previous else Counter()
         )
         newly_missing_number_counts = (
             missing_number_counts - previous_missing_number_counts
@@ -305,15 +447,12 @@ class PostEditIntegrityGate:
                 duplicate_count=len(duplicate_paragraphs),
             )
 
-        normalized_previous = normalize_for_match(previous)
-        normalized_candidate = normalize_for_match(candidate)
         missing_terms = []
         for term in protected_terms:
-            normalized_term = normalize_for_match(term)
-            if not normalized_term:
+            if not str(term).strip():
                 continue
-            required = enforce_all_terms or normalized_term in normalized_previous
-            if required and normalized_term not in normalized_candidate:
+            required = enforce_all_terms or target_present(str(term), previous)
+            if required and not target_present(str(term), candidate):
                 missing_terms.append(term)
         if missing_terms:
             add(

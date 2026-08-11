@@ -1060,8 +1060,88 @@ def _chunk_needs_review(db: Any, job_id: str, chunk_index: int) -> bool:
         "integrity_final_failed",
         "back_translation_flagged",
         "glossary_needs_review",
+        "chunk_review_required",
     }
     return any(event.get("event_type") in review_events for event in events[last_start:])
+
+
+def _chunk_review_reason_payload(
+    db: Any,
+    job_id: str,
+    chunk_index: int,
+) -> dict[str, Any] | None:
+    """Build one explicit review summary from the current chunk attempt."""
+    events = db.get_chunk_events(job_id, chunk_index)
+    last_start = 0
+    for index, event in enumerate(events):
+        if event.get("event_type") == "chunk_started":
+            last_start = index
+    current = events[last_start:]
+    reason_map = {
+        "critique_needs_review": "quality_disagreement",
+        "qa_unavailable": "qa_unavailable",
+        "integrity_edit_rejected": "automatic_edit_rejected",
+        "integrity_final_failed": "final_integrity_failed",
+        "back_translation_flagged": "back_translation_risk",
+        "glossary_needs_review": "glossary_noncompliance",
+    }
+    reasons: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for event in current:
+        event_type = str(event.get("event_type", ""))
+        reason = reason_map.get(event_type)
+        if not reason:
+            continue
+        payload = event.get("payload", {}) or {}
+        detail = str(
+            payload.get("review_reason")
+            or payload.get("component")
+            or payload.get("stage")
+            or ""
+        )
+        key = (reason, detail)
+        if key in seen:
+            continue
+        seen.add(key)
+        reasons.append({
+            "reason": reason,
+            "detail": detail,
+            "source_event": event_type,
+        })
+    if not reasons:
+        return None
+    return {
+        "reasons": reasons,
+        "reason_codes": [item["reason"] for item in reasons],
+        "translation_available": True,
+        "automatic_pipeline_continued": True,
+        "human_review_required": True,
+    }
+
+
+def _ensure_chunk_review_reason(
+    db: Any,
+    job_id: str,
+    chunk_index: int,
+) -> dict[str, Any] | None:
+    """Persist a canonical reason once for each current chunk attempt."""
+    payload = _chunk_review_reason_payload(db, job_id, chunk_index)
+    if payload is None:
+        return None
+    events = db.get_chunk_events(job_id, chunk_index)
+    last_start = 0
+    for index, event in enumerate(events):
+        if event.get("event_type") == "chunk_started":
+            last_start = index
+    summaries = [
+        event for event in events[last_start:]
+        if event.get("event_type") == "chunk_review_required"
+    ]
+    if not summaries or summaries[-1].get("payload") != payload:
+        db.log_chunk_event(
+            job_id, chunk_index, "chunk_review_required", payload
+        )
+    return payload
 
 
 def _compliance_report_for_event(report: Any) -> dict[str, Any]:
@@ -1787,6 +1867,7 @@ class TranslationPipeline:
                                 except Exception as e:
                                     logger.warning("Bilingual summary update failed: %s", e)
 
+                        _ensure_chunk_review_reason(self.db, job_id, idx)
                         final_status = (
                             ChunkStatus.NEEDS_REVIEW
                             if _chunk_needs_review(self.db, job_id, idx)
@@ -1941,6 +2022,7 @@ class TranslationPipeline:
                                 except Exception as e:
                                     logger.warning("Bilingual summary update failed: %s", e)
 
+                        _ensure_chunk_review_reason(self.db, job_id, idx)
                         final_status = (
                             ChunkStatus.NEEDS_REVIEW
                             if _chunk_needs_review(self.db, job_id, idx)
@@ -2593,6 +2675,7 @@ class TranslationPipeline:
                     manual_result.to_dict(),
                 )
                 translation = previous_translation
+        _ensure_chunk_review_reason(self.db, job_id, chunk_index)
         final_status = (
             ChunkStatus.NEEDS_REVIEW
             if _chunk_needs_review(self.db, job_id, chunk_index)

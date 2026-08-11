@@ -87,6 +87,8 @@ def rank_search_results(
             authority -= 0.18
         score = 0.55 * identity_coverage + 0.30 * query_coverage + authority
         reasons: list[str] = []
+        if strict_identity and not identity_tokens:
+            reasons.append("missing_identity_anchor")
         if identity_tokens and identity_coverage < required_identity_coverage:
             reasons.append("identity_mismatch")
         if query_tokens and query_coverage < 0.15:

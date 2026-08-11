@@ -187,7 +187,10 @@ class BackTranslator:
         missing_numbers = list((source_numbers - back_numbers).elements())
         added_numbers = list((back_numbers - source_numbers).elements())
 
-        source_entities = _extract_entities(original_english)
+        structural_listing = _looks_like_structural_listing(original_english)
+        source_entities = (
+            [] if structural_listing else _extract_entities(original_english)
+        )
         preserved_inline_entities = [
             entity for entity in source_entities
             if translated_text and _entity_is_present(entity, translated_text)
@@ -229,6 +232,7 @@ class BackTranslator:
             "missing_numbers": missing_numbers,
             "added_numbers": added_numbers,
             "missing_entities": missing_entities,
+            "entity_check_skipped_for_structural_listing": structural_listing,
             "entities_preserved_inline": preserved_inline_entities,
             "source_negations": source_negations,
             "back_translation_negations": back_negations,
@@ -296,8 +300,12 @@ def _extract_entities(text: str) -> list[str]:
     entities = []
     for match in _ENTITY_RE.finditer(text or ""):
         value = " ".join(match.group().split()).strip()
-        prefix = (text or "")[:match.start()].rstrip()
-        at_sentence_start = not prefix or prefix.endswith((".", "!", "?"))
+        prefix = (text or "")[:match.start()]
+        stripped_prefix = prefix.rstrip(" \t")
+        at_sentence_start = (
+            not stripped_prefix
+            or stripped_prefix.endswith((".", "!", "?", "\n"))
+        )
         single_word = " " not in value
         if value.split()[-1].casefold() in {"of", "the", "and", "&"}:
             continue
@@ -306,6 +314,22 @@ def _extract_entities(text: str) -> list[str]:
         if value.casefold() not in _ENTITY_STOP and len(value) > 2:
             entities.append(value)
     return sorted(set(entities), key=str.casefold)
+
+
+def _looks_like_structural_listing(text: str) -> bool:
+    """Detect TOCs/tables/index-like source where capitals are not entities."""
+    value = text or ""
+    lines = [" ".join(line.split()) for line in value.splitlines() if line.strip()]
+    if len(lines) < 3:
+        return False
+    numbered_lines = sum(bool(re.search(r"\b\d+(?:[-\u2013]\d+)?\s*$", line)) for line in lines)
+    short_lines = sum(len(line.split()) <= 16 for line in lines)
+    sentence_lines = sum(bool(re.search(r"[.!?][\"')\]]?\s*$", line)) for line in lines)
+    return (
+        numbered_lines / len(lines) >= 0.35
+        and short_lines / len(lines) >= 0.6
+        and sentence_lines / len(lines) <= 0.35
+    )
 
 
 def _entity_is_present(entity: str, text: str) -> bool:

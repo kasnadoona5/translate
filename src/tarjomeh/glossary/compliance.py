@@ -123,7 +123,7 @@ class GlossaryComplianceChecker:
             if term_occurs_only_in_citations(source_text, entry.source):
                 citation_exemptions.append(entry.source)
                 continue
-            if not self._target_present(entry.target, translation):
+            if not target_present(entry.target, translation):
                 escaped_source = re.escape(entry.source)
                 if re.search(rf"\b{escaped_source}\b", translation, re.IGNORECASE):
                     status = "wrong"
@@ -149,7 +149,12 @@ class GlossaryComplianceChecker:
 
     @staticmethod
     def _target_present(target: str, translation: str) -> bool:
-        """Check if the Persian *target* term exists in *translation*.
+        """Backward-compatible wrapper for the shared target matcher."""
+        return target_present(target, translation)
+
+
+def target_present(target: str, translation: str) -> bool:
+    """Check if the Persian *target* term exists in *translation*.
 
         Uses a permissive match that accounts for:
         * Hazm-normalized Persian spelling/spacing
@@ -160,42 +165,60 @@ class GlossaryComplianceChecker:
         For Persian text we do **not** use ``\\b`` because word-boundary
         semantics are unreliable with the Arabic script.
         """
-        normalised_target = _normalise_persian(target)
-        normalised_text = _normalise_persian(translation)
-        if not normalised_target:
-            return False
+    normalised_target = _normalise_persian(target)
+    normalised_text = _normalise_persian(translation)
+    if not normalised_target:
+        return False
         # Use letter ranges rather than the whole Arabic block; that block also
         # contains Persian comma/semicolon characters, which are valid term
         # boundaries.
-        persian_word = r"\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff"
-        if re.search(
-            rf"(?<![{persian_word}]){re.escape(normalised_target)}(?![{persian_word}])",
-            normalised_text,
-        ):
-            return True
-        intra_word_joiner = rf"[{_ZWNJ}{_ZWJ}]*"
-        parts = [
-            intra_word_joiner.join(re.escape(char) for char in part)
-            for part in re.split(rf"[\s{_ZWNJ}{_ZWJ}]+", normalised_target)
-            if part
-        ]
-        if not parts:
-            return False
-        flexible_target = rf"[\s{_ZWNJ}{_ZWJ}]*".join(parts)
+    persian_word = r"\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff"
+    if re.search(
+        rf"(?<![{persian_word}]){re.escape(normalised_target)}(?![{persian_word}])",
+        normalised_text,
+    ):
+        return True
+    intra_word_joiner = rf"[{_ZWNJ}{_ZWJ}]*"
+    parts = [
+        intra_word_joiner.join(re.escape(char) for char in part)
+        for part in re.split(rf"[\s{_ZWNJ}{_ZWJ}]+", normalised_target)
+        if part
+    ]
+    if not parts:
+        return False
+    flexible_target = rf"[\s{_ZWNJ}{_ZWJ}]*".join(parts)
         # Persian targets can take productive suffixes without a word boundary
         # (for example, a noun becoming an adjective or plural). Keep the
         # leading boundary so embedded substrings in unrelated words still fail.
-        joiner = rf"[\s{_ZWNJ}{_ZWJ}]*"
-        suffix = (
-            rf"(?:{joiner}(?:"
-            r"\u0647\u0627(?:\u06cc(?:\u06cc|\u0645|\u062a|\u0634|\u0645\u0627\u0646|\u062a\u0627\u0646|\u0634\u0627\u0646)?)?"
-            r"|\u06cc|\u0627\u0646|\u0627\u062a|\u062a\u0631(?:\u06cc\u0646)?|\u0627\u0645|\u0627\u0634|\u0645\u0627\u0646|\u062a\u0627\u0646|\u0634\u0627\u0646"
-            r"))?"
-        )
-        return re.search(
-            rf"(?<![{persian_word}]){flexible_target}{suffix}(?![{persian_word}])",
+    joiner = rf"[\s{_ZWNJ}{_ZWJ}]*"
+    suffix = (
+        rf"(?:{joiner}(?:"
+        r"\u0647\u0627(?:\u06cc(?:\u06cc|\u0645|\u062a|\u0634|\u0645\u0627\u0646|\u062a\u0627\u0646|\u0634\u0627\u0646)?)?"
+        r"|\u06cc|\u0627\u0646|\u0627\u062a|\u062a\u0631(?:\u06cc\u0646)?|\u0627\u0645|\u0627\u0634|\u0645\u0627\u0646|\u062a\u0627\u0646|\u0634\u0627\u0646"
+        r"))?"
+    )
+    if re.search(
+        rf"(?<![{persian_word}]){flexible_target}{suffix}(?![{persian_word}])",
+        normalised_text,
+    ) is not None:
+        return True
+
+        # Persian nouns ending in heh productively form abstract/adjectival
+        # derivatives by replacing the final heh with gaf + yeh. Accept that
+        # narrow transformation (for example X-heh -> X-gi) without treating
+        # arbitrary substrings as glossary compliance.
+    if (
+        " " not in normalised_target
+        and normalised_target.endswith("\u0647")
+        and len(normalised_target) >= 3
+    ):
+        derived = re.escape(normalised_target[:-1]) + "\u06af\u06cc"
+        if re.search(
+            rf"(?<![{persian_word}]){derived}{suffix}(?![{persian_word}])",
             normalised_text,
-        ) is not None
+        ):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +227,8 @@ class GlossaryComplianceChecker:
 
 _ZWNJ = "\u200c"  # zero-width non-joiner
 _ZWJ = "\u200d"   # zero-width joiner
+_HAZM_NORMALIZER = None
+_HAZM_CHECKED = False
 _SCHOLARLY_CITATION_RE = re.compile(
     r"\([^()\n]{0,240}\b(?:1[5-9]\d{2}|20\d{2})[a-z]?\b[^()\n]{0,240}\)",
     re.IGNORECASE,
@@ -238,11 +263,19 @@ def _normalise_persian(text: str) -> str:
     * Normalises Arabic ي / ك to Persian ی / ک
     * Collapses multiple spaces around ZWNJ
     """
-    try:
-        from hazm import Normalizer  # type: ignore[import-untyped]
-        text = Normalizer().normalize(text)
-    except Exception:
-        pass
+    global _HAZM_NORMALIZER, _HAZM_CHECKED
+    if not _HAZM_CHECKED:
+        try:
+            from hazm import Normalizer  # type: ignore[import-untyped]
+            _HAZM_NORMALIZER = Normalizer()
+        except Exception:
+            _HAZM_NORMALIZER = None
+        _HAZM_CHECKED = True
+    if _HAZM_NORMALIZER is not None:
+        try:
+            text = _HAZM_NORMALIZER.normalize(text)
+        except Exception:
+            pass
 
     # Arabic → Persian letter normalisation
     text = text.replace("\u064a", "\u06cc")   # ي → ی

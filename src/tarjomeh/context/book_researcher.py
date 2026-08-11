@@ -60,15 +60,17 @@ class BookResearcher:
         queries = [
             f'"{title}" {author}'.strip(),
             f'"{title}" review summary key concepts',
-            f'{author} concepts terminology scholarship'.strip(),
-            f'"{title}" {domain} terminology',
-            f'{title} {author} Persian scholarship ترجمه فارسی'.strip(),
+            f'"{title}" {author} concepts terminology scholarship'.strip(),
+            f'"{title}" {author} {domain} terminology'.strip(),
+            f'"{title}" {author} Persian scholarship ترجمه فارسی'.strip(),
         ]
 
         sources: list[dict[str, str]] = []
         try:
             excerpt = self._book_excerpt(document)
-            await self._search_queries(queries, sources)
+            await self._search_queries(
+                queries, sources, title=title, author=author
+            )
             data, used_batches, recovery_error = await self._synthesise(
                 title,
                 author,
@@ -85,10 +87,14 @@ class BookResearcher:
                 data.get("follow_up_queries", []),
                 existing=queries,
                 limit=remaining,
+                title=title,
+                author=author,
             )
             if follow_ups:
                 queries.extend(follow_ups)
-                await self._search_queries(follow_ups, sources)
+                await self._search_queries(
+                    follow_ups, sources, title=title, author=author
+                )
                 data, follow_up_batches, follow_up_error = await self._synthesise(
                     title,
                     author,
@@ -250,6 +256,9 @@ class BookResearcher:
         self,
         queries: list[str],
         sources: list[dict[str, str]],
+        *,
+        title: str = "",
+        author: str = "",
     ) -> None:
         known_urls = {item["url"] for item in sources}
         for query in queries:
@@ -257,14 +266,12 @@ class BookResearcher:
             from tarjomeh.context.search_providers import rank_search_results
 
             quoted = re.findall(r'"([^"]{3,})"', query)
-            identity = quoted[0] if quoted else " ".join(
-                re.findall(r"\b[A-Z][\w'-]+", query)[:3]
-            )
+            identity = quoted[0] if quoted else (title or author)
             ranked, relevance = rank_search_results(
                 query,
                 results,
                 identity=identity,
-                strict_identity=False,
+                strict_identity=True,
             )
             diagnostics = getattr(self.provider, "diagnostics", None)
             if isinstance(diagnostics, list):
@@ -301,6 +308,8 @@ class BookResearcher:
         *,
         existing: list[str],
         limit: int,
+        title: str = "",
+        author: str = "",
     ) -> list[str]:
         if not isinstance(raw_queries, list) or limit <= 0:
             return []
@@ -310,6 +319,13 @@ class BookResearcher:
             if isinstance(value, dict):
                 value = value.get("query", "")
             query = " ".join(str(value).split()).strip()[:300]
+            if query and (title or author):
+                query_folded = query.casefold()
+                title_present = bool(title and title.casefold() in query_folded)
+                author_present = bool(author and author.casefold() in query_folded)
+                if not title_present and not author_present:
+                    anchor = f'"{title}" {author}'.strip() if title else author
+                    query = f"{anchor} {query}"[:300]
             key = query.casefold()
             if not query or key in seen:
                 continue
@@ -347,9 +363,18 @@ class BookResearcher:
             source = str(item.get("source", "")).strip()
             target = str(item.get("target", "")).strip()
             key = source.casefold()
-            if not source or not target or key in seen:
+            if not source or key in seen:
                 continue
             seen.add(key)
+            unsupported_target = bool(re.search(
+                r"\b(?:no persian|no established|not supported|"
+                r"insufficient evidence|unknown|n/?a)\b",
+                target,
+                re.IGNORECASE,
+            ))
+            context_only = not target or unsupported_target
+            if context_only:
+                target = ""
             cited = [
                 str(url) for url in item.get("source_urls", [])
                 if str(url) in known_urls
@@ -369,7 +394,7 @@ class BookResearcher:
                     "source_supported" if cited else "book_excerpt_inference"
                 ),
                 "is_auto": True,
-                "status": "suggested",
+                "status": "context_only" if context_only else "suggested",
             })
         return terms
 
