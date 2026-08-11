@@ -31,6 +31,15 @@ _UNUSABLE_TARGET_RE = re.compile(
     r"not supported|insufficient evidence|untranslated)\b",
     re.IGNORECASE,
 )
+_PROVENANCE_AUTHORITY = {
+    "auto_extraction": 10,
+    "incremental_extraction": 10,
+    "research_suggestion": 10,
+    "legacy": 50,
+    "accepted_correction": 80,
+    "approved_research": 100,
+    "curated_glossary": 100,
+}
 
 
 def is_usable_memory_mapping(english: str, persian: str) -> bool:
@@ -53,6 +62,10 @@ def _normalise_category(category: str) -> str:
     return _CATEGORY_ALIASES.get(value, value)
 
 
+def _normalise_target(value: str) -> str:
+    return re.sub(r"[\s\u200c]+", " ", (value or "").strip()).casefold()
+
+
 class ProperNouns:
     """Proper noun translation memory layer.
 
@@ -64,10 +77,28 @@ class ProperNouns:
     def __init__(self) -> None:
         self._nouns: dict[str, str] = {}
         self._categories: dict[str, str] = {}
+        self._provenance: dict[str, dict[str, Any]] = {}
         self._introduced: set[str] = set()
 
-    def add_noun(self, english: str, persian: str, category: str = "proper_noun") -> None:
-        """Add or update a proper noun mapping.
+    def _stored_key(self, english: str) -> str | None:
+        requested = " ".join((english or "").split()).casefold()
+        return next(
+            (
+                source for source in self._nouns
+                if " ".join(source.split()).casefold() == requested
+            ),
+            None,
+        )
+
+    def add_noun(
+        self,
+        english: str,
+        persian: str,
+        category: str = "proper_noun",
+        *,
+        provenance: str = "legacy",
+    ) -> dict[str, Any]:
+        """Add or reconcile a proper noun mapping by source authority.
 
         Parameters
         ----------
@@ -76,27 +107,75 @@ class ProperNouns:
         persian:
             Established Persian translation/transliteration.
         """
-        en_key = english.strip()
+        en_key = " ".join(english.split()).strip()
         fa_val = persian.strip()
-        if en_key and fa_val:
-            # Never overwrite an established rendering with a new suggestion —
-            # consistency across the book beats a "better" late transliteration.
-            self._nouns.setdefault(en_key, fa_val)
-            new_category = _normalise_category(category)
-            current_category = self._categories.get(en_key)
-            if (
-                current_category is None
-                or new_category == "approved_term"
-                or (
-                    current_category not in INLINE_ORIGINAL_CATEGORIES
-                    and new_category in INLINE_ORIGINAL_CATEGORIES
-                )
-            ):
-                self._categories[en_key] = new_category
+        if not en_key or not fa_val:
+            return {"action": "ignored", "source": en_key}
+
+        origin = provenance if provenance in _PROVENANCE_AUTHORITY else "legacy"
+        authority = _PROVENANCE_AUTHORITY[origin]
+        stored_key = self._stored_key(en_key)
+        previous = self._nouns.get(stored_key or "", "")
+        prior = dict(self._provenance.get(stored_key or "", {}))
+        prior_authority = int(
+            prior.get("authority", _PROVENANCE_AUTHORITY["legacy"])
+        )
+
+        if stored_key is None:
+            stored_key = en_key
+            self._nouns[stored_key] = fa_val
+            action = "added"
+        elif _normalise_target(previous) == _normalise_target(fa_val):
+            action = "confirmed"
+        elif authority > prior_authority:
+            self._nouns[stored_key] = fa_val
+            action = "replaced_lower_authority"
+        else:
+            action = "preserved_higher_authority"
+
+        observations = int(prior.get("observations", 0)) + 1
+        if action in {"added", "replaced_lower_authority"} or (
+            action == "confirmed" and authority >= prior_authority
+        ):
+            history = list(prior.get("superseded", []))
+            if action == "replaced_lower_authority" and previous:
+                history.append({
+                    "target": previous,
+                    "origin": str(prior.get("origin", "legacy")),
+                })
+            self._provenance[stored_key] = {
+                "origin": origin,
+                "authority": authority,
+                "observations": observations,
+                "superseded": history[-3:],
+            }
+        elif prior:
+            prior["observations"] = observations
+            self._provenance[stored_key] = prior
+
+        new_category = _normalise_category(category)
+        current_category = self._categories.get(stored_key)
+        if (
+            current_category is None
+            or new_category == "approved_term"
+            or action == "replaced_lower_authority"
+            or (
+                current_category not in INLINE_ORIGINAL_CATEGORIES
+                and new_category in INLINE_ORIGINAL_CATEGORIES
+            )
+        ):
+            self._categories[stored_key] = new_category
+        return {
+            "action": action,
+            "source": stored_key,
+            "previous_target": previous,
+            "target": self._nouns[stored_key],
+            "origin": self._provenance.get(stored_key, {}).get("origin", origin),
+        }
 
     def mark_introduced(self, english: str) -> None:
         """Mark a noun as already introduced (parenthetical already shown)."""
-        en_key = english.strip()
+        en_key = self._stored_key(english) or english.strip()
         if en_key in self._nouns:
             self._introduced.add(en_key)
 
@@ -115,11 +194,18 @@ class ProperNouns:
 
     def is_introduced(self, english: str) -> bool:
         """Return True if the noun's first occurrence has already happened."""
-        return english.strip() in self._introduced
+        return (self._stored_key(english) or english.strip()) in self._introduced
 
     def category_for(self, english: str) -> str:
         """Return the semantic category retained from extraction."""
-        return self._categories.get(english.strip(), "proper_noun")
+        return self._categories.get(
+            self._stored_key(english) or english.strip(), "proper_noun"
+        )
+
+    def provenance_for(self, english: str) -> dict[str, Any]:
+        """Return a copy of the mapping's reconciliation provenance."""
+        key = self._stored_key(english) or english.strip()
+        return dict(self._provenance.get(key, {}))
 
     def is_inline_eligible(self, english: str) -> bool:
         """Return whether a noun may carry a first-occurrence English original."""
@@ -184,6 +270,9 @@ class ProperNouns:
         return {
             "nouns": dict(self._nouns),
             "categories": dict(self._categories),
+            "provenance": {
+                source: dict(value) for source, value in self._provenance.items()
+            },
             "introduced": sorted(self._introduced),
         }
 
@@ -196,6 +285,7 @@ class ProperNouns:
         if not data:
             self._nouns = {}
             self._categories = {}
+            self._provenance = {}
             self._introduced = set()
             return
 
@@ -206,11 +296,33 @@ class ProperNouns:
                 source: _normalise_category(str(stored_categories.get(source, "proper_noun")))
                 for source in self._nouns
             }
+            stored_provenance = data.get("provenance", {})
+            self._provenance = {
+                source: dict(stored_provenance.get(source, {}))
+                for source in self._nouns
+                if isinstance(stored_provenance.get(source), dict)
+            }
+            for source in self._nouns:
+                self._provenance.setdefault(source, {
+                    "origin": "legacy",
+                    "authority": _PROVENANCE_AUTHORITY["legacy"],
+                    "observations": 1,
+                    "superseded": [],
+                })
             self._introduced = set(data.get("introduced", []))
         else:
             # Legacy checkpoint: flat mapping, no introduction tracking.
             self._nouns = {k: v for k, v in data.items() if isinstance(v, str)}
             self._categories = {source: "proper_noun" for source in self._nouns}
+            self._provenance = {
+                source: {
+                    "origin": "legacy",
+                    "authority": _PROVENANCE_AUTHORITY["legacy"],
+                    "observations": 1,
+                    "superseded": [],
+                }
+                for source in self._nouns
+            }
             self._introduced = set()
 
     def __len__(self) -> int:

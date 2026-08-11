@@ -266,11 +266,17 @@ class BookResearcher:
             from tarjomeh.context.search_providers import rank_search_results
 
             quoted = re.findall(r'"([^"]{3,})"', query)
-            identity = quoted[0] if quoted else (title or author)
+            book_title = "" if title.casefold() == "unknown title" else title
+            quoted_identity = quoted[0] if quoted else ""
+            if quoted_identity.casefold() == "unknown title":
+                quoted_identity = ""
+            identity = quoted_identity or book_title or author
             ranked, relevance = rank_search_results(
                 query,
                 results,
                 identity=identity,
+                title=book_title,
+                author=author,
                 strict_identity=True,
             )
             diagnostics = getattr(self.provider, "diagnostics", None)

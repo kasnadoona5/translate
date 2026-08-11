@@ -159,6 +159,10 @@ class LLMRecoveryConfig:
 class LLMTransportConfig:
     """Portable HTTP/SSE behavior for OpenAI-compatible model endpoints."""
 
+    # Protocol profile, not a model profile. ``auto`` recognizes common
+    # endpoints conservatively; an explicit value is useful behind a private
+    # reverse proxy whose URL does not identify the gateway.
+    profile: str = "auto"
     streaming: bool = True
     connect_timeout_seconds: float = 30.0
     read_timeout_seconds: float = 900.0
@@ -541,6 +545,9 @@ class TarjomehConfig:
             self.llm.transport.streaming = True
         elif value in ("0", "false", "no", "off"):
             self.llm.transport.streaming = False
+        value = env("LLM_TRANSPORT_PROFILE", "").strip().lower()
+        if value:
+            self.llm.transport.profile = value
         value = env("LLM_READ_TIMEOUT_SECONDS", "").strip()
         if value:
             try:
@@ -814,6 +821,15 @@ class TarjomehConfig:
                 errors.append(f"llm.transport.{field_name} must be > 0")
         if not 0 <= self.llm.transport.unknown_outcome_retries <= 2:
             errors.append("llm.transport.unknown_outcome_retries must be 0-2")
+        valid_transport_profiles = (
+            "auto", "9router", "openrouter", "opencode",
+            "openai_compatible", "anthropic_compatible",
+        )
+        if self.llm.transport.profile not in valid_transport_profiles:
+            errors.append(
+                "llm.transport.profile must be one of "
+                f"{valid_transport_profiles}"
+            )
 
         if self.translation.back_translation_sample_pct < 0 or \
            self.translation.back_translation_sample_pct > 100:

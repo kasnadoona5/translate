@@ -401,9 +401,11 @@ Port `20128` should not be left publicly accessible without authentication and
 network restrictions. Tarjomeh only needs internal access to it.
 
 Tarjomeh accepts ordinary JSON, OpenAI-compatible SSE, and Anthropic-style SSE
-from compatible gateways. v9.6 requests streaming by default, separates hidden
-reasoning from visible output, and sends `X-9Router-Token-Saver: off` to a
-recognized 9router endpoint so Tarjomeh retains control of retries and budgets.
+from compatible gateways. It incrementally assembles complete SSE events,
+including multiline `data:` fields, while separating hidden reasoning from
+visible output. Set `LLM_TRANSPORT_PROFILE` only when an opaque reverse proxy
+prevents automatic detection. Recognized 9router endpoints also receive
+`X-9Router-Token-Saver: off` so Tarjomeh retains control of retries and budgets.
 
 ### Updating the standalone 9router container
 
@@ -841,11 +843,14 @@ and token evidence, then retries with a larger evidence-based bounded budget.
 Critic recovery can use a separate fallback. Partial translations are never
 accepted as complete.
 
-### `malformed_response` containing `data:`
+### Empty, incomplete, or malformed streaming response
 
-Confirm the VPS is on v9.6 or later. v9.6 normalizes OpenAI and Anthropic SSE,
-structured JSON wrapped in markdown or leading reasoning blocks, and common
-OpenAI-compatible non-streaming response envelopes.
+Confirm the VPS is on v9.10 or later. The first recovery replays the exact same
+request body, model, reasoning policy, token budget, and `stream=true` setting.
+Attempt events record response bytes, event counts, terminal status, safe
+provider request IDs, and a request-payload hash. If both attempts have the
+same hash and 9router reports `OUT 0`, the remaining failure is upstream of
+Tarjomeh's decoder; incomplete content is still barred from memory and export.
 
 ### Long-thinking request times out
 
@@ -894,6 +899,10 @@ releases.
 
 ## Release History
 
+- v9.10: standards-aware incremental SSE decoding, protocol-profile detection,
+  exact-request transport replay, privacy-safe wire diagnostics, provenance-aware
+  terminology reconciliation, numeric-role QA evidence, stricter book identity
+  filtering, and bilingual-summary provenance deduplication
 - v9.8: geometry-aware PDF reading order, canonical chapter headings, safer
   rotated-table preservation, trust-aware short-term continuity, complete-sentence
   body-style samples, improved DOCX heading/table formatting, and legacy job

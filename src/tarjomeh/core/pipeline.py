@@ -1690,7 +1690,10 @@ class TranslationPipeline:
                             "category": category,
                         }
                         memory_manager.proper_nouns.add_noun(
-                            term, persian, category=category
+                            term,
+                            persian,
+                            category=category,
+                            provenance="auto_extraction",
                         )
                 glossary_manager.merge_auto_extracted(auto_terms)
                 self.db.save_job_artifact(
@@ -1728,7 +1731,10 @@ class TranslationPipeline:
         for entry in glossary_manager.entries:
             if bool(getattr(entry, "include_original", False)):
                 memory_manager.proper_nouns.add_noun(
-                    entry.source, entry.target, category="approved_term"
+                    entry.source,
+                    entry.target,
+                    category="approved_term",
+                    provenance="curated_glossary",
                 )
 
         research_artifact = self._prepare_book_research(
@@ -2588,7 +2594,10 @@ class TranslationPipeline:
         for entry in glossary_manager.entries:
             if bool(getattr(entry, "include_original", False)):
                 memory_manager.proper_nouns.add_noun(
-                    entry.source, entry.target, category="approved_term"
+                    entry.source,
+                    entry.target,
+                    category="approved_term",
+                    provenance="curated_glossary",
                 )
         research_artifact = self.db.get_job_artifact(job_id, "book_research")
         if research_artifact is not None:
@@ -2971,6 +2980,46 @@ class TranslationPipeline:
             for entry in matched_entries
             if entry.source.casefold() not in citation_exempt_sources
         ]
+        memory_reconciliations: list[dict[str, Any]] = []
+
+        def reconcile_curated_memory() -> None:
+            for entry in active_entries:
+                if bool(getattr(entry, "is_auto", False)):
+                    continue
+                existing = memory_manager.proper_nouns.provenance_for(entry.source)
+                include_original = bool(getattr(entry, "include_original", False))
+                if not existing and not include_original:
+                    continue
+                outcome = memory_manager.proper_nouns.add_noun(
+                    entry.source,
+                    entry.target,
+                    category=("approved_term" if include_original else "term"),
+                    provenance="curated_glossary",
+                )
+                if outcome.get("action") in {
+                    "replaced_lower_authority", "confirmed"
+                }:
+                    memory_reconciliations.append(outcome)
+
+        if lock:
+            with lock:
+                reconcile_curated_memory()
+        else:
+            reconcile_curated_memory()
+        if memory_reconciliations:
+            self.db.log_chunk_event(
+                job_id,
+                idx,
+                "terminology_memory_reconciled",
+                {
+                    "count": len(memory_reconciliations),
+                    "mappings": memory_reconciliations[:50],
+                    "policy": (
+                        "Curated terminology supersedes stale automatic memory; "
+                        "automatic suggestions cannot overwrite curated mappings."
+                    ),
+                },
+            )
         enforce_auto_terms = bool(
             getattr(
                 self.config.glossary,

@@ -23,6 +23,13 @@ import tiktoken
 
 from tarjomeh.core.config import TarjomehConfig
 from tarjomeh.core.structured_output import normalize_model_text
+from tarjomeh.core.transport import (
+    TransportDecodeError,
+    decode_response_text,
+    detect_transport_profile,
+    stream_completion_async,
+    stream_completion_sync,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +88,17 @@ _QUALITY_RECOVERY_OPERATIONS = {
     "refinement",
     "refinement_json_repair",
 }
+_TRANSPORT_FAILURE_REASONS = {
+    "empty_stream",
+    "empty_response",
+    "incomplete_stream",
+    "malformed_sse",
+    "malformed_json",
+    "provider_error",
+    "read_timeout",
+    "connect_timeout",
+    "transport_error",
+}
 
 
 def _use_no_reasoning_recovery(
@@ -122,6 +140,19 @@ class MalformedLLMResponseError(Exception):
 class IncompleteCompletionError(Exception):
     """Raised when a provider explicitly reports an incomplete generation."""
     pass
+
+
+def _map_transport_decode_error(exc: TransportDecodeError) -> Exception:
+    """Map wire-level failures onto the client's established public errors."""
+    if exc.kind in {"empty_stream", "empty_response"}:
+        mapped: Exception = EmptyCompletionError(str(exc))
+    elif exc.kind in {"incomplete_stream", "provider_error"}:
+        mapped = IncompleteCompletionError(str(exc))
+    else:
+        mapped = MalformedLLMResponseError(str(exc))
+    setattr(mapped, "transport_failure_kind", exc.kind)
+    setattr(mapped, "transport_evidence", dict(exc.evidence))
+    return mapped
 
 
 class LLMClient:
@@ -464,6 +495,117 @@ class LLMClient:
         lowered = api_base.casefold()
         return "9router" in lowered or ":20128" in lowered
 
+    def _transport_profile(self, url: str) -> str:
+        return detect_transport_profile(
+            configured=str(getattr(self.config.llm.transport, "profile", "auto")),
+            provider=self.config.llm.provider,
+            url=url,
+        )
+
+    @staticmethod
+    def _buffered_response_evidence(
+        response: httpx.Response,
+        response_text: str,
+        profile: str,
+        parsed_evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        response_headers = (
+            response.headers
+            if isinstance(response.headers, (dict, httpx.Headers))
+            else {}
+        )
+        identifiers = {
+            name: value
+            for name in (
+                "x-request-id",
+                "request-id",
+                "x-openrouter-generation-id",
+                "cf-ray",
+            )
+            if (value := response_headers.get(name))
+        }
+        return {
+            **parsed_evidence,
+            "transport_profile": profile,
+            "response_bytes": len(response_text.encode("utf-8")),
+            "response_content_type": str(
+                response_headers.get("content-type", "")
+            )[:160],
+            "response_identifiers": identifiers,
+            "first_event_seconds": None,
+            "buffered_response": True,
+        }
+
+    def _request_sync(
+        self,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+    ) -> tuple[httpx.Response, dict[str, Any], dict[str, Any]]:
+        """Execute one request using incremental transport in production."""
+        profile = self._transport_profile(url)
+        # Existing tests and embedders may replace ``post`` on this client
+        # instance. Honour that explicit seam; a normal httpx.Client has no
+        # instance-level post attribute and therefore uses true streaming.
+        explicit_post_override = "post" in vars(self._client)
+        try:
+            if bool(payload.get("stream")) and not explicit_post_override:
+                response, data, evidence = stream_completion_sync(
+                    self._client,
+                    url=url,
+                    headers=headers,
+                    payload=payload,
+                    profile=profile,
+                )
+            else:
+                response = self._client.post(url, headers=headers, json=payload)
+                response.raise_for_status()
+                response_text = response.text
+                data, parsed_evidence = decode_response_text(
+                    response_text,
+                    profile=profile,
+                )
+                evidence = self._buffered_response_evidence(
+                    response, response_text, profile, parsed_evidence
+                )
+        except TransportDecodeError as exc:
+            raise _map_transport_decode_error(exc) from exc
+        return response, self._normalize_completion_envelope(data), evidence
+
+    async def _request_async(
+        self,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+    ) -> tuple[httpx.Response, dict[str, Any], dict[str, Any]]:
+        """Asynchronous request counterpart with the same decoding contract."""
+        profile = self._transport_profile(url)
+        try:
+            if bool(payload.get("stream")):
+                response, data, evidence = await stream_completion_async(
+                    self._aclient,
+                    url=url,
+                    headers=headers,
+                    payload=payload,
+                    profile=profile,
+                )
+            else:
+                response = await self._aclient.post(
+                    url, headers=headers, json=payload
+                )
+                response.raise_for_status()
+                response_text = response.text
+                data, parsed_evidence = decode_response_text(
+                    response_text,
+                    profile=profile,
+                )
+                evidence = self._buffered_response_evidence(
+                    response, response_text, profile, parsed_evidence
+                )
+        except TransportDecodeError as exc:
+            raise _map_transport_decode_error(exc) from exc
+        return response, self._normalize_completion_envelope(data), evidence
+
     def _update_usage(self, response: httpx.Response, response_json: dict[str, Any]) -> None:
         """Update token usage counters and cost metrics."""
         usage = response_json.get("usage", {})
@@ -495,31 +637,11 @@ class LLMClient:
     @staticmethod
     def _parse_response_json(response_text: str) -> dict[str, Any]:
         """Parse JSON/SSE and return one canonical chat-completion envelope."""
-        res_text = response_text.strip()
         try:
-            parsed = json.loads(res_text)
-            if not isinstance(parsed, dict):
-                raise MalformedLLMResponseError(
-                    "LLM endpoint returned a non-object response."
-                )
-            return LLMClient._normalize_completion_envelope(parsed)
-        except json.JSONDecodeError as first_error:
-            if res_text.startswith(("data:", "event:")):
-                return LLMClient._assemble_sse_chat_completion(res_text)
-
-            last_brace = res_text.rfind("}")
-            if last_brace != -1:
-                try:
-                    parsed = json.loads(res_text[:last_brace + 1])
-                    if isinstance(parsed, dict):
-                        return LLMClient._normalize_completion_envelope(parsed)
-                except json.JSONDecodeError:
-                    pass
-
-            snippet = res_text[:300].replace("\n", "\\n")
-            raise MalformedLLMResponseError(
-                f"LLM endpoint returned malformed JSON response: {snippet!r}"
-            ) from first_error
+            parsed, _evidence = decode_response_text(response_text)
+        except TransportDecodeError as exc:
+            raise _map_transport_decode_error(exc) from exc
+        return LLMClient._normalize_completion_envelope(parsed)
 
     @staticmethod
     def _normalize_completion_envelope(data: dict[str, Any]) -> dict[str, Any]:
@@ -584,163 +706,7 @@ class LLMClient:
     @staticmethod
     def _assemble_sse_chat_completion(response_text: str) -> dict[str, Any]:
         """Combine OpenAI- or Anthropic-compatible SSE into one response."""
-        result: dict[str, Any] = {}
-        content_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        finish_reason: str | None = None
-        usage: dict[str, Any] = {}
-        saw_event = False
-        saw_done = False
-        event_name = ""
-
-        for raw_line in response_text.splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith(":"):
-                continue
-            if line.startswith("event:"):
-                event_name = line[6:].strip()
-                continue
-            if not line.startswith("data:"):
-                raise MalformedLLMResponseError(
-                    "LLM endpoint returned an invalid SSE chat-completion stream."
-                )
-
-            data = line[5:].strip()
-            if data == "[DONE]":
-                saw_done = True
-                continue
-
-            try:
-                chunk = json.loads(data)
-            except json.JSONDecodeError as exc:
-                snippet = data[:300].replace("\n", "\\n")
-                raise MalformedLLMResponseError(
-                    f"LLM endpoint returned malformed SSE data: {snippet!r}"
-                ) from exc
-            if not isinstance(chunk, dict):
-                raise MalformedLLMResponseError(
-                    "LLM endpoint returned a non-object SSE data event."
-                )
-            if chunk.get("error"):
-                raise IncompleteCompletionError(
-                    f"LLM SSE stream reported an error: {chunk['error']}"
-                )
-
-            saw_event = True
-            chunk_type = str(chunk.get("type", event_name))
-            if chunk_type == "message_start":
-                message_data = chunk.get("message", {})
-                if isinstance(message_data, dict):
-                    for key in ("id", "model"):
-                        if message_data.get(key) and key not in result:
-                            result[key] = message_data[key]
-                    start_usage = message_data.get("usage")
-                    if isinstance(start_usage, dict):
-                        usage.update(start_usage)
-                continue
-            if chunk_type == "content_block_start":
-                block = chunk.get("content_block", {})
-                if isinstance(block, dict):
-                    block_text = block.get("text", block.get("thinking", ""))
-                    if isinstance(block_text, str):
-                        if block.get("type") in {"thinking", "reasoning"}:
-                            reasoning_parts.append(block_text)
-                        else:
-                            content_parts.append(block_text)
-                continue
-            if chunk_type == "content_block_delta":
-                delta = chunk.get("delta", {})
-                if isinstance(delta, dict):
-                    if delta.get("type") in {"thinking_delta", "reasoning_delta"}:
-                        part = delta.get("thinking", delta.get("reasoning", ""))
-                        if isinstance(part, str):
-                            reasoning_parts.append(part)
-                    else:
-                        part = delta.get("text", "")
-                        if isinstance(part, str):
-                            content_parts.append(part)
-                continue
-            if chunk_type == "message_delta":
-                delta = chunk.get("delta", {})
-                if isinstance(delta, dict) and delta.get("stop_reason") is not None:
-                    finish_reason = LLMClient._canonical_finish_reason(
-                        delta["stop_reason"]
-                    )
-                delta_usage = chunk.get("usage")
-                if isinstance(delta_usage, dict):
-                    usage.update(delta_usage)
-                continue
-            if chunk_type == "message_stop":
-                saw_done = True
-                continue
-
-            for key in ("id", "object", "created", "model", "system_fingerprint"):
-                if key in chunk and key not in result:
-                    result[key] = chunk[key]
-
-            raw_usage = chunk.get("usage")
-            if isinstance(raw_usage, dict):
-                usage = raw_usage
-
-            choices = chunk.get("choices")
-            if not isinstance(choices, list) or not choices:
-                continue
-            choice = choices[0]
-            if not isinstance(choice, dict):
-                continue
-            delta = choice.get("delta")
-            message = choice.get("message")
-            part = None
-            if isinstance(delta, dict):
-                part = delta.get("content")
-                for reasoning_key in ("reasoning_content", "reasoning", "analysis"):
-                    reasoning_part = delta.get(reasoning_key)
-                    if isinstance(reasoning_part, str):
-                        reasoning_parts.append(reasoning_part)
-            elif isinstance(message, dict):
-                part = message.get("content")
-                for reasoning_key in ("reasoning_content", "reasoning", "analysis"):
-                    reasoning_part = message.get(reasoning_key)
-                    if isinstance(reasoning_part, str):
-                        reasoning_parts.append(reasoning_part)
-            if isinstance(part, str):
-                content_parts.append(part)
-            if choice.get("finish_reason") is not None:
-                finish_reason = LLMClient._canonical_finish_reason(
-                    choice["finish_reason"]
-                )
-
-        if not saw_event:
-            raise MalformedLLMResponseError(
-                "LLM endpoint returned an empty SSE chat-completion stream."
-            )
-        if not saw_done and finish_reason is None:
-            raise IncompleteCompletionError(
-                "LLM SSE stream ended without [DONE] or a finish reason."
-            )
-
-        if "input_tokens" in usage and "prompt_tokens" not in usage:
-            usage["prompt_tokens"] = usage.get("input_tokens", 0)
-        if "output_tokens" in usage and "completion_tokens" not in usage:
-            usage["completion_tokens"] = usage.get("output_tokens", 0)
-        if usage:
-            usage.setdefault(
-                "total_tokens",
-                int(usage.get("prompt_tokens", 0) or 0)
-                + int(usage.get("completion_tokens", 0) or 0),
-            )
-        result["choices"] = [{
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": "".join(content_parts),
-                "reasoning_content": "".join(reasoning_parts),
-            },
-            "finish_reason": finish_reason,
-        }]
-        if usage:
-            result["usage"] = usage
-        return result
+        return LLMClient._parse_response_json(response_text)
 
     def set_trace_context(self, job_id: str | None, chunk_index: int | None) -> None:
         """Attach job context to attempt events in the current worker thread."""
@@ -810,6 +776,16 @@ class LLMClient:
         payload = dict(original)
         recovery = self.config.llm.recovery
         calculation: dict[str, Any] = {}
+
+        # The first transport recovery is an exact logical replay. Increasing
+        # output budget or changing reasoning cannot repair missing/corrupted
+        # wire data and would make diagnosis and billing less trustworthy.
+        if attempt == 1 and failure_reason in _TRANSPORT_FAILURE_REASONS:
+            return payload, {
+                "stage": "transport_replay",
+                "same_request_contract": True,
+                "failure_reason": failure_reason,
+            }
 
         # Full-quality Attempt 2 intentionally keeps the original model and
         # reasoning policy. A configured fallback remains a third bounded rung.
@@ -975,6 +951,7 @@ class LLMClient:
         response_model: str = "",
         failure_reason: str = "",
         error: str = "",
+        transport_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         prompt_metrics = self._prompt_metrics(payload)
         usage_evidence = self._usage_evidence(usage, content)
@@ -988,6 +965,14 @@ class LLMClient:
         contract_sha256 = hashlib.sha256(
             json.dumps(
                 contract,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        request_sha256 = hashlib.sha256(
+            json.dumps(
+                payload,
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
@@ -1030,6 +1015,7 @@ class LLMClient:
                 self.config.llm.transport.read_timeout_seconds
             ),
             "request_contract_sha256": contract_sha256,
+            "request_payload_sha256": request_sha256,
             "prompt_tokens": usage.get("prompt_tokens", 0),
             "completion_tokens": usage.get("completion_tokens", 0),
             "total_tokens": usage.get("total_tokens", 0),
@@ -1043,6 +1029,31 @@ class LLMClient:
             event["failure_reason"] = failure_reason
         if error:
             event["error"] = error[:1000]
+        evidence = dict(transport_evidence or {})
+        if evidence:
+            event["transport"] = {
+                key: evidence.get(key)
+                for key in (
+                    "transport_profile",
+                    "protocol",
+                    "response_bytes",
+                    "line_count",
+                    "event_count",
+                    "data_event_count",
+                    "terminal_received",
+                    "content_bytes",
+                    "reasoning_bytes",
+                    "event_types",
+                    "response_sha256",
+                    "response_content_type",
+                    "response_identifiers",
+                    "first_event_seconds",
+                    "buffered_response",
+                    "trailing_json_repair",
+                    "trailing_bytes_ignored",
+                )
+                if key in evidence
+            }
         return event
 
     def complete(
@@ -1102,11 +1113,14 @@ class LLMClient:
             response_model = ""
             normalization: dict[str, Any] = {}
             response_reasoning_chars = 0
+            transport_evidence: dict[str, Any] = {
+                "transport_profile": self._transport_profile(url),
+            }
             try:
-                response = self._client.post(url, headers=headers, json=payload)
+                response, res_json, transport_evidence = self._request_sync(
+                    url, headers, payload
+                )
                 status_code = response.status_code
-                response.raise_for_status()
-                res_json = self._parse_response_json(response.text)
                 response_model = str(res_json.get("model", "") or "")
                 self._update_usage(response, res_json)
                 raw_usage = res_json.get("usage", {})
@@ -1159,6 +1173,7 @@ class LLMClient:
                     usage=usage,
                     content=content,
                     response_model=response_model,
+                    transport_evidence=transport_evidence,
                 )
                 if attempt == 0 and preflight_calculation:
                     event["preflight_calculation"] = preflight_calculation
@@ -1180,14 +1195,27 @@ class LLMClient:
                     getattr(exc.response, "status_code", None)
                     if hasattr(exc, "response") else status_code
                 )
+                transport_evidence.update(
+                    dict(getattr(exc, "transport_evidence", {}) or {})
+                )
                 if isinstance(exc, TruncatedCompletionError):
                     failure_reason = "length"
                 elif isinstance(exc, IncompleteCompletionError):
-                    failure_reason = str(finish_reason or "error")
+                    failure_reason = str(
+                        getattr(exc, "transport_failure_kind", "")
+                        or finish_reason
+                        or "incomplete_completion"
+                    )
                 elif isinstance(exc, EmptyCompletionError):
-                    failure_reason = "empty"
+                    failure_reason = str(
+                        getattr(exc, "transport_failure_kind", "")
+                        or "empty_completion"
+                    )
                 elif isinstance(exc, MalformedLLMResponseError):
-                    failure_reason = "malformed_response"
+                    failure_reason = str(
+                        getattr(exc, "transport_failure_kind", "")
+                        or "malformed_response"
+                    )
                 else:
                     if isinstance(exc, httpx.ReadTimeout):
                         failure_reason = "read_timeout"
@@ -1222,6 +1250,7 @@ class LLMClient:
                     response_model=response_model,
                     failure_reason=failure_reason,
                     error=str(exc),
+                    transport_evidence=transport_evidence,
                 )
                 if attempt == 0 and preflight_calculation:
                     event["preflight_calculation"] = preflight_calculation
@@ -1261,7 +1290,13 @@ class LLMClient:
                     delay,
                 )
                 time.sleep(delay)
-                if self.config.llm.provider.lower() == "openrouter":
+                exact_transport_replay = (
+                    attempt == 0 and failure_reason in _TRANSPORT_FAILURE_REASONS
+                )
+                if (
+                    self.config.llm.provider.lower() == "openrouter"
+                    and not exact_transport_replay
+                ):
                     headers["Authorization"] = f"Bearer {self._get_next_api_key()}"
 
         raise RuntimeError("LLM request exhausted its bounded attempt budget.")
@@ -1323,13 +1358,14 @@ class LLMClient:
             response_model = ""
             normalization: dict[str, Any] = {}
             response_reasoning_chars = 0
+            transport_evidence: dict[str, Any] = {
+                "transport_profile": self._transport_profile(url),
+            }
             try:
-                response = await self._aclient.post(
-                    url, headers=headers, json=payload
+                response, res_json, transport_evidence = await self._request_async(
+                    url, headers, payload
                 )
                 status_code = response.status_code
-                response.raise_for_status()
-                res_json = self._parse_response_json(response.text)
                 response_model = str(res_json.get("model", "") or "")
                 self._update_usage(response, res_json)
                 raw_usage = res_json.get("usage", {})
@@ -1382,6 +1418,7 @@ class LLMClient:
                     usage=usage,
                     content=content,
                     response_model=response_model,
+                    transport_evidence=transport_evidence,
                 )
                 if attempt == 0 and preflight_calculation:
                     event["preflight_calculation"] = preflight_calculation
@@ -1403,14 +1440,27 @@ class LLMClient:
                     getattr(exc.response, "status_code", None)
                     if hasattr(exc, "response") else status_code
                 )
+                transport_evidence.update(
+                    dict(getattr(exc, "transport_evidence", {}) or {})
+                )
                 if isinstance(exc, TruncatedCompletionError):
                     failure_reason = "length"
                 elif isinstance(exc, IncompleteCompletionError):
-                    failure_reason = str(finish_reason or "error")
+                    failure_reason = str(
+                        getattr(exc, "transport_failure_kind", "")
+                        or finish_reason
+                        or "incomplete_completion"
+                    )
                 elif isinstance(exc, EmptyCompletionError):
-                    failure_reason = "empty"
+                    failure_reason = str(
+                        getattr(exc, "transport_failure_kind", "")
+                        or "empty_completion"
+                    )
                 elif isinstance(exc, MalformedLLMResponseError):
-                    failure_reason = "malformed_response"
+                    failure_reason = str(
+                        getattr(exc, "transport_failure_kind", "")
+                        or "malformed_response"
+                    )
                 else:
                     if isinstance(exc, httpx.ReadTimeout):
                         failure_reason = "read_timeout"
@@ -1445,6 +1495,7 @@ class LLMClient:
                     response_model=response_model,
                     failure_reason=failure_reason,
                     error=str(exc),
+                    transport_evidence=transport_evidence,
                 )
                 if attempt == 0 and preflight_calculation:
                     event["preflight_calculation"] = preflight_calculation
@@ -1484,7 +1535,13 @@ class LLMClient:
                     delay,
                 )
                 await asyncio.sleep(delay)
-                if self.config.llm.provider.lower() == "openrouter":
+                exact_transport_replay = (
+                    attempt == 0 and failure_reason in _TRANSPORT_FAILURE_REASONS
+                )
+                if (
+                    self.config.llm.provider.lower() == "openrouter"
+                    and not exact_transport_replay
+                ):
                     headers["Authorization"] = f"Bearer {self._get_next_api_key()}"
 
         raise RuntimeError("LLM request exhausted its bounded attempt budget.")

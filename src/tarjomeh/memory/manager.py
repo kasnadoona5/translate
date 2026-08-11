@@ -382,6 +382,7 @@ class MemoryManager:
                             term,
                             persian,
                             category=str(item.get("category", "term")),
+                            provenance="incremental_extraction",
                         )
                         accepted += 1
             elif isinstance(items, dict):
@@ -395,6 +396,7 @@ class MemoryManager:
                             term,
                             persian,
                             category=str(item.get("category", "term")),
+                            provenance="incremental_extraction",
                         )
                         accepted += 1
             return {

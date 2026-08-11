@@ -11,11 +11,32 @@ import re
 
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
+_PROVENANCE_LINE_RE = re.compile(
+    r"^(?:provenance\s*:\s*translated content only\.?|"
+    r"\u0645\u0646\u0634[\u0623\u0627]\s*:\s*\u0641\u0642\u0637\s+"
+    r"\u0645\u062d\u062a\u0648\u0627\u06cc\s+\u062a\u0631\u062c\u0645\u0647[\u200c\s-]*"
+    r"\u0634\u062f\u0647\.?)$",
+    re.IGNORECASE,
+)
 
 
 def _clean_summary_line(value: str) -> str:
     clean = html.unescape(_HTML_TAG_RE.sub("", value or ""))
     return " ".join(clean.replace("\u200e", "").replace("\u200f", "").split())
+
+
+def _deduplicate_summary_lines(lines: list[str]) -> list[str]:
+    """Remove protocol provenance and exact repeats without rewriting prose."""
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in lines:
+        clean = _clean_summary_line(value)
+        identity = re.sub(r"[\s\u200c]+", " ", clean).casefold()
+        if not clean or _PROVENANCE_LINE_RE.fullmatch(clean) or identity in seen:
+            continue
+        seen.add(identity)
+        result.append(clean)
+    return result
 
 
 class BilingualSummary:
@@ -60,6 +81,8 @@ class BilingualSummary:
             elif current_section == "persian":
                 fa_parts.append(line_str)
 
+        eng_parts = _deduplicate_summary_lines(eng_parts)
+        fa_parts = _deduplicate_summary_lines(fa_parts)
         if eng_parts:
             self.english_summary = "\n".join(eng_parts)
         if fa_parts:
@@ -100,12 +123,12 @@ class BilingualSummary:
 
     def deserialize(self, data: dict[str, str]) -> None:
         """Restore the layer state from serialized data."""
-        self.english_summary = _clean_summary_line(
-            data.get("english_summary", "")
-        )
-        self.persian_summary = _clean_summary_line(
-            data.get("persian_summary", "")
-        )
+        self.english_summary = "\n".join(_deduplicate_summary_lines(
+            str(data.get("english_summary", "")).splitlines()
+        ))
+        self.persian_summary = "\n".join(_deduplicate_summary_lines(
+            str(data.get("persian_summary", "")).splitlines()
+        ))
 
     def __repr__(self) -> str:
         en_len = len(self.english_summary)

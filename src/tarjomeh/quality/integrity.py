@@ -93,6 +93,77 @@ def extract_numbers(text: str) -> Counter[str]:
     return Counter(values)
 
 
+def classify_numbers(text: str) -> dict[str, Counter[str]]:
+    """Classify comparable numbers for QA evidence without changing matching.
+
+    Footnote/endnote markers remain governed by ``extract_note_markers`` and
+    are intentionally excluded here. The roles make a failure explainable;
+    they do not relax or strengthen the existing numeric integrity decision.
+    """
+    normalized = (text or "").translate(_DIGIT_MAP).replace("\u066a", "%")
+    normalized = re.sub(
+        r"(?<=\d)\s*([.\u066b\u066c])\s*(?=\d)", r"\1", normalized
+    )
+    normalized = _NOTE_RE.sub("", normalized)
+    normalized = re.sub(
+        r"(?<=\d)\s*(?:percent|per\s+cent|\u062f\u0631\u0635\u062f)\b",
+        "%",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    roles = {
+        "prose": Counter(),
+        "citation": Counter(),
+        "structural": Counter(),
+    }
+    structural_labels = "|".join(re.escape(value) for value in (
+        *_STRUCTURAL_NUMBER_LABELS,
+        *(target for values in _STRUCTURAL_NUMBER_LABELS.values() for target in values),
+        "page", "pages", "p", "pp",
+    ))
+    for match in _NUMBER_RE.finditer(normalized):
+        value = re.sub(r"\s+", "", match.group()).replace("\u066b", ".").replace(
+            "\u066c", ","
+        )
+        before = normalized[max(0, match.start() - 80):match.start()]
+        after = normalized[match.end():match.end() + 50]
+        in_parenthetical = before.rfind("(") > before.rfind(")") and ")" in after
+        is_year = bool(_CITATION_YEAR_RE.fullmatch(value.rstrip("%")))
+        citation_cue = bool(re.search(
+            r"(?:\b(?:see|cf|ibid|et\s+al|doi)\.?|\u0631\.\s*\u06a9\.)\s*$",
+            before,
+            re.IGNORECASE,
+        ))
+        structural_cue = bool(re.search(
+            rf"(?:\b(?:{structural_labels})\.?\s*)$",
+            before,
+            re.IGNORECASE,
+        ))
+        if is_year or citation_cue or in_parenthetical:
+            role = "citation"
+        elif structural_cue:
+            role = "structural"
+        else:
+            role = "prose"
+        roles[role][value] += 1
+    return roles
+
+
+def _missing_number_roles(source: str, missing: Counter[str]) -> dict[str, list[str]]:
+    """Allocate missing numeric occurrences to their source-side QA roles."""
+    remaining = Counter(missing)
+    output: dict[str, list[str]] = {}
+    source_roles = classify_numbers(source)
+    for role in ("citation", "structural", "prose"):
+        allocated = source_roles[role] & remaining
+        if allocated:
+            output[role] = list(allocated.elements())
+            remaining -= allocated
+    if remaining:
+        output.setdefault("prose", []).extend(remaining.elements())
+    return output
+
+
 def extract_note_markers(text: str) -> list[str]:
     markers = []
     for bracketed, superscript in _NOTE_RE.findall(text or ""):
@@ -370,12 +441,16 @@ class PostEditIntegrityGate:
                 "numbers_missing", "blocking",
                 "Source numbers, dates, pages, or percentages are missing or changed.",
                 missing=newly_missing_numbers,
+                missing_by_role=_missing_number_roles(
+                    source, newly_missing_number_counts
+                ),
             )
         elif missing_number_counts:
             add(
                 "numbers_still_missing", "warning",
                 "The edit did not introduce numeric loss, but an earlier omission remains.",
                 missing=list(missing_number_counts.elements()),
+                missing_by_role=_missing_number_roles(source, missing_number_counts),
             )
 
         required_notes = Counter(extract_note_markers(source))

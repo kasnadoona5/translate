@@ -52,11 +52,15 @@ def rank_search_results(
     results: list[SearchResult],
     *,
     identity: str = "",
+    title: str = "",
+    author: str = "",
     strict_identity: bool = True,
 ) -> tuple[list[SearchResult], list[dict[str, Any]]]:
     """Rank search evidence conservatively and reject clear identity mismatches."""
     query_tokens = _search_tokens(query)
     identity_tokens = _search_tokens(identity)
+    title_tokens = _search_tokens(title)
+    author_tokens = _search_tokens(author)
     ranked: list[tuple[float, SearchResult]] = []
     diagnostics: list[dict[str, Any]] = []
     for result in results:
@@ -66,6 +70,14 @@ def rank_search_results(
         identity_coverage = (
             len(identity_tokens & haystack_tokens) / len(identity_tokens)
             if identity_tokens else 1.0
+        )
+        title_coverage = (
+            len(title_tokens & haystack_tokens) / len(title_tokens)
+            if title_tokens else 1.0
+        )
+        author_coverage = (
+            len(author_tokens & haystack_tokens) / len(author_tokens)
+            if author_tokens else 1.0
         )
         required_identity_coverage = (
             (1.0 if len(identity_tokens) <= 3 else 0.7)
@@ -89,7 +101,28 @@ def rank_search_results(
         reasons: list[str] = []
         if strict_identity and not identity_tokens:
             reasons.append("missing_identity_anchor")
-        if identity_tokens and identity_coverage < required_identity_coverage:
+        title_requirement = 1.0 if len(title_tokens) <= 3 else 0.65
+        title_mismatch = bool(
+            title_tokens and title_coverage < title_requirement
+        )
+        # A full title match is a strong identity anchor even when a publisher
+        # result omits the author. Partial title matches require corroboration
+        # by at least one distinctive author token.
+        author_support_required = bool(
+            author_tokens and title_tokens and title_coverage < 0.9
+        )
+        author_mismatch = bool(
+            author_support_required and not (author_tokens & haystack_tokens)
+        )
+        if title_mismatch:
+            reasons.append("title_identity_mismatch")
+        if author_mismatch:
+            reasons.append("author_identity_mismatch")
+        if (
+            identity_tokens
+            and not title_tokens
+            and identity_coverage < required_identity_coverage
+        ):
             reasons.append("identity_mismatch")
         if query_tokens and query_coverage < 0.15:
             reasons.append("low_query_relevance")
@@ -98,6 +131,9 @@ def rank_search_results(
             "title": result.title[:300],
             "url": result.url[:1000],
             "score": round(score, 4),
+            "identity_coverage": round(identity_coverage, 4),
+            "title_coverage": round(title_coverage, 4),
+            "author_coverage": round(author_coverage, 4),
             "accepted": accepted,
             "reasons": reasons or (["below_relevance_threshold"] if not accepted else []),
         })
