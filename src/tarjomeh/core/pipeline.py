@@ -1015,6 +1015,21 @@ def _critique_for_event(critique: Any, threshold: float, iteration: int) -> dict
     }
 
 
+def _inline_aliases_from_state(noun_state: Any) -> dict[str, list[str]]:
+    """Read backward-compatible first-occurrence aliases from memory state."""
+    if not isinstance(noun_state, dict):
+        return {}
+    aliases = noun_state.get("aliases", {})
+    eligible = _inline_eligible_nouns_from_state(noun_state)
+    if not isinstance(aliases, dict):
+        return {}
+    return {
+        source: [str(value) for value in values if str(value).strip()]
+        for source, values in aliases.items()
+        if source in eligible and isinstance(values, list)
+    }
+
+
 def _adjacent_source_context(chunks: list[Chunk], index: int) -> str:
     """Return one bounded source neighbour on either side for Q3 review only."""
     parts: list[str] = []
@@ -1063,6 +1078,149 @@ def _chunk_needs_review(db: Any, job_id: str, chunk_index: int) -> bool:
         "chunk_review_required",
     }
     return any(event.get("event_type") in review_events for event in events[last_start:])
+
+
+def _chunk_style_approved(db: Any, job_id: str, chunk_index: int) -> bool:
+    """Admit only clean, high-quality prose into the persistent style guide."""
+    if _chunk_needs_review(db, job_id, chunk_index):
+        return False
+    events = db.get_chunk_events(job_id, chunk_index)
+    last_start = 0
+    for index, event in enumerate(events):
+        if event.get("event_type") == "chunk_started":
+            last_start = index
+    critiques = [
+        event.get("payload", {}) or {}
+        for event in events[last_start:]
+        if event.get("event_type") == "critique_completed"
+    ]
+    if not critiques:
+        return True
+    latest = critiques[-1]
+    if not bool(latest.get("valid", True)):
+        return False
+    if int(latest.get("blocking_issue_count", 0) or 0):
+        return False
+    scores = latest.get("scores", {}) or {}
+    required = ("accuracy", "fluency", "terminology", "register", "average")
+    try:
+        return all(float(scores.get(name, 0)) >= 8.5 for name in required)
+    except (TypeError, ValueError):
+        return False
+
+
+def _reconcile_committed_terminology(
+    db: Any,
+    job_id: str,
+    chunk_index: int,
+    memory_manager: MemoryManager,
+    source_text: str,
+    final_translation: str,
+) -> dict[str, Any]:
+    """Promote only committed, source-grounded corrections into safe memory."""
+    report: dict[str, Any] = {
+        "reconciled": [],
+        "aliases_added": [],
+        "skipped": [],
+    }
+    if _chunk_needs_review(db, job_id, chunk_index):
+        report["policy"] = "skipped_unresolved_chunk"
+        return report
+
+    issues = {
+        str(item.get("issue_id", "")): item
+        for item in db.get_qa_issues(job_id, chunk_index)
+        if str(item.get("issue_id", ""))
+    }
+    known = memory_manager.proper_nouns.inline_eligible_nouns()
+    for decision in db.get_issue_decisions(job_id, chunk_index):
+        decision_payload = decision.get("payload", {})
+        if not isinstance(decision_payload, dict):
+            decision_payload = {}
+        commit_status = str(
+            decision_payload.get("commit_status", "")
+        )
+        if not commit_status.startswith("committed"):
+            continue
+        issue_id = str(decision.get("issue_id", ""))
+        issue = issues.get(issue_id, {})
+        category = str(issue.get("category", "")).strip().lower()
+        if category not in {"accuracy", "terminology", "name"}:
+            continue
+        source_quote = " ".join(str(issue.get("source_quote", "")).split())
+        matching_sources = [
+            source for source in known
+            if re.search(
+                rf"(?<!\w){re.escape(source)}(?!\w)",
+                source_quote,
+                flags=re.IGNORECASE,
+            )
+            and re.search(
+                rf"(?<!\w){re.escape(source)}(?!\w)",
+                source_text,
+                flags=re.IGNORECASE,
+            )
+        ]
+        if not matching_sources:
+            continue
+        source = max(matching_sources, key=len)
+        if category == "accuracy":
+            quote_words = re.findall(r"[A-Za-z][A-Za-z'\-]*", source_quote)
+            source_words = re.findall(r"[A-Za-z][A-Za-z'\-]*", source)
+            if len(quote_words) > len(source_words) + 2:
+                continue
+
+        target_candidates = [
+            str(
+                decision.get("resulting_span", "")
+                or decision_payload.get("resulting_span", "")
+            ).strip(),
+            str(issue.get("suggested_correction", "")).strip(),
+        ]
+        target = next((
+            value for value in target_candidates
+            if value
+            and len(value) <= 120
+            and "\n" not in value
+            and not re.search(r"[.!?\u061f]", value)
+            and len(re.findall(r"[\u0600-\u06ff]+", value)) <= 10
+            and normalize_for_match(value) in normalize_for_match(final_translation)
+        ), "")
+        if not target:
+            report["skipped"].append({
+                "issue_id": issue_id,
+                "source": source,
+                "reason": "no_compact_committed_target_in_final_translation",
+            })
+            continue
+
+        provenance = memory_manager.proper_nouns.provenance_for(source)
+        if int(provenance.get("authority", 50)) >= 100:
+            report["skipped"].append({
+                "issue_id": issue_id,
+                "source": source,
+                "reason": "curated_authority_preserved",
+            })
+            continue
+        outcome = memory_manager.proper_nouns.add_noun(
+            source,
+            target,
+            category=memory_manager.proper_nouns.category_for(source),
+            provenance="accepted_correction",
+        )
+        if outcome.get("action") in {"replaced_lower_authority", "confirmed"}:
+            report["reconciled"].append({"issue_id": issue_id, **outcome})
+        elif memory_manager.proper_nouns.add_alias(source, target):
+            report["aliases_added"].append({
+                "issue_id": issue_id,
+                "source": source,
+                "target": target,
+            })
+    report["policy"] = (
+        "Only committed compact terminology corrections from review-clean chunks "
+        "may supersede lower-authority automatic memory; curated mappings remain protected."
+    )
+    return report
 
 
 def _chunk_review_reason_payload(
@@ -1825,6 +1983,9 @@ class TranslationPipeline:
                             quality_approved=not _chunk_needs_review(
                                 self.db, job_id, idx
                             ),
+                            style_approved=_chunk_style_approved(
+                                self.db, job_id, idx
+                            ),
                         )
                         self.db.log_chunk_event(
                             job_id, idx, "memory_update_policy", memory_policy
@@ -1834,7 +1995,7 @@ class TranslationPipeline:
                             try:
                                 noun_report = self._run_async(
                                     memory_manager.update_proper_nouns(
-                                        self.llm_client, chunk.text
+                                        self.llm_client, chunk.text, translation
                                     )
                                 )
                                 self.db.log_chunk_event(
@@ -1980,6 +2141,9 @@ class TranslationPipeline:
                             quality_approved=not _chunk_needs_review(
                                 self.db, job_id, idx
                             ),
+                            style_approved=_chunk_style_approved(
+                                self.db, job_id, idx
+                            ),
                         )
                         self.db.log_chunk_event(
                             job_id, idx, "memory_update_policy", memory_policy
@@ -1989,7 +2153,7 @@ class TranslationPipeline:
                             try:
                                 noun_report = self._run_async(
                                     memory_manager.update_proper_nouns(
-                                        self.llm_client, chunk.text
+                                        self.llm_client, chunk.text, translation
                                     )
                                 )
                                 self.db.log_chunk_event(
@@ -2323,6 +2487,7 @@ class TranslationPipeline:
         note_formats = {"docx", "epub", "markdown"}
         noun_state = memory_manager.proper_nouns.serialize()
         proper_nouns = memory_manager.proper_nouns.inline_eligible_nouns()
+        noun_aliases = memory_manager.proper_nouns.inline_eligible_aliases()
         noun_categories = dict(noun_state.get("categories", {}))
         if note_mode in {"inline", "both"}:
             anchor_audit = ensure_inline_proper_noun_originals(
@@ -2330,6 +2495,7 @@ class TranslationPipeline:
                 proper_nouns,
                 typographer,
                 noun_categories,
+                aliases=noun_aliases,
                 return_report=True,
             )
             self.db.save_job_artifact(
@@ -2375,6 +2541,7 @@ class TranslationPipeline:
                 typographer,
                 domain=self.config.translation.domain,
                 mode=note_mode,
+                aliases=noun_aliases,
             )
             self.db.save_job_artifact(job_id, "term_notes", {
                 "mode": note_mode,
@@ -2484,6 +2651,7 @@ class TranslationPipeline:
         proper_nouns = _inline_eligible_nouns_from_state(noun_state)
         noun_categories = dict(noun_state.get("categories", {})) \
             if isinstance(noun_state, dict) else {}
+        noun_aliases = _inline_aliases_from_state(noun_state)
 
         typographer = PersianTypographer(self.config.to_dict().get("persian"))
         if note_mode in {"inline", "both"}:
@@ -2492,6 +2660,7 @@ class TranslationPipeline:
                 dict(proper_nouns),
                 typographer,
                 noun_categories,
+                aliases=noun_aliases,
                 return_report=True,
             )
             self.db.save_job_artifact(
@@ -2539,6 +2708,7 @@ class TranslationPipeline:
                 domain=self.config.translation.domain,
                 mode=note_mode,
                 extra_terms=persisted_terms,
+                aliases=noun_aliases,
             )
         exporter_cls = get_exporter(fmt)
         exporter = exporter_cls(self.config.to_dict().get(fmt))
@@ -2695,6 +2865,9 @@ class TranslationPipeline:
             chunks[chunk_index],
             translation,
             quality_approved=final_status == ChunkStatus.COMPLETED,
+            style_approved=_chunk_style_approved(
+                self.db, job_id, chunk_index
+            ),
         )
         self.db.log_chunk_event(
             job_id, chunk_index, "memory_update_policy", memory_policy
@@ -2967,6 +3140,11 @@ class TranslationPipeline:
             context=f"{chunk.chapter_title}\n{chunk.section_title}",
             domain=self.config.translation.domain,
         )
+        contextual_advisories = getattr(
+            glossary_manager, "last_contextual_advisories", []
+        )
+        if not isinstance(contextual_advisories, list):
+            contextual_advisories = []
         citation_exempt_entries = [
             entry
             for entry in matched_entries
@@ -3036,15 +3214,34 @@ class TranslationPipeline:
             entry
             for entry in active_entries
             if bool(getattr(entry, "is_auto", False)) and not enforce_auto_terms
-        ]
+        ] + contextual_advisories
+        if contextual_advisories:
+            self.db.log_chunk_event(
+                job_id,
+                idx,
+                "glossary_context_deferred",
+                {
+                    "count": len(contextual_advisories),
+                    "entries": _glossary_entries_for_event(
+                        contextual_advisories
+                    ),
+                    "policy": (
+                        "Sense-qualified glossary rows without supporting author, "
+                        "sense, or local-context evidence are advisory, not mandatory."
+                    ),
+                },
+            )
         self.db.log_chunk_event(job_id, idx, "glossary_matches", {
-            "matched_count": len(matched_entries),
+            "matched_count": len(matched_entries) + len(contextual_advisories),
             "mandatory_count": len(enforced_entries),
             "advisory_count": len(advisory_entries),
             "auto_term_policy": (
                 "mandatory" if enforce_auto_terms else "advisory"
             ),
-            "entries": _glossary_entries_for_event(matched_entries),
+            "entries": _glossary_entries_for_event(
+                matched_entries + contextual_advisories
+            ),
+            "context_deferred_count": len(contextual_advisories),
             "citation_exemptions": [
                 entry.source for entry in citation_exempt_entries
             ],
@@ -4373,6 +4570,37 @@ Output ONLY the corrected Persian translation.
                 })
         else:
             self.db.log_chunk_event(job_id, idx, "back_translation_skipped", {"enabled": False})
+
+        if lock:
+            with lock:
+                reconciliation_report = _reconcile_committed_terminology(
+                    self.db,
+                    job_id,
+                    idx,
+                    memory_manager,
+                    chunk.text,
+                    translation,
+                )
+        else:
+            reconciliation_report = _reconcile_committed_terminology(
+                self.db,
+                job_id,
+                idx,
+                memory_manager,
+                chunk.text,
+                translation,
+            )
+        if (
+            reconciliation_report.get("reconciled")
+            or reconciliation_report.get("aliases_added")
+            or reconciliation_report.get("skipped")
+        ):
+            self.db.log_chunk_event(
+                job_id,
+                idx,
+                "accepted_terminology_reconciled",
+                reconciliation_report,
+            )
 
         self.db.log_chunk_event(job_id, idx, "chunk_completed", {
             "final_translation_chars": len(translation),

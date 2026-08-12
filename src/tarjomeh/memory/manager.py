@@ -216,6 +216,7 @@ class MemoryManager:
         translation: str,
         *,
         quality_approved: bool = True,
+        style_approved: bool | None = None,
     ) -> dict[str, Any]:
         """Update synchronous memory layers with a new source-translation pair."""
         body_indices = list(
@@ -265,8 +266,13 @@ class MemoryManager:
                 )
             elif not chunk.metadata.get("style_eligible", False):
                 style_translation = ""
+        style_quality_approved = (
+            bool(quality_approved)
+            if style_approved is None else bool(style_approved)
+        )
         style_eligible = bool(
             long_term_reliable
+            and style_quality_approved
             and (
                 not has_structure_policy
                 or (
@@ -289,6 +295,7 @@ class MemoryManager:
             "style_sample_added": len(self.style_samples) > style_count_before,
             "structure_eligible": structure_eligible,
             "quality_approved": bool(quality_approved),
+            "style_approved": style_quality_approved,
             "structural_roles": structural_roles,
         }
 
@@ -340,7 +347,7 @@ class MemoryManager:
         )
 
     async def update_proper_nouns(
-        self, llm_client: Any, text: str
+        self, llm_client: Any, text: str, translation: str = ""
     ) -> dict[str, Any]:
         """Incrementally identify new proper nouns in the text and add them."""
         from tarjomeh.core.prompts import INCREMENTAL_NER_PROMPT, GLOSSARY_EXTRACT_PROMPT
@@ -361,6 +368,15 @@ class MemoryManager:
             prompt = GLOSSARY_EXTRACT_PROMPT.format(text=text)
         else:
             prompt = INCREMENTAL_NER_PROMPT.format(known_entities=known, text=text)
+        if translation.strip():
+            prompt += (
+                "\n\n### Accepted Persian translation\n"
+                + translation[:12000]
+                + "\n\nFor a proper name, publication, organization, product, or "
+                  "named theory that is visibly rendered in the accepted Persian "
+                  "translation, copy that exact Persian rendering into "
+                  "suggested_persian. Do not infer a different spelling."
+            )
 
         try:
             if hasattr(llm_client, "set_operation"):
@@ -373,38 +389,58 @@ class MemoryManager:
                 items.get("terms", []) or items.get("extracted_terms", []) or []
             )
             accepted = 0
-            if isinstance(items, list):
-                for item in items:
-                    term = item.get("term")
-                    persian = item.get("suggested_persian")
-                    if term and persian and is_usable_memory_mapping(term, persian):
-                        self.proper_nouns.add_noun(
-                            term,
-                            persian,
-                            category=str(item.get("category", "term")),
-                            provenance="incremental_extraction",
+            observed = 0
+            aliases_added = 0
+            inline_categories = {
+                "proper_noun", "person", "place", "institution",
+                "organization", "organisation", "publication", "product",
+                "theory", "named_theory", "approved_term", "book", "article",
+                "journal", "work",
+            }
+            normalized_translation = re.sub(
+                r"[\s\u200c]+", " ", translation.strip()
+            ).casefold()
+            for item in candidates if isinstance(candidates, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                term = str(item.get("term", "")).strip()
+                persian = str(item.get("suggested_persian", "")).strip()
+                category = str(item.get("category", "term"))
+                if not is_usable_memory_mapping(term, persian):
+                    continue
+                rendered = bool(
+                    normalized_translation
+                    and re.sub(r"[\s\u200c]+", " ", persian).casefold()
+                    in normalized_translation
+                )
+                provenance = (
+                    "observed_translation"
+                    if rendered
+                    and category.strip().lower().replace("-", "_")
+                    in inline_categories
+                    else "incremental_extraction"
+                )
+                outcome = self.proper_nouns.add_noun(
+                    term,
+                    persian,
+                    category=category,
+                    provenance=provenance,
+                )
+                if rendered and provenance == "observed_translation":
+                    observed += 1
+                    if outcome.get("action") == "preserved_higher_authority":
+                        aliases_added += int(
+                            self.proper_nouns.add_alias(term, persian)
                         )
-                        accepted += 1
-            elif isinstance(items, dict):
-                # Handle unexpected single dict object wrapping the list
-                terms_list = items.get("terms", []) or items.get("extracted_terms", []) or []
-                for item in terms_list:
-                    term = item.get("term")
-                    persian = item.get("suggested_persian")
-                    if term and persian and is_usable_memory_mapping(term, persian):
-                        self.proper_nouns.add_noun(
-                            term,
-                            persian,
-                            category=str(item.get("category", "term")),
-                            provenance="incremental_extraction",
-                        )
-                        accepted += 1
+                accepted += 1
             return {
                 "status": (
                     "completed" if accepted else "completed_without_suggestions"
                 ),
                 "candidate_count": len(candidates),
                 "accepted_count": accepted,
+                "observed_translation_count": observed,
+                "alias_count": aliases_added,
                 "rejected_count": max(0, len(candidates) - accepted),
             }
         except Exception as exc:

@@ -35,6 +35,7 @@ _PROVENANCE_AUTHORITY = {
     "auto_extraction": 10,
     "incremental_extraction": 10,
     "research_suggestion": 10,
+    "observed_translation": 30,
     "legacy": 50,
     "accepted_correction": 80,
     "approved_research": 100,
@@ -78,6 +79,7 @@ class ProperNouns:
         self._nouns: dict[str, str] = {}
         self._categories: dict[str, str] = {}
         self._provenance: dict[str, dict[str, Any]] = {}
+        self._aliases: dict[str, list[str]] = {}
         self._introduced: set[str] = set()
 
     def _stored_key(self, english: str) -> str | None:
@@ -139,6 +141,7 @@ class ProperNouns:
         ):
             history = list(prior.get("superseded", []))
             if action == "replaced_lower_authority" and previous:
+                self.add_alias(stored_key, previous)
                 history.append({
                     "target": previous,
                     "origin": str(prior.get("origin", "legacy")),
@@ -171,6 +174,35 @@ class ProperNouns:
             "previous_target": previous,
             "target": self._nouns[stored_key],
             "origin": self._provenance.get(stored_key, {}).get("origin", origin),
+        }
+
+    def add_alias(self, english: str, persian: str) -> bool:
+        """Record a verified rendered variant without changing authority."""
+        stored_key = self._stored_key(english)
+        target = " ".join((persian or "").split()).strip()
+        if not stored_key or not is_usable_memory_mapping(stored_key, target):
+            return False
+        canonical = self._nouns.get(stored_key, "")
+        if _normalise_target(canonical) == _normalise_target(target):
+            return False
+        aliases = self._aliases.setdefault(stored_key, [])
+        if any(_normalise_target(value) == _normalise_target(target) for value in aliases):
+            return False
+        aliases.append(target)
+        self._aliases[stored_key] = aliases[-5:]
+        return True
+
+    def aliases_for(self, english: str) -> list[str]:
+        """Return known Persian rendering aliases for one source expression."""
+        key = self._stored_key(english) or english.strip()
+        return list(self._aliases.get(key, []))
+
+    def inline_eligible_aliases(self) -> dict[str, list[str]]:
+        """Return aliases only for terms eligible for first-occurrence notes."""
+        return {
+            source: list(self._aliases.get(source, []))
+            for source in self._nouns
+            if self.is_inline_eligible(source) and self._aliases.get(source)
         }
 
     def mark_introduced(self, english: str) -> None:
@@ -273,6 +305,10 @@ class ProperNouns:
             "provenance": {
                 source: dict(value) for source, value in self._provenance.items()
             },
+            "aliases": {
+                source: list(values) for source, values in self._aliases.items()
+                if values
+            },
             "introduced": sorted(self._introduced),
         }
 
@@ -286,6 +322,7 @@ class ProperNouns:
             self._nouns = {}
             self._categories = {}
             self._provenance = {}
+            self._aliases = {}
             self._introduced = set()
             return
 
@@ -309,6 +346,16 @@ class ProperNouns:
                     "observations": 1,
                     "superseded": [],
                 })
+            stored_aliases = data.get("aliases", {})
+            self._aliases = {
+                source: [
+                    str(value) for value in stored_aliases.get(source, [])
+                    if isinstance(value, str) and value.strip()
+                ][-5:]
+                for source in self._nouns
+                if isinstance(stored_aliases, dict)
+                and isinstance(stored_aliases.get(source), list)
+            }
             self._introduced = set(data.get("introduced", []))
         else:
             # Legacy checkpoint: flat mapping, no introduction tracking.
@@ -323,6 +370,7 @@ class ProperNouns:
                 }
                 for source in self._nouns
             }
+            self._aliases = {}
             self._introduced = set()
 
     def __len__(self) -> int:

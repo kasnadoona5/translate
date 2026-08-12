@@ -21,6 +21,29 @@ _NOTE_RE = re.compile(r"\[(\d+)\]|([\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u
 _PERSIAN_RE = re.compile(r"[\u0600-\u06ff]")
 _ASCII_WORD_RE = re.compile(r"[A-Za-z]{2,}")
 _JSON_LEAK_RE = re.compile(r'(^\s*\{|"(?:translation|decision|rationale)"\s*:)', re.IGNORECASE)
+_IDENTIFIER_DIGITS = "0-9\u06f0-\u06f9\u0660-\u0669"
+_IDENTIFIER_PATTERNS = (
+    re.compile(r"https?://[^\s<>()]+", re.IGNORECASE),
+    re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Za-z0-9]+", re.IGNORECASE),
+    re.compile(
+        rf"\b(?:ISBN(?:-1[03])?|ISSN)\s*:?\s*"
+        rf"[{_IDENTIFIER_DIGITS}Xx][{_IDENTIFIER_DIGITS}Xx\-\s]{{6,30}}"
+        rf"[{_IDENTIFIER_DIGITS}Xx]",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"(?<![A-Za-z0-9])(?:97[89][\-\s]?)?"
+        rf"[{_IDENTIFIER_DIGITS}][{_IDENTIFIER_DIGITS}\-]{{8,20}}"
+        rf"[{_IDENTIFIER_DIGITS}Xx](?![A-Za-z0-9])"
+    ),
+    re.compile(
+        rf"(?<![A-Za-z0-9])(?=[A-Za-z0-9\-/]*[A-Za-z])"
+        rf"(?=[A-Za-z0-9\-/]*[{_IDENTIFIER_DIGITS}])"
+        rf"[A-Za-z]{{2,}}(?:[-/][A-Za-z{_IDENTIFIER_DIGITS}]{{2,}}){{1,8}}"
+        rf"(?![A-Za-z0-9])",
+        re.IGNORECASE,
+    ),
+)
 _ENGLISH_PAREN_RE = re.compile(r"\(([A-Za-z][A-Za-z0-9 .,&':;\u2019\-]{1,80})\)")
 _SOURCE_PAREN_RE = re.compile(r"\(([^()\n]{2,240})\)")
 _SOURCE_QUOTE_RE = re.compile(
@@ -221,6 +244,22 @@ def extract_note_markers(text: str) -> list[str]:
     for bracketed, superscript in _NOTE_RE.findall(text or ""):
         markers.append(bracketed or superscript.translate(_SUPERSCRIPT_MAP))
     return markers
+
+
+def extract_identifiers(text: str) -> Counter[str]:
+    """Extract source identifiers whose spelling, digits, and separators matter."""
+    values: list[str] = []
+    occupied: list[tuple[int, int]] = []
+    for pattern in _IDENTIFIER_PATTERNS:
+        for match in pattern.finditer(text or ""):
+            if any(match.start() < end and match.end() > start for start, end in occupied):
+                continue
+            value = " ".join(match.group().split()).strip(".,;)")
+            value = re.sub(r"[\u2010-\u2015]", "-", value)
+            if value:
+                values.append(value.casefold())
+                occupied.append(match.span())
+    return Counter(values)
 
 
 def protected_english_originals(source: str, translation: str) -> list[str]:
@@ -573,6 +612,32 @@ class PostEditIntegrityGate:
                     "Source-authored multilingual or scholarly material was removed.",
                     missing=missing_apparatus,
                 )
+
+        required_identifiers = extract_identifiers(source)
+        candidate_identifiers = extract_identifiers(candidate)
+        previous_identifiers = extract_identifiers(previous) if previous else Counter()
+        missing_identifiers = required_identifiers - candidate_identifiers
+        previous_missing_identifiers = (
+            required_identifiers - previous_identifiers if previous else Counter()
+        )
+        newly_missing_identifiers = (
+            missing_identifiers - previous_missing_identifiers
+            if previous else missing_identifiers
+        )
+        if newly_missing_identifiers:
+            add(
+                "source_identifiers_changed",
+                "blocking",
+                "A source identifier was removed, localized, or respaced.",
+                missing=list(newly_missing_identifiers.elements()),
+            )
+        elif missing_identifiers:
+            add(
+                "source_identifiers_still_changed",
+                "warning",
+                "The edit did not introduce identifier damage, but earlier damage remains.",
+                missing=list(missing_identifiers.elements()),
+            )
 
         number_reconciliation = _reconcile_numbers(source, candidate)
         previous_number_reconciliation = (

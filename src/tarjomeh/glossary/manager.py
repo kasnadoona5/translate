@@ -29,6 +29,10 @@ OPTIONAL_FIELDNAMES = ["sense", "author", "is_auto", "include_original"]
 FIELDNAMES = BASE_FIELDNAMES + OPTIONAL_FIELDNAMES
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9\u0600-\u06FF']+", re.UNICODE)
+_CONTEXT_STOPWORDS = {
+    "a", "an", "and", "as", "at", "by", "for", "from", "in", "of",
+    "on", "or", "the", "to", "with", "analysis", "concept", "theory",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +88,7 @@ class GlossaryManager:
         self._entries: list[GlossaryEntry] = []
         # Compiled regex cache; a source term can have several namespaced senses.
         self._patterns: list[tuple[re.Pattern[str], GlossaryEntry]] = []
+        self.last_contextual_advisories: list[GlossaryEntry] = []
 
     # -- I/O ----------------------------------------------------------------
 
@@ -307,12 +312,28 @@ class GlossaryManager:
                 grouped[key].append(entry)
 
         selected: list[GlossaryEntry] = []
+        deferred: list[GlossaryEntry] = []
         for key in source_order:
             entries = grouped[key]
-            if len(entries) == 1:
-                selected.append(entries[0])
+            supported = [
+                entry for entry in entries
+                if self._context_evidence_present(
+                    entry, text=text, context=context, domain=domain
+                )
+            ]
+            if supported:
+                selected.append(
+                    self._select_entry(
+                        supported, text=text, context=context, domain=domain
+                    )
+                )
             else:
-                selected.append(self._select_entry(entries, text=text, context=context, domain=domain))
+                deferred.append(
+                    self._select_entry(
+                        entries, text=text, context=context, domain=domain
+                    )
+                )
+        self.last_contextual_advisories = deferred
         return selected
 
     def format_for_prompt(self, terms: list[GlossaryEntry] | None = None) -> str:
@@ -376,7 +397,7 @@ class GlossaryManager:
         if not entries:
             return ""
         lines = [
-            "## Auto-extracted terminology suggestions — advisory only",
+            "## Contextual and auto-extracted terminology suggestions — advisory only",
             "Evaluate each candidate in its full source context. It may be used, "
             "revised, or rejected; it must not override a curated glossary entry "
             "or source meaning.",
@@ -439,6 +460,49 @@ class GlossaryManager:
         ]
         scored.sort(key=lambda item: (-item[0], item[1]))
         return scored[0][2]
+
+    @staticmethod
+    def _context_evidence_present(
+        entry: GlossaryEntry,
+        *,
+        text: str,
+        context: str,
+        domain: str,
+    ) -> bool:
+        """Require namespace evidence before a qualified row is mandatory."""
+        if not any((entry.author, entry.sense, entry.context, entry.domain)):
+            return True
+
+        domain_tokens = set(_meaningful_tokens(domain))
+        entry_domain_tokens = set(_meaningful_tokens(entry.domain))
+        domain_supported = bool(
+            entry_domain_tokens
+            and (
+                entry_domain_tokens <= domain_tokens
+                or len(entry_domain_tokens & domain_tokens)
+                >= max(1, (len(entry_domain_tokens) + 1) // 2)
+            )
+        )
+        if not any((entry.author, entry.sense, entry.context)):
+            return domain_supported
+
+        evidence_tokens = set(_meaningful_tokens(f"{text} {context}"))
+        author_tokens = set(_meaningful_tokens(entry.author))
+        if author_tokens and author_tokens <= evidence_tokens:
+            return True
+
+        sense_tokens = set(_meaningful_tokens(entry.sense))
+        if sense_tokens:
+            overlap = len(sense_tokens & evidence_tokens)
+            if overlap >= max(1, (len(sense_tokens) + 1) // 2):
+                return True
+
+        context_tokens = set(_meaningful_tokens(entry.context))
+        if context_tokens:
+            overlap = len(context_tokens & evidence_tokens)
+            if overlap >= min(2, len(context_tokens)):
+                return True
+        return False
 
     @staticmethod
     def _context_score(
@@ -519,6 +583,13 @@ def _fieldnames_for_entries(entries: Iterable[GlossaryEntry]) -> list[str]:
 
 def _tokens(text: str) -> list[str]:
     return _TOKEN_RE.findall(text.casefold())
+
+
+def _meaningful_tokens(text: str) -> list[str]:
+    return [
+        token for token in _tokens(text)
+        if len(token) > 1 and token not in _CONTEXT_STOPWORDS
+    ]
 
 
 def _table_cell(value: str) -> str:

@@ -7,6 +7,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 from tarjomeh.core.config import TarjomehConfig
 from tarjomeh.core.structured_output import parse_structured_output
@@ -27,6 +28,7 @@ class BookResearchResult:
     providers_used: list[str] = field(default_factory=list)
     status: str = "completed"
     error: str = ""
+    evidence_warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -38,6 +40,7 @@ class BookResearchResult:
             "providers_used": self.providers_used,
             "status": self.status,
             "error": self.error,
+            "evidence_warnings": self.evidence_warnings,
         }
 
 
@@ -106,7 +109,10 @@ class BookResearcher:
                 recovery_error = recovery_error or follow_up_error
 
             terms = self._normalise_terms(data.get("terms", []), sources)
-            context = str(data.get("book_context", "")).strip()[:4000]
+            context, evidence_warnings = self._guard_research_context(
+                str(data.get("book_context", "")).strip()[:4000],
+                sources,
+            )
             if sources and recovery_error and not context and not terms:
                 status = "partial"
             elif used_batches or not sources:
@@ -130,6 +136,7 @@ class BookResearcher:
                 providers_used=[name for name in providers_used if name],
                 status=status,
                 error=recovery_error,
+                evidence_warnings=evidence_warnings,
             )
         except Exception as exc:
             logger.warning("Book research seed pass failed: %s", exc)
@@ -299,12 +306,14 @@ class BookResearcher:
                     "title": result.title[:300],
                     "url": result.url[:1000],
                     "snippet": result.snippet[:700],
+                    "source_authority": self._source_authority(result.url),
                 })
 
     @staticmethod
     def _evidence_text(sources: list[dict[str, str]]) -> str:
         return chr(10).join(
-            f"- {item['title']}: {item['snippet']} ({item['url']})"
+            f"- [authority={item.get('source_authority', 'general')}] "
+            f"{item['title']}: {item['snippet']} ({item['url']})"
             for item in sources
         ) or "(No web results were available.)"
 
@@ -385,6 +394,10 @@ class BookResearcher:
                 str(url) for url in item.get("source_urls", [])
                 if str(url) in known_urls
             ][:5]
+            cited_authorities = {
+                item.get("source_authority", "general")
+                for item in sources if item.get("url") in cited
+            }
             terms.append({
                 "source": source,
                 "target": target,
@@ -397,12 +410,81 @@ class BookResearcher:
                 "confidence": str(item.get("confidence", "low")).strip().lower(),
                 "source_urls": cited,
                 "evidence_type": (
-                    "source_supported" if cited else "book_excerpt_inference"
+                    "source_supported"
+                    if cited_authorities & {"primary", "scholarly", "catalogue"}
+                    else "weak_source_supported"
+                    if cited else "book_excerpt_inference"
                 ),
                 "is_auto": True,
                 "status": "context_only" if context_only else "suggested",
             })
         return terms
+
+    @staticmethod
+    def _source_authority(url: str) -> str:
+        """Classify evidence by source type, independently of any one book."""
+        host = urlparse(url or "").netloc.casefold().split(":", 1)[0]
+        path = urlparse(url or "").path.casefold()
+        if not host:
+            return "general"
+        commercial = (
+            "amazon.", "goodreads.", "ebay.", "torob.", "emalls.",
+            "bookfinder.", "abebooks.", "barnesandnoble.",
+        )
+        if any(marker in host for marker in commercial):
+            return "commercial"
+        if (
+            host in {"doi.org", "dx.doi.org"}
+            or host.endswith((".edu", ".ac.uk"))
+            or ".edu." in host
+            or ".ac." in host
+        ):
+            return "scholarly"
+        if any(marker in host for marker in ("worldcat.", "openlibrary.", "loc.gov")):
+            return "catalogue"
+        if any(marker in path for marker in ("/journal/", "/article/", "/doi/")):
+            return "scholarly"
+        if any(marker in path for marker in ("/book/", "/books/", "/catalog/")):
+            return "primary"
+        return "general"
+
+    @classmethod
+    def _guard_research_context(
+        cls,
+        context: str,
+        sources: list[dict[str, str]],
+    ) -> tuple[str, list[str]]:
+        """Remove unsupported prior-translation/publication claims from memory."""
+        if not context:
+            return "", []
+        claim_re = re.compile(
+            r"\b(?:persian translation|translated into persian|persian edition|"
+            r"published in iran|iranian edition)\b",
+            re.IGNORECASE,
+        )
+        evidence_re = re.compile(
+            r"\b(?:persian|farsi|iran|translation|translated|edition)\b|"
+            r"[\u0600-\u06ff]",
+            re.IGNORECASE,
+        )
+        credible = any(
+            item.get("source_authority") in {"primary", "scholarly", "catalogue"}
+            and evidence_re.search(
+                " ".join((
+                    item.get("title", ""), item.get("snippet", ""),
+                ))
+            )
+            for item in sources
+        )
+        if credible or not claim_re.search(context):
+            return context, []
+        sentences = re.split(r"(?<=[.!?])\s+", context)
+        kept = [sentence for sentence in sentences if not claim_re.search(sentence)]
+        warning = (
+            "A prior Persian-translation or Iran-publication claim was excluded "
+            "because no primary, scholarly, or catalogue evidence supported it."
+        )
+        return " ".join(kept).strip(), [warning]
 
     @staticmethod
     def _parse_json(response: str) -> dict[str, Any]:
@@ -446,6 +528,8 @@ Rules:
 - Never assume a Persian translation exists. State it only when supported by
   a supplied source.
 - Cite only URLs present in the evidence.
+- Treat commercial/retail listings as discovery evidence only. They cannot by
+  themselves establish authorship, publication history, or a prior Persian edition.
 - Include a term only when it is likely important across the book.
 - Research the book, author, concepts, and domain even when no translation
   or prior Persian scholarship exists.
@@ -474,7 +558,8 @@ Evidence batch:
 Return JSON only with book_context and at most 12 terms. Each term must contain
 source, target, context, domain, sense, author, reason, confidence, and
 source_urls. Cite only supplied URLs. Suggestions are non-authoritative and
-must be conservative. Do not include follow-up queries or commentary."""
+must be conservative. Commercial listings cannot by themselves establish a
+published translation or edition. Do not include follow-up queries or commentary."""
 
     @staticmethod
     def _compact_synthesis_prompt(

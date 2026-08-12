@@ -59,6 +59,7 @@ def ensure_inline_proper_noun_originals(
     typographer: PersianTypographer,
     categories: dict[str, str] | None = None,
     *,
+    aliases: dict[str, list[str]] | None = None,
     return_report: bool = False,
 ) -> int | dict[str, Any]:
     """Anchor one English original to its exact source occurrence."""
@@ -70,6 +71,7 @@ def ensure_inline_proper_noun_originals(
     ambiguous: list[dict[str, Any]] = []
     missing_targets: list[dict[str, Any]] = []
     categories = categories or {}
+    aliases = aliases or {}
     for paragraph in document.paragraphs:
         candidates = []
         for source, raw_target in proper_nouns.items():
@@ -86,16 +88,31 @@ def ensure_inline_proper_noun_originals(
             if source_match is None:
                 continue
             target = typographer.process(raw_target).strip()
-            if target:
+            target_variants = [target] + [
+                typographer.process(value).strip()
+                for value in aliases.get(source, [])
+                if str(value).strip()
+            ]
+            target_variants = list(dict.fromkeys(
+                value for value in target_variants if value
+            ))
+            if target_variants:
                 candidates.append(
-                    (source_match.start(), source, target, key, category)
+                    (
+                        source_match.start(), source, target_variants,
+                        key, category,
+                    )
                 )
 
         text = paragraph.translated_text
-        for source_position, source, target, key, category in sorted(candidates):
-            target_offsets = [
-                match.start() for match in re.finditer(re.escape(target), text)
+        for source_position, source, target_variants, key, category in sorted(candidates):
+            target_matches = [
+                (match.start(), target)
+                for target in target_variants
+                for match in re.finditer(re.escape(target), text)
             ]
+            target_offsets = sorted({offset for offset, _target in target_matches})
+            target = target_variants[0]
             if not target_offsets:
                 bare_originals = [
                     match
@@ -111,6 +128,7 @@ def ensure_inline_proper_noun_originals(
                     )
                     paired_repaired += 1
                     target_offsets = [original_match.start()]
+                    target_matches = [(original_match.start(), target)]
                 elif len(bare_originals) > 1:
                     ambiguous.append({
                         "paragraph_index": paragraph.index,
@@ -146,6 +164,13 @@ def ensure_inline_proper_noun_originals(
                 })
                 continue
             target_offset = ranked[0]
+            target = max(
+                [
+                    value for offset, value in target_matches
+                    if offset == target_offset
+                ],
+                key=len,
+            )
             target_end = target_offset + len(target)
             insertion_at = target_end
             if insertion_at < len(text) and text[insertion_at] in "»”":
@@ -388,6 +413,7 @@ def apply_term_notes(
     domain: str = "",
     mode: str = "inline",
     extra_terms: dict[str, str] | None = None,
+    aliases: dict[str, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Attach stable, exporter-neutral note metadata to a translated book."""
     if mode == "inline":
@@ -435,15 +461,26 @@ def apply_term_notes(
             key = source.casefold().strip()
             if not key or key in seen:
                 continue
-            target = typographer.process(raw_target).strip()
-            if not target:
+            target_variants = [typographer.process(raw_target).strip()] + [
+                typographer.process(value).strip()
+                for value in (aliases or {}).get(source, [])
+                if str(value).strip()
+            ]
+            target_variants = list(dict.fromkeys(
+                value for value in target_variants if value
+            ))
+            if not target_variants:
                 continue
-            target_offsets = []
-            offset = paragraph.translated_text.find(target)
-            while offset >= 0:
-                if offset not in used_target_offsets:
-                    target_offsets.append(offset)
-                offset = paragraph.translated_text.find(target, offset + len(target))
+            target_matches: list[tuple[int, str]] = []
+            for target in target_variants:
+                offset = paragraph.translated_text.find(target)
+                while offset >= 0:
+                    if offset not in used_target_offsets:
+                        target_matches.append((offset, target))
+                    offset = paragraph.translated_text.find(
+                        target, offset + len(target)
+                    )
+            target_offsets = sorted({offset for offset, _target in target_matches})
             if not target_offsets:
                 continue
             expected_offset = int(
@@ -454,6 +491,13 @@ def apply_term_notes(
             target_offset = min(
                 target_offsets,
                 key=lambda value: abs(value - expected_offset),
+            )
+            target = max(
+                [
+                    value for offset, value in target_matches
+                    if offset == target_offset
+                ],
+                key=len,
             )
 
             note = {

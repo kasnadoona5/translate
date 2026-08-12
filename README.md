@@ -899,6 +899,10 @@ releases.
 
 ## Release History
 
+- v9.11: evidence-gated contextual glossary enforcement, accepted-rendering
+  terminology reconciliation, alias-aware first-occurrence originals,
+  identifier integrity protection, stricter style-sample admission, and
+  authority-graded book-research evidence
 - v9.10: standards-aware incremental SSE decoding, protocol-profile detection,
   exact-request transport replay, privacy-safe wire diagnostics, provenance-aware
   terminology reconciliation, numeric-role QA evidence, stricter book identity
