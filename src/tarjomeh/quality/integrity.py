@@ -58,6 +58,15 @@ _NON_ATOMIC_APPARATUS_RE = re.compile(
     r"^(?:as|cf\.?|e\.g\.?|for|i\.e\.?|on|see|that|which|where)\b",
     re.IGNORECASE,
 )
+_BIBLIOGRAPHIC_MARKER_RE = re.compile(
+    r"^(?:pb|pbk|paperback|hb|hbk|hardback|hardcover|cloth|ebook|e-book|"
+    r"ed\.?|eds\.?|rev\.?\s*ed\.?|vol\.?|no\.?)$",
+    re.IGNORECASE,
+)
+_MIXED_SCRIPT_TOKEN_RE = re.compile(
+    r"(?<![\w/.-])(?:[A-Za-z]+[\u0600-\u06ff]+|"
+    r"[\u0600-\u06ff]+[A-Za-z]+)(?![\w/.-])"
+)
 _STRUCTURAL_NUMBER_LABELS = {
     "chapter": ("\u0641\u0635\u0644",),
     "part": ("\u0628\u062e\u0634", "\u0642\u0633\u0645\u062a"),
@@ -256,10 +265,117 @@ def extract_identifiers(text: str) -> Counter[str]:
                 continue
             value = " ".join(match.group().split()).strip(".,;)")
             value = re.sub(r"[\u2010-\u2015]", "-", value)
+            value = re.sub(
+                r"^\s*(?:ISBN(?:-1[03])?|ISSN)\s*:?\s*",
+                "",
+                value,
+                flags=re.IGNORECASE,
+            )
             if value:
                 values.append(value.casefold())
                 occupied.append(match.span())
     return Counter(values)
+
+
+def _identifier_identity(value: str) -> str:
+    """Return a script-insensitive identity used only to locate damaged IDs."""
+    normalized = (value or "").translate(_DIGIT_MAP)
+    normalized = re.sub(r"[\u2010-\u2015]", "-", normalized)
+    normalized = re.sub(
+        r"^\s*(?:ISBN(?:-1[03])?|ISSN)\s*:?\s*",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r"[^A-Za-z0-9]", "", normalized).casefold()
+
+
+def _identifier_occurrences(text: str) -> list[tuple[int, int, str]]:
+    occurrences: list[tuple[int, int, str]] = []
+    occupied: list[tuple[int, int]] = []
+    for pattern in _IDENTIFIER_PATTERNS:
+        for match in pattern.finditer(text or ""):
+            if any(match.start() < end and match.end() > start for start, end in occupied):
+                continue
+            value = match.group().strip(".,;)")
+            if value:
+                occurrences.append((match.start(), match.start() + len(value), value))
+                occupied.append(match.span())
+    return occurrences
+
+
+def restore_source_identifiers(source: str, translation: str) -> tuple[str, dict[str, Any]]:
+    """Restore uniquely matched identifier values without translating nearby labels.
+
+    The repair is deliberately conservative: a localized or respaced candidate is
+    replaced only when its alphanumeric identity maps to exactly one source value.
+    """
+    source_by_identity: dict[str, list[str]] = {}
+    for _start, _end, value in _identifier_occurrences(source):
+        identity = _identifier_identity(value)
+        if identity:
+            source_by_identity.setdefault(identity, []).append(value)
+
+    replacements: list[tuple[int, int, str, str]] = []
+    candidate_occurrences = _identifier_occurrences(translation)
+    flexible_numeric = re.compile(
+        rf"(?<![{_IDENTIFIER_DIGITS}])"
+        rf"[{_IDENTIFIER_DIGITS}Xx](?:[\s\-\u2010-\u2015]*"
+        rf"[{_IDENTIFIER_DIGITS}Xx]){{8,30}}"
+        rf"(?![{_IDENTIFIER_DIGITS}])"
+    )
+    occupied = [(start, end) for start, end, _value in candidate_occurrences]
+    for match in flexible_numeric.finditer(translation or ""):
+        if any(match.start() < end and match.end() > start for start, end in occupied):
+            continue
+        candidate_occurrences.append((match.start(), match.end(), match.group()))
+
+    for start, end, value in candidate_occurrences:
+        identity = _identifier_identity(value)
+        candidates = list(dict.fromkeys(source_by_identity.get(identity, [])))
+        if len(candidates) != 1:
+            continue
+        source_value = candidates[0]
+        source_payload = re.sub(
+            r"^\s*(?:ISBN(?:-1[03])?|ISSN)\s*:?\s*",
+            "",
+            source_value,
+            flags=re.IGNORECASE,
+        )
+        candidate_payload = re.sub(
+            r"^\s*(?:ISBN(?:-1[03])?|ISSN)\s*:?\s*",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        )
+        source_has_label = source_payload != source_value
+        candidate_has_label = candidate_payload != value
+        if source_has_label:
+            replacement = source_payload
+            if candidate_has_label:
+                replacement = value[: len(value) - len(candidate_payload)] + source_payload
+        else:
+            replacement = source_value
+        if value != replacement:
+            replacements.append((start, end, value, replacement))
+
+    repaired = translation
+    edits: list[dict[str, str]] = []
+    for start, end, before, after in reversed(replacements):
+        repaired = repaired[:start] + after + repaired[end:]
+        edits.append({"before": before, "after": after})
+    edits.reverse()
+    return repaired, {"repair_count": len(edits), "repairs": edits}
+
+
+def mixed_script_artifacts(text: str) -> list[str]:
+    """Return contiguous Latin/Persian tokens that indicate protocol corruption."""
+    return sorted(set(_MIXED_SCRIPT_TOKEN_RE.findall(text or "")), key=str.casefold)
+
+
+def is_bibliographic_marker(value: str) -> bool:
+    """Recognize compact source-authored publishing apparatus such as ``(pb)``."""
+    return bool(_BIBLIOGRAPHIC_MARKER_RE.fullmatch(" ".join((value or "").split())))
 
 
 def protected_english_originals(source: str, translation: str) -> list[str]:
@@ -726,6 +842,24 @@ class PostEditIntegrityGate:
                 "JSON or refiner control fields leaked into translation text.",
             )
 
+        mixed_artifacts = mixed_script_artifacts(candidate)
+        previous_mixed_artifacts = set(mixed_script_artifacts(previous))
+        newly_mixed = [
+            value for value in mixed_artifacts if value not in previous_mixed_artifacts
+        ]
+        if newly_mixed:
+            add(
+                "mixed_script_corruption", "blocking",
+                "A contiguous token unexpectedly mixes Latin and Persian scripts.",
+                tokens=newly_mixed,
+            )
+        elif mixed_artifacts:
+            add(
+                "mixed_script_corruption_still_present", "warning",
+                "The edit did not introduce mixed-script corruption, but earlier damage remains.",
+                tokens=mixed_artifacts,
+            )
+
         source_words = _ASCII_WORD_RE.findall(source)
         if len(source_words) >= 8 and len(_PERSIAN_RE.findall(candidate)) < 3:
             add(
@@ -795,6 +929,10 @@ class PostEditIntegrityGate:
                     if value.casefold() not in allowed_folded
                     and value.casefold() not in previous_folded
                     and not any(char.isdigit() for char in value)
+                    and not (
+                        is_bibliographic_marker(value)
+                        and f"({value})".casefold() in source.casefold()
+                    )
                 ]
                 if unauthorized and previous:
                     add(

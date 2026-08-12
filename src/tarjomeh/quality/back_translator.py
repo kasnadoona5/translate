@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 from tarjomeh.core.prompts import BACK_TRANSLATE_PROMPT
 from tarjomeh.quality.integrity import extract_numbers
+from tarjomeh.glossary.compliance import target_present
 
 
 @dataclass
@@ -138,6 +139,7 @@ class BackTranslator:
         original_english: str,
         back_translated: str,
         translated_text: str = "",
+        entity_aliases: dict[str, list[str]] | None = None,
     ) -> BackTranslationResult:
         """Compare the original English with a back-translation.
 
@@ -195,11 +197,33 @@ class BackTranslator:
             entity for entity in source_entities
             if translated_text and _entity_is_present(entity, translated_text)
         ]
+        entity_aliases = entity_aliases or {}
+        reconciled_aliases: list[dict[str, str]] = []
+        for entity in source_entities:
+            if entity in preserved_inline_entities:
+                continue
+            aliases = next((
+                values for source, values in entity_aliases.items()
+                if source.casefold() == entity.casefold()
+            ), [])
+            matched_alias = next((
+                alias for alias in aliases
+                if alias and target_present(alias, translated_text)
+            ), "")
+            if matched_alias:
+                reconciled_aliases.append({
+                    "source": entity,
+                    "target": matched_alias,
+                })
+        reconciled_entities = {
+            item["source"].casefold() for item in reconciled_aliases
+        }
         missing_entities = [
             entity
             for entity in source_entities
             if not _entity_is_present(entity, back_translated)
             and entity not in preserved_inline_entities
+            and entity.casefold() not in reconciled_entities
         ]
         source_negations = _negations(original_english)
         back_negations = _negations(back_translated)
@@ -234,6 +258,7 @@ class BackTranslator:
             "missing_entities": missing_entities,
             "entity_check_skipped_for_structural_listing": structural_listing,
             "entities_preserved_inline": preserved_inline_entities,
+            "entities_reconciled_by_memory": reconciled_aliases,
             "source_negations": source_negations,
             "back_translation_negations": back_negations,
             "negation_mismatch": negation_mismatch,

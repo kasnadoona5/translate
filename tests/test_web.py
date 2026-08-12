@@ -437,6 +437,54 @@ class TestWebUI(unittest.TestCase):
         self.assertIn("classification=CONTENT FAIL", report)
         self.assertIn("missing_output", report)
 
+    @patch("tarjomeh.jobs.database.JobDatabase")
+    def test_qa_report_classifies_intentional_checkpoint_as_partial(
+        self, mock_db_cls: MagicMock
+    ) -> None:
+        mock_db = mock_db_cls.return_value
+        mock_db.get_job.return_value = {
+            "id": "job-checkpoint",
+            "input_path": "book.pdf",
+            "status": "paused",
+            "config": {"translation": {"stop_after_chapter": 1}},
+        }
+
+        def artifact(_job_id: str, name: str):
+            if name == "chapter_checkpoints":
+                return {"reached_positions": [1]}
+            if name == "chapter_manifest":
+                return {"chapters": [{"position": 1}, {"position": 2}]}
+            return None
+
+        mock_db.get_job_artifact.side_effect = artifact
+        mock_db.get_chunks.return_value = [
+            {
+                "chunk_index": 0,
+                "status": "completed",
+                "translation": "\u062a\u0631\u062c\u0645\u0647 \u0641\u0635\u0644 \u0627\u0648\u0644",
+                "metadata": {"chapter_position": 1},
+            },
+            {
+                "chunk_index": 1,
+                "status": "pending",
+                "translation": None,
+                "metadata": {"chapter_position": 2},
+            },
+        ]
+        mock_db.get_chunk_events.return_value = []
+
+        response = self.client.get(
+            "/api/jobs/job-checkpoint/qa-report",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        report = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("status=partial_checkpoint", report)
+        self.assertIn("classification=PARTIAL CHECKPOINT", report)
+        self.assertNotIn("incomplete_chunk", report)
+        self.assertNotIn("classification=CONTENT FAIL", report)
+
     def test_safe_glossary_upload_path_sanitizes_filename(self) -> None:
         from tarjomeh.web.app import _safe_glossary_upload_path
 

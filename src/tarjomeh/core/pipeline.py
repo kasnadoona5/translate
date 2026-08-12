@@ -45,6 +45,7 @@ from tarjomeh.context.web_searcher import WebContextSearcher
 from tarjomeh.glossary.manager import GlossaryManager
 from tarjomeh.glossary.compliance import (
     GlossaryComplianceChecker,
+    target_present,
     term_occurs_only_in_citations,
 )
 from tarjomeh.persian.typography import PersianTypographer
@@ -67,6 +68,7 @@ from tarjomeh.quality.refiner import TranslationRefiner
 from tarjomeh.quality.back_translator import BackTranslator
 from tarjomeh.quality.integrity import (
     PostEditIntegrityGate,
+    restore_source_identifiers,
     normalize_for_match,
     protected_english_originals,
     protected_source_apparatus,
@@ -1221,6 +1223,47 @@ def _reconcile_committed_terminology(
         "may supersede lower-authority automatic memory; curated mappings remain protected."
     )
     return report
+
+
+def _advisory_terminology_consistency(
+    memory_manager: MemoryManager,
+    source_text: str,
+    final_translation: str,
+) -> dict[str, Any]:
+    """Report established rendering drift without forcing an automatic edit."""
+    checked: list[dict[str, Any]] = []
+    inconsistent: list[dict[str, Any]] = []
+    noun_state = memory_manager.proper_nouns.serialize()
+    for source, target in (noun_state.get("nouns", {}) or {}).items():
+        if not re.search(
+            rf"(?<!\w){re.escape(source)}(?!\w)", source_text, re.IGNORECASE
+        ):
+            continue
+        if term_occurs_only_in_citations(source_text, source):
+            continue
+        variants = [target] + memory_manager.proper_nouns.aliases_for(source)
+        present = next((
+            value for value in variants
+            if value and target_present(value, final_translation)
+        ), "")
+        evidence = {
+            "source": source,
+            "expected": target,
+            "matched_variant": present,
+            "provenance": memory_manager.proper_nouns.provenance_for(source),
+        }
+        checked.append(evidence)
+        if not present:
+            inconsistent.append(evidence)
+    return {
+        "checked_count": len(checked),
+        "inconsistent_count": len(inconsistent),
+        "inconsistencies": inconsistent[:50],
+        "policy": (
+            "Advisory evidence only; no translation is rewritten. Curated glossary "
+            "compliance remains the mandatory terminology authority."
+        ),
+    }
 
 
 def _chunk_review_reason_payload(
@@ -3633,6 +3676,17 @@ class TranslationPipeline:
 
             translation = recover_all_parts()
 
+            translation, identifier_repairs = restore_source_identifiers(
+                chunk.text, translation
+            )
+            if identifier_repairs["repair_count"]:
+                self.db.log_chunk_event(
+                    job_id, idx, "source_identifiers_restored", {
+                        "stage": "adaptive_recovery_assembly",
+                        **identifier_repairs,
+                    },
+                )
+
             if integrity_enabled:
                 initial_integrity = integrity_gate.evaluate(
                     chunk.text,
@@ -3656,6 +3710,16 @@ class TranslationPipeline:
                         },
                     )
                     translation = recover_all_parts(strict_target_only=True)
+                    translation, identifier_repairs = restore_source_identifiers(
+                        chunk.text, translation
+                    )
+                    if identifier_repairs["repair_count"]:
+                        self.db.log_chunk_event(
+                            job_id, idx, "source_identifiers_restored", {
+                                "stage": "adaptive_recovery_strict_assembly",
+                                **identifier_repairs,
+                            },
+                        )
                     initial_integrity = integrity_gate.evaluate(
                         chunk.text,
                         translation,
@@ -3680,6 +3744,16 @@ class TranslationPipeline:
         translation, orthography_edits = apply_safe_persian_orthography(
             translation
         )
+        translation, identifier_repairs = restore_source_identifiers(
+            chunk.text, translation
+        )
+        if identifier_repairs["repair_count"]:
+            self.db.log_chunk_event(
+                job_id, idx, "source_identifiers_restored", {
+                    "stage": "initial_translation",
+                    **identifier_repairs,
+                },
+            )
         if orthography_edits:
             self.db.log_chunk_event(
                 job_id, idx, "persian_orthography_normalized", {
@@ -4493,6 +4567,16 @@ Output ONLY the corrected Persian translation.
             self.db.log_chunk_event(job_id, idx, "glossary_compliance_skipped", {"enabled": False})
 
         if integrity_enabled:
+            translation, identifier_repairs = restore_source_identifiers(
+                chunk.text, translation
+            )
+            if identifier_repairs["repair_count"]:
+                self.db.log_chunk_event(
+                    job_id, idx, "source_identifiers_restored", {
+                        "stage": "final_translation",
+                        **identifier_repairs,
+                    },
+                )
             final_integrity = integrity_gate.evaluate(
                 chunk.text,
                 translation,
@@ -4534,7 +4618,15 @@ Output ONLY the corrected Persian translation.
                     back_translated = ""
                 bt_result = (
                     back_translator.compare(
-                        chunk.text, back_translated, translation
+                        chunk.text,
+                        back_translated,
+                        translation,
+                        entity_aliases={
+                            source: [target]
+                            + memory_manager.proper_nouns.aliases_for(source)
+                            for source, target in memory_manager.proper_nouns
+                            .inline_eligible_nouns().items()
+                        },
                     )
                     if back_translated else None
                 )
@@ -4601,6 +4693,16 @@ Output ONLY the corrected Persian translation.
                 "accepted_terminology_reconciled",
                 reconciliation_report,
             )
+
+        consistency_report = _advisory_terminology_consistency(
+            memory_manager, chunk.text, translation
+        )
+        self.db.log_chunk_event(
+            job_id,
+            idx,
+            "terminology_consistency_advisory",
+            consistency_report,
+        )
 
         self.db.log_chunk_event(job_id, idx, "chunk_completed", {
             "final_translation_chars": len(translation),

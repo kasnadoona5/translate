@@ -934,7 +934,8 @@ def _register_api(app: Flask) -> None:
                 f"paired_repaired={anchor_audit.get('paired_repair_count', 0)} "
                 f"repositioned={anchor_audit.get('repositioned_count', 0)} "
                 f"ambiguous={anchor_audit.get('ambiguous_count', 0)} "
-                f"missing_target={anchor_audit.get('missing_target_count', 0)}",
+                f"missing_target={anchor_audit.get('missing_target_count', 0)} "
+                f"citation_only={anchor_audit.get('citation_only_count', 0)}",
             ])
             for missing in anchor_audit.get("missing_targets", []) or []:
                 lines.append(
@@ -987,17 +988,59 @@ def _register_api(app: Flask) -> None:
         for event in all_events:
             events_by_chunk.setdefault(int(event["chunk_index"]), []).append(event)
 
+        reached_positions = [
+            int(value) for value in
+            (chapter_checkpoints or {}).get("reached_positions", [])
+        ]
+        latest_checkpoint = max(reached_positions, default=0)
+        later_chunks_advanced = any(
+            int((chunk.get("metadata") or {}).get("chapter_position", 0) or 0)
+            > latest_checkpoint
+            and chunk.get("status") != "pending"
+            for chunk in all_chunks
+        ) if latest_checkpoint else False
+        intentional_checkpoint = bool(
+            job.get("status") == "paused"
+            and latest_checkpoint
+            and not later_chunks_advanced
+        )
+
+        consistency_events = [
+            event for event in all_events
+            if event["event_type"] == "terminology_consistency_advisory"
+        ]
+        consistency_issues = [
+            issue
+            for event in consistency_events
+            for issue in (event.get("payload", {}).get("inconsistencies", []) or [])
+        ]
+        if consistency_events:
+            lines.extend([
+                "Terminology consistency (advisory):",
+                f"  checked={sum(int(event.get('payload', {}).get('checked_count', 0) or 0) for event in consistency_events)}",
+                f"  unresolved={len(consistency_issues)}",
+                "  policy=review evidence only; no automatic rewrite",
+            ])
+            for issue in consistency_issues[:20]:
+                lines.append(
+                    f"  REVIEW: source={issue.get('source')!r} "
+                    f"expected={issue.get('expected')!r}"
+                )
+            lines.append("")
+
         review_reasons: set[str] = set()
         if (
             anchor_audit is not None
             and int(anchor_audit.get("missing_target_count", 0) or 0) > 0
         ):
             review_reasons.add("first_occurrence_target_missing")
-        if job.get("status") != "completed":
+        if intentional_checkpoint:
+            review_reasons.add("checkpoint_partial")
+        elif job.get("status") != "completed":
             review_reasons.add(f"job_{job.get('status')}")
         if any(chunk.get("status") == "needs_review" for chunk in all_chunks):
             review_reasons.add("chunk_needs_review")
-        if any(
+        if not intentional_checkpoint and any(
             chunk.get("status") not in {"completed", "needs_review"}
             for chunk in all_chunks
         ):
@@ -1018,7 +1061,7 @@ def _register_api(app: Flask) -> None:
             and not str(chunk.get("translation") or "").strip()
             for chunk in all_chunks
         )
-        incomplete_output = any(
+        incomplete_output = not intentional_checkpoint and any(
             chunk.get("status") not in {"completed", "needs_review"}
             for chunk in all_chunks
         )
@@ -1033,10 +1076,15 @@ def _register_api(app: Flask) -> None:
         )
         if missing_output:
             review_reasons.add("missing_output")
+        substantive_review_reasons = review_reasons - {"checkpoint_partial"}
         if content_fail:
             verdict_status = "content_fail"
         elif quality_fail:
             verdict_status = "quality_fail"
+        elif intentional_checkpoint and substantive_review_reasons:
+            verdict_status = "partial_checkpoint_review"
+        elif intentional_checkpoint:
+            verdict_status = "partial_checkpoint"
         elif review_reasons:
             verdict_status = "review_required"
         else:
@@ -1046,6 +1094,8 @@ def _register_api(app: Flask) -> None:
             "review_required": "REVIEW REQUIRED",
             "quality_fail": "QUALITY FAIL",
             "content_fail": "CONTENT FAIL",
+            "partial_checkpoint": "PARTIAL CHECKPOINT",
+            "partial_checkpoint_review": "PARTIAL CHECKPOINT - REVIEW REQUIRED",
         }
         lines.extend([
             "QA Verdict:",
@@ -1286,6 +1336,14 @@ def _register_api(app: Flask) -> None:
                             "    Missing entities: "
                             + ", ".join(diagnostics["missing_entities"])
                         )
+                    if diagnostics.get("entities_reconciled_by_memory"):
+                        lines.append(
+                            "    Reconciled entities: "
+                            + ", ".join(
+                                f"{item.get('source')} -> {item.get('target')}"
+                                for item in diagnostics["entities_reconciled_by_memory"]
+                            )
+                        )
                 elif event["event_type"] == "integrity_edit_rejected":
                     lines.append(
                         f"  INTEGRITY REJECTED: stage={payload.get('stage')} "
@@ -1296,11 +1354,27 @@ def _register_api(app: Flask) -> None:
                             lines.append(
                                 f"    {finding.get('check_id')}: {finding.get('message')}"
                             )
+                elif event["event_type"] == "source_identifiers_restored":
+                    lines.append(
+                        f"  IDENTIFIERS RESTORED: stage={payload.get('stage')} "
+                        f"repairs={payload.get('repair_count', 0)}"
+                    )
+                    for repair in payload.get("repairs", []) or []:
+                        lines.append(
+                            f"    {repair.get('before')!r} -> {repair.get('after')!r}"
+                        )
                 elif event["event_type"] == "integrity_final_failed":
                     lines.append(
                         f"  INTEGRITY FINAL: blocking={payload.get('blocking_count')} "
                         "chunk requires review"
                     )
+                    for finding in payload.get("findings", []):
+                        if finding.get("severity") == "blocking":
+                            details = finding.get("details", {}) or {}
+                            lines.append(
+                                f"    {finding.get('check_id')}: "
+                                f"{finding.get('message')} details={details}"
+                            )
                 elif event["event_type"] == "chunk_review_required":
                     lines.append(
                         "  REVIEW REQUIRED: reasons="

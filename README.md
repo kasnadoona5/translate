@@ -899,6 +899,10 @@ releases.
 
 ## Release History
 
+- v9.12: conservative identifier restoration, mixed-script corruption gates,
+  morphology-safe first-occurrence originals, citation-only name exemptions,
+  memory-reconciled back-translation entities, advisory document terminology
+  evidence, and truthful partial-checkpoint QA classification
 - v9.11: evidence-gated contextual glossary enforcement, accepted-rendering
   terminology reconciliation, alias-aware first-occurrence originals,
   identifier integrity protection, stricter style-sample admission, and

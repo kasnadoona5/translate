@@ -8,6 +8,7 @@ from typing import Any
 
 from tarjomeh.exporters.base import TranslatedDocument
 from tarjomeh.glossary.manager import GlossaryManager
+from tarjomeh.glossary.compliance import term_occurs_only_in_citations
 from tarjomeh.persian.typography import PersianTypographer
 
 
@@ -53,6 +54,20 @@ def _inside_parenthetical(text: str, offset: int) -> bool:
     return text.rfind("(", 0, offset) > text.rfind(")", 0, offset)
 
 
+_PERSIAN_ANCHOR_SUFFIX_RE = re.compile(
+    r"(?:\u200c?(?:"
+    r"ها(?:ی(?:ی|م|ت|ش|مان|تان|شان)?)?"
+    r"|ی|ان|ات|تر(?:ین)?|ام|ات|اش|مان|تان|شان"
+    r"))"
+)
+
+
+def _extend_persian_anchor_end(text: str, end: int) -> int:
+    """Keep a productive Persian suffix attached before an English original."""
+    match = _PERSIAN_ANCHOR_SUFFIX_RE.match(text or "", end)
+    return match.end() if match else end
+
+
 def ensure_inline_proper_noun_originals(
     document: TranslatedDocument,
     proper_nouns: dict[str, str],
@@ -70,6 +85,7 @@ def ensure_inline_proper_noun_originals(
     anchors: list[dict[str, Any]] = []
     ambiguous: list[dict[str, Any]] = []
     missing_targets: list[dict[str, Any]] = []
+    citation_only: list[dict[str, Any]] = []
     categories = categories or {}
     aliases = aliases or {}
     for paragraph in document.paragraphs:
@@ -139,6 +155,17 @@ def ensure_inline_proper_noun_originals(
                     })
                     continue
                 else:
+                    if term_occurs_only_in_citations(
+                        paragraph.source_text, source
+                    ):
+                        citation_only.append({
+                            "paragraph_index": paragraph.index,
+                            "source": source,
+                            "target": target,
+                            "category": category,
+                            "reason": "citation_only_source_occurrence",
+                        })
+                        continue
                     missing_targets.append({
                         "paragraph_index": paragraph.index,
                         "source": source,
@@ -172,7 +199,7 @@ def ensure_inline_proper_noun_originals(
                 key=len,
             )
             target_end = target_offset + len(target)
-            insertion_at = target_end
+            insertion_at = _extend_persian_anchor_end(text, target_end)
             if insertion_at < len(text) and text[insertion_at] in "»”":
                 insertion_at += 1
             original_re = re.compile(
@@ -180,7 +207,9 @@ def ensure_inline_proper_noun_originals(
             )
             existing = list(original_re.finditer(text))
             correctly_placed = any(
-                abs(match.start() - insertion_at) <= 2 for match in existing
+                abs(match.start() - insertion_at) <= 2
+                and _PERSIAN_ANCHOR_SUFFIX_RE.match(text, match.end()) is None
+                for match in existing
             )
             if not correctly_placed:
                 if existing:
@@ -194,7 +223,9 @@ def ensure_inline_proper_noun_originals(
                     target_offset = min(
                         target_offsets, key=lambda value: abs(value - expected)
                     )
-                    insertion_at = target_offset + len(target)
+                    insertion_at = _extend_persian_anchor_end(
+                        text, target_offset + len(target)
+                    )
                     if insertion_at < len(text) and text[insertion_at] in "»”":
                         insertion_at += 1
                 text = (
@@ -232,9 +263,11 @@ def ensure_inline_proper_noun_originals(
         "anchored_count": len(anchors),
         "ambiguous_count": len(ambiguous),
         "missing_target_count": len(missing_targets),
+        "citation_only_count": len(citation_only),
         "anchors": anchors,
         "ambiguous": ambiguous,
         "missing_targets": missing_targets,
+        "citation_only": citation_only,
     }
     return report if return_report else inserted
 

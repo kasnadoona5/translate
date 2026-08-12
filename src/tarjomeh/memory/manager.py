@@ -19,6 +19,7 @@ from tarjomeh.memory.proper_nouns import ProperNouns, is_usable_memory_mapping
 from tarjomeh.memory.bilingual_summary import BilingualSummary
 from tarjomeh.memory.long_term import LongTermMemory
 from tarjomeh.memory.short_term import ShortTermMemory
+from tarjomeh.quality.integrity import mixed_script_artifacts
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,8 @@ def _clean_style_sample(text: str) -> str:
     if not sample or _STYLE_PROTOCOL_RE.search(sample):
         return ""
     if _UNTRANSLATED_CITATION_PROSE_RE.search(sample):
+        return ""
+    if mixed_script_artifacts(sample):
         return ""
     persian_chars = len(re.findall(r"[\u0600-\u06ff]", sample))
     latin_words = len(re.findall(r"\b[A-Za-z]{3,}\b", sample))
