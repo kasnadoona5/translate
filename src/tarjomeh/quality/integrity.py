@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from tarjomeh.glossary.compliance import target_present
 
@@ -93,40 +93,95 @@ def extract_numbers(text: str) -> Counter[str]:
     return Counter(values)
 
 
-def classify_numbers(text: str) -> dict[str, Counter[str]]:
-    """Classify comparable numbers for QA evidence without changing matching.
+@dataclass(frozen=True)
+class _NumberOccurrence:
+    value: str
+    role: str
+    position: int
+    label: str = ""
 
-    Footnote/endnote markers remain governed by ``extract_note_markers`` and
-    are intentionally excluded here. The roles make a failure explainable;
-    they do not relax or strengthen the existing numeric integrity decision.
-    """
+
+@dataclass
+class _NumberReconciliation:
+    missing: Counter[str] = field(default_factory=Counter)
+    missing_roles: dict[str, Counter[str]] = field(default_factory=dict)
+    localized_equivalents: list[dict[str, Any]] = field(default_factory=list)
+
+    def roles_payload(self) -> dict[str, list[str]]:
+        return {
+            role: list(values.elements())
+            for role, values in self.missing_roles.items()
+            if values
+        }
+
+
+def _numeric_text(text: str) -> str:
     normalized = (text or "").translate(_DIGIT_MAP).replace("\u066a", "%")
     normalized = re.sub(
         r"(?<=\d)\s*([.\u066b\u066c])\s*(?=\d)", r"\1", normalized
     )
     normalized = _NOTE_RE.sub("", normalized)
-    normalized = re.sub(
+    return re.sub(
         r"(?<=\d)\s*(?:percent|per\s+cent|\u062f\u0631\u0635\u062f)\b",
         "%",
         normalized,
         flags=re.IGNORECASE,
     )
-    roles = {
-        "prose": Counter(),
-        "citation": Counter(),
-        "structural": Counter(),
-    }
-    structural_labels = "|".join(re.escape(value) for value in (
-        *_STRUCTURAL_NUMBER_LABELS,
-        *(target for values in _STRUCTURAL_NUMBER_LABELS.values() for target in values),
-        "page", "pages", "p", "pp",
-    ))
+
+
+def _structural_aliases() -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for source_label, target_labels in _STRUCTURAL_NUMBER_LABELS.items():
+        canonical = "volume" if source_label == "vol" else source_label
+        aliases[source_label] = canonical
+        for target_label in target_labels:
+            aliases[target_label] = canonical
+    for alias in ("page", "pages", "p", "pp"):
+        aliases[alias] = "page"
+    return aliases
+
+
+def _structural_label(before: str, after: str) -> str:
+    aliases = _structural_aliases()
+    alternatives = "|".join(
+        sorted((re.escape(value) for value in aliases), key=len, reverse=True)
+    )
+    leading = re.search(
+        rf"(?:\b|(?<=[\u0600-\u06ff]))(?P<label>{alternatives})s?\.?\s*$",
+        before,
+        re.IGNORECASE,
+    )
+    if leading:
+        return aliases[leading.group("label").casefold().rstrip(".")]
+    listed = re.search(
+        rf"(?:\b|(?<=[\u0600-\u06ff]))(?P<label>{alternatives})s?\.?\s+"
+        rf"\d{{1,2}}(?:\s*,\s*\d{{1,2}})*"
+        rf"(?:\s*,\s*|\s*,?\s*(?:and|or|&)\s*)?$",
+        before,
+        re.IGNORECASE,
+    )
+    if listed:
+        return aliases[listed.group("label").casefold().rstrip(".")]
+    trailing = re.match(
+        rf"\s*[-\u2010-\u2014]?\s*(?P<label>{alternatives})s?\b",
+        after,
+        re.IGNORECASE,
+    )
+    if trailing:
+        return aliases[trailing.group("label").casefold().rstrip(".")]
+    return ""
+
+
+def _number_occurrences(text: str) -> list[_NumberOccurrence]:
+    normalized = _numeric_text(text)
+    occurrences: list[_NumberOccurrence] = []
     for match in _NUMBER_RE.finditer(normalized):
         value = re.sub(r"\s+", "", match.group()).replace("\u066b", ".").replace(
             "\u066c", ","
         )
         before = normalized[max(0, match.start() - 80):match.start()]
         after = normalized[match.end():match.end() + 50]
+        label = _structural_label(before, after)
         in_parenthetical = before.rfind("(") > before.rfind(")") and ")" in after
         is_year = bool(_CITATION_YEAR_RE.fullmatch(value.rstrip("%")))
         citation_cue = bool(re.search(
@@ -134,34 +189,31 @@ def classify_numbers(text: str) -> dict[str, Counter[str]]:
             before,
             re.IGNORECASE,
         ))
-        structural_cue = bool(re.search(
-            rf"(?:\b(?:{structural_labels})\.?\s*)$",
-            before,
-            re.IGNORECASE,
-        ))
-        if is_year or citation_cue or in_parenthetical:
-            role = "citation"
-        elif structural_cue:
+        if label:
             role = "structural"
+        elif is_year or citation_cue or in_parenthetical:
+            role = "citation"
         else:
             role = "prose"
-        roles[role][value] += 1
+        occurrences.append(_NumberOccurrence(value, role, match.start(), label))
+    return occurrences
+
+
+def classify_numbers(text: str) -> dict[str, Counter[str]]:
+    """Classify comparable numbers for QA evidence without changing matching.
+
+    Footnote/endnote markers remain governed by ``extract_note_markers`` and
+    are intentionally excluded here. The roles make a failure explainable;
+    they do not relax or strengthen the existing numeric integrity decision.
+    """
+    roles = {
+        "prose": Counter(),
+        "citation": Counter(),
+        "structural": Counter(),
+    }
+    for occurrence in _number_occurrences(text):
+        roles[occurrence.role][occurrence.value] += 1
     return roles
-
-
-def _missing_number_roles(source: str, missing: Counter[str]) -> dict[str, list[str]]:
-    """Allocate missing numeric occurrences to their source-side QA roles."""
-    remaining = Counter(missing)
-    output: dict[str, list[str]] = {}
-    source_roles = classify_numbers(source)
-    for role in ("citation", "structural", "prose"):
-        allocated = source_roles[role] & remaining
-        if allocated:
-            output[role] = list(allocated.elements())
-            remaining -= allocated
-    if remaining:
-        output.setdefault("prose", []).extend(remaining.elements())
-    return output
 
 
 def extract_note_markers(text: str) -> list[str]:
@@ -255,62 +307,157 @@ def _persian_number_forms(value: int) -> set[str]:
     return forms
 
 
-def _structural_number_equivalents(source: str, candidate: str) -> Counter[str]:
-    """Count localized number words only in explicit structural contexts."""
+def _localized_structural_matches(
+    source_occurrences: list[_NumberOccurrence],
+    candidate: str,
+) -> tuple[set[int], list[dict[str, Any]]]:
+    """Match conservative Persian number words to explicit source units."""
     normalized_candidate = normalize_for_match(candidate.translate(_DIGIT_MAP))
-    equivalents: Counter[str] = Counter()
-    labels = "|".join(re.escape(label) for label in _STRUCTURAL_NUMBER_LABELS)
-    leading = re.compile(
-        rf"\b(?P<label>{labels})s?\.?\s+(?P<numbers>\d{{1,2}}"
-        rf"(?:\s*(?:,\s*(?:and|or)?|and|or|&)\s*\d{{1,2}})*)",
-        re.IGNORECASE,
-    )
-    trailing = re.compile(
-        rf"\b(?P<number>\d{{1,2}})\s*[- ]\s*(?P<label>{labels})s?\.?\b",
-        re.IGNORECASE,
-    )
-    occurrences: set[tuple[int, str, int]] = set()
-    for match in leading.finditer(source or ""):
-        label = match.group("label").casefold().rstrip(".")
-        for number_text in re.findall(r"\d{1,2}", match.group("numbers")):
-            occurrences.add((match.start(), label, int(number_text)))
-    for match in trailing.finditer(source or ""):
-        occurrences.add((
-            match.start(),
-            match.group("label").casefold().rstrip("."),
-            int(match.group("number")),
-        ))
     persian_word = r"\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff"
-    for _position, source_label, number in occurrences:
-            target_labels = _STRUCTURAL_NUMBER_LABELS.get(source_label, ())
-            forms = _persian_number_forms(number)
-            for target_label in target_labels:
+    consumed_spans: set[tuple[int, int]] = set()
+    matched_source: set[int] = set()
+    evidence: list[dict[str, Any]] = []
+    canonical_targets: dict[str, set[str]] = {}
+    for source_label, target_labels in _STRUCTURAL_NUMBER_LABELS.items():
+        canonical = "volume" if source_label == "vol" else source_label
+        canonical_targets.setdefault(canonical, set()).update(target_labels)
+
+    for index, occurrence in enumerate(source_occurrences):
+        if occurrence.role != "structural" or not occurrence.label:
+            continue
+        try:
+            number = int(occurrence.value)
+        except ValueError:
+            continue
+        forms = _persian_number_forms(number)
+        target_labels = canonical_targets.get(occurrence.label, set())
+        if not forms or not target_labels:
+            continue
+        candidates: list[tuple[int, int, str]] = []
+        for target_label in target_labels:
+            label = re.escape(target_label)
+            label_suffix = r"(?:\s*\u0647\u0627(?:\u06cc)?|\u06cc)?"
+            for form in forms:
+                number_form = re.escape(form)
+                # A single plural label can govern a short coordinated list:
+                # "chapters second, third and fourth". Keep the search inside
+                # that label's current clause and consume each number word once.
                 for label_match in re.finditer(
-                    rf"(?<![{persian_word}]){re.escape(target_label)}"
-                    rf"(?:\s*\u0647\u0627(?:\u06cc)?)?(?![{persian_word}])",
+                    rf"(?<![{persian_word}]){label}{label_suffix}(?![{persian_word}])",
                     normalized_candidate,
                 ):
-                    window = normalized_candidate[
-                        max(0, label_match.start() - 100):label_match.end() + 180
-                    ]
-                    if any(
-                        re.search(
-                            rf"(?<![{persian_word}]){re.escape(form)}(?![{persian_word}])",
-                            window,
-                        )
-                        for form in forms
+                    clause_start = label_match.end()
+                    clause = normalized_candidate[clause_start:clause_start + 120]
+                    clause = re.split(r"[.!?\u061b;\n]", clause, maxsplit=1)[0]
+                    for form_match in re.finditer(
+                        rf"(?<![{persian_word}]){number_form}(?![{persian_word}])",
+                        clause,
                     ):
-                        equivalents[str(number)] += 1
-                        break
-                else:
-                    continue
-                break
-    return equivalents
+                        start = clause_start + form_match.start()
+                        end = clause_start + form_match.end()
+                        if (start, end) not in consumed_spans:
+                            candidates.append((start, end, form_match.group()))
+                patterns = (
+                    # Label-first forms, including lists such as
+                    # "chapters second, third and fourth".
+                    rf"(?<![{persian_word}]){label}{label_suffix}"
+                    rf"(?P<link>[\s\u060c,\u0648\u06cc\u0627-]{{0,48}})"
+                    rf"(?P<number>{number_form})(?![{persian_word}])",
+                    # Number-first compounds such as "three-volume" ->
+                    # "three volume-adjectival" with ordinary space or ZWNJ.
+                    rf"(?<![{persian_word}])(?P<number>{number_form})"
+                    rf"[\s-]{{0,3}}{label}{label_suffix}(?![{persian_word}])",
+                )
+                for pattern in patterns:
+                    for match in re.finditer(pattern, normalized_candidate):
+                        span = match.span("number")
+                        if span not in consumed_spans:
+                            candidates.append((span[0], span[1], match.group("number")))
+        if not candidates:
+            continue
+        start, end, rendered = min(candidates, key=lambda item: item[0])
+        consumed_spans.add((start, end))
+        matched_source.add(index)
+        evidence.append({
+            "source_value": occurrence.value,
+            "source_role": occurrence.role,
+            "source_label": occurrence.label,
+            "target_form": rendered,
+        })
+    return matched_source, evidence
+
+
+def _reconcile_numbers(source: str, candidate: str) -> _NumberReconciliation:
+    """Reconcile literal occurrences before safe localized unit equivalents."""
+    source_occurrences = _number_occurrences(source)
+    target_occurrences = _number_occurrences(candidate)
+    unmatched_source = set(range(len(source_occurrences)))
+    unmatched_target = set(range(len(target_occurrences)))
+
+    def pair_where(
+        predicate: Callable[[_NumberOccurrence, _NumberOccurrence], bool],
+    ) -> None:
+        for source_index in list(unmatched_source):
+            source_item = source_occurrences[source_index]
+            target_index = next((
+                index for index in unmatched_target
+                if target_occurrences[index].value == source_item.value
+                and predicate(source_item, target_occurrences[index])
+            ), None)
+            if target_index is not None:
+                unmatched_source.remove(source_index)
+                unmatched_target.remove(target_index)
+
+    # Preserve semantic identity where diagnostics can establish it, then retain
+    # the legacy value-count behavior as a compatibility fallback.
+    pair_where(lambda source_item, target_item: (
+        source_item.label and source_item.label == target_item.label
+    ))
+    pair_where(lambda source_item, target_item: source_item.role == target_item.role)
+    pair_where(lambda _source_item, _target_item: True)
+
+    remaining = [source_occurrences[index] for index in sorted(unmatched_source)]
+    localized_indexes, evidence = _localized_structural_matches(remaining, candidate)
+    remaining = [
+        occurrence for index, occurrence in enumerate(remaining)
+        if index not in localized_indexes
+    ]
+    missing = Counter(occurrence.value for occurrence in remaining)
+    missing_roles: dict[str, Counter[str]] = {}
+    for occurrence in remaining:
+        missing_roles.setdefault(occurrence.role, Counter())[occurrence.value] += 1
+    return _NumberReconciliation(missing, missing_roles, evidence)
 
 
 def _missing_numbers(source: str, candidate: str) -> Counter[str]:
-    missing = extract_numbers(source) - extract_numbers(candidate)
-    return missing - _structural_number_equivalents(source, candidate)
+    return _reconcile_numbers(source, candidate).missing
+
+
+def _new_missing_roles(
+    current: _NumberReconciliation,
+    previous: _NumberReconciliation,
+    newly_missing: Counter[str],
+) -> dict[str, list[str]]:
+    """Describe the roles whose unmatched occurrence counts actually grew."""
+    remaining = Counter(newly_missing)
+    output: dict[str, list[str]] = {}
+    for role in ("citation", "structural", "prose"):
+        growth = (
+            current.missing_roles.get(role, Counter())
+            - previous.missing_roles.get(role, Counter())
+        ) & remaining
+        if growth:
+            output[role] = list(growth.elements())
+            remaining -= growth
+    if remaining:
+        for role in ("citation", "structural", "prose"):
+            available = current.missing_roles.get(role, Counter()) & remaining
+            if available:
+                output.setdefault(role, []).extend(available.elements())
+                remaining -= available
+    if remaining:
+        output.setdefault("prose", []).extend(remaining.elements())
+    return output
 
 
 @dataclass
@@ -427,22 +574,33 @@ class PostEditIntegrityGate:
                     missing=missing_apparatus,
                 )
 
-        missing_number_counts = _missing_numbers(source, candidate)
-        previous_missing_number_counts = (
-            _missing_numbers(source, previous) if previous else Counter()
+        number_reconciliation = _reconcile_numbers(source, candidate)
+        previous_number_reconciliation = (
+            _reconcile_numbers(source, previous)
+            if previous else _NumberReconciliation()
         )
+        missing_number_counts = number_reconciliation.missing
+        previous_missing_number_counts = previous_number_reconciliation.missing
         newly_missing_number_counts = (
             missing_number_counts - previous_missing_number_counts
             if previous else missing_number_counts
         )
+        if number_reconciliation.localized_equivalents:
+            add(
+                "numbers_localized_equivalent", "info",
+                "Explicit structural numbers were preserved as localized Persian forms.",
+                equivalents=number_reconciliation.localized_equivalents,
+            )
         newly_missing_numbers = list(newly_missing_number_counts.elements())
         if newly_missing_numbers:
             add(
                 "numbers_missing", "blocking",
                 "Source numbers, dates, pages, or percentages are missing or changed.",
                 missing=newly_missing_numbers,
-                missing_by_role=_missing_number_roles(
-                    source, newly_missing_number_counts
+                missing_by_role=_new_missing_roles(
+                    number_reconciliation,
+                    previous_number_reconciliation,
+                    newly_missing_number_counts,
                 ),
             )
         elif missing_number_counts:
@@ -450,7 +608,7 @@ class PostEditIntegrityGate:
                 "numbers_still_missing", "warning",
                 "The edit did not introduce numeric loss, but an earlier omission remains.",
                 missing=list(missing_number_counts.elements()),
-                missing_by_role=_missing_number_roles(source, missing_number_counts),
+                missing_by_role=number_reconciliation.roles_payload(),
             )
 
         required_notes = Counter(extract_note_markers(source))
