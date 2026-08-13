@@ -202,7 +202,9 @@ class ProperNouns:
         return {
             source: list(self._aliases.get(source, []))
             for source in self._nouns
-            if self.is_inline_eligible(source) and self._aliases.get(source)
+            if self.is_inline_eligible(source)
+            and not self.is_context_deferred(source)
+            and self._aliases.get(source)
         }
 
     def mark_introduced(self, english: str) -> None:
@@ -239,6 +241,40 @@ class ProperNouns:
         key = self._stored_key(english) or english.strip()
         return dict(self._provenance.get(key, {}))
 
+    def all_nouns(self) -> dict[str, str]:
+        """Return a copy of every proper-noun and terminology mapping."""
+        return dict(self._nouns)
+
+    def mark_context_conflict(
+        self,
+        english: str,
+        *,
+        corrected_source: str,
+        corrected_target: str,
+    ) -> bool:
+        """Defer a lower-authority container mapping contradicted by review."""
+        key = self._stored_key(english)
+        if not key:
+            return False
+        provenance = dict(self._provenance.get(key, {}))
+        authority = int(
+            provenance.get("authority", _PROVENANCE_AUTHORITY["legacy"])
+        )
+        if authority >= _PROVENANCE_AUTHORITY["approved_research"]:
+            return False
+        provenance.update({
+            "context_deferred": True,
+            "conflict_source": corrected_source,
+            "conflict_target": corrected_target,
+        })
+        self._provenance[key] = provenance
+        return True
+
+    def is_context_deferred(self, english: str) -> bool:
+        """Return whether a contradicted automatic mapping is prompt-deferred."""
+        key = self._stored_key(english) or english.strip()
+        return bool(self._provenance.get(key, {}).get("context_deferred"))
+
     def is_inline_eligible(self, english: str) -> bool:
         """Return whether a noun may carry a first-occurrence English original."""
         return self.category_for(english) in INLINE_ORIGINAL_CATEGORIES
@@ -248,6 +284,7 @@ class ProperNouns:
         return {
             source: target for source, target in self._nouns.items()
             if self.is_inline_eligible(source)
+            and not self.is_context_deferred(source)
         }
 
     def pending_inline_originals(self, source_text: str) -> dict[str, str]:
@@ -255,6 +292,7 @@ class ProperNouns:
         return {
             source: target for source, target in self._nouns.items()
             if self.is_inline_eligible(source)
+            and not self.is_context_deferred(source)
             and source not in self._introduced
             and re.search(rf"\b{re.escape(source)}\b", source_text, re.IGNORECASE)
         }
@@ -278,6 +316,8 @@ class ProperNouns:
         lines = []
         for en, fa in sorted(self._nouns.items()):
             if not is_usable_memory_mapping(en, fa):
+                continue
+            if self._provenance.get(en, {}).get("context_deferred"):
                 continue
             category = self.category_for(en)
             if not self.is_inline_eligible(en):

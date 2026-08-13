@@ -63,9 +63,10 @@ _BIBLIOGRAPHIC_MARKER_RE = re.compile(
     r"ed\.?|eds\.?|rev\.?\s*ed\.?|vol\.?|no\.?)$",
     re.IGNORECASE,
 )
+_PERSIAN_LETTER_CLASS = r"\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff"
 _MIXED_SCRIPT_TOKEN_RE = re.compile(
-    r"(?<![\w/.-])(?:[A-Za-z]+[\u0600-\u06ff]+|"
-    r"[\u0600-\u06ff]+[A-Za-z]+)(?![\w/.-])"
+    rf"(?<![\w/.-])(?:[A-Za-z]+[{_PERSIAN_LETTER_CLASS}]+|"
+    rf"[{_PERSIAN_LETTER_CLASS}]+[A-Za-z]+)(?![\w/.-])"
 )
 _STRUCTURAL_NUMBER_LABELS = {
     "chapter": ("\u0641\u0635\u0644",),
@@ -390,11 +391,23 @@ def protected_english_originals(source: str, translation: str) -> list[str]:
 
 
 def protected_source_citations(source: str, translation: str) -> list[str]:
-    """Return numeric English parentheticals that also occur in the source."""
-    return [
-        value for value in protected_english_originals(source, translation)
-        if any(char.isdigit() for char in value)
-    ]
+    """Return source-grounded author-year atoms retained in a translation.
+
+    Framing prose such as ``see chapter 4`` is intentionally excluded. It may
+    be translated while the author, year, and structural number remain guarded
+    by apparatus and numeric integrity checks.
+    """
+    values: list[str] = []
+    for parenthetical in _SOURCE_PAREN_RE.findall(source or ""):
+        for year in _CITATION_YEAR_RE.finditer(parenthetical):
+            prefix = parenthetical[:year.start()]
+            name_match = _CITATION_NAME_RE.search(prefix)
+            name = name_match.group().strip() if name_match else ""
+            name = re.sub(r"^(?:cf\.?|see)\s+", "", name, flags=re.IGNORECASE)
+            atom = " ".join(part for part in (name, year.group()) if part)
+            if atom and _apparatus_value_present(atom, translation):
+                values.append(atom)
+    return sorted(set(values), key=str.casefold)
 
 
 def protected_source_apparatus(source: str, translation: str) -> list[str]:
@@ -442,6 +455,23 @@ def protected_source_apparatus(source: str, translation: str) -> list[str]:
         if normalize_for_match(cleaned) in translation_folded:
             values.append(cleaned)
     return sorted(set(values), key=str.casefold)
+
+
+def _apparatus_value_present(value: str, candidate: str) -> bool:
+    """Match citation atoms despite harmless citation-style reformatting."""
+    normalized_candidate = normalize_for_match(candidate)
+    years = _CITATION_YEAR_RE.findall(value or "")
+    if not years:
+        return normalize_for_match(value) in normalized_candidate
+    words = re.findall(r"[A-Za-z][A-Za-z'\u2019.-]*", value or "")
+    surnames = [
+        word.strip(".").casefold() for word in words
+        if word.casefold() not in {"cf", "see"}
+    ]
+    surname_present = not surnames or surnames[-1] in normalized_candidate
+    return surname_present and all(
+        normalize_for_match(year) in normalized_candidate for year in years
+    )
 
 
 def _persian_number_forms(value: int) -> set[str]:
@@ -588,6 +618,16 @@ def _missing_numbers(source: str, candidate: str) -> Counter[str]:
     return _reconcile_numbers(source, candidate).missing
 
 
+def reconcile_numbers(source: str, candidate: str) -> dict[str, Any]:
+    """Expose conservative numeric reconciliation to secondary QA checks."""
+    result = _reconcile_numbers(source, candidate)
+    return {
+        "missing": list(result.missing.elements()),
+        "missing_by_role": result.roles_payload(),
+        "localized_equivalents": list(result.localized_equivalents),
+    }
+
+
 def _new_missing_roles(
     current: _NumberReconciliation,
     previous: _NumberReconciliation,
@@ -720,7 +760,7 @@ class PostEditIntegrityGate:
 
             missing_apparatus = [
                 value for value in protected_source_apparatus(source, previous)
-                if normalize_for_match(value) not in normalize_for_match(candidate)
+                if not _apparatus_value_present(value, candidate)
             ]
             if missing_apparatus:
                 add(
@@ -950,7 +990,7 @@ class PostEditIntegrityGate:
             if previous:
                 missing_citations = [
                     value for value in protected_source_citations(source, previous)
-                    if value.casefold() not in candidate_folded
+                    if not _apparatus_value_present(value, candidate)
                 ]
                 if missing_citations:
                     add(

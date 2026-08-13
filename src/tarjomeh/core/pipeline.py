@@ -1123,6 +1123,7 @@ def _reconcile_committed_terminology(
     report: dict[str, Any] = {
         "reconciled": [],
         "aliases_added": [],
+        "context_deferred": [],
         "skipped": [],
     }
     if _chunk_needs_review(db, job_id, chunk_index):
@@ -1134,7 +1135,7 @@ def _reconcile_committed_terminology(
         for item in db.get_qa_issues(job_id, chunk_index)
         if str(item.get("issue_id", ""))
     }
-    known = memory_manager.proper_nouns.inline_eligible_nouns()
+    known = memory_manager.proper_nouns.all_nouns()
     for decision in db.get_issue_decisions(job_id, chunk_index):
         decision_payload = decision.get("payload", {})
         if not isinstance(decision_payload, dict):
@@ -1163,9 +1164,41 @@ def _reconcile_committed_terminology(
                 flags=re.IGNORECASE,
             )
         ]
-        if not matching_sources:
-            continue
-        source = max(matching_sources, key=len)
+        derived_source = False
+        container_sources: list[str] = []
+        if matching_sources:
+            source = max(matching_sources, key=len)
+        else:
+            quote_words = re.findall(r"[A-Za-z][A-Za-z'\-]*", source_quote)
+            if not (
+                1 <= len(quote_words) <= 4
+                and len(source_quote) <= 80
+                and re.fullmatch(
+                    r"[A-Za-z][A-Za-z'\-]*(?:\s+[A-Za-z][A-Za-z'\-]*){0,3}",
+                    source_quote,
+                )
+                and re.search(
+                    rf"(?<!\w){re.escape(source_quote)}(?!\w)",
+                    source_text,
+                    re.IGNORECASE,
+                )
+            ):
+                continue
+            source = source_quote
+            derived_source = True
+            container_sources = [
+                known_source for known_source in known
+                if re.search(
+                    rf"(?<!\w){re.escape(source_quote)}(?!\w)",
+                    known_source,
+                    re.IGNORECASE,
+                )
+                and re.search(
+                    rf"(?<!\w){re.escape(known_source)}(?!\w)",
+                    source_text,
+                    re.IGNORECASE,
+                )
+            ]
         if category == "accuracy":
             quote_words = re.findall(r"[A-Za-z][A-Za-z'\-]*", source_quote)
             source_words = re.findall(r"[A-Za-z][A-Za-z'\-]*", source)
@@ -1207,7 +1240,10 @@ def _reconcile_committed_terminology(
         outcome = memory_manager.proper_nouns.add_noun(
             source,
             target,
-            category=memory_manager.proper_nouns.category_for(source),
+            category=(
+                "term" if derived_source
+                else memory_manager.proper_nouns.category_for(source)
+            ),
             provenance="accepted_correction",
         )
         if outcome.get("action") in {"replaced_lower_authority", "confirmed"}:
@@ -1218,6 +1254,21 @@ def _reconcile_committed_terminology(
                 "source": source,
                 "target": target,
             })
+        if outcome.get("action") in {
+            "added", "replaced_lower_authority", "confirmed"
+        }:
+            for container in container_sources:
+                if memory_manager.proper_nouns.mark_context_conflict(
+                    container,
+                    corrected_source=source,
+                    corrected_target=target,
+                ):
+                    report["context_deferred"].append({
+                        "issue_id": issue_id,
+                        "source": container,
+                        "conflict_source": source,
+                        "accepted_target": target,
+                    })
     report["policy"] = (
         "Only committed compact terminology corrections from review-clean chunks "
         "may supersede lower-authority automatic memory; curated mappings remain protected."
@@ -1235,6 +1286,8 @@ def _advisory_terminology_consistency(
     inconsistent: list[dict[str, Any]] = []
     noun_state = memory_manager.proper_nouns.serialize()
     for source, target in (noun_state.get("nouns", {}) or {}).items():
+        if memory_manager.proper_nouns.is_context_deferred(source):
+            continue
         if not re.search(
             rf"(?<!\w){re.escape(source)}(?!\w)", source_text, re.IGNORECASE
         ):

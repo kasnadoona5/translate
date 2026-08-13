@@ -47,6 +47,24 @@ def _search_tokens(value: str) -> set[str]:
     }
 
 
+def _ordered_search_tokens(value: str) -> list[str]:
+    return [
+        token.casefold()
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9'-]{2,}", value or "")
+        if token.casefold() not in _SEARCH_STOPWORDS
+    ]
+
+
+def _contains_token_sequence(haystack: list[str], needle: list[str]) -> bool:
+    if not needle:
+        return False
+    width = len(needle)
+    return any(
+        haystack[index:index + width] == needle
+        for index in range(len(haystack) - width + 1)
+    )
+
+
 def rank_search_results(
     query: str,
     results: list[SearchResult],
@@ -54,6 +72,7 @@ def rank_search_results(
     identity: str = "",
     title: str = "",
     author: str = "",
+    identifiers: tuple[str, ...] = (),
     strict_identity: bool = True,
 ) -> tuple[list[SearchResult], list[dict[str, Any]]]:
     """Rank search evidence conservatively and reject clear identity mismatches."""
@@ -61,12 +80,23 @@ def rank_search_results(
     identity_tokens = _search_tokens(identity)
     title_tokens = _search_tokens(title)
     author_tokens = _search_tokens(author)
+    title_sequence = _ordered_search_tokens(title)
     ranked: list[tuple[float, SearchResult]] = []
     diagnostics: list[dict[str, Any]] = []
     for result in results:
         host = urllib.parse.urlparse(result.url).netloc.casefold().removeprefix("www.")
         haystack = " ".join((result.title, result.snippet, result.url)).casefold()
         haystack_tokens = _search_tokens(haystack)
+        haystack_sequence = _ordered_search_tokens(haystack)
+        strong_title_match = _contains_token_sequence(
+            haystack_sequence, title_sequence
+        )
+        author_support = bool(author_tokens & haystack_tokens)
+        normalized_haystack = re.sub(r"[^a-z0-9x]", "", haystack)
+        identifier_support = any(
+            re.sub(r"[^a-z0-9x]", "", value.casefold()) in normalized_haystack
+            for value in identifiers if value.strip()
+        )
         identity_coverage = (
             len(identity_tokens & haystack_tokens) / len(identity_tokens)
             if identity_tokens else 1.0
@@ -101,23 +131,19 @@ def rank_search_results(
         reasons: list[str] = []
         if strict_identity and not identity_tokens:
             reasons.append("missing_identity_anchor")
-        title_requirement = 1.0 if len(title_tokens) <= 3 else 0.65
-        title_mismatch = bool(
-            title_tokens and title_coverage < title_requirement
+        title_identity_supported = bool(
+            strong_title_match
+            or identifier_support
+            or (
+                title_tokens
+                and title_coverage >= 0.65
+                and author_support
+            )
         )
-        # A full title match is a strong identity anchor even when a publisher
-        # result omits the author. Partial title matches require corroboration
-        # by at least one distinctive author token.
-        author_support_required = bool(
-            author_tokens and title_tokens and title_coverage < 0.9
-        )
-        author_mismatch = bool(
-            author_support_required and not (author_tokens & haystack_tokens)
-        )
-        if title_mismatch:
+        if strict_identity and title_tokens and not title_identity_supported:
             reasons.append("title_identity_mismatch")
-        if author_mismatch:
-            reasons.append("author_identity_mismatch")
+            if title_coverage > 0 and author_tokens and not author_support:
+                reasons.append("author_identity_mismatch")
         if (
             identity_tokens
             and not title_tokens
@@ -134,6 +160,9 @@ def rank_search_results(
             "identity_coverage": round(identity_coverage, 4),
             "title_coverage": round(title_coverage, 4),
             "author_coverage": round(author_coverage, 4),
+            "strong_title_match": strong_title_match,
+            "author_support": author_support,
+            "identifier_support": identifier_support,
             "accepted": accepted,
             "reasons": reasons or (["below_relevance_threshold"] if not accepted else []),
         })

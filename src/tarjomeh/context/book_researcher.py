@@ -71,8 +71,10 @@ class BookResearcher:
         sources: list[dict[str, str]] = []
         try:
             excerpt = self._book_excerpt(document)
+            identifiers = self._book_identifiers(excerpt)
             await self._search_queries(
-                queries, sources, title=title, author=author
+                queries, sources, title=title, author=author,
+                identifiers=identifiers,
             )
             data, used_batches, recovery_error = await self._synthesise(
                 title,
@@ -96,7 +98,8 @@ class BookResearcher:
             if follow_ups:
                 queries.extend(follow_ups)
                 await self._search_queries(
-                    follow_ups, sources, title=title, author=author
+                    follow_ups, sources, title=title, author=author,
+                    identifiers=identifiers,
                 )
                 data, follow_up_batches, follow_up_error = await self._synthesise(
                     title,
@@ -266,6 +269,7 @@ class BookResearcher:
         *,
         title: str = "",
         author: str = "",
+        identifiers: tuple[str, ...] = (),
     ) -> None:
         known_urls = {item["url"] for item in sources}
         for query in queries:
@@ -284,6 +288,7 @@ class BookResearcher:
                 identity=identity,
                 title=book_title,
                 author=author,
+                identifiers=identifiers,
                 strict_identity=True,
             )
             diagnostics = getattr(self.provider, "diagnostics", None)
@@ -293,6 +298,7 @@ class BookResearcher:
                     "provider": "relevance_filter",
                     "status": "filtered",
                     "identity": identity,
+                    "identifiers": list(identifiers),
                     "accepted_count": len(ranked),
                     "rejected_count": len(results) - len(ranked),
                     "results": relevance,
@@ -308,6 +314,22 @@ class BookResearcher:
                     "snippet": result.snippet[:700],
                     "source_authority": self._source_authority(result.url),
                 })
+
+    @staticmethod
+    def _book_identifiers(excerpt: str) -> tuple[str, ...]:
+        """Extract stable publication identifiers for search identity checks."""
+        values: list[str] = []
+        values.extend(match.group() for match in re.finditer(
+            r"(?:ISBN(?:-1[03])?|ISSN)\s*:?[\s0-9Xx-]{8,32}",
+            excerpt or "",
+            re.IGNORECASE,
+        ))
+        values.extend(match.group() for match in re.finditer(
+            r"\b10\.\d{4,9}/[-._;()/:A-Za-z0-9]+",
+            excerpt or "",
+            re.IGNORECASE,
+        ))
+        return tuple(dict.fromkeys(" ".join(value.split()) for value in values))
 
     @staticmethod
     def _evidence_text(sources: list[dict[str, str]]) -> str:

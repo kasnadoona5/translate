@@ -68,6 +68,48 @@ def _extend_persian_anchor_end(text: str, end: int) -> int:
     return match.end() if match else end
 
 
+_PERSIAN_TARGET_TOKEN_RE = re.compile(
+    r"[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]+"
+    r"(?:\u200c[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]+)*"
+)
+
+
+def _target_spans(text: str, target: str) -> list[tuple[int, int, str]]:
+    """Find exact targets, then a conservative modifier-tolerant Persian form."""
+    exact = [
+        (match.start(), match.end(), match.group())
+        for match in re.finditer(re.escape(target), text or "")
+    ]
+    if exact:
+        return exact
+
+    target_tokens = [
+        match.group().replace("\u200c", "")
+        for match in _PERSIAN_TARGET_TOKEN_RE.finditer(target or "")
+    ]
+    if len(target_tokens) < 2:
+        return []
+    text_tokens = list(_PERSIAN_TARGET_TOKEN_RE.finditer(text or ""))
+    matches: list[tuple[int, int, str]] = []
+    for start_index, token in enumerate(text_tokens):
+        if token.group().replace("\u200c", "") != target_tokens[0]:
+            continue
+        cursor = start_index
+        for expected in target_tokens[1:]:
+            next_index = next((
+                index for index in range(cursor + 1, min(cursor + 4, len(text_tokens)))
+                if text_tokens[index].group().replace("\u200c", "") == expected
+            ), None)
+            if next_index is None:
+                break
+            cursor = next_index
+        else:
+            start = token.start()
+            end = text_tokens[cursor].end()
+            matches.append((start, end, text[start:end]))
+    return matches
+
+
 def ensure_inline_proper_noun_originals(
     document: TranslatedDocument,
     proper_nouns: dict[str, str],
@@ -123,11 +165,13 @@ def ensure_inline_proper_noun_originals(
         text = paragraph.translated_text
         for source_position, source, target_variants, key, category in sorted(candidates):
             target_matches = [
-                (match.start(), target)
+                (*match, target)
                 for target in target_variants
-                for match in re.finditer(re.escape(target), text)
+                for match in _target_spans(text, target)
             ]
-            target_offsets = sorted({offset for offset, _target in target_matches})
+            target_offsets = sorted({
+                offset for offset, _end, _rendered, _canonical in target_matches
+            })
             target = target_variants[0]
             if not target_offsets:
                 bare_originals = [
@@ -144,7 +188,12 @@ def ensure_inline_proper_noun_originals(
                     )
                     paired_repaired += 1
                     target_offsets = [original_match.start()]
-                    target_matches = [(original_match.start(), target)]
+                    target_matches = [(
+                        original_match.start(),
+                        original_match.start() + len(target),
+                        target,
+                        target,
+                    )]
                 elif len(bare_originals) > 1:
                     ambiguous.append({
                         "paragraph_index": paragraph.index,
@@ -191,14 +240,14 @@ def ensure_inline_proper_noun_originals(
                 })
                 continue
             target_offset = ranked[0]
-            target = max(
+            target_end, rendered_target, target = max(
                 [
-                    value for offset, value in target_matches
+                    (end, rendered, canonical)
+                    for offset, end, rendered, canonical in target_matches
                     if offset == target_offset
                 ],
-                key=len,
+                key=lambda item: item[0] - target_offset,
             )
-            target_end = target_offset + len(target)
             insertion_at = _extend_persian_anchor_end(text, target_end)
             if insertion_at < len(text) and text[insertion_at] in "»”":
                 insertion_at += 1
@@ -215,16 +264,14 @@ def ensure_inline_proper_noun_originals(
                 if existing:
                     repositioned += 1
                     text = original_re.sub("", text)
-                    target_offsets = [
-                        match.start() for match in re.finditer(re.escape(target), text)
-                    ]
-                    if not target_offsets:
+                    refreshed = _target_spans(text, rendered_target)
+                    if not refreshed:
                         continue
-                    target_offset = min(
-                        target_offsets, key=lambda value: abs(value - expected)
+                    target_offset, target_end, rendered_target = min(
+                        refreshed, key=lambda item: abs(item[0] - expected)
                     )
                     insertion_at = _extend_persian_anchor_end(
-                        text, target_offset + len(target)
+                        text, target_end
                     )
                     if insertion_at < len(text) and text[insertion_at] in "»”":
                         insertion_at += 1
@@ -280,6 +327,97 @@ _ORIGINAL_BARE_YEAR_RE = re.compile(
     r"\((?P<original>[A-Za-zÀ-ž][^()]{0,120}?)\)\s+"
     r"(?P<citation>(?:1[5-9]|20)\d{2}[a-z]?(?:\s*,\s*\d+(?:[-–]\d+)?)?)"
 )
+_CITATION_YEAR_RE = re.compile(r"\b(?:1[5-9]\d{2}|20\d{2})[a-z]?\b", re.IGNORECASE)
+_CITATION_WRAPPER_RE = re.compile(
+    r"\((?P<wrapper>see(?:\s+also)?|cf\.?)\s+"
+    r"(?P<body>[^()\n]{1,200})\)",
+    re.IGNORECASE,
+)
+_STRUCTURAL_REFERENCE_RE = re.compile(
+    r"(?P<label>\u062c\u062f\u0648\u0644|\u0641\u0635\u0644|\u0628\u062e\u0634|"
+    r"\u0634\u06a9\u0644|\u0646\u0645\u0648\u062f\u0627\u0631|\u067e\u06cc\u0648\u0633\u062a)"
+    r"(?P<space>\s+)(?P<major>[0-9\u06f0-\u06f9\u0660-\u0669]+)"
+    r"\s*[.\u066b]\s*(?P<minor>[0-9\u06f0-\u06f9\u0660-\u0669]+)"
+)
+
+
+def _source_supports_adjacent_citation(
+    source_text: str,
+    original: str,
+    citation: str,
+) -> bool:
+    """Ground an adjacent name/year pair in source syntax, not vocabulary."""
+    source_folded = (source_text or "").casefold()
+    if original.casefold() not in source_folded:
+        return False
+    years = _CITATION_YEAR_RE.findall(citation)
+    if not years or not all(year.casefold() in source_folded for year in years):
+        return False
+    if f"({citation})".casefold() in source_folded:
+        return True
+    return bool(re.search(
+        rf"{re.escape(original)}(?:['\u2019]s)?\s*\([^)]*"
+        rf"{re.escape(years[0])}[^)]*\)",
+        source_text or "",
+        re.IGNORECASE,
+    ))
+
+
+def _citation_without_repeated_surname(original: str, citation: str) -> str:
+    original_words = re.findall(r"[A-Za-z][A-Za-z'\u2019.-]*", original)
+    if not original_words:
+        return citation
+    surname = original_words[-1].strip(".")
+    return re.sub(
+        rf"^\s*{re.escape(surname)}\s+", "", citation, flags=re.IGNORECASE
+    ).strip()
+
+
+def _normalize_citation_house_style(text: str) -> tuple[str, list[dict[str, str]]]:
+    """Translate only citation framing and normalize structural separators."""
+    changes: list[dict[str, str]] = []
+
+    def wrapper(match: re.Match[str]) -> str:
+        body = " ".join(match.group("body").split())
+        if not (
+            _CITATION_YEAR_RE.search(body)
+            or re.match(
+                r"^(?:chapter|table|figure|section|appendix)\s+\d",
+                body,
+                re.IGNORECASE,
+            )
+        ):
+            return match.group(0)
+        labels = {
+            "chapter": "\u0641\u0635\u0644",
+            "table": "\u062c\u062f\u0648\u0644",
+            "figure": "\u0634\u06a9\u0644",
+            "section": "\u0628\u062e\u0634",
+            "appendix": "\u067e\u06cc\u0648\u0633\u062a",
+        }
+        body = re.sub(
+            r"^(chapter|table|figure|section|appendix)\b",
+            lambda item: labels[item.group(1).casefold()],
+            body,
+            flags=re.IGNORECASE,
+        )
+        replacement = f"(\u0631.\u06a9. {body})"
+        changes.append({"before": match.group(0), "after": replacement})
+        return replacement
+
+    result = _CITATION_WRAPPER_RE.sub(wrapper, text or "")
+    result = re.sub(r"\u0631\s*\.\s*\u06a9\s*\.", "\u0631.\u06a9.", result)
+
+    def structural(match: re.Match[str]) -> str:
+        replacement = (
+            f"{match.group('label')}{match.group('space')}"
+            f"{match.group('major')}.{match.group('minor')}"
+        )
+        if replacement != match.group(0):
+            changes.append({"before": match.group(0), "after": replacement})
+        return replacement
+
+    return _STRUCTURAL_REFERENCE_RE.sub(structural, result), changes
 
 
 def normalize_adjacent_original_citations(
@@ -299,8 +437,11 @@ def normalize_adjacent_original_citations(
                 return match.group(0)
             if original.casefold() not in source_folded:
                 return match.group(0)
-            if f"({citation})".casefold() not in source_folded:
+            if not _source_supports_adjacent_citation(
+                paragraph.source_text, original, citation
+            ):
                 return match.group(0)
+            citation = _citation_without_repeated_surname(original, citation)
             combined = f"({original}, {citation})"
             changes.append({
                 "paragraph_index": paragraph.index,
@@ -339,6 +480,15 @@ def normalize_adjacent_original_citations(
         paragraph.translated_text = _ORIGINAL_BARE_YEAR_RE.sub(
             replace_bare_year, paragraph.translated_text or ""
         )
+        normalized, style_changes = _normalize_citation_house_style(
+            paragraph.translated_text
+        )
+        paragraph.translated_text = normalized
+        changes.extend({
+            "paragraph_index": paragraph.index,
+            "kind": "citation_house_style",
+            **change,
+        } for change in style_changes)
     return {"normalized_count": len(changes), "changes": changes}
 
 
@@ -504,16 +654,17 @@ def apply_term_notes(
             ))
             if not target_variants:
                 continue
-            target_matches: list[tuple[int, str]] = []
+            target_matches: list[tuple[int, int, str, str]] = []
             for target in target_variants:
-                offset = paragraph.translated_text.find(target)
-                while offset >= 0:
-                    if offset not in used_target_offsets:
-                        target_matches.append((offset, target))
-                    offset = paragraph.translated_text.find(
-                        target, offset + len(target)
+                target_matches.extend(
+                    (*match, target) for match in _target_spans(
+                        paragraph.translated_text, target
                     )
-            target_offsets = sorted({offset for offset, _target in target_matches})
+                    if match[0] not in used_target_offsets
+                )
+            target_offsets = sorted({
+                offset for offset, _end, _rendered, _canonical in target_matches
+            })
             if not target_offsets:
                 continue
             expected_offset = int(
@@ -525,18 +676,19 @@ def apply_term_notes(
                 target_offsets,
                 key=lambda value: abs(value - expected_offset),
             )
-            target = max(
+            target, canonical_target = max(
                 [
-                    value for offset, value in target_matches
+                    (rendered, canonical)
+                    for offset, _end, rendered, canonical in target_matches
                     if offset == target_offset
                 ],
-                key=len,
+                key=lambda item: len(item[0]),
             )
 
             note = {
                 "number": next_number,
                 "original": source,
-                "transliteration": target,
+                "transliteration": canonical_target,
                 "kind": kind,
             }
             refs.append({

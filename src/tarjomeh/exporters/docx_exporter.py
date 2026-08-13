@@ -4,11 +4,66 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from pathlib import Path
 from tarjomeh.exporters.base import BaseExporter, TranslatedDocument, BilingualMode
 from tarjomeh.exporters.term_notes import document_term_notes, paragraph_note_parts
 
 logger = logging.getLogger(__name__)
+
+_LATIN_PARENTHETICAL_RE = re.compile(r"\([^()\n]*[A-Za-z][^()\n]*\)")
+_PERSIAN_LETTER_RE = re.compile(
+    r"[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]"
+)
+
+
+def _mixed_direction_parts(value: str) -> list[tuple[str, bool]]:
+    """Split mixed citation content into stable RTL and LTR run spans."""
+    parts: list[tuple[str, bool]] = []
+    buffer = ""
+    direction: bool | None = None
+    for char in value:
+        bidi = unicodedata.bidirectional(char)
+        char_direction: bool | None
+        if bidi in {"R", "AL", "AN"}:
+            char_direction = True
+        elif bidi in {"L", "EN"}:
+            char_direction = False
+        else:
+            char_direction = None
+        if char_direction is not None and direction is not None and char_direction != direction:
+            if buffer:
+                parts.append((buffer, direction))
+            buffer = char
+            direction = char_direction
+        else:
+            buffer += char
+            if direction is None and char_direction is not None:
+                direction = char_direction
+    if buffer:
+        parts.append((buffer, True if direction is None else direction))
+    return parts
+
+
+def directional_target_parts(text: str) -> list[tuple[str, bool]]:
+    """Return text/run-direction pairs without changing visible content."""
+    output: list[tuple[str, bool]] = []
+    cursor = 0
+    for match in _LATIN_PARENTHETICAL_RE.finditer(text or ""):
+        if match.start() > cursor:
+            output.append((text[cursor:match.start()], True))
+        parenthetical = match.group()
+        inner = parenthetical[1:-1]
+        if _PERSIAN_LETTER_RE.search(inner):
+            output.append(("(", True))
+            output.extend(_mixed_direction_parts(inner))
+            output.append((")", True))
+        else:
+            output.append((parenthetical, False))
+        cursor = match.end()
+    if cursor < len(text or ""):
+        output.append((text[cursor:], True))
+    return [(value, rtl) for value, rtl in output if value]
 
 try:
     import docx
@@ -66,7 +121,6 @@ class DocxExporter(BaseExporter):
             heading_style.font.color.rgb = RGBColor(0, 0, 0)
             heading_style.paragraph_format.keep_with_next = True
 
-        latin_parenthetical = re.compile(r"(\([^()\n]*[A-Za-z][^()\n]*\))")
         chapter_page_breaks = bool(
             document.metadata.get("chapter_page_breaks", True)
         )
@@ -129,14 +183,9 @@ class DocxExporter(BaseExporter):
         def add_target_runs(p_obj, text: str, metadata: dict) -> None:
             for segment, ref in paragraph_note_parts(text, metadata):
                 if segment:
-                    for part in latin_parenthetical.split(segment):
-                        if not part:
-                            continue
+                    for part, rtl in directional_target_parts(segment):
                         run = p_obj.add_run(part)
-                        set_run_fonts(
-                            run,
-                            rtl=not bool(latin_parenthetical.fullmatch(part)),
-                        )
+                        set_run_fonts(run, rtl=rtl)
                 if ref is not None:
                     marker = p_obj.add_run(
                         str(ref.get("display_number", ref["number"]))

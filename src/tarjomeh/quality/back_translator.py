@@ -16,7 +16,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from tarjomeh.core.prompts import BACK_TRANSLATE_PROMPT
-from tarjomeh.quality.integrity import extract_numbers
+from tarjomeh.quality.integrity import extract_numbers, reconcile_numbers
 from tarjomeh.glossary.compliance import target_present
 
 
@@ -186,12 +186,29 @@ class BackTranslator:
 
         source_numbers = extract_numbers(original_english)
         back_numbers = extract_numbers(back_translated)
-        missing_numbers = list((source_numbers - back_numbers).elements())
+        raw_missing_number_counts = source_numbers - back_numbers
+        translated_number_evidence = (
+            reconcile_numbers(original_english, translated_text)
+            if translated_text else {"missing": [], "localized_equivalents": []}
+        )
+        translation_missing_counts = Counter(
+            translated_number_evidence.get("missing", [])
+        )
+        missing_number_counts = (
+            raw_missing_number_counts & translation_missing_counts
+            if translated_text else raw_missing_number_counts
+        )
+        reconciled_number_counts = raw_missing_number_counts - missing_number_counts
+        missing_numbers = list(missing_number_counts.elements())
         added_numbers = list((back_numbers - source_numbers).elements())
 
         structural_listing = _looks_like_structural_listing(original_english)
+        non_prose_front_matter = _looks_like_non_prose_front_matter(
+            original_english
+        )
+        non_prose = structural_listing or non_prose_front_matter
         source_entities = (
-            [] if structural_listing else _extract_entities(original_english)
+            [] if non_prose else _extract_entities(original_english)
         )
         preserved_inline_entities = [
             entity for entity in source_entities
@@ -232,11 +249,13 @@ class BackTranslator:
         source_sentences = _sentence_count(original_english)
         back_sentences = _sentence_count(back_translated)
         sentence_ratio = back_sentences / max(1, source_sentences)
-        possible_omission = (
+        possible_omission = not non_prose and (
             (source_sentences >= 2 and sentence_ratio < 0.5)
             or (len(orig_tokens) >= 20 and similarity < 0.2)
         )
-        possible_addition = source_sentences >= 1 and sentence_ratio > 2.0
+        possible_addition = (
+            not non_prose and source_sentences >= 1 and sentence_ratio > 2.0
+        )
         risk_flags = []
         if missing_numbers:
             risk_flags.append("numbers_missing_or_changed")
@@ -255,8 +274,13 @@ class BackTranslator:
             "risk_flags": risk_flags,
             "missing_numbers": missing_numbers,
             "added_numbers": added_numbers,
+            "numbers_reconciled_by_translation": list(
+                reconciled_number_counts.elements()
+            ),
+            "translated_number_evidence": translated_number_evidence,
             "missing_entities": missing_entities,
             "entity_check_skipped_for_structural_listing": structural_listing,
+            "qa_risk_skipped_for_non_prose_front_matter": non_prose_front_matter,
             "entities_preserved_inline": preserved_inline_entities,
             "entities_reconciled_by_memory": reconciled_aliases,
             "source_negations": source_negations,
@@ -354,6 +378,27 @@ def _looks_like_structural_listing(text: str) -> bool:
         numbered_lines / len(lines) >= 0.35
         and short_lines / len(lines) >= 0.6
         and sentence_lines / len(lines) <= 0.35
+    )
+
+
+def _looks_like_non_prose_front_matter(text: str) -> bool:
+    """Detect publishing metadata/dedication blocks without book-specific text."""
+    value = text or ""
+    folded = value.casefold()
+    markers = (
+        "all rights reserved", "copyright", "isbn", "issn",
+        "library of congress", "british library", "cataloguing",
+        "cataloging", "typeset", "printed and bound", "in memoriam",
+    )
+    marker_count = sum(marker in folded for marker in markers)
+    lines = [line.strip() for line in value.splitlines() if line.strip()]
+    metadata_lines = sum(bool(re.search(
+        r"(?:https?://|www\.|isbn|copyright|\u00a9|\b(?:19|20)\d{2}\b)",
+        line,
+        re.IGNORECASE,
+    )) for line in lines)
+    return marker_count >= 2 or (
+        marker_count >= 1 and len(lines) >= 3 and metadata_lines >= 2
     )
 
 
