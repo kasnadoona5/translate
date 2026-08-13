@@ -24,6 +24,11 @@ _JSON_LEAK_RE = re.compile(r'(^\s*\{|"(?:translation|decision|rationale)"\s*:)',
 _IDENTIFIER_DIGITS = "0-9\u06f0-\u06f9\u0660-\u0669"
 _IDENTIFIER_PATTERNS = (
     re.compile(r"https?://[^\s<>()]+", re.IGNORECASE),
+    re.compile(
+        r"(?<![@\w])(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})\.)+"
+        r"[A-Za-z]{2,63}(?:/[^\s<>()]*)?",
+        re.IGNORECASE,
+    ),
     re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Za-z0-9]+", re.IGNORECASE),
     re.compile(
         rf"\b(?:ISBN(?:-1[03])?|ISSN)\s*:?\s*"
@@ -42,6 +47,20 @@ _IDENTIFIER_PATTERNS = (
         rf"[A-Za-z]{{2,}}(?:[-/][A-Za-z{_IDENTIFIER_DIGITS}]{{2,}}){{1,8}}"
         rf"(?![A-Za-z0-9])",
         re.IGNORECASE,
+    ),
+    re.compile(
+        rf"(?<![A-Za-z0-9])"
+        rf"(?=[A-Za-z{_IDENTIFIER_DIGITS}.\-/\u2010-\u2015]*[A-Za-z])"
+        rf"(?=[A-Za-z{_IDENTIFIER_DIGITS}.\-/\u2010-\u2015]*[{_IDENTIFIER_DIGITS}])"
+        rf"(?=[A-Za-z{_IDENTIFIER_DIGITS}.\-/\u2010-\u2015]*[./])"
+        rf"[A-Za-z{_IDENTIFIER_DIGITS}]{{1,12}}"
+        rf"(?:[.\-/\u2010-\u2015][A-Za-z{_IDENTIFIER_DIGITS}]{{1,12}}){{1,5}}"
+        rf"(?![A-Za-z0-9])",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"(?<![A-Za-z0-9])[A-Z]{{1,2}}[{_IDENTIFIER_DIGITS}][A-Z{_IDENTIFIER_DIGITS}]?"
+        rf"\s+[{_IDENTIFIER_DIGITS}][A-Z]{{2}}(?![A-Za-z0-9])"
     ),
 )
 _ENGLISH_PAREN_RE = re.compile(r"\(([A-Za-z][A-Za-z0-9 .,&':;\u2019\-]{1,80})\)")
@@ -291,6 +310,36 @@ def _identifier_identity(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "", normalized).casefold()
 
 
+def _identifier_payload(value: str) -> str:
+    """Strip a source label while preserving the exact identifier payload."""
+    return re.sub(
+        r"^\s*(?:ISBN\s*(?:-\s*(?:10|13))?|ISSN)\s*:?\s*",
+        "",
+        value or "",
+        flags=re.IGNORECASE,
+    )
+
+
+def _identity_candidate_pattern(identity: str) -> re.Pattern[str]:
+    """Build a source-grounded matcher for localized/respaced identifier text."""
+    persian_digits = "۰۱۲۳۴۵۶۷۸۹"
+    arabic_digits = "٠١٢٣٤٥٦٧٨٩"
+    parts: list[str] = []
+    for character in identity:
+        if character.isdigit():
+            number = int(character)
+            parts.append(re.escape(
+                character + persian_digits[number] + arabic_digits[number]
+            ).join(("[", "]")))
+        else:
+            parts.append(re.escape(character))
+    separator = r"[\s._:/\-\u2010-\u2015]*"
+    return re.compile(
+        rf"(?<![A-Za-z0-9]){separator.join(parts)}(?![A-Za-z0-9])",
+        re.IGNORECASE,
+    )
+
+
 def _identifier_occurrences(text: str) -> list[tuple[int, int, str]]:
     occurrences: list[tuple[int, int, str]] = []
     occupied: list[tuple[int, int]] = []
@@ -319,36 +368,88 @@ def restore_source_identifiers(source: str, translation: str) -> tuple[str, dict
 
     replacements: list[tuple[int, int, str, str]] = []
     candidate_occurrences = _identifier_occurrences(translation)
+    occupied = [(start, end) for start, end, _value in candidate_occurrences]
+    for identity in sorted(source_by_identity, key=len, reverse=True):
+        pattern = _identity_candidate_pattern(identity)
+        for match in pattern.finditer(translation or ""):
+            overlaps = [
+                (start, end) for start, end in occupied
+                if match.start() < end and match.end() > start
+            ]
+            if overlaps and not all(
+                match.start() <= start and match.end() >= end
+                for start, end in overlaps
+            ):
+                continue
+            if overlaps:
+                overlap_set = set(overlaps)
+                candidate_occurrences = [
+                    item for item in candidate_occurrences
+                    if (item[0], item[1]) not in overlap_set
+                ]
+                occupied = [
+                    item for item in occupied if item not in overlap_set
+                ]
+            candidate_occurrences.append(
+                (match.start(), match.end(), match.group())
+            )
+            occupied.append(match.span())
+
     flexible_numeric = re.compile(
         rf"(?<![{_IDENTIFIER_DIGITS}])"
         rf"[{_IDENTIFIER_DIGITS}Xx](?:[\s\-\u2010-\u2015]*"
         rf"[{_IDENTIFIER_DIGITS}Xx]){{8,30}}"
         rf"(?![{_IDENTIFIER_DIGITS}])"
     )
-    occupied = [(start, end) for start, end, _value in candidate_occurrences]
     for match in flexible_numeric.finditer(translation or ""):
         if any(match.start() < end and match.end() > start for start, end in occupied):
             continue
         candidate_occurrences.append((match.start(), match.end(), match.group()))
 
+    flexible_domains = re.compile(
+        r"(?<![@\w])(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})\s*\.\s*)+"
+        r"[A-Za-z]{2,63}(?:\s*/\s*[^\s<>()]*)?",
+        re.IGNORECASE,
+    )
+    flexible_codes = re.compile(
+        rf"(?<![A-Za-z0-9])"
+        rf"(?=[A-Za-z{_IDENTIFIER_DIGITS}\s.\-/\u2010-\u2015]*[A-Za-z])"
+        rf"(?=[A-Za-z{_IDENTIFIER_DIGITS}\s.\-/\u2010-\u2015]*[{_IDENTIFIER_DIGITS}])"
+        rf"(?=[A-Za-z{_IDENTIFIER_DIGITS}\s.\-/\u2010-\u2015]*[./])"
+        rf"[A-Za-z{_IDENTIFIER_DIGITS}]{{1,12}}"
+        rf"(?:\s*[.\-/\u2010-\u2015]\s*[A-Za-z{_IDENTIFIER_DIGITS}]{{1,12}}){{1,5}}"
+        rf"(?![A-Za-z0-9])",
+        re.IGNORECASE,
+    )
+    flexible_postcodes = re.compile(
+        rf"(?<![A-Za-z0-9])[A-Z]{{1,2}}\s*[{_IDENTIFIER_DIGITS}]"
+        rf"[A-Z{_IDENTIFIER_DIGITS}]?\s+[{_IDENTIFIER_DIGITS}]\s*[A-Z]{{2}}"
+        rf"(?![A-Za-z0-9])"
+    )
+    occupied = [(start, end) for start, end, _value in candidate_occurrences]
+    for pattern in (flexible_domains, flexible_codes, flexible_postcodes):
+        for match in pattern.finditer(translation or ""):
+            if any(
+                match.start() < end and match.end() > start
+                for start, end in occupied
+            ):
+                continue
+            candidate_occurrences.append(
+                (match.start(), match.end(), match.group())
+            )
+            occupied.append(match.span())
+
     for start, end, value in candidate_occurrences:
         identity = _identifier_identity(value)
         candidates = list(dict.fromkeys(source_by_identity.get(identity, [])))
-        if len(candidates) != 1:
+        source_payloads = list(dict.fromkeys(
+            _identifier_payload(candidate) for candidate in candidates
+        ))
+        if len(source_payloads) != 1:
             continue
         source_value = candidates[0]
-        source_payload = re.sub(
-            r"^\s*(?:ISBN(?:-1[03])?|ISSN)\s*:?\s*",
-            "",
-            source_value,
-            flags=re.IGNORECASE,
-        )
-        candidate_payload = re.sub(
-            r"^\s*(?:ISBN(?:-1[03])?|ISSN)\s*:?\s*",
-            "",
-            value,
-            flags=re.IGNORECASE,
-        )
+        source_payload = source_payloads[0]
+        candidate_payload = _identifier_payload(value)
         source_has_label = source_payload != source_value
         candidate_has_label = candidate_payload != value
         if source_has_label:
@@ -362,7 +463,9 @@ def restore_source_identifiers(source: str, translation: str) -> tuple[str, dict
 
     repaired = translation
     edits: list[dict[str, str]] = []
-    for start, end, before, after in reversed(replacements):
+    for start, end, before, after in sorted(
+        replacements, key=lambda item: item[0], reverse=True
+    ):
         repaired = repaired[:start] + after + repaired[end:]
         edits.append({"before": before, "after": after})
     edits.reverse()

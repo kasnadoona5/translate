@@ -38,6 +38,13 @@ _UNTRANSLATED_CITATION_PROSE_RE = re.compile(
     r"\bon (?:these|this|the)\b)[^()]*)\)",
     re.IGNORECASE,
 )
+_AUTHOR_YEAR_CITATION_RE = re.compile(
+    r"\([^()\n]*(?:1[5-9]\d{2}|20\d{2})[a-z]?[^()\n]*\)",
+    re.IGNORECASE,
+)
+_LEADING_NOTE_MARKER_RE = re.compile(
+    r"^(?:\[?\d{1,3}\]?|[\u00b9\u00b2\u00b3\u2070-\u2079])\s+"
+)
 
 
 def _clean_style_sample(text: str) -> str:
@@ -66,8 +73,16 @@ def _complete_style_sample(text: str, preferred_limit: int = 900) -> str:
         sentence.strip() for sentence in sentences
         if sentence.strip() and re.search(r"[.!?\u061f][\"'\u00bb)]*$", sentence.strip())
     ]
+    clean_complete = [
+        sentence for sentence in complete
+        if not _AUTHOR_YEAR_CITATION_RE.search(sentence)
+        and not _LEADING_NOTE_MARKER_RE.search(sentence)
+    ]
     if not complete:
         return normalized if len(normalized) <= preferred_limit else ""
+    if not clean_complete:
+        return ""
+    complete = clean_complete
 
     selected: list[str] = []
     for sentence in complete:
@@ -150,7 +165,8 @@ class MemoryManager:
             "both",
         )
         proper_nouns_str = self.proper_nouns.get_context(
-            include_inline_originals=include_inline_originals
+            include_inline_originals=include_inline_originals,
+            source_text=chunk.text,
         )
 
         # Layer 2: Bilingual Summary

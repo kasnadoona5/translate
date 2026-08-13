@@ -40,7 +40,10 @@ from tarjomeh.core.llm_client import (
 from tarjomeh.parsers.base import BaseParser, Document, EXTENSION_PARSER_MAP
 from tarjomeh.chunking.chunker import SemanticChunker, FixedChunker, Chunk
 from tarjomeh.memory.manager import MemoryManager, MemoryContext
-from tarjomeh.memory.proper_nouns import INLINE_ORIGINAL_CATEGORIES
+from tarjomeh.memory.proper_nouns import (
+    INLINE_ORIGINAL_CATEGORIES,
+    is_reusable_terminology_mapping,
+)
 from tarjomeh.context.web_searcher import WebContextSearcher
 from tarjomeh.glossary.manager import GlossaryManager
 from tarjomeh.glossary.compliance import (
@@ -1229,6 +1232,15 @@ def _reconcile_committed_terminology(
             })
             continue
 
+        if not is_reusable_terminology_mapping(source, target):
+            report["context_deferred"].append({
+                "issue_id": issue_id,
+                "source": source,
+                "target": target,
+                "reason": "contextual_correction_not_reusable_as_global_term",
+            })
+            continue
+
         provenance = memory_manager.proper_nouns.provenance_for(source)
         if int(provenance.get("authority", 50)) >= 100:
             report["skipped"].append({
@@ -1270,8 +1282,10 @@ def _reconcile_committed_terminology(
                         "accepted_target": target,
                     })
     report["policy"] = (
-        "Only committed compact terminology corrections from review-clean chunks "
-        "may supersede lower-authority automatic memory; curated mappings remain protected."
+        "Only committed compact, context-independent terminology corrections from "
+        "review-clean chunks may supersede lower-authority automatic memory; "
+        "sentence-specific corrections remain in continuity memory and curated "
+        "mappings remain protected."
     )
     return report
 

@@ -31,6 +31,14 @@ _UNUSABLE_TARGET_RE = re.compile(
     r"not supported|insufficient evidence|untranslated)\b",
     re.IGNORECASE,
 )
+_CONTEXTUAL_TARGET_TOKEN_RE = re.compile(
+    r"(?:^|\s)(?:من|ما|تو|شما|او|ایشان|آنها|آن‌ها|این|آن|همین|همان|"
+    r"سایر|دیگر|خود|هستم|هستی|است|هست|هستیم|هستید|هستند|بود|بودند|"
+    r"شد|شدند|می‌شود|می‌شوند)(?:\s|$)"
+)
+_TRAILING_CONNECTIVE_RE = re.compile(
+    r"(?:^|\s)(?:از|به|با|در|برای|که|و|یا|اما|تا|را)\s*$"
+)
 _PROVENANCE_AUTHORITY = {
     "auto_extraction": 10,
     "incremental_extraction": 10,
@@ -56,6 +64,43 @@ def is_usable_memory_mapping(english: str, persian: str) -> bool:
     if not _PERSIAN_LETTER_RE.search(target):
         return False
     return True
+
+
+def is_reusable_terminology_mapping(english: str, persian: str) -> bool:
+    """Return whether a reviewed rendering is safe as book-wide terminology.
+
+    A sentence-level correction may be perfectly right in its original passage
+    while being unsafe as a global ``English -> Persian`` replacement.  This
+    conservative test admits compact nominal renderings and defers contextual
+    clauses, pronoun-bound phrases, and incomplete connective fragments.
+    """
+    if not is_usable_memory_mapping(english, persian):
+        return False
+    source = " ".join((english or "").split()).strip()
+    target = " ".join((persian or "").split()).strip()
+    source_words = re.findall(r"[A-Za-z][A-Za-z'\-]*", source)
+    target_words = re.findall(rf"[{_PERSIAN_LETTER_RE.pattern[1:-1]}]+", target)
+    if not 1 <= len(source_words) <= 6 or not target_words:
+        return False
+    if len(source_words) == 1 and len(target_words) > 3:
+        return False
+    if len(target_words) > max(5, len(source_words) * 2 + 1):
+        return False
+    if _CONTEXTUAL_TARGET_TOKEN_RE.search(target):
+        return False
+    if _TRAILING_CONNECTIVE_RE.search(target):
+        return False
+    return True
+
+
+def _source_term_present(source_text: str, term: str) -> bool:
+    """Match a stored source term despite PDF whitespace/hyphen line breaks."""
+    words = re.findall(r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)?", term or "")
+    if not words:
+        return False
+    separator = r"(?:\s+|\s*[-‐-―]\s*)"
+    pattern = separator.join(re.escape(word) for word in words)
+    return bool(re.search(rf"(?<!\w){pattern}(?!\w)", source_text or "", re.IGNORECASE))
 
 
 def _normalise_category(category: str) -> str:
@@ -273,7 +318,15 @@ class ProperNouns:
     def is_context_deferred(self, english: str) -> bool:
         """Return whether a contradicted automatic mapping is prompt-deferred."""
         key = self._stored_key(english) or english.strip()
-        return bool(self._provenance.get(key, {}).get("context_deferred"))
+        provenance = self._provenance.get(key, {})
+        if provenance.get("context_deferred"):
+            return True
+        return bool(
+            provenance.get("origin") == "accepted_correction"
+            and not is_reusable_terminology_mapping(
+                key, self._nouns.get(key, "")
+            )
+        )
 
     def is_inline_eligible(self, english: str) -> bool:
         """Return whether a noun may carry a first-occurrence English original."""
@@ -297,7 +350,11 @@ class ProperNouns:
             and re.search(rf"\b{re.escape(source)}\b", source_text, re.IGNORECASE)
         }
 
-    def get_context(self, include_inline_originals: bool = True) -> str:
+    def get_context(
+        self,
+        include_inline_originals: bool = True,
+        source_text: str = "",
+    ) -> str:
         """Return a formatted string representing the proper nouns dictionary.
 
         Each entry carries an introduction marker the translation prompt is
@@ -317,7 +374,9 @@ class ProperNouns:
         for en, fa in sorted(self._nouns.items()):
             if not is_usable_memory_mapping(en, fa):
                 continue
-            if self._provenance.get(en, {}).get("context_deferred"):
+            if self.is_context_deferred(en):
+                continue
+            if source_text and not _source_term_present(source_text, en):
                 continue
             category = self.category_for(en)
             if not self.is_inline_eligible(en):

@@ -72,6 +72,23 @@ _ADVISORY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 
+_COMPOUND_AXIS_RE = re.compile(
+    rf"(?P<base>[{_PERSIAN_LETTERS}]{{2,}})(?:[ \t]+|(?<!\u200c))محور"
+    rf"(?![{_PERSIAN_LETTERS}])"
+)
+_NON_COMPOUND_AXIS_BASES = frozenset({
+    "از", "این", "آن", "با", "بر", "به", "در", "روی", "حول", "کنار",
+    "هر", "یک", "دو", "سه", "چهار", "پنج", "خود",
+})
+
+
+def _axis_compound_matches(text: str) -> list[re.Match[str]]:
+    """Return suffix uses while excluding ordinary prepositional phrases."""
+    return [
+        match for match in _COMPOUND_AXIS_RE.finditer(text or "")
+        if match.group("base") not in _NON_COMPOUND_AXIS_BASES
+    ]
+
 
 def apply_safe_persian_orthography(
     text: str,
@@ -94,6 +111,21 @@ def apply_safe_persian_orthography(
             "before": before_values[:10],
             "after": replacement,
         })
+    axis_matches = _axis_compound_matches(current)
+    if axis_matches:
+        before_values = [match.group(0) for match in axis_matches]
+        for match in reversed(axis_matches):
+            current = (
+                current[:match.start()]
+                + f"{match.group('base')}\u200cمحور"
+                + current[match.end():]
+            )
+        edits.append({
+            "rule_id": "compound_axis_zwnj",
+            "count": len(axis_matches),
+            "before": before_values[:10],
+            "after": "<base>\u200cمحور",
+        })
     return current, edits
 
 
@@ -103,4 +135,5 @@ def orthography_issue_count(text: str) -> int:
     advisory = sum(
         len(pattern.findall(text or "")) for _, pattern in _ADVISORY_PATTERNS
     )
-    return safe + advisory
+    compounds = len(_axis_compound_matches(text or ""))
+    return safe + advisory + compounds

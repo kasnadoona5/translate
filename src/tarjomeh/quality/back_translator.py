@@ -216,13 +216,36 @@ class BackTranslator:
         ]
         entity_aliases = entity_aliases or {}
         reconciled_aliases: list[dict[str, str]] = []
+        structurally_reconciled: list[dict[str, str]] = []
         for entity in source_entities:
             if entity in preserved_inline_entities:
                 continue
-            aliases = next((
-                values for source, values in entity_aliases.items()
-                if source.casefold() == entity.casefold()
-            ), [])
+            structural_target = _structural_entity_target(
+                entity, original_english, translated_text
+            )
+            if structural_target:
+                structurally_reconciled.append({
+                    "source": entity,
+                    "target": structural_target,
+                })
+                continue
+            aliases: list[str] = []
+            for source, values in entity_aliases.items():
+                source_grounded = bool(re.search(
+                    rf"(?<!\w){re.escape(source)}(?!\w)",
+                    original_english,
+                    re.IGNORECASE,
+                ))
+                entity_grounded_in_source = bool(re.search(
+                    rf"(?<!\w){re.escape(entity)}(?!\w)",
+                    source,
+                    re.IGNORECASE,
+                ))
+                if (
+                    source.casefold() == entity.casefold()
+                    or (source_grounded and entity_grounded_in_source)
+                ):
+                    aliases.extend(values)
             matched_alias = next((
                 alias for alias in aliases
                 if alias and target_present(alias, translated_text)
@@ -234,6 +257,8 @@ class BackTranslator:
                 })
         reconciled_entities = {
             item["source"].casefold() for item in reconciled_aliases
+        } | {
+            item["source"].casefold() for item in structurally_reconciled
         }
         missing_entities = [
             entity
@@ -283,6 +308,7 @@ class BackTranslator:
             "qa_risk_skipped_for_non_prose_front_matter": non_prose_front_matter,
             "entities_preserved_inline": preserved_inline_entities,
             "entities_reconciled_by_memory": reconciled_aliases,
+            "entities_reconciled_by_structure": structurally_reconciled,
             "source_negations": source_negations,
             "back_translation_negations": back_negations,
             "negation_mismatch": negation_mismatch,
@@ -334,6 +360,82 @@ _ENTITY_TOKEN_EQUIVALENTS = {
 }
 _NEGATION_RE = re.compile(r"\b(?:not|no|never|without|neither|nor|cannot|can't|won't|isn't|aren't|didn't|doesn't)\b", re.IGNORECASE)
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
+_ROMAN_VALUES = {
+    "i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5,
+    "vi": 6, "vii": 7, "viii": 8, "ix": 9, "x": 10,
+}
+_PERSIAN_CARDINALS = {
+    1: ("یک", "اول", "نخست"),
+    2: ("دو", "دوم"),
+    3: ("سه", "سوم"),
+    4: ("چهار", "چهارم"),
+    5: ("پنج", "پنجم"),
+    6: ("شش", "ششم"),
+    7: ("هفت", "هفتم"),
+    8: ("هشت", "هشتم"),
+    9: ("نه", "نهم"),
+    10: ("ده", "دهم"),
+}
+
+
+def _structural_entity_target(
+    entity: str,
+    original_english: str,
+    translated_text: str,
+) -> str:
+    """Reconcile translated Part/Chapter headings without hiding name loss."""
+    heading = entity or ""
+    match = re.match(
+        r"^(?P<label>Part|Chapter|Volume|Book|Section)\s+"
+        r"(?P<number>[IVX]+|\d+)\b",
+        heading,
+        re.IGNORECASE,
+    )
+    if not match:
+        for line in (original_english or "").splitlines():
+            normalized = " ".join(line.split()).strip()
+            heading_match = re.match(
+                r"^(?P<label>Part|Chapter|Volume|Book|Section)\s+"
+                r"(?P<number>[IVX]+|\d+)\b",
+                normalized,
+                re.IGNORECASE,
+            )
+            if not heading_match:
+                continue
+            heading_shape = ":" in normalized or not re.search(
+                r"[.!?][\"')\]]?$", normalized
+            )
+            contains_entity = bool(re.search(
+                rf"(?<!\w){re.escape(entity)}(?!\w)",
+                normalized,
+                re.IGNORECASE,
+            ))
+            if heading_shape and contains_entity:
+                match = heading_match
+                break
+    if not match or not translated_text:
+        return ""
+    label = match.group("label").casefold()
+    raw_number = match.group("number").casefold()
+    number = int(raw_number) if raw_number.isdigit() else _ROMAN_VALUES.get(raw_number)
+    if not number:
+        return ""
+    labels = {
+        "part": ("بخش", "قسمت"),
+        "chapter": ("فصل",),
+        "volume": ("جلد",),
+        "book": ("کتاب",),
+        "section": ("بخش", "قسمت"),
+    }[label]
+    digits = str(number).translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
+    forms = (str(number), digits, *_PERSIAN_CARDINALS.get(number, ()))
+    label_pattern = "|".join(re.escape(value) for value in labels)
+    form_pattern = "|".join(re.escape(value) for value in forms)
+    found = re.search(
+        rf"(?:{label_pattern})\s+(?P<form>{form_pattern})(?![\u0600-\u06ff\d])",
+        translated_text,
+    )
+    return found.group(0) if found else ""
 
 
 def _tokenize_simple(text: str) -> list[str]:
