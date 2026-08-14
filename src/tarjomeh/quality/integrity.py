@@ -63,6 +63,9 @@ _IDENTIFIER_PATTERNS = (
         rf"\s+[{_IDENTIFIER_DIGITS}][A-Z]{{2}}(?![A-Za-z0-9])"
     ),
 )
+_PROSE_FOOTNOTE_SUFFIX_RE = re.compile(
+    r"^[a-z][a-z'\u2019-]{1,40}\.[0-9]{1,3}$"
+)
 _ENGLISH_PAREN_RE = re.compile(r"\(([A-Za-z][A-Za-z0-9 .,&':;\u2019\-]{1,80})\)")
 _SOURCE_PAREN_RE = re.compile(r"\(([^()\n]{2,240})\)")
 _SOURCE_QUOTE_RE = re.compile(
@@ -284,6 +287,8 @@ def extract_identifiers(text: str) -> Counter[str]:
             if any(match.start() < end and match.end() > start for start, end in occupied):
                 continue
             value = " ".join(match.group().split()).strip(".,;)")
+            if _PROSE_FOOTNOTE_SUFFIX_RE.fullmatch(value):
+                continue
             value = re.sub(r"[\u2010-\u2015]", "-", value)
             value = re.sub(
                 r"^\s*(?:ISBN(?:-1[03])?|ISSN)\s*:?\s*",
@@ -348,6 +353,8 @@ def _identifier_occurrences(text: str) -> list[tuple[int, int, str]]:
             if any(match.start() < end and match.end() > start for start, end in occupied):
                 continue
             value = match.group().strip(".,;)")
+            if _PROSE_FOOTNOTE_SUFFIX_RE.fullmatch(value):
+                continue
             if value:
                 occurrences.append((match.start(), match.start() + len(value), value))
                 occupied.append(match.span())
@@ -372,15 +379,29 @@ def restore_source_identifiers(source: str, translation: str) -> tuple[str, dict
     for identity in sorted(source_by_identity, key=len, reverse=True):
         pattern = _identity_candidate_pattern(identity)
         for match in pattern.finditer(translation or ""):
+            overlapping_candidates = [
+                item for item in candidate_occurrences
+                if match.start() < item[1] and match.end() > item[0]
+            ]
             overlaps = [
-                (start, end) for start, end in occupied
+                (start, end) for start, end, _value in overlapping_candidates
                 if match.start() < end and match.end() > start
             ]
             if overlaps and not all(
                 match.start() <= start and match.end() >= end
                 for start, end in overlaps
             ):
-                continue
+                # A malformed target can expose only a leading fragment as an
+                # identifier (for example ``RES-۰۵۱``) while the exact
+                # source-grounded numeric identity continues after it.  Such a
+                # fragment must not block restoration of the complete source
+                # value, but an independently valid source identifier still
+                # retains precedence.
+                if any(
+                    _identifier_identity(value) in source_by_identity
+                    for _start, _end, value in overlapping_candidates
+                ):
+                    continue
             if overlaps:
                 overlap_set = set(overlaps)
                 candidate_occurrences = [

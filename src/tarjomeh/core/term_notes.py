@@ -333,6 +333,12 @@ _CITATION_WRAPPER_RE = re.compile(
     r"(?P<body>[^()\n]{1,200})\)",
     re.IGNORECASE,
 )
+_YEAR_LIST_CONJUNCTION_RE = re.compile(
+    r"\((?P<body>(?:1[5-9]|20)\d{2}[a-z]?"
+    r"(?:\s*,\s*(?:(?:1[5-9]|20)\d{2}[a-z]?|and\s+"
+    r"(?:1[5-9]|20)\d{2}[a-z]?)){1,12})\)",
+    re.IGNORECASE,
+)
 _STRUCTURAL_REFERENCE_RE = re.compile(
     r"(?P<label>\u062c\u062f\u0648\u0644|\u0641\u0635\u0644|\u0628\u062e\u0634|"
     r"\u0634\u06a9\u0644|\u0646\u0645\u0648\u062f\u0627\u0631|\u067e\u06cc\u0648\u0633\u062a)"
@@ -407,6 +413,17 @@ def _normalize_citation_house_style(text: str) -> tuple[str, list[dict[str, str]
 
     result = _CITATION_WRAPPER_RE.sub(wrapper, text or "")
     result = re.sub(r"\u0631\s*\.\s*\u06a9\s*\.", "\u0631.\u06a9.", result)
+
+    def year_list(match: re.Match[str]) -> str:
+        body = re.sub(
+            r",\s*and\s+", ", ", match.group("body"), flags=re.IGNORECASE
+        )
+        replacement = f"({body})"
+        if replacement != match.group(0):
+            changes.append({"before": match.group(0), "after": replacement})
+        return replacement
+
+    result = _YEAR_LIST_CONJUNCTION_RE.sub(year_list, result)
 
     def structural(match: re.Match[str]) -> str:
         replacement = (

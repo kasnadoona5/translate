@@ -71,6 +71,7 @@ from tarjomeh.quality.refiner import TranslationRefiner
 from tarjomeh.quality.back_translator import BackTranslator
 from tarjomeh.quality.integrity import (
     PostEditIntegrityGate,
+    extract_identifiers,
     restore_source_identifiers,
     normalize_for_match,
     protected_english_originals,
@@ -167,6 +168,44 @@ def sanitize_document_protocol_artifacts(
         "safe_edit_count": len(edits),
         "remaining_artifact_count": len(unresolved),
         "edits": edits,
+        "unresolved": unresolved,
+    }
+
+
+def restore_document_source_identifiers(
+    document: TranslatedDocument,
+) -> dict[str, Any]:
+    """Restore exact source identifiers after every text transformation."""
+    repairs: list[dict[str, Any]] = []
+    unresolved: list[dict[str, Any]] = []
+    for paragraph in document.paragraphs:
+        repaired, report = restore_source_identifiers(
+            paragraph.source_text, paragraph.translated_text
+        )
+        paragraph.translated_text = repaired
+        if report.get("repair_count"):
+            repairs.append({
+                "paragraph_index": paragraph.index,
+                **report,
+            })
+        missing = list(
+            (
+                extract_identifiers(paragraph.source_text)
+                - extract_identifiers(paragraph.translated_text)
+            ).elements()
+        )
+        if missing:
+            unresolved.append({
+                "paragraph_index": paragraph.index,
+                "missing": missing,
+            })
+    return {
+        "repair_count": sum(
+            int(item.get("repair_count", 0)) for item in repairs
+        ),
+        "repaired_paragraph_count": len(repairs),
+        "unresolved_count": sum(len(item["missing"]) for item in unresolved),
+        "repairs": repairs,
         "unresolved": unresolved,
     }
 
@@ -920,6 +959,7 @@ _HIGH_CONFIDENCE_MINOR_CATEGORIES = frozenset({
     "terminology",
 })
 _HIGH_CONFIDENCE_MINOR_THRESHOLD = 0.85
+_STRUCTURAL_FLUENCY_MINOR_THRESHOLD = 0.70
 
 
 def _high_confidence_semantic_minor_issues(critique: Any) -> list[dict[str, Any]]:
@@ -952,6 +992,55 @@ def _high_confidence_semantic_minor_issues(critique: Any) -> list[dict[str, Any]
     return routed
 
 
+def _high_confidence_structural_fluency_minor_issues(
+    critique: Any,
+) -> list[dict[str, Any]]:
+    """Route long, grounded sentence-level fluency defects for one review pass."""
+    routed: list[dict[str, Any]] = []
+    for detail in list(getattr(critique, "issue_details", []) or []):
+        if (
+            str(detail.get("severity", "")).strip().lower() != "minor"
+            or str(detail.get("category", "")).strip().lower() != "fluency"
+        ):
+            continue
+        try:
+            confidence = float(detail.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        source_quote = " ".join(str(detail.get("source_quote", "")).split())
+        current = " ".join(
+            str(detail.get("current_persian_quote", "")).split()
+        )
+        suggested = " ".join(
+            str(detail.get("suggested_correction", "")).split()
+        )
+        source_words = re.findall(r"[A-Za-z][A-Za-z'\u2019-]*", source_quote)
+        current_words = re.findall(r"[\u0600-\u06ff]+", current)
+        suggested_words = re.findall(r"[\u0600-\u06ff]+", suggested)
+        ratio = len(suggested) / max(1, len(current))
+        if (
+            confidence >= _STRUCTURAL_FLUENCY_MINOR_THRESHOLD
+            and len(source_words) >= 12
+            and len(current_words) >= 8
+            and len(suggested_words) >= 8
+            and 0.75 <= ratio <= 1.5
+            and normalize_for_match(current) != normalize_for_match(suggested)
+        ):
+            routed.append(detail)
+    return routed
+
+
+def _high_confidence_minor_issues(critique: Any) -> list[dict[str, Any]]:
+    routed = _high_confidence_semantic_minor_issues(critique)
+    seen = {str(item.get("issue_id", "")) for item in routed}
+    for detail in _high_confidence_structural_fluency_minor_issues(critique):
+        issue_id = str(detail.get("issue_id", ""))
+        if issue_id not in seen:
+            routed.append(detail)
+            seen.add(issue_id)
+    return routed
+
+
 def _critique_requires_refinement(critique: Any, threshold: float) -> bool:
     """Apply Q3 severity routing while preserving legacy score-only critiques."""
     if not getattr(critique, "valid", True):
@@ -968,7 +1057,7 @@ def _critique_requires_refinement(critique: Any, threshold: float) -> bool:
         for detail in details
     )
     return bool(
-        _high_confidence_semantic_minor_issues(critique)
+        _high_confidence_minor_issues(critique)
         or (
             has_substantive_nonblocking
             and not critique.passes_threshold(threshold)
@@ -978,7 +1067,7 @@ def _critique_requires_refinement(critique: Any, threshold: float) -> bool:
 
 def _critique_for_event(critique: Any, threshold: float, iteration: int) -> dict[str, Any]:
     blocking_issues = _blocking_critique_issues(critique)
-    routed_minor_issues = _high_confidence_semantic_minor_issues(critique)
+    routed_minor_issues = _high_confidence_minor_issues(critique)
     return {
         "iteration": iteration,
         "valid": bool(getattr(critique, "valid", True)),
@@ -1107,9 +1196,12 @@ def _chunk_style_approved(db: Any, job_id: str, chunk_index: int) -> bool:
     if int(latest.get("blocking_issue_count", 0) or 0):
         return False
     scores = latest.get("scores", {}) or {}
-    required = ("accuracy", "fluency", "terminology", "register", "average")
+    dimensions = ("accuracy", "fluency", "terminology", "register")
     try:
-        return all(float(scores.get(name, 0)) >= 8.5 for name in required)
+        return (
+            all(float(scores.get(name, 0)) >= 8.0 for name in dimensions)
+            and float(scores.get("average", 0)) >= 9.0
+        )
     except (TypeError, ValueError):
         return False
 
@@ -2600,7 +2692,7 @@ class TranslationPipeline:
         noun_aliases = memory_manager.proper_nouns.inline_eligible_aliases()
         noun_categories = dict(noun_state.get("categories", {}))
         if note_mode in {"inline", "both"}:
-            anchor_audit = ensure_inline_proper_noun_originals(
+            initial_anchor_audit = ensure_inline_proper_noun_originals(
                 trans_doc,
                 proper_nouns,
                 typographer,
@@ -2608,20 +2700,6 @@ class TranslationPipeline:
                 aliases=noun_aliases,
                 return_report=True,
             )
-            self.db.save_job_artifact(
-                job_id, "english_original_anchor_audit", anchor_audit
-            )
-            restored = int(anchor_audit.get("inserted_count", 0))
-            paired_repaired = int(anchor_audit.get("paired_repair_count", 0))
-            if restored or paired_repaired or anchor_audit.get("repositioned_count"):
-                self.db.log_event(
-                    job_id, "INFO",
-                    "Anchored first-occurrence English originals: "
-                    f"inserted={restored}, "
-                    f"paired_repaired={paired_repaired}, "
-                    f"repositioned={anchor_audit.get('repositioned_count', 0)}, "
-                    f"ambiguous={anchor_audit.get('ambiguous_count', 0)}.",
-                )
         citation_audit = normalize_adjacent_original_citations(
             trans_doc, proper_nouns
         )
@@ -2643,6 +2721,42 @@ class TranslationPipeline:
             f"duplicates={original_audit['removed_duplicate_count']}, "
             f"citations_preserved={original_audit['preserved_citation_count']}.",
         )
+        if note_mode in {"inline", "both"}:
+            final_anchor_audit = ensure_inline_proper_noun_originals(
+                trans_doc,
+                proper_nouns,
+                typographer,
+                noun_categories,
+                aliases=noun_aliases,
+                return_report=True,
+            )
+            anchor_audit = {
+                **final_anchor_audit,
+                "initial_inserted_count": int(
+                    initial_anchor_audit.get("inserted_count", 0)
+                ),
+                "initial_missing_target_count": int(
+                    initial_anchor_audit.get("missing_target_count", 0)
+                ),
+                "final_reconciliation": True,
+            }
+            self.db.save_job_artifact(
+                job_id, "english_original_anchor_audit", anchor_audit
+            )
+            restored = int(initial_anchor_audit.get("inserted_count", 0))
+            restored += int(final_anchor_audit.get("inserted_count", 0))
+            paired_repaired = int(
+                initial_anchor_audit.get("paired_repair_count", 0)
+            ) + int(final_anchor_audit.get("paired_repair_count", 0))
+            if restored or paired_repaired or anchor_audit.get("repositioned_count"):
+                self.db.log_event(
+                    job_id, "INFO",
+                    "Anchored first-occurrence English originals: "
+                    f"inserted={restored}, "
+                    f"paired_repaired={paired_repaired}, "
+                    f"repositioned={anchor_audit.get('repositioned_count', 0)}, "
+                    f"ambiguous={anchor_audit.get('ambiguous_count', 0)}.",
+                )
         if note_mode != "inline" and self.config.output.format in note_formats:
             notes = apply_term_notes(
                 trans_doc,
@@ -2669,6 +2783,17 @@ class TranslationPipeline:
             )
             self.warnings.append(warning)
             self.db.log_event(job_id, "WARNING", warning)
+
+        identifier_audit = restore_document_source_identifiers(trans_doc)
+        self.db.save_job_artifact(
+            job_id, "final_identifier_reconciliation", identifier_audit
+        )
+        if identifier_audit["repair_count"]:
+            self.db.log_event(
+                job_id, "INFO",
+                "Restored exact source identifiers after final typography: "
+                f"{identifier_audit['repair_count']} repair(s).",
+            )
 
         # 9. Export
         if progress_callback:
@@ -2765,16 +2890,13 @@ class TranslationPipeline:
 
         typographer = PersianTypographer(self.config.to_dict().get("persian"))
         if note_mode in {"inline", "both"}:
-            anchor_audit = ensure_inline_proper_noun_originals(
+            initial_anchor_audit = ensure_inline_proper_noun_originals(
                 trans_doc,
                 dict(proper_nouns),
                 typographer,
                 noun_categories,
                 aliases=noun_aliases,
                 return_report=True,
-            )
-            self.db.save_job_artifact(
-                job_id, "english_original_anchor_audit", anchor_audit
             )
         citation_audit = normalize_adjacent_original_citations(
             trans_doc, dict(proper_nouns)
@@ -2789,6 +2911,27 @@ class TranslationPipeline:
         self.db.save_job_artifact(
             job_id, "english_original_audit", original_audit
         )
+        if note_mode in {"inline", "both"}:
+            anchor_audit = ensure_inline_proper_noun_originals(
+                trans_doc,
+                dict(proper_nouns),
+                typographer,
+                noun_categories,
+                aliases=noun_aliases,
+                return_report=True,
+            )
+            anchor_audit.update({
+                "initial_inserted_count": int(
+                    initial_anchor_audit.get("inserted_count", 0)
+                ),
+                "initial_missing_target_count": int(
+                    initial_anchor_audit.get("missing_target_count", 0)
+                ),
+                "final_reconciliation": True,
+            })
+            self.db.save_job_artifact(
+                job_id, "english_original_anchor_audit", anchor_audit
+            )
         if note_mode != "inline" and fmt in {"docx", "epub", "markdown"}:
             glossary_manager = GlossaryManager()
             glossary_paths = []
@@ -2820,6 +2963,10 @@ class TranslationPipeline:
                 extra_terms=persisted_terms,
                 aliases=noun_aliases,
             )
+        identifier_audit = restore_document_source_identifiers(trans_doc)
+        self.db.save_job_artifact(
+            job_id, "final_identifier_reconciliation", identifier_audit
+        )
         exporter_cls = get_exporter(fmt)
         exporter = exporter_cls(self.config.to_dict().get(fmt))
         exporter.export(

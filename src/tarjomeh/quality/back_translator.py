@@ -214,9 +214,11 @@ class BackTranslator:
             entity for entity in source_entities
             if translated_text and _entity_is_present(entity, translated_text)
         ]
+        aliases_were_supplied = entity_aliases is not None
         entity_aliases = entity_aliases or {}
         reconciled_aliases: list[dict[str, str]] = []
         structurally_reconciled: list[dict[str, str]] = []
+        deferred_first_seen_entities: list[str] = []
         for entity in source_entities:
             if entity in preserved_inline_entities:
                 continue
@@ -255,6 +257,11 @@ class BackTranslator:
                     "source": entity,
                     "target": matched_alias,
                 })
+            elif aliases_were_supplied and not aliases:
+                # Incremental NER intentionally runs after chunk QA. A first-seen
+                # name has no trusted Persian alias yet, so final term anchoring
+                # must verify it instead of producing a premature omission flag.
+                deferred_first_seen_entities.append(entity)
         reconciled_entities = {
             item["source"].casefold() for item in reconciled_aliases
         } | {
@@ -266,6 +273,7 @@ class BackTranslator:
             if not _entity_is_present(entity, back_translated)
             and entity not in preserved_inline_entities
             and entity.casefold() not in reconciled_entities
+            and entity not in deferred_first_seen_entities
         ]
         source_negations = _negations(original_english)
         back_negations = _negations(back_translated)
@@ -309,6 +317,7 @@ class BackTranslator:
             "entities_preserved_inline": preserved_inline_entities,
             "entities_reconciled_by_memory": reconciled_aliases,
             "entities_reconciled_by_structure": structurally_reconciled,
+            "entities_deferred_until_term_anchoring": deferred_first_seen_entities,
             "source_negations": source_negations,
             "back_translation_negations": back_negations,
             "negation_mismatch": negation_mismatch,
