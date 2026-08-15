@@ -217,6 +217,8 @@ def audit_translation_language(
     translation: str,
     *,
     allowed_originals: list[str] | tuple[str, ...] = (),
+    structural_role: str = "body",
+    chapter_title: str = "",
 ) -> dict[str, Any]:
     """Report deterministic foreign-script leakage without rewriting semantics."""
     mixed = mixed_script_artifacts(translation)
@@ -224,6 +226,8 @@ def audit_translation_language(
         source,
         translation,
         allowed_originals=allowed_originals,
+        structural_role=structural_role,
+        chapter_title=chapter_title,
     )
     return {
         "review_required": bool(mixed or unexpected),
@@ -252,6 +256,12 @@ def audit_document_final_text(
             paragraph.source_text,
             paragraph.translated_text,
             allowed_originals=allowed_originals,
+            structural_role=str(
+                paragraph.metadata.get("structure_role", "body")
+            ),
+            chapter_title=str(
+                paragraph.metadata.get("chapter_title", "")
+            ),
         )
         if language["review_required"]:
             paragraph_findings.append({
@@ -1028,6 +1038,13 @@ _HIGH_CONFIDENCE_MINOR_CATEGORIES = frozenset({
 })
 _HIGH_CONFIDENCE_MINOR_THRESHOLD = 0.85
 _STRUCTURAL_FLUENCY_MINOR_THRESHOLD = 0.70
+_OBJECTIVE_FLUENCY_MINOR_THRESHOLD = 0.75
+_OBJECTIVE_FLUENCY_RATIONALE_RE = re.compile(
+    r"\b(?:agreement|ambig(?:uity|uous)|broken grammar|calque|fragment|"
+    r"incomplete (?:clause|coordination|sentence)|missing (?:predicate|verb)|"
+    r"ungrammatical)\b",
+    re.IGNORECASE,
+)
 
 
 def _high_confidence_semantic_minor_issues(critique: Any) -> list[dict[str, Any]]:
@@ -1082,16 +1099,28 @@ def _high_confidence_structural_fluency_minor_issues(
         suggested = " ".join(
             str(detail.get("suggested_correction", "")).split()
         )
+        rationale = " ".join(str(detail.get("rationale", "")).split())
         source_words = re.findall(r"[A-Za-z][A-Za-z'\u2019-]*", source_quote)
         current_words = re.findall(r"[\u0600-\u06ff]+", current)
         suggested_words = re.findall(r"[\u0600-\u06ff]+", suggested)
         ratio = len(suggested) / max(1, len(current))
-        if (
+        long_structural_defect = bool(
             confidence >= _STRUCTURAL_FLUENCY_MINOR_THRESHOLD
             and len(source_words) >= 12
             and len(current_words) >= 8
             and len(suggested_words) >= 8
             and 0.75 <= ratio <= 1.5
+        )
+        objective_local_defect = bool(
+            confidence >= _OBJECTIVE_FLUENCY_MINOR_THRESHOLD
+            and source_quote
+            and current
+            and suggested
+            and 0.5 <= ratio <= 1.8
+            and _OBJECTIVE_FLUENCY_RATIONALE_RE.search(rationale)
+        )
+        if (
+            (long_structural_defect or objective_local_defect)
             and normalize_for_match(current) != normalize_for_match(suggested)
         ):
             routed.append(detail)
@@ -2317,11 +2346,18 @@ class TranslationPipeline:
                                 new_content = "\n\n".join(chap_source)
                                 chap_translation = "\n\n".join(chap_trans)
                                 try:
-                                    self._run_async(memory_manager.update_bilingual_summary(
+                                    summary_report = self._run_async(memory_manager.update_bilingual_summary(
                                         self.llm_client,
                                         new_content=new_content,
                                         translation=chap_translation
                                     ))
+                                    if summary_report.get("replacement_count"):
+                                        self.db.log_chunk_event(
+                                            job_id,
+                                            idx,
+                                            "bilingual_summary_reconciled",
+                                            summary_report,
+                                        )
                                 except Exception as e:
                                     logger.warning("Bilingual summary update failed: %s", e)
 
@@ -2494,11 +2530,18 @@ class TranslationPipeline:
                                 new_content = "\n\n".join(chap_source)
                                 chap_translation = "\n\n".join(chap_trans)
                                 try:
-                                    self._run_async(memory_manager.update_bilingual_summary(
+                                    summary_report = self._run_async(memory_manager.update_bilingual_summary(
                                         self.llm_client,
                                         new_content=new_content,
                                         translation=chap_translation
                                     ))
+                                    if summary_report.get("replacement_count"):
+                                        self.db.log_chunk_event(
+                                            job_id,
+                                            idx,
+                                            "bilingual_summary_reconciled",
+                                            summary_report,
+                                        )
                                 except Exception as e:
                                     logger.warning("Bilingual summary update failed: %s", e)
 
@@ -4941,12 +4984,24 @@ Output ONLY the corrected Persian translation.
                     job_id, idx, "integrity_final_failed", final_integrity_payload
                 )
 
+        structural_roles = {
+            str(role).casefold()
+            for role in list(chunk.metadata.get("structural_roles", []) or [])
+            if str(role).strip()
+        }
+        language_role = (
+            next(iter(structural_roles))
+            if len(structural_roles) == 1 and "body" not in structural_roles
+            else "body"
+        )
         language_quality = audit_translation_language(
             chunk.text,
             translation,
             allowed_originals=tuple(
                 memory_manager.proper_nouns.inline_eligible_nouns()
             ),
+            structural_role=language_role,
+            chapter_title=chunk.chapter_title,
         )
         self.db.log_chunk_event(
             job_id, idx, "language_quality_checked", language_quality
@@ -5064,6 +5119,14 @@ Output ONLY the corrected Persian translation.
                 idx,
                 "accepted_terminology_reconciled",
                 reconciliation_report,
+            )
+        summary_reconciliation = memory_manager.reconcile_bilingual_summary()
+        if summary_reconciliation.get("replacement_count"):
+            self.db.log_chunk_event(
+                job_id,
+                idx,
+                "bilingual_summary_reconciled",
+                summary_reconciliation,
             )
 
         consistency_report = _advisory_terminology_consistency(

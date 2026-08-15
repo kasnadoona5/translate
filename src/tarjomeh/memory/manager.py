@@ -471,7 +471,27 @@ class MemoryManager:
                 "error": f"{type(exc).__name__}: {exc}",
             }
 
-    async def update_bilingual_summary(self, llm_client: Any, new_content: str, translation: str) -> None:
+    def reconcile_bilingual_summary(self) -> dict[str, Any]:
+        """Remove stale automatic renderings contradicted by accepted corrections."""
+        replacements: list[tuple[str, str]] = []
+        for source, target in self.proper_nouns.all_nouns().items():
+            provenance = self.proper_nouns.provenance_for(source)
+            if provenance.get("origin") != "accepted_correction":
+                continue
+            for record in list(provenance.get("superseded", []) or []):
+                if not isinstance(record, dict):
+                    continue
+                previous = str(record.get("target", "")).strip()
+                if previous and previous != target:
+                    replacements.append((previous, target))
+        return self.bilingual_summary.reconcile_persian_terms(replacements)
+
+    async def update_bilingual_summary(
+        self,
+        llm_client: Any,
+        new_content: str,
+        translation: str,
+    ) -> dict[str, Any]:
         """Call the LLM to update the running bilingual summary of translated chapters."""
         from tarjomeh.core.prompts import SUMMARY_UPDATE_PROMPT
 
@@ -487,8 +507,14 @@ class MemoryManager:
                 llm_client.set_operation("bilingual_summary_update")
             response = await llm_client.chat(prompt)
             self.bilingual_summary.update(response)
+            return self.reconcile_bilingual_summary()
         except Exception as exc:
             logger.warning("Failed to update running bilingual summary: %s", exc)
+            return {
+                "replacement_count": 0,
+                "changes": [],
+                "error": f"{type(exc).__name__}: {exc}",
+            }
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize memory state for database checkpointing."""

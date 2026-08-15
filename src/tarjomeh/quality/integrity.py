@@ -90,8 +90,22 @@ _MIXED_SCRIPT_TOKEN_RE = re.compile(
     rf"(?<![\w/.-])(?:[A-Za-z]+[{_PERSIAN_LETTER_CLASS}]+|"
     rf"[{_PERSIAN_LETTER_CLASS}]+[A-Za-z]+)(?![\w/.-])"
 )
-_LATIN_PROSE_TOKEN_RE = re.compile(r"(?<![A-Za-z])[A-Za-z][A-Za-z'\u2019-]{1,}(?![A-Za-z])")
+_LATIN_LETTERS = "A-Za-z\u00c0-\u024f\u1e00-\u1eff"
+_LATIN_PROSE_TOKEN_RE = re.compile(
+    rf"(?<![{_LATIN_LETTERS}])[{_LATIN_LETTERS}]"
+    rf"[{_LATIN_LETTERS}'\u2019-]{{1,}}(?![{_LATIN_LETTERS}])"
+)
 _ROMAN_NUMERAL_RE = re.compile(r"[ivxlcdm]+", re.IGNORECASE)
+_APPARATUS_CHAPTER_RE = re.compile(
+    r"\b(?:abbreviations?|bibliograph(?:y|ies)|catalog(?:ue|ing)?|contents?|"
+    r"glossar(?:y|ies)|index(?:es)?|references?|works cited)\b",
+    re.IGNORECASE,
+)
+_SOURCE_METADATA_RE = re.compile(
+    r"\b(?:ISBN|ISSN|Library of Congress|catalog(?:ue|ing)|classification|"
+    r"copyright|all rights reserved)\b",
+    re.IGNORECASE,
+)
 _STRUCTURAL_NUMBER_LABELS = {
     "chapter": ("\u0641\u0635\u0644",),
     "part": ("\u0628\u062e\u0634", "\u0642\u0633\u0645\u062a"),
@@ -103,6 +117,7 @@ _STRUCTURAL_NUMBER_LABELS = {
     "section": ("\u0628\u062e\u0634", "\u0642\u0633\u0645\u062a"),
     "appendix": ("\u067e\u06cc\u0648\u0633\u062a",),
     "edition": ("\u0648\u06cc\u0631\u0627\u06cc\u0634", "\u0686\u0627\u067e"),
+    "year": ("\u0633\u0627\u0644",),
 }
 _PERSIAN_UNITS = (
     "\u0635\u0641\u0631", "\u06cc\u06a9", "\u062f\u0648", "\u0633\u0647", "\u0686\u0647\u0627\u0631",
@@ -117,6 +132,11 @@ _PERSIAN_TEENS = {
 _PERSIAN_TENS = {
     20: "\u0628\u06cc\u0633\u062a", 30: "\u0633\u06cc", 40: "\u0686\u0647\u0644", 50: "\u067e\u0646\u062c\u0627\u0647",
     60: "\u0634\u0635\u062a", 70: "\u0647\u0641\u062a\u0627\u062f", 80: "\u0647\u0634\u062a\u0627\u062f", 90: "\u0646\u0648\u062f",
+}
+_PERSIAN_HUNDREDS = {
+    100: "\u0635\u062f", 200: "\u062f\u0648\u06cc\u0633\u062a", 300: "\u0633\u06cc\u0635\u062f",
+    400: "\u0686\u0647\u0627\u0631\u0635\u062f", 500: "\u067e\u0627\u0646\u0635\u062f", 600: "\u0634\u0634\u0635\u062f",
+    700: "\u0647\u0641\u062a\u0635\u062f", 800: "\u0647\u0634\u062a\u0635\u062f", 900: "\u0646\u0647\u0635\u062f",
 }
 _PERSIAN_SPECIAL_ORDINALS = {
     1: {"\u0646\u062e\u0633\u062a", "\u0627\u0648\u0644"},
@@ -224,6 +244,13 @@ def _structural_label(before: str, after: str) -> str:
         after,
         re.IGNORECASE,
     )
+    if not trailing:
+        trailing = re.match(
+            rf"\s*[-\u2010-\u2014]\s*\d+(?:[.,]\d+)?\s*"
+            rf"(?P<label>{alternatives})s?\b",
+            after,
+            re.IGNORECASE,
+        )
     if trailing:
         return aliases[trailing.group("label").casefold().rstrip(".")]
     return ""
@@ -357,7 +384,7 @@ def _identity_candidate_pattern(identity: str) -> re.Pattern[str]:
             ).join(("[", "]")))
         else:
             parts.append(re.escape(character))
-    separator = r"[\s._:/\-\u2010-\u2015]*"
+    separator = r"[\s._:/\-\u066b\u066c\u200e\u200f\u2010-\u2015]*"
     return re.compile(
         rf"(?<![A-Za-z0-9]){separator.join(parts)}(?![A-Za-z0-9])",
         re.IGNORECASE,
@@ -624,11 +651,71 @@ def _grounded_phrase_spans(text: str, phrase: str) -> list[tuple[int, int]]:
     return [match.span() for match in pattern.finditer(text or "")]
 
 
+def _latin_token_identity(value: str) -> str:
+    """Normalize a Latin token for source-provenance comparison only."""
+    return re.sub(r"[-\u2010-\u2015]", "", value or "").casefold()
+
+
+def _source_latin_identity_sequence(source: str) -> list[str]:
+    return [
+        _latin_token_identity(match.group())
+        for match in _LATIN_PROSE_TOKEN_RE.finditer(source or "")
+    ]
+
+
+def _source_latin_identities(source: str) -> set[str]:
+    return set(_source_latin_identity_sequence(source))
+
+
+def _contains_identity_sequence(
+    source_identities: list[str],
+    candidate_identities: list[str],
+) -> bool:
+    """Return whether a normalized token sequence occurs contiguously."""
+    width = len(candidate_identities)
+    if not width or width > len(source_identities):
+        return False
+    return any(
+        source_identities[index:index + width] == candidate_identities
+        for index in range(len(source_identities) - width + 1)
+    )
+
+
+def _source_grounded_parenthetical_spans(
+    source: str,
+    translation: str,
+) -> list[tuple[int, int]]:
+    """Protect compact target parentheticals whose Latin words occur in source."""
+    source_identities = _source_latin_identity_sequence(source)
+    spans: list[tuple[int, int]] = []
+    for match in re.finditer(r"\(([^()\n]{1,160})\)", translation or ""):
+        tokens = list(_LATIN_PROSE_TOKEN_RE.finditer(match.group(1)))
+        if not tokens or len(tokens) > 8:
+            continue
+        identities = [_latin_token_identity(token.group()) for token in tokens]
+        if _contains_identity_sequence(source_identities, identities):
+            spans.append(match.span())
+    return spans
+
+
+def _citation_author_connector(text: str, start: int, end: int) -> bool:
+    """Recognize ``Surname and Surname YEAR`` without treating prose as citation."""
+    left = (text or "")[max(0, start - 80):start]
+    right = (text or "")[end:min(len(text or ""), end + 100)]
+    name = rf"[{_LATIN_LETTERS}][{_LATIN_LETTERS}'\u2019.-]*"
+    return bool(
+        re.search(rf"{name}\s*$", left)
+        and re.match(rf"\s+{name}(?:\s+{name}){{0,3}}\s+\(?\d{{4}}", right)
+    )
+
+
 def unexpected_latin_prose(
     source: str,
     translation: str,
     *,
     allowed_originals: Iterable[str] = (),
+    structural_role: str = "body",
+    chapter_title: str = "",
 ) -> list[dict[str, Any]]:
     """Find Latin prose that is not justified by source scholarly apparatus.
 
@@ -649,6 +736,21 @@ def unexpected_latin_prose(
     )
     for phrase in grounded_phrases:
         protected_spans.extend(_grounded_phrase_spans(text, phrase))
+    protected_spans.extend(_source_grounded_parenthetical_spans(source, text))
+
+    source_identities = _source_latin_identities(source)
+    source_is_apparatus = bool(
+        str(structural_role or "body").casefold() in {
+            "bibliography",
+            "catalog",
+            "front_matter",
+            "heading",
+            "index",
+            "table",
+        }
+        or _APPARATUS_CHAPTER_RE.search(chapter_title or "")
+        or _SOURCE_METADATA_RE.search(source or "")
+    )
 
     findings: list[dict[str, Any]] = []
     for match in _LATIN_PROSE_TOKEN_RE.finditer(text):
@@ -656,11 +758,9 @@ def unexpected_latin_prose(
         token = match.group()
         if any(start < span_end and end > span_start for span_start, span_end in protected_spans):
             continue
-        source_present = bool(re.search(
-            rf"(?<![A-Za-z]){re.escape(token)}(?![A-Za-z])",
-            source or "",
-            re.IGNORECASE,
-        ))
+        source_present = _latin_token_identity(token) in source_identities
+        if source_present and source_is_apparatus:
+            continue
         if source_present and (
             token.isupper()
             or _ROMAN_NUMERAL_RE.fullmatch(token)
@@ -671,6 +771,10 @@ def unexpected_latin_prose(
         if source_present and citation_context and (
             token[:1].isupper()
             or token.casefold() in {"et", "al", "ibid", "doi"}
+            or (
+                token.casefold() in {"and", "or"}
+                and _citation_author_connector(text, start, end)
+            )
         ):
             continue
         findings.append({
@@ -700,19 +804,36 @@ def _apparatus_value_present(value: str, candidate: str) -> bool:
     )
 
 
-def _persian_number_forms(value: int) -> set[str]:
-    """Return conservative cardinal/ordinal Persian forms for 0..99."""
-    if not 0 <= value <= 99:
-        return set()
+def _persian_cardinal(value: int) -> str:
+    """Return one standard Persian cardinal form for a bounded integer."""
+    if not 0 <= value <= 9999:
+        return ""
     if value < 10:
-        cardinal = _PERSIAN_UNITS[value]
-    elif value < 20:
-        cardinal = _PERSIAN_TEENS[value]
-    else:
+        return _PERSIAN_UNITS[value]
+    if value < 20:
+        return _PERSIAN_TEENS[value]
+    if value < 100:
         tens, unit = divmod(value, 10)
         cardinal = _PERSIAN_TENS[tens * 10]
         if unit:
             cardinal += " \u0648 " + _PERSIAN_UNITS[unit]
+        return cardinal
+    if value < 1000:
+        hundreds, remainder = divmod(value, 100)
+        cardinal = _PERSIAN_HUNDREDS[hundreds * 100]
+        if remainder:
+            cardinal += " \u0648 " + _persian_cardinal(remainder)
+        return cardinal
+    thousands, remainder = divmod(value, 1000)
+    prefix = "\u0647\u0632\u0627\u0631" if thousands == 1 else f"{_persian_cardinal(thousands)} \u0647\u0632\u0627\u0631"
+    return prefix + ((" \u0648 " + _persian_cardinal(remainder)) if remainder else "")
+
+
+def _persian_number_forms(value: int) -> set[str]:
+    """Return conservative cardinal/ordinal Persian forms for 0..9999."""
+    cardinal = _persian_cardinal(value)
+    if not cardinal:
+        return set()
     forms = {cardinal, cardinal + "\u0645"}
     forms.update(_PERSIAN_SPECIAL_ORDINALS.get(value, set()))
     return forms
@@ -827,6 +948,35 @@ def _localized_structural_matches(
                     rf"(?<![{persian_word}])(?P<number>{number_form})"
                     rf"[\s-]{{0,3}}{label}{label_suffix}(?![{persian_word}])",
                 )
+                shared_unit_forms: set[str] = set()
+                for other_index, other in enumerate(source_occurrences):
+                    if (
+                        other_index == index
+                        or other.role != "structural"
+                        or other.label != occurrence.label
+                    ):
+                        continue
+                    try:
+                        shared_unit_forms.update(
+                            _persian_number_forms(int(other.value))
+                        )
+                    except ValueError:
+                        continue
+                if shared_unit_forms:
+                    following_number = "|".join(
+                        re.escape(value)
+                        for value in sorted(shared_unit_forms, key=len, reverse=True)
+                    )
+                    patterns += (
+                        # A source-grounded range can share one trailing unit,
+                        # e.g. ``four hundred to five hundred years``. Both
+                        # number forms and an explicit connector are required.
+                        rf"(?<![{persian_word}])(?P<number>{number_form})"
+                        rf"[\s\u200c]{{0,3}}(?:\u062a\u0627|\u0627\u0644\u06cc|\u0648|"
+                        rf"[-\u2010-\u2015])[\s\u200c]{{0,3}}"
+                        rf"(?:{following_number})[\s\u200c-]{{0,3}}"
+                        rf"{label}{label_suffix}(?![{persian_word}])",
+                    )
                 for pattern in patterns:
                     for match in re.finditer(pattern, normalized_candidate):
                         span = match.span("number")

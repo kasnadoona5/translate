@@ -68,7 +68,12 @@ _PAGE_NUMBER_RE = re.compile(r"^\s*(?:\d+|[ivxlcdm]+)\s*$", re.IGNORECASE)
 _FURNITURE_NUMBER_RE = re.compile(r"\b(?:\d+|[ivxlcdm]+)\b", re.IGNORECASE)
 
 
-def _join_block_lines(lines: list[str]) -> str:
+def _join_block_lines(
+    lines: list[str],
+    *,
+    known_words: set[str] | None = None,
+    dehyphenation_evidence: list[dict[str, str]] | None = None,
+) -> str:
     """Join the visual lines of one PDF text block into flowing prose.
 
     Handles print-style hyphenation:
@@ -90,10 +95,54 @@ def _join_block_lines(lines: list[str]) -> str:
         elif out.endswith(_SOFT_HYPHEN):
             out = out[: -len(_SOFT_HYPHEN)] + line.lstrip()
         elif out.endswith("-"):
-            out = out + line.lstrip()
+            left = re.search(r"([A-Za-z]{2,})-$", out)
+            right = re.match(r"([a-z]{2,})", line.lstrip())
+            joined = (
+                left.group(1) + right.group(1)
+                if left is not None and right is not None else ""
+            )
+            if joined and known_words and joined.casefold() in known_words:
+                before = f"{left.group(1)}-{right.group(1)}"
+                out = out[:-1] + line.lstrip()
+                if dehyphenation_evidence is not None:
+                    dehyphenation_evidence.append({
+                        "before": before,
+                        "joined": joined,
+                        "reason": "unhyphenated_form_observed_elsewhere_in_source",
+                    })
+            else:
+                out = out + line.lstrip()
         else:
             out = out + " " + line.lstrip()
     return out.replace(_SOFT_HYPHEN, "").strip()
+
+
+def _join_span_texts(spans: list[dict[str, Any]]) -> str:
+    """Join styled PDF spans while restoring only geometry-evidenced spaces."""
+    output = ""
+    previous: dict[str, Any] | None = None
+    for span in spans:
+        value = str(span.get("text", ""))
+        if not value:
+            continue
+        if output and previous is not None and not output[-1].isspace() and not value[0].isspace():
+            previous_box = previous.get("bbox", (0, 0, 0, 0))
+            current_box = span.get("bbox", (0, 0, 0, 0))
+            gap = float(current_box[0]) - float(previous_box[2])
+            font_size = min(
+                float(previous.get("size", 0.0) or 0.0),
+                float(span.get("size", 0.0) or 0.0),
+            )
+            threshold = max(0.8, font_size * 0.12)
+            if (
+                gap >= threshold
+                and re.search(r"[A-Za-z0-9)\]}]$", output)
+                and re.match(r"[A-Za-z0-9]", value)
+            ):
+                output += " "
+        output += value
+        previous = span
+    return output.strip()
 
 
 def _extract_page_blocks(
@@ -136,7 +185,9 @@ def _extract_page_blocks(
                     sizes.append(span.get("size", 0.0))
                     font_names.append(span.get("font", ""))
             if text_parts:
-                line_text = "".join(text_parts).strip()
+                line_text = _join_span_texts([
+                    span for span in spans if str(span.get("text", "")).strip()
+                ])
                 line_texts.append(line_text)
                 line_sizes = [
                     float(span.get("size", 0.0))
@@ -458,11 +509,22 @@ def _prepare_document_blocks(
         for signature, page_numbers in edge_occurrences.items()
         if len(page_numbers) >= recurrence_min
     }
+    source_words = {
+        match.group().casefold()
+        for blocks in pages
+        for block in blocks
+        for line in block.get("lines", [])
+        for match in re.finditer(
+            r"(?<![A-Za-z-])[A-Za-z]{4,}(?![A-Za-z-])",
+            str(line.get("text", "")),
+        )
+    }
     removed: list[dict[str, Any]] = []
     table_blocks = 0
     rotated_table_pages: list[int] = []
     reading_order_modes: dict[str, int] = {}
     internal_paragraph_splits: list[dict[str, Any]] = []
+    ascii_dehyphenation_evidence: list[dict[str, str]] = []
     prepared: list[list[dict[str, Any]]] = []
     for page_num, blocks in enumerate(pages):
         rotated_count = sum(
@@ -510,9 +572,11 @@ def _prepare_document_blocks(
                     ],
                 })
             for part_index, line_group in enumerate(line_groups):
-                text = _join_block_lines([
-                    str(line.get("text", "")) for line in line_group
-                ])
+                text = _join_block_lines(
+                    [str(line.get("text", "")) for line in line_group],
+                    known_words=source_words,
+                    dehyphenation_evidence=ascii_dehyphenation_evidence,
+                )
                 text, embedded_removed = _strip_embedded_furniture(text, recurrent)
                 embedded_removed_any = embedded_removed_any or embedded_removed
                 if not text:
@@ -560,7 +624,9 @@ def _prepare_document_blocks(
         "internal_paragraph_split_count": len(internal_paragraph_splits),
         "internal_paragraph_splits": internal_paragraph_splits,
         "recurrence_minimum_pages": recurrence_min,
-        "dehyphenation_mode": "soft_hyphen_only",
+        "dehyphenation_mode": "soft_hyphen_plus_repeated_source_evidence",
+        "ascii_dehyphenation_count": len(ascii_dehyphenation_evidence),
+        "ascii_dehyphenation_evidence": ascii_dehyphenation_evidence[:200],
         "structure_version": structure_version,
     }
 

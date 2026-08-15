@@ -114,6 +114,55 @@ class BilingualSummary:
             )
         return "\n\n".join(parts)
 
+    def reconcile_persian_terms(
+        self,
+        replacements: list[tuple[str, str]],
+    ) -> dict[str, object]:
+        """Replace only exact superseded Persian terms in the stored summary.
+
+        This repairs stale memory after a committed terminology correction. It
+        neither changes the English summary nor creates terminology authority.
+        """
+        text = self.persian_summary
+        changes: list[dict[str, object]] = []
+        persian_letter = r"\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff"
+        for previous, current in replacements:
+            old = " ".join((previous or "").split()).strip()
+            new = " ".join((current or "").split()).strip()
+            if (
+                not old
+                or not new
+                or old == new
+                or len(old) > 120
+                or len(new) > 120
+                or not re.search(r"[\u0600-\u06ff]", old + new)
+            ):
+                continue
+            words = [re.escape(word) for word in re.split(r"[\s\u200c]+", old) if word]
+            if not words:
+                continue
+            pattern = re.compile(
+                rf"(?<![{persian_letter}])"
+                + r"[\s\u200c]+".join(words)
+                + rf"(?![{persian_letter}])"
+            )
+            text, count = pattern.subn(lambda _match: new, text)
+            if count:
+                changes.append({
+                    "previous_target": old,
+                    "target": new,
+                    "count": count,
+                })
+        self.persian_summary = text
+        return {
+            "replacement_count": sum(int(item["count"]) for item in changes),
+            "changes": changes,
+            "policy": (
+                "Only exact superseded Persian renderings from committed, "
+                "non-curated terminology corrections are reconciled."
+            ),
+        }
+
     def serialize(self) -> dict[str, str]:
         """Serialize the layer state for database checkpointing."""
         return {
