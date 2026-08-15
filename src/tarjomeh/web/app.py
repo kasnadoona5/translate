@@ -716,6 +716,9 @@ def _register_api(app: Flask) -> None:
             integrity_final_failures = [
                 e for e in chunk_events if e["event_type"] == "integrity_final_failed"
             ]
+            language_quality_reviews = [
+                e for e in chunk_events if e["event_type"] == "language_quality_review"
+            ]
             final_glossary_events = [
                 e for e in chunk_events
                 if e["event_type"] == "glossary_compliance_final"
@@ -757,6 +760,7 @@ def _register_api(app: Flask) -> None:
                 or bool(qa_unavailable_events)
                 or bool(integrity_rejections)
                 or bool(integrity_final_failures)
+                or bool(language_quality_reviews)
                 or glossary_violations > 0
                 or bt_flagged
                 or bool(concept_risks)
@@ -774,11 +778,13 @@ def _register_api(app: Flask) -> None:
                     or qa_unavailable_events
                     or integrity_rejections
                     or integrity_final_failures
+                    or language_quality_reviews
                     or bt_flagged
                 ),
                 "qa_unavailable": bool(qa_unavailable_events),
                 "integrity_rejections": len(integrity_rejections),
                 "integrity_final_failures": len(integrity_final_failures),
+                "language_quality_reviews": len(language_quality_reviews),
                 "glossary_violations": glossary_violations,
                 "back_translation_flagged": bt_flagged,
                 "high_risk_concepts": concept_risks,
@@ -935,7 +941,8 @@ def _register_api(app: Flask) -> None:
                 f"repositioned={anchor_audit.get('repositioned_count', 0)} "
                 f"ambiguous={anchor_audit.get('ambiguous_count', 0)} "
                 f"missing_target={anchor_audit.get('missing_target_count', 0)} "
-                f"citation_only={anchor_audit.get('citation_only_count', 0)}",
+                f"citation_only={anchor_audit.get('citation_only_count', 0)} "
+                f"nested_suppressed={anchor_audit.get('overlap_suppressed_count', 0)}",
             ])
             for missing in anchor_audit.get("missing_targets", []) or []:
                 lines.append(
@@ -982,6 +989,35 @@ def _register_api(app: Flask) -> None:
                 f"{protocol_audit.get('remaining_artifact_count', 0)}",
                 "",
             ])
+        final_text_audit = db.get_job_artifact(
+            job_id, "final_text_quality_audit"
+        )
+        if final_text_audit is not None:
+            lines.extend([
+                "Final assembled-text audit:",
+                f"  language_findings="
+                f"{final_text_audit.get('language_finding_count', 0)}",
+                f"  unresolved_identifiers="
+                f"{final_text_audit.get('unresolved_identifier_count', 0)}",
+                "  policy=evidence only; unexplained foreign prose is retained for "
+                "review, while exact source identifiers are restored deterministically",
+            ])
+            for finding in final_text_audit.get("paragraph_findings", []) or []:
+                tokens = [
+                    item.get("token", "")
+                    for item in finding.get("unexpected_latin", []) or []
+                ]
+                lines.append(
+                    f"  REVIEW: paragraph={finding.get('paragraph_index')} "
+                    f"unexpected_latin={tokens} "
+                    f"mixed={finding.get('mixed_script_artifacts', [])}"
+                )
+            for finding in final_text_audit.get("unresolved_identifiers", []) or []:
+                lines.append(
+                    f"  IDENTIFIER MISSING: paragraph={finding.get('paragraph_index')} "
+                    f"values={finding.get('missing', [])}"
+                )
+            lines.append("")
         all_events = db.get_chunk_events(job_id)
         all_chunks = db.get_chunks(job_id)
         events_by_chunk: dict[int, list[dict[str, Any]]] = {}
@@ -1049,12 +1085,15 @@ def _register_api(app: Flask) -> None:
             "qa_unavailable": "qa_unavailable",
             "glossary_needs_review": "glossary_needs_review",
             "integrity_final_failed": "integrity_final_failed",
+            "language_quality_review": "foreign_text_quality_risk",
             "chunk_review_required": "explicit_chunk_review_reason",
         }
         for event in all_events:
             reason = review_event_reasons.get(event["event_type"])
             if reason:
                 review_reasons.add(reason)
+        if final_text_audit and final_text_audit.get("review_required"):
+            review_reasons.add("final_text_quality_risk")
         missing_output = any(
             "translation" in chunk
             and chunk.get("status") in {"completed", "needs_review"}
@@ -1073,6 +1112,9 @@ def _register_api(app: Flask) -> None:
         quality_fail = any(
             event["event_type"] == "integrity_final_failed"
             for event in all_events
+        ) or bool(
+            final_text_audit
+            and int(final_text_audit.get("unresolved_identifier_count", 0) or 0) > 0
         )
         if missing_output:
             review_reasons.add("missing_output")
@@ -1375,6 +1417,18 @@ def _register_api(app: Flask) -> None:
                                 f"    {finding.get('check_id')}: "
                                 f"{finding.get('message')} details={details}"
                             )
+                elif event["event_type"] == "language_quality_review":
+                    lines.append(
+                        "  LANGUAGE REVIEW: unexplained foreign or mixed-script "
+                        "text retained for human review"
+                    )
+                    for finding in payload.get("unexpected_latin", []) or []:
+                        lines.append(
+                            f"    token={finding.get('token')!r} "
+                            f"context={finding.get('context')!r}"
+                        )
+                    for finding in payload.get("mixed_script_artifacts", []) or []:
+                        lines.append(f"    mixed_script={finding!r}")
                 elif event["event_type"] == "chunk_review_required":
                     lines.append(
                         "  REVIEW REQUIRED: reasons="

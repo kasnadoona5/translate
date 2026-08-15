@@ -72,10 +72,12 @@ from tarjomeh.quality.back_translator import BackTranslator
 from tarjomeh.quality.integrity import (
     PostEditIntegrityGate,
     extract_identifiers,
+    mixed_script_artifacts,
     restore_source_identifiers,
     normalize_for_match,
     protected_english_originals,
     protected_source_apparatus,
+    unexpected_latin_prose,
 )
 from tarjomeh.core.prompts import (
     TRANSLATE_SYSTEM_PROMPT,
@@ -207,6 +209,72 @@ def restore_document_source_identifiers(
         "unresolved_count": sum(len(item["missing"]) for item in unresolved),
         "repairs": repairs,
         "unresolved": unresolved,
+    }
+
+
+def audit_translation_language(
+    source: str,
+    translation: str,
+    *,
+    allowed_originals: list[str] | tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Report deterministic foreign-script leakage without rewriting semantics."""
+    mixed = mixed_script_artifacts(translation)
+    unexpected = unexpected_latin_prose(
+        source,
+        translation,
+        allowed_originals=allowed_originals,
+    )
+    return {
+        "review_required": bool(mixed or unexpected),
+        "mixed_script_count": len(mixed),
+        "mixed_script_artifacts": mixed,
+        "unexpected_latin_count": len(unexpected),
+        "unexpected_latin": unexpected,
+        "policy": (
+            "Source-grounded identifiers, citations, approved originals, acronyms, "
+            "and multilingual apparatus are allowed; unexplained foreign prose is "
+            "review evidence and is never deleted automatically."
+        ),
+    }
+
+
+def audit_document_final_text(
+    document: TranslatedDocument,
+    *,
+    allowed_originals: list[str] | tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Recheck final assembled text after every deterministic transformation."""
+    paragraph_findings: list[dict[str, Any]] = []
+    unresolved_identifiers: list[dict[str, Any]] = []
+    for paragraph in document.paragraphs:
+        language = audit_translation_language(
+            paragraph.source_text,
+            paragraph.translated_text,
+            allowed_originals=allowed_originals,
+        )
+        if language["review_required"]:
+            paragraph_findings.append({
+                "paragraph_index": paragraph.index,
+                **language,
+            })
+        missing = list((
+            extract_identifiers(paragraph.source_text)
+            - extract_identifiers(paragraph.translated_text)
+        ).elements())
+        if missing:
+            unresolved_identifiers.append({
+                "paragraph_index": paragraph.index,
+                "missing": missing,
+            })
+    return {
+        "review_required": bool(paragraph_findings or unresolved_identifiers),
+        "language_finding_count": len(paragraph_findings),
+        "unresolved_identifier_count": sum(
+            len(item["missing"]) for item in unresolved_identifiers
+        ),
+        "paragraph_findings": paragraph_findings,
+        "unresolved_identifiers": unresolved_identifiers,
     }
 
 
@@ -1167,6 +1235,7 @@ def _chunk_needs_review(db: Any, job_id: str, chunk_index: int) -> bool:
         "qa_unavailable",
         "integrity_edit_rejected",
         "integrity_final_failed",
+        "language_quality_review",
         "back_translation_flagged",
         "glossary_needs_review",
         "chunk_review_required",
@@ -1442,6 +1511,7 @@ def _chunk_review_reason_payload(
         "qa_unavailable": "qa_unavailable",
         "integrity_edit_rejected": "automatic_edit_rejected",
         "integrity_final_failed": "final_integrity_failed",
+        "language_quality_review": "foreign_text_quality_risk",
         "back_translation_flagged": "back_translation_risk",
         "glossary_needs_review": "glossary_noncompliance",
     }
@@ -2194,19 +2264,38 @@ class TranslationPipeline:
                         )
                         
                         if self.config.memory.enable_4layer:
-                            try:
-                                noun_report = self._run_async(
-                                    memory_manager.update_proper_nouns(
-                                        self.llm_client, chunk.text, translation
-                                    )
-                                )
+                            # Seen-state is grounded in the source occurrence and is
+                            # safe even when the target remains advisory.
+                            memory_manager.proper_nouns.mark_seen_in_text(chunk.text)
+                            if _chunk_needs_review(self.db, job_id, idx):
                                 self.db.log_chunk_event(
-                                    job_id, idx, "proper_noun_extraction",
-                                    noun_report,
+                                    job_id,
+                                    idx,
+                                    "proper_noun_extraction",
+                                    {
+                                        "status": "deferred_untrusted_chunk",
+                                        "reason": (
+                                            "The translation remains available as "
+                                            "advisory short-term context, but cannot "
+                                            "teach durable noun mappings until review."
+                                        ),
+                                    },
                                 )
-                                memory_manager.proper_nouns.mark_seen_in_text(chunk.text)
-                            except Exception as e:
-                                logger.warning("Incremental proper noun extraction failed: %s", e)
+                            else:
+                                try:
+                                    noun_report = self._run_async(
+                                        memory_manager.update_proper_nouns(
+                                            self.llm_client, chunk.text, translation
+                                        )
+                                    )
+                                    self.db.log_chunk_event(
+                                        job_id, idx, "proper_noun_extraction",
+                                        noun_report,
+                                    )
+                                except Exception as e:
+                                    logger.warning(
+                                        "Incremental proper noun extraction failed: %s", e
+                                    )
 
                             is_chapter_end = False
                             if idx == total_chunks - 1:
@@ -2352,19 +2441,38 @@ class TranslationPipeline:
                         )
 
                         if self.config.memory.enable_4layer:
-                            try:
-                                noun_report = self._run_async(
-                                    memory_manager.update_proper_nouns(
-                                        self.llm_client, chunk.text, translation
-                                    )
-                                )
+                            # Seen-state is grounded in the source occurrence and is
+                            # safe even when the target remains advisory.
+                            memory_manager.proper_nouns.mark_seen_in_text(chunk.text)
+                            if _chunk_needs_review(self.db, job_id, idx):
                                 self.db.log_chunk_event(
-                                    job_id, idx, "proper_noun_extraction",
-                                    noun_report,
+                                    job_id,
+                                    idx,
+                                    "proper_noun_extraction",
+                                    {
+                                        "status": "deferred_untrusted_chunk",
+                                        "reason": (
+                                            "The translation remains available as "
+                                            "advisory short-term context, but cannot "
+                                            "teach durable noun mappings until review."
+                                        ),
+                                    },
                                 )
-                                memory_manager.proper_nouns.mark_seen_in_text(chunk.text)
-                            except Exception as e:
-                                logger.warning("Incremental proper noun extraction failed: %s", e)
+                            else:
+                                try:
+                                    noun_report = self._run_async(
+                                        memory_manager.update_proper_nouns(
+                                            self.llm_client, chunk.text, translation
+                                        )
+                                    )
+                                    self.db.log_chunk_event(
+                                        job_id, idx, "proper_noun_extraction",
+                                        noun_report,
+                                    )
+                                except Exception as e:
+                                    logger.warning(
+                                        "Incremental proper noun extraction failed: %s", e
+                                    )
 
                             is_chapter_end = False
                             if idx == total_chunks - 1:
@@ -2795,6 +2903,23 @@ class TranslationPipeline:
                 f"{identifier_audit['repair_count']} repair(s).",
             )
 
+        final_text_audit = audit_document_final_text(
+            trans_doc,
+            allowed_originals=tuple(proper_nouns),
+        )
+        self.db.save_job_artifact(
+            job_id, "final_text_quality_audit", final_text_audit
+        )
+        if final_text_audit["review_required"]:
+            self.db.log_event(
+                job_id,
+                "WARNING",
+                "Final text audit found review evidence: "
+                f"language_findings={final_text_audit['language_finding_count']}, "
+                "unresolved_identifiers="
+                f"{final_text_audit['unresolved_identifier_count']}.",
+            )
+
         # 9. Export
         if progress_callback:
             progress_callback("Export", 0.98, f"Exporting to {self.config.output.format.upper()}...")
@@ -2966,6 +3091,13 @@ class TranslationPipeline:
         identifier_audit = restore_document_source_identifiers(trans_doc)
         self.db.save_job_artifact(
             job_id, "final_identifier_reconciliation", identifier_audit
+        )
+        final_text_audit = audit_document_final_text(
+            trans_doc,
+            allowed_originals=tuple(proper_nouns),
+        )
+        self.db.save_job_artifact(
+            job_id, "final_text_quality_audit", final_text_audit
         )
         exporter_cls = get_exporter(fmt)
         exporter = exporter_cls(self.config.to_dict().get(fmt))
@@ -4808,6 +4940,32 @@ Output ONLY the corrected Persian translation.
                 self.db.log_chunk_event(
                     job_id, idx, "integrity_final_failed", final_integrity_payload
                 )
+
+        language_quality = audit_translation_language(
+            chunk.text,
+            translation,
+            allowed_originals=tuple(
+                memory_manager.proper_nouns.inline_eligible_nouns()
+            ),
+        )
+        self.db.log_chunk_event(
+            job_id, idx, "language_quality_checked", language_quality
+        )
+        if language_quality["review_required"]:
+            self.db.log_chunk_event(
+                job_id,
+                idx,
+                "language_quality_review",
+                {
+                    **language_quality,
+                    "review_reason": "unexplained_foreign_or_mixed_script_text",
+                    "message": (
+                        "Unexplained foreign-script prose remained in the final "
+                        "translation. The text was retained for review and was not "
+                        "admitted to trusted retrieval or style memory."
+                    ),
+                },
+            )
 
         # Back translation verification
         if self.config.translation.enable_back_translation:

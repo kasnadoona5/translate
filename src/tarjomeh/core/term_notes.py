@@ -128,6 +128,7 @@ def ensure_inline_proper_noun_originals(
     ambiguous: list[dict[str, Any]] = []
     missing_targets: list[dict[str, Any]] = []
     citation_only: list[dict[str, Any]] = []
+    overlap_suppressed: list[dict[str, Any]] = []
     categories = categories or {}
     aliases = aliases or {}
     for paragraph in document.paragraphs:
@@ -157,13 +158,36 @@ def ensure_inline_proper_noun_originals(
             if target_variants:
                 candidates.append(
                     (
-                        source_match.start(), source, target_variants,
+                        source_match.start(), source_match.end(), source, target_variants,
                         key, category,
                     )
                 )
 
         text = paragraph.translated_text
-        for source_position, source, target_variants, key, category in sorted(candidates):
+        selected_candidates = []
+        for candidate in sorted(
+            candidates,
+            key=lambda item: (-(item[1] - item[0]), item[0], item[2].casefold()),
+        ):
+            source_start, source_end, source, _targets, _key, category = candidate
+            covering = next((
+                kept for kept in selected_candidates
+                if source_start < kept[1] and source_end > kept[0]
+            ), None)
+            if covering is not None:
+                overlap_suppressed.append({
+                    "paragraph_index": paragraph.index,
+                    "source": source,
+                    "category": category,
+                    "covered_by": covering[2],
+                    "reason": "nested_source_entity",
+                })
+                continue
+            selected_candidates.append(candidate)
+
+        for (
+            source_position, _source_end, source, target_variants, key, category
+        ) in sorted(selected_candidates, key=lambda item: item[0]):
             target_matches = [
                 (*match, target)
                 for target in target_variants
@@ -311,10 +335,12 @@ def ensure_inline_proper_noun_originals(
         "ambiguous_count": len(ambiguous),
         "missing_target_count": len(missing_targets),
         "citation_only_count": len(citation_only),
+        "overlap_suppressed_count": len(overlap_suppressed),
         "anchors": anchors,
         "ambiguous": ambiguous,
         "missing_targets": missing_targets,
         "citation_only": citation_only,
+        "overlap_suppressed": overlap_suppressed,
     }
     return report if return_report else inserted
 

@@ -90,6 +90,8 @@ _MIXED_SCRIPT_TOKEN_RE = re.compile(
     rf"(?<![\w/.-])(?:[A-Za-z]+[{_PERSIAN_LETTER_CLASS}]+|"
     rf"[{_PERSIAN_LETTER_CLASS}]+[A-Za-z]+)(?![\w/.-])"
 )
+_LATIN_PROSE_TOKEN_RE = re.compile(r"(?<![A-Za-z])[A-Za-z][A-Za-z'\u2019-]{1,}(?![A-Za-z])")
+_ROMAN_NUMERAL_RE = re.compile(r"[ivxlcdm]+", re.IGNORECASE)
 _STRUCTURAL_NUMBER_LABELS = {
     "chapter": ("\u0641\u0635\u0644",),
     "part": ("\u0628\u062e\u0634", "\u0642\u0633\u0645\u062a"),
@@ -227,8 +229,23 @@ def _structural_label(before: str, after: str) -> str:
     return ""
 
 
+def _ordered_enumeration_values(text: str) -> Counter[str]:
+    """Identify source list markers such as ``(1) ... (2) ...`` conservatively."""
+    normalized = (text or "").translate(_DIGIT_MAP)
+    values = [
+        int(match.group(1))
+        for match in re.finditer(r"\(\s*(\d{1,2})\s*\)", normalized)
+    ]
+    if len(values) < 2 or values[0] != 1:
+        return Counter()
+    if any(current != previous + 1 for previous, current in zip(values, values[1:])):
+        return Counter()
+    return Counter(str(value) for value in values)
+
+
 def _number_occurrences(text: str) -> list[_NumberOccurrence]:
     normalized = _numeric_text(text)
+    enumeration_values = _ordered_enumeration_values(text)
     occurrences: list[_NumberOccurrence] = []
     for match in _NUMBER_RE.finditer(normalized):
         value = re.sub(r"\s+", "", match.group()).replace("\u066b", ".").replace(
@@ -244,7 +261,16 @@ def _number_occurrences(text: str) -> list[_NumberOccurrence]:
             before,
             re.IGNORECASE,
         ))
-        if label:
+        parenthesized_marker = bool(
+            re.search(r"\(\s*$", before)
+            and re.match(r"\s*\)", after)
+            and enumeration_values[value] > 0
+        )
+        if parenthesized_marker:
+            role = "enumeration"
+            label = "enumeration"
+            enumeration_values[value] -= 1
+        elif label:
             role = "structural"
         elif is_year or citation_cue or in_parenthetical:
             role = "citation"
@@ -281,24 +307,17 @@ def extract_note_markers(text: str) -> list[str]:
 def extract_identifiers(text: str) -> Counter[str]:
     """Extract source identifiers whose spelling, digits, and separators matter."""
     values: list[str] = []
-    occupied: list[tuple[int, int]] = []
-    for pattern in _IDENTIFIER_PATTERNS:
-        for match in pattern.finditer(text or ""):
-            if any(match.start() < end and match.end() > start for start, end in occupied):
-                continue
-            value = " ".join(match.group().split()).strip(".,;)")
-            if _PROSE_FOOTNOTE_SUFFIX_RE.fullmatch(value):
-                continue
-            value = re.sub(r"[\u2010-\u2015]", "-", value)
-            value = re.sub(
-                r"^\s*(?:ISBN(?:-1[03])?|ISSN)\s*:?\s*",
-                "",
-                value,
-                flags=re.IGNORECASE,
-            )
-            if value:
-                values.append(value.casefold())
-                occupied.append(match.span())
+    for _start, _end, raw_value in _identifier_occurrences(text):
+        value = " ".join(raw_value.split()).strip(".,;)")
+        value = re.sub(r"[\u2010-\u2015]", "-", value)
+        value = re.sub(
+            r"^\s*(?:ISBN(?:-1[03])?|ISSN)\s*:?\s*",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        )
+        if value:
+            values.append(value.casefold())
     return Counter(values)
 
 
@@ -346,19 +365,34 @@ def _identity_candidate_pattern(identity: str) -> re.Pattern[str]:
 
 
 def _identifier_occurrences(text: str) -> list[tuple[int, int, str]]:
-    occurrences: list[tuple[int, int, str]] = []
-    occupied: list[tuple[int, int]] = []
-    for pattern in _IDENTIFIER_PATTERNS:
+    """Return non-overlapping identifiers, preferring complete specific spans."""
+    candidates: list[tuple[int, int, str, int]] = []
+    for priority, pattern in enumerate(_IDENTIFIER_PATTERNS):
         for match in pattern.finditer(text or ""):
-            if any(match.start() < end and match.end() > start for start, end in occupied):
-                continue
             value = match.group().strip(".,;)")
             if _PROSE_FOOTNOTE_SUFFIX_RE.fullmatch(value):
                 continue
             if value:
-                occurrences.append((match.start(), match.start() + len(value), value))
-                occupied.append(match.span())
-    return occurrences
+                candidates.append(
+                    (match.start(), match.start() + len(value), value, priority)
+                )
+
+    # A complete catalogue/grant code may contain a substring that also looks
+    # like an ordinary numeric identifier. Selecting by span length first keeps
+    # the full source-authored token authoritative without relying on its prefix.
+    selected: list[tuple[int, int, str, int]] = []
+    for candidate in sorted(
+        candidates,
+        key=lambda item: (-(item[1] - item[0]), item[3], item[0]),
+    ):
+        start, end, _value, _priority = candidate
+        if any(start < kept_end and end > kept_start for kept_start, kept_end, *_ in selected):
+            continue
+        selected.append(candidate)
+    return [
+        (start, end, value)
+        for start, end, value, _priority in sorted(selected, key=lambda item: item[0])
+    ]
 
 
 def restore_source_identifiers(source: str, translation: str) -> tuple[str, dict[str, Any]]:
@@ -581,6 +615,74 @@ def protected_source_apparatus(source: str, translation: str) -> list[str]:
     return sorted(set(values), key=str.casefold)
 
 
+def _grounded_phrase_spans(text: str, phrase: str) -> list[tuple[int, int]]:
+    """Locate a source-grounded phrase despite harmless whitespace changes."""
+    words = re.findall(r"\S+", phrase or "")
+    if not words:
+        return []
+    pattern = re.compile(r"\s+".join(re.escape(word) for word in words), re.IGNORECASE)
+    return [match.span() for match in pattern.finditer(text or "")]
+
+
+def unexpected_latin_prose(
+    source: str,
+    translation: str,
+    *,
+    allowed_originals: Iterable[str] = (),
+) -> list[dict[str, Any]]:
+    """Find Latin prose that is not justified by source scholarly apparatus.
+
+    The check is deliberately provenance-based. It does not maintain a list of
+    book-specific words: identifiers, approved originals, source-delimited
+    multilingual apparatus, citation names, acronyms, and Roman page numbers are
+    allowed; an unexplained model note or foreign word in Persian prose is not.
+    """
+    text = translation or ""
+    protected_spans = [
+        (start, end)
+        for start, end, _value in _identifier_occurrences(text)
+    ]
+    grounded_phrases = list(protected_source_apparatus(source, text))
+    grounded_phrases.extend(
+        value for value in allowed_originals
+        if value and re.search(re.escape(value), source or "", re.IGNORECASE)
+    )
+    for phrase in grounded_phrases:
+        protected_spans.extend(_grounded_phrase_spans(text, phrase))
+
+    findings: list[dict[str, Any]] = []
+    for match in _LATIN_PROSE_TOKEN_RE.finditer(text):
+        start, end = match.span()
+        token = match.group()
+        if any(start < span_end and end > span_start for span_start, span_end in protected_spans):
+            continue
+        source_present = bool(re.search(
+            rf"(?<![A-Za-z]){re.escape(token)}(?![A-Za-z])",
+            source or "",
+            re.IGNORECASE,
+        ))
+        if source_present and (
+            token.isupper()
+            or _ROMAN_NUMERAL_RE.fullmatch(token)
+        ):
+            continue
+        context = text[max(0, start - 80):min(len(text), end + 80)]
+        citation_context = bool(_CITATION_YEAR_RE.search(context))
+        if source_present and citation_context and (
+            token[:1].isupper()
+            or token.casefold() in {"et", "al", "ibid", "doi"}
+        ):
+            continue
+        findings.append({
+            "token": token,
+            "offset": start,
+            "source_grounded": source_present,
+            "context": context[:180],
+            "reason": "unapproved_latin_prose",
+        })
+    return findings[:50]
+
+
 def _apparatus_value_present(value: str, candidate: str) -> bool:
     """Match citation atoms despite harmless citation-style reformatting."""
     normalized_candidate = normalize_for_match(candidate)
@@ -616,6 +718,25 @@ def _persian_number_forms(value: int) -> set[str]:
     return forms
 
 
+def _persian_enumerator_forms(value: int) -> set[str]:
+    """Return forms that can replace an ordered parenthesized list marker."""
+    if value < 0 or value >= 100:
+        return set()
+    cardinal = (
+        _PERSIAN_UNITS[value]
+        if value < 10
+        else _PERSIAN_TEENS[value]
+        if value < 20
+        else _PERSIAN_TENS[(value // 10) * 10]
+        + ((" \u0648 " + _PERSIAN_UNITS[value % 10]) if value % 10 else "")
+    )
+    ordinal = cardinal + "\u0645"
+    forms = {cardinal, ordinal, ordinal + "\u06cc", ordinal + "\u06cc\u0646"}
+    for special in _PERSIAN_SPECIAL_ORDINALS.get(value, set()):
+        forms.update({special, special + "\u06cc", special + "\u06cc\u0646"})
+    return forms
+
+
 def _localized_structural_matches(
     source_occurrences: list[_NumberOccurrence],
     candidate: str,
@@ -626,12 +747,41 @@ def _localized_structural_matches(
     consumed_spans: set[tuple[int, int]] = set()
     matched_source: set[int] = set()
     evidence: list[dict[str, Any]] = []
+    enumeration_cursor = 0
     canonical_targets: dict[str, set[str]] = {}
     for source_label, target_labels in _STRUCTURAL_NUMBER_LABELS.items():
         canonical = "volume" if source_label == "vol" else source_label
         canonical_targets.setdefault(canonical, set()).update(target_labels)
 
     for index, occurrence in enumerate(source_occurrences):
+        if occurrence.role == "enumeration":
+            try:
+                number = int(occurrence.value)
+            except ValueError:
+                continue
+            candidates: list[tuple[int, int, str]] = []
+            for form in _persian_enumerator_forms(number):
+                for match in re.finditer(
+                    rf"(?<![{persian_word}]){re.escape(form)}(?![{persian_word}])",
+                    normalized_candidate[enumeration_cursor:],
+                ):
+                    start = enumeration_cursor + match.start()
+                    end = enumeration_cursor + match.end()
+                    if (start, end) not in consumed_spans:
+                        candidates.append((start, end, match.group()))
+            if not candidates:
+                continue
+            start, end, rendered = min(candidates, key=lambda item: item[0])
+            enumeration_cursor = end
+            consumed_spans.add((start, end))
+            matched_source.add(index)
+            evidence.append({
+                "source_value": occurrence.value,
+                "source_role": occurrence.role,
+                "source_label": occurrence.label,
+                "target_form": rendered,
+            })
+            continue
         if occurrence.role != "structural" or not occurrence.label:
             continue
         try:

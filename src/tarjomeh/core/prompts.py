@@ -12,20 +12,21 @@ from __future__ import annotations
 
 GENERAL_EDITORIAL_CONTRACT: str = """\
 ### General editorial contract
-- Resolve meaning from the current proposition, neighboring discourse, book context,
-  domain, and approved terminology; never force an isolated dictionary equivalent.
-- Preserve semantic roles and relations, including agency, possession, attribution,
-  negation, modality, quantity, comparison, causality, and temporal orientation.
+- Resolve meaning from the proposition, neighboring discourse, book context, domain,
+  and approved terminology; never force an isolated dictionary equivalent.
+- Preserve semantic roles and relations: agency, possession, attribution, negation,
+  modality, quantity, comparison, causality, and time.
 - Preserve source-authored multilingual expressions, titles, labels, citation atoms
-  (author, year, page), and note markers. These are scholarly apparatus, not optional
-  inline English originals. Translate ordinary quoted prose and ordinary connective
-  prose inside citations (such as "see" or "for discussion") while retaining the
-  cited names, years, pages, and original-language expressions.
-- Write idiomatic formal Iranian Persian. Avoid English calques; use standard ezafe,
-  clitics, affixes, verb agreement, punctuation, and ZWNJ conventions.
-- Treat only glossary entries explicitly marked mandatory and established name
-  renderings as mandatory. Advisory candidates may be revised or rejected. For
-  every unlisted expression, choose the rendering supported by its actual context.
+  (author, year, page), and note markers as scholarly apparatus. Translate ordinary
+  quoted or connective citation prose while retaining names, dates, pages, and
+  original-language expressions.
+- Write idiomatic formal Iranian Persian with standard ezafe, clitics, affixes,
+  agreement, punctuation, and ZWNJ; avoid English calques.
+- Emit only the requested translation or structured response. Never insert model notes,
+  protocol labels, or unexplained foreign-language prose into Persian output.
+- Only explicitly mandatory glossary entries and established name renderings are
+  mandatory. Advisory candidates may be revised or rejected; resolve all other
+  expressions from context.
 """
 
 # ---------------------------------------------------------------------------
@@ -241,6 +242,9 @@ Instructions:
 2. If the critique is correct, revise the translation to fix the issue.
 3. If the current translation is more accurate in context, preserve it; do not change a
    correct rendering merely because the critic suggested an alternative.
+   Accept a minor fluency or style issue only when it identifies an objective defect
+   such as ambiguity, broken grammar/agreement, an unnatural calque, or invalid
+   orthography. Reject synonym swaps and stylistic preferences without such evidence.
 4. Preserve every part of the translation that has no validated issue.
 5. Apply entries marked mandatory using their prescribed lexical rendering, with
    standard Persian orthography. Treat advisory candidates as optional context and
