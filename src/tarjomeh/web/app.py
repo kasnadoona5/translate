@@ -1233,14 +1233,33 @@ def _register_api(app: Flask) -> None:
                 elif event["event_type"] == "memory_update_policy":
                     lines.append(
                         "  Memory update: short_term={short} trust={trust} "
-                        "long_term_reliable={long} style_sample={style} "
-                        "structure_eligible={structure} quality_approved={quality}".format(
+                        "continuity_retained={continuity} long_term_reliable={long} "
+                        "long_term_trust={long_trust} style_sample={style} "
+                        "structure_eligible={structure} quality_approved={quality} "
+                        "reasons={reasons}".format(
                             short=payload.get("short_term_added"),
                             trust=payload.get("short_term_trust", "legacy"),
+                            continuity=payload.get("continuity_retained", True),
                             long=payload.get("long_term_reliable"),
+                            long_trust=payload.get("long_term_trust", "legacy"),
                             style=payload.get("style_sample_added"),
                             structure=payload.get("structure_eligible"),
                             quality=payload.get("quality_approved"),
+                            reasons=payload.get("reliability_reasons", []),
+                        )
+                    )
+                elif event["event_type"] == "bilingual_summary_memory_policy":
+                    lines.append(
+                        "  Summary memory: trust={trust} context_retained={retained} "
+                        "authority={authority} contributing_chunks={chunks} "
+                        "reasons={reasons}".format(
+                            trust=payload.get("input_trust", "advisory_inputs"),
+                            retained=payload.get("context_retained", True),
+                            authority=payload.get(
+                                "authority", "argument_orientation_only"
+                            ),
+                            chunks=payload.get("contributing_chunks", 0),
+                            reasons=payload.get("trust_reasons", []),
                         )
                     )
                 elif event["event_type"] == "critique_completed":

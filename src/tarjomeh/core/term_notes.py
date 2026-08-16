@@ -279,10 +279,16 @@ def ensure_inline_proper_noun_originals(
                 rf"\s*\(\s*{re.escape(source)}\s*\)", re.IGNORECASE
             )
             existing = list(original_re.finditer(text))
+            combined_original_re = re.compile(
+                rf"\(\s*{re.escape(source)}\s*,\s*[^()]*"
+                rf"(?:1[5-9]|20)\d{{2}}[a-z]?[^()]*\)",
+                re.IGNORECASE,
+            )
+            combined_existing = list(combined_original_re.finditer(text))
             correctly_placed = any(
                 abs(match.start() - insertion_at) <= 2
                 and _PERSIAN_ANCHOR_SUFFIX_RE.match(text, match.end()) is None
-                for match in existing
+                for match in existing + combined_existing
             )
             if not correctly_placed:
                 if existing:
@@ -396,6 +402,12 @@ def _source_supports_adjacent_citation(
 
 
 def _citation_without_repeated_surname(original: str, citation: str) -> str:
+    citation = re.sub(
+        rf"^\s*{re.escape(original)}\s*,?\s*",
+        "",
+        citation,
+        flags=re.IGNORECASE,
+    ).strip()
     original_words = re.findall(r"[A-Za-z][A-Za-z'\u2019.-]*", original)
     if not original_words:
         return citation

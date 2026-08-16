@@ -174,10 +174,20 @@ class MemoryManager:
 
         # Layer 3: Long-term Memory (TF-IDF)
         relevant_long_term = self.long_term.get_relevant(chunk.text)
-        long_term_str = "\n\n".join(
-            f"EN: {pair['source']}\nFA: {pair['translation']}"
-            for pair in relevant_long_term
-        )
+        long_term_blocks = []
+        for pair in relevant_long_term:
+            guidance = (
+                "[retrieval: reliable prose]"
+                if pair.get("reliable", True)
+                else (
+                    "[retrieval: advisory continuity; preserve the argument, "
+                    "but do not treat wording as terminology or style authority]"
+                )
+            )
+            long_term_blocks.append(
+                f"{guidance}\nEN: {pair['source']}\nFA: {pair['translation']}"
+            )
+        long_term_str = "\n\n".join(long_term_blocks)
 
         # Layer 4: Short-term Memory (Window)
         pairs = self.short_term.get_entries()
@@ -222,6 +232,10 @@ class MemoryManager:
                 "long_term_entry_ids": [
                     pair.get("entry_id") for pair in relevant_long_term
                 ],
+                "long_term_trust": [
+                    "reliable" if pair.get("reliable", True) else "advisory"
+                    for pair in relevant_long_term
+                ],
                 "short_term_window_size": len(pairs),
                 "short_term_trust": [pair.trust for pair in pairs],
                 "proper_noun_count": len(self.proper_nouns),
@@ -236,6 +250,9 @@ class MemoryManager:
         *,
         quality_approved: bool = True,
         style_approved: bool | None = None,
+        long_term_reliable: bool | None = None,
+        short_term_trust: str | None = None,
+        reliability_reasons: list[str] | None = None,
     ) -> dict[str, Any]:
         """Update synchronous memory layers with a new source-translation pair."""
         body_indices = list(
@@ -246,7 +263,12 @@ class MemoryManager:
             body_indices if has_body_policy
             else chunk.metadata.get("style_eligible", True)
         ) and not _NON_PROSE_RE.search(chunk.text or "")
-        long_term_reliable = bool(quality_approved and structure_eligible)
+        durable_quality = (
+            bool(quality_approved)
+            if long_term_reliable is None
+            else bool(long_term_reliable)
+        )
+        resolved_long_term_reliable = bool(durable_quality and structure_eligible)
         structural_roles = list(
             chunk.metadata.get("structural_roles", []) or []
         )
@@ -254,22 +276,29 @@ class MemoryManager:
             structural_roles[0] if len(set(structural_roles)) == 1
             else "mixed"
         ) if structural_roles else "body"
-        short_term_trust = (
+        default_short_term_trust = (
             "trusted"
-            if long_term_reliable
+            if resolved_long_term_reliable
             else ("advisory_review" if structure_eligible else "structural_only")
         )
+        resolved_short_term_trust = (
+            short_term_trust
+            if short_term_trust in {"trusted", "advisory_review", "structural_only"}
+            else default_short_term_trust
+        )
+        if not structure_eligible:
+            resolved_short_term_trust = "structural_only"
         self.short_term.add(
             chunk.text,
             translation,
-            trust=short_term_trust,
+            trust=resolved_short_term_trust,
             structural_role=primary_role,
             chapter_title=chunk.chapter_title,
         )
         self.long_term.add(
             chunk.text,
             translation,
-            reliable=long_term_reliable,
+            reliable=resolved_long_term_reliable,
             chapter_title=chunk.chapter_title,
         )
         has_structure_policy = "style_eligible" in chunk.metadata
@@ -290,7 +319,7 @@ class MemoryManager:
             if style_approved is None else bool(style_approved)
         )
         style_eligible = bool(
-            long_term_reliable
+            resolved_long_term_reliable
             and style_quality_approved
             and (
                 not has_structure_policy
@@ -308,9 +337,18 @@ class MemoryManager:
         self.proper_nouns.mark_seen_in_text(chunk.text)
         return {
             "short_term_added": True,
-            "short_term_trust": short_term_trust,
+            "short_term_trust": resolved_short_term_trust,
+            "continuity_retained": True,
             "long_term_added": True,
-            "long_term_reliable": long_term_reliable,
+            "long_term_reliable": resolved_long_term_reliable,
+            "long_term_trust": (
+                "reliable" if resolved_long_term_reliable else "advisory"
+            ),
+            "reliability_reasons": list(dict.fromkeys(
+                str(reason).strip()
+                for reason in (reliability_reasons or [])
+                if str(reason).strip()
+            )),
             "style_sample_added": len(self.style_samples) > style_count_before,
             "structure_eligible": structure_eligible,
             "quality_approved": bool(quality_approved),
@@ -491,6 +529,9 @@ class MemoryManager:
         llm_client: Any,
         new_content: str,
         translation: str,
+        *,
+        input_trust: str = "advisory_inputs",
+        trust_reasons: list[str] | None = None,
     ) -> dict[str, Any]:
         """Call the LLM to update the running bilingual summary of translated chapters."""
         from tarjomeh.core.prompts import SUMMARY_UPDATE_PROMPT
@@ -507,7 +548,15 @@ class MemoryManager:
                 llm_client.set_operation("bilingual_summary_update")
             response = await llm_client.chat(prompt)
             self.bilingual_summary.update(response)
-            return self.reconcile_bilingual_summary()
+            self.bilingual_summary.set_input_trust(input_trust, trust_reasons)
+            report = self.reconcile_bilingual_summary()
+            report.update({
+                "input_trust": self.bilingual_summary.input_trust,
+                "trust_reasons": list(self.bilingual_summary.trust_reasons),
+                "context_retained": True,
+                "authority": "argument_orientation_only",
+            })
+            return report
         except Exception as exc:
             logger.warning("Failed to update running bilingual summary: %s", exc)
             return {

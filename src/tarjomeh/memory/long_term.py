@@ -51,14 +51,18 @@ class LongTermMemory:
                 "chapter_title": chapter_title,
             })
 
-    def get_relevant(self, query_text: str) -> list[dict[str, str]]:
-        """Retrieve top-K translation pairs that are relevant to query_text."""
+    def get_relevant(self, query_text: str) -> list[dict[str, Any]]:
+        """Retrieve relevant pairs while retaining advisory continuity.
+
+        Reviewed-but-unresolved translations remain useful evidence about the
+        argument and local references.  They are therefore retrievable, but a
+        small ranking penalty keeps equally relevant, QA-reliable prose ahead
+        of advisory wording.
+        """
         if not self._pairs:
             return []
 
-        eligible_pairs = [
-            pair for pair in self._pairs if pair.get("reliable", True)
-        ]
+        eligible_pairs = list(self._pairs)
         if not eligible_pairs:
             return []
 
@@ -110,7 +114,8 @@ class LongTermMemory:
             else:
                 sim = 0.0
 
-            scores.append((sim, eligible_pairs[idx]))
+            trust_weight = 1.0 if eligible_pairs[idx].get("reliable", True) else 0.85
+            scores.append((sim * trust_weight, eligible_pairs[idx]))
 
         # Sort by similarity score descending
         scores.sort(key=lambda x: x[0], reverse=True)
@@ -132,7 +137,17 @@ class LongTermMemory:
             return ""
         lines = []
         for p in relevant:
-            lines.append(f"EN: {p['source']}\nFA: {p['translation']}")
+            guidance = (
+                "[retrieval: reliable prose]"
+                if p.get("reliable", True)
+                else (
+                    "[retrieval: advisory continuity; preserve the argument, "
+                    "but do not treat wording as terminology or style authority]"
+                )
+            )
+            lines.append(
+                f"{guidance}\nEN: {p['source']}\nFA: {p['translation']}"
+            )
         return "\n\n".join(lines)
 
     def serialize(self) -> list[dict[str, Any]]:

@@ -1040,9 +1040,10 @@ _HIGH_CONFIDENCE_MINOR_THRESHOLD = 0.85
 _STRUCTURAL_FLUENCY_MINOR_THRESHOLD = 0.70
 _OBJECTIVE_FLUENCY_MINOR_THRESHOLD = 0.75
 _OBJECTIVE_FLUENCY_RATIONALE_RE = re.compile(
-    r"\b(?:agreement|ambig(?:uity|uous)|broken grammar|calque|fragment|"
+    r"\b(?:agreement|ambig(?:uity|uous)|attachment|broken grammar|calque|fragment|"
     r"incomplete (?:clause|coordination|sentence)|missing (?:predicate|verb)|"
-    r"ungrammatical)\b",
+    r"malformed|orthograph(?:y|ic)|punctuation|redundan(?:cy|t)|spacing|syntax|"
+    r"typograph(?:y|ic)|ungrammatical|word order|zwnj)\b",
     re.IGNORECASE,
 )
 
@@ -1099,7 +1100,10 @@ def _high_confidence_structural_fluency_minor_issues(
         suggested = " ".join(
             str(detail.get("suggested_correction", "")).split()
         )
-        rationale = " ".join(str(detail.get("rationale", "")).split())
+        evidence = " ".join(
+            str(detail.get(field, ""))
+            for field in ("issue_id", "rationale", "explanation", "error_type")
+        )
         source_words = re.findall(r"[A-Za-z][A-Za-z'\u2019-]*", source_quote)
         current_words = re.findall(r"[\u0600-\u06ff]+", current)
         suggested_words = re.findall(r"[\u0600-\u06ff]+", suggested)
@@ -1117,7 +1121,7 @@ def _high_confidence_structural_fluency_minor_issues(
             and current
             and suggested
             and 0.5 <= ratio <= 1.8
-            and _OBJECTIVE_FLUENCY_RATIONALE_RE.search(rationale)
+            and _OBJECTIVE_FLUENCY_RATIONALE_RE.search(evidence)
         )
         if (
             (long_structural_defect or objective_local_defect)
@@ -1302,6 +1306,104 @@ def _chunk_style_approved(db: Any, job_id: str, chunk_index: int) -> bool:
         )
     except (TypeError, ValueError):
         return False
+
+
+def _chunk_memory_admission(
+    db: Any,
+    job_id: str,
+    chunk_index: int,
+) -> dict[str, Any]:
+    """Separate continuity context from durable wording/style authority."""
+    events = db.get_chunk_events(job_id, chunk_index)
+    last_start = 0
+    for index, event in enumerate(events):
+        if event.get("event_type") == "chunk_started":
+            last_start = index
+    current_events = events[last_start:]
+    needs_review = _chunk_needs_review(db, job_id, chunk_index)
+    reasons: list[str] = []
+    if needs_review:
+        reasons.append("unresolved_qa_review")
+
+    if any(
+        event.get("event_type") == "mqm_minor_only_deferred"
+        for event in current_events
+    ):
+        reasons.append("deferred_mqm_advice")
+
+    critiques = [
+        event.get("payload", {}) or {}
+        for event in current_events
+        if event.get("event_type") == "critique_completed"
+    ]
+    if critiques:
+        latest = critiques[-1]
+        if not bool(latest.get("valid", True)):
+            reasons.append("invalid_final_critique")
+        if int(latest.get("blocking_issue_count", 0) or 0):
+            reasons.append("blocking_critique_issue")
+        scores = latest.get("scores", {}) or {}
+        try:
+            average = float(scores.get("average", 0) or 0)
+            accuracy = float(scores.get("accuracy", 0) or 0)
+            terminology = float(scores.get("terminology", 0) or 0)
+        except (TypeError, ValueError):
+            average = accuracy = terminology = 0.0
+        if average < 8.5:
+            reasons.append("final_critique_below_memory_floor")
+        if accuracy < 8.0 or terminology < 8.0:
+            reasons.append("semantic_dimension_below_memory_floor")
+
+    reasons = list(dict.fromkeys(reasons))
+    durable_reliable = not reasons
+    return {
+        "quality_approved": not needs_review,
+        "long_term_reliable": durable_reliable,
+        "short_term_trust": (
+            "trusted" if durable_reliable else "advisory_review"
+        ),
+        "reliability_reasons": reasons,
+        "continuity_retained": True,
+    }
+
+
+def _chapter_summary_memory_admission(
+    db: Any,
+    job_id: str,
+    chunks: list[Chunk],
+    boundary_index: int,
+) -> dict[str, Any]:
+    """Describe source-memory trust for a chapter summary without omitting it."""
+    chapter_position = int(
+        chunks[boundary_index].metadata.get("chapter_position", 1)
+    )
+    reasons: list[str] = []
+    contributing = 0
+    for index, chunk in enumerate(chunks[:boundary_index + 1]):
+        if int(chunk.metadata.get("chapter_position", 1)) != chapter_position:
+            continue
+        policies = [
+            event.get("payload", {}) or {}
+            for event in db.get_chunk_events(job_id, index)
+            if event.get("event_type") == "memory_update_policy"
+        ]
+        if not policies:
+            reasons.append("missing_memory_policy")
+            continue
+        contributing += 1
+        policy = policies[-1]
+        if not bool(policy.get("long_term_reliable", False)):
+            policy_reasons = list(policy.get("reliability_reasons", []) or [])
+            reasons.extend(policy_reasons or ["advisory_contributing_chunk"])
+    reasons = list(dict.fromkeys(str(reason) for reason in reasons if str(reason)))
+    return {
+        "input_trust": (
+            "reviewed_inputs" if contributing and not reasons else "advisory_inputs"
+        ),
+        "trust_reasons": reasons,
+        "contributing_chunks": contributing,
+        "context_retained": True,
+    }
 
 
 def _reconcile_committed_terminology(
@@ -2278,15 +2380,19 @@ class TranslationPipeline:
                     # Update shared memory and database safely under lock
                     with lock:
                         translations[idx] = translation
+                        memory_admission = _chunk_memory_admission(
+                            self.db, job_id, idx
+                        )
                         memory_policy = memory_manager.update_after_translation(
                             chunk,
                             translation,
-                            quality_approved=not _chunk_needs_review(
-                                self.db, job_id, idx
-                            ),
+                            quality_approved=memory_admission["quality_approved"],
                             style_approved=_chunk_style_approved(
                                 self.db, job_id, idx
                             ),
+                            long_term_reliable=memory_admission["long_term_reliable"],
+                            short_term_trust=memory_admission["short_term_trust"],
+                            reliability_reasons=memory_admission["reliability_reasons"],
                         )
                         self.db.log_chunk_event(
                             job_id, idx, "memory_update_policy", memory_policy
@@ -2346,11 +2452,27 @@ class TranslationPipeline:
                                 new_content = "\n\n".join(chap_source)
                                 chap_translation = "\n\n".join(chap_trans)
                                 try:
+                                    summary_admission = _chapter_summary_memory_admission(
+                                        self.db, job_id, chunks, idx
+                                    )
                                     summary_report = self._run_async(memory_manager.update_bilingual_summary(
                                         self.llm_client,
                                         new_content=new_content,
-                                        translation=chap_translation
+                                        translation=chap_translation,
+                                        input_trust=summary_admission["input_trust"],
+                                        trust_reasons=summary_admission["trust_reasons"],
                                     ))
+                                    summary_report.update({
+                                        "contributing_chunks": summary_admission[
+                                            "contributing_chunks"
+                                        ],
+                                    })
+                                    self.db.log_chunk_event(
+                                        job_id,
+                                        idx,
+                                        "bilingual_summary_memory_policy",
+                                        summary_report,
+                                    )
                                     if summary_report.get("replacement_count"):
                                         self.db.log_chunk_event(
                                             job_id,
@@ -2462,15 +2584,19 @@ class TranslationPipeline:
                         translations[idx] = translation
                         consecutive_errors = 0
 
+                        memory_admission = _chunk_memory_admission(
+                            self.db, job_id, idx
+                        )
                         memory_policy = memory_manager.update_after_translation(
                             chunk,
                             translation,
-                            quality_approved=not _chunk_needs_review(
-                                self.db, job_id, idx
-                            ),
+                            quality_approved=memory_admission["quality_approved"],
                             style_approved=_chunk_style_approved(
                                 self.db, job_id, idx
                             ),
+                            long_term_reliable=memory_admission["long_term_reliable"],
+                            short_term_trust=memory_admission["short_term_trust"],
+                            reliability_reasons=memory_admission["reliability_reasons"],
                         )
                         self.db.log_chunk_event(
                             job_id, idx, "memory_update_policy", memory_policy
@@ -2530,11 +2656,27 @@ class TranslationPipeline:
                                 new_content = "\n\n".join(chap_source)
                                 chap_translation = "\n\n".join(chap_trans)
                                 try:
+                                    summary_admission = _chapter_summary_memory_admission(
+                                        self.db, job_id, chunks, idx
+                                    )
                                     summary_report = self._run_async(memory_manager.update_bilingual_summary(
                                         self.llm_client,
                                         new_content=new_content,
-                                        translation=chap_translation
+                                        translation=chap_translation,
+                                        input_trust=summary_admission["input_trust"],
+                                        trust_reasons=summary_admission["trust_reasons"],
                                     ))
+                                    summary_report.update({
+                                        "contributing_chunks": summary_admission[
+                                            "contributing_chunks"
+                                        ],
+                                    })
+                                    self.db.log_chunk_event(
+                                        job_id,
+                                        idx,
+                                        "bilingual_summary_memory_policy",
+                                        summary_report,
+                                    )
                                     if summary_report.get("replacement_count"):
                                         self.db.log_chunk_event(
                                             job_id,
@@ -2908,6 +3050,19 @@ class TranslationPipeline:
                     f"repositioned={anchor_audit.get('repositioned_count', 0)}, "
                     f"ambiguous={anchor_audit.get('ambiguous_count', 0)}.",
                 )
+            final_citation_audit = normalize_adjacent_original_citations(
+                trans_doc, proper_nouns
+            )
+            citation_audit = {
+                "normalized_count": int(citation_audit.get("normalized_count", 0))
+                + int(final_citation_audit.get("normalized_count", 0)),
+                "changes": list(citation_audit.get("changes", []) or [])
+                + list(final_citation_audit.get("changes", []) or []),
+                "final_anchor_reconciliation": True,
+            }
+            self.db.save_job_artifact(
+                job_id, "citation_format_audit", citation_audit
+            )
         if note_mode != "inline" and self.config.output.format in note_formats:
             notes = apply_term_notes(
                 trans_doc,
@@ -3099,6 +3254,19 @@ class TranslationPipeline:
             })
             self.db.save_job_artifact(
                 job_id, "english_original_anchor_audit", anchor_audit
+            )
+            final_citation_audit = normalize_adjacent_original_citations(
+                trans_doc, dict(proper_nouns)
+            )
+            citation_audit = {
+                "normalized_count": int(citation_audit.get("normalized_count", 0))
+                + int(final_citation_audit.get("normalized_count", 0)),
+                "changes": list(citation_audit.get("changes", []) or [])
+                + list(final_citation_audit.get("changes", []) or []),
+                "final_anchor_reconciliation": True,
+            }
+            self.db.save_job_artifact(
+                job_id, "citation_format_audit", citation_audit
             )
         if note_mode != "inline" and fmt in {"docx", "epub", "markdown"}:
             glossary_manager = GlossaryManager()
@@ -3293,13 +3461,19 @@ class TranslationPipeline:
             else ChunkStatus.COMPLETED
         )
         self.db.update_chunk(job_id, chunk_index, final_status, translation)
+        memory_admission = _chunk_memory_admission(
+            self.db, job_id, chunk_index
+        )
         memory_policy = memory_manager.update_after_translation(
             chunks[chunk_index],
             translation,
-            quality_approved=final_status == ChunkStatus.COMPLETED,
+            quality_approved=memory_admission["quality_approved"],
             style_approved=_chunk_style_approved(
                 self.db, job_id, chunk_index
             ),
+            long_term_reliable=memory_admission["long_term_reliable"],
+            short_term_trust=memory_admission["short_term_trust"],
+            reliability_reasons=memory_admission["reliability_reasons"],
         )
         self.db.log_chunk_event(
             job_id, chunk_index, "memory_update_policy", memory_policy

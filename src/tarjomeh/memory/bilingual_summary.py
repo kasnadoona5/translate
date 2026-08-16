@@ -48,6 +48,21 @@ class BilingualSummary:
     def __init__(self) -> None:
         self.english_summary: str = ""
         self.persian_summary: str = ""
+        self.input_trust: str = "context_only"
+        self.trust_reasons: list[str] = []
+
+    def set_input_trust(
+        self,
+        trust: str,
+        reasons: list[str] | None = None,
+    ) -> None:
+        """Record how strongly the translated inputs support this summary."""
+        self.input_trust = (
+            "reviewed_inputs" if trust == "reviewed_inputs" else "advisory_inputs"
+        )
+        self.trust_reasons = list(dict.fromkeys(
+            str(reason).strip() for reason in (reasons or []) if str(reason).strip()
+        ))[:12]
 
     def update(self, raw_llm_output: str) -> None:
         """Parse and update the summaries from the LLM response text.
@@ -99,7 +114,17 @@ class BilingualSummary:
         if not self.english_summary and not self.persian_summary:
             return ""
 
-        parts = []
+        trust_note = (
+            "Input trust: reviewed translated prose."
+            if self.input_trust == "reviewed_inputs"
+            else "Input trust: advisory; one or more contributing passages need review."
+        )
+        authority_note = (
+            "Memory role: argument orientation only. Never copy its wording as "
+            "terminology or style authority; the source, curated glossary, accepted "
+            "terminology, and current passage always override it."
+        )
+        parts = [f"{trust_note}\n{authority_note}"]
         if self.english_summary:
             parts.append(
                 "## English Summary\n"
@@ -163,14 +188,16 @@ class BilingualSummary:
             ),
         }
 
-    def serialize(self) -> dict[str, str]:
+    def serialize(self) -> dict[str, object]:
         """Serialize the layer state for database checkpointing."""
         return {
             "english_summary": self.english_summary,
             "persian_summary": self.persian_summary,
+            "input_trust": self.input_trust,
+            "trust_reasons": self.trust_reasons,
         }
 
-    def deserialize(self, data: dict[str, str]) -> None:
+    def deserialize(self, data: dict[str, object]) -> None:
         """Restore the layer state from serialized data."""
         self.english_summary = "\n".join(_deduplicate_summary_lines(
             str(data.get("english_summary", "")).splitlines()
@@ -178,6 +205,16 @@ class BilingualSummary:
         self.persian_summary = "\n".join(_deduplicate_summary_lines(
             str(data.get("persian_summary", "")).splitlines()
         ))
+        stored_trust = str(data.get("input_trust", "context_only"))
+        self.input_trust = (
+            stored_trust
+            if stored_trust in {"reviewed_inputs", "advisory_inputs"}
+            else "advisory_inputs"
+        )
+        raw_reasons = data.get("trust_reasons", [])
+        self.trust_reasons = [
+            str(reason) for reason in raw_reasons
+        ] if isinstance(raw_reasons, list) else []
 
     def __repr__(self) -> str:
         en_len = len(self.english_summary)
