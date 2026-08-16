@@ -356,12 +356,17 @@ async function trackJobProgress(jobId) {
     }
 
     let jobFinished = false;
+    let snapshotPollTimer = null;
 
     const finish = (stage) => {
         jobFinished = true;
         if (currentEventSource) {
             currentEventSource.close();
             currentEventSource = null;
+        }
+        if (snapshotPollTimer) {
+            clearTimeout(snapshotPollTimer);
+            snapshotPollTimer = null;
         }
         const ok = stage === "complete";
         const paused = stage === "paused";
@@ -396,6 +401,28 @@ async function trackJobProgress(jobId) {
         appendLog(`Could not restore the current snapshot: ${error.message}`, "warning");
     }
 
+    const pollSnapshot = async () => {
+        if (jobFinished) return;
+        try {
+            const response = await fetch(detailUrl);
+            if (!response.ok) throw new Error("snapshot request failed");
+            const snapshot = await response.json();
+            const job = snapshot.job || {};
+            const chunks = snapshot.chunks || {};
+            const pct = Math.max(0, Math.min(100, Math.round(Number(job.pct || 0) * 100)));
+            progressBar.style.width = `${pct}%`;
+            progressPct.innerText = `${pct}%`;
+            progressStage.innerText = `Tracking ${chunks.completed || 0}/${chunks.total || 0} completed chunks`;
+            const status = job.raw_status || job.status;
+            if (status === "completed") { finish("complete"); return; }
+            if (status === "paused") { finish("paused"); return; }
+            if (status === "failed" || status === "paused_error") { finish("error"); return; }
+        } catch (error) {
+            appendLog(`Saved progress check failed: ${error.message}`, "warning");
+        }
+        snapshotPollTimer = setTimeout(pollSnapshot, 5000);
+    };
+
     currentEventSource = new EventSource(streamUrl);
     appendLog("Connected to the live translation stream.", "info");
 
@@ -407,9 +434,10 @@ async function trackJobProgress(jobId) {
             if (data.stage === "keepalive") return;
             if (data.stage === "closed") {
                 if (!jobFinished) {
-                    appendLog("Live stream is unavailable; refresh the job list to verify its state.", "warning");
+                    appendLog("Live stream is unavailable; continuing from saved job progress.", "warning");
                     if (currentEventSource) { currentEventSource.close(); currentEventSource = null; }
                     fetchJobs();
+                    pollSnapshot();
                 }
                 return;
             }
@@ -574,10 +602,12 @@ async function pauseJob(jobId) {
     }
 
     try {
-        await fetch(url, { method: "POST" });
+        const response = await fetch(url, { method: "POST" });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || data.message || "Pause failed");
         fetchJobs();
     } catch (e) {
-        alert("Failed to pause job");
+        alert(`Failed to pause job: ${e.message}`);
     }
 }
 
@@ -591,12 +621,17 @@ async function resumeJob(jobId) {
     }
 
     try {
-        await fetch(url, { method: "POST" });
+        const response = await fetch(url, { method: "POST" });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(data.message || data.error || "Resume failed");
+        }
         document.getElementById("uploadSection").hidden = true;
         document.getElementById("progressSection").hidden = false;
         trackJobProgress(jobId);
     } catch (e) {
-        alert("Failed to resume job");
+        alert(`Failed to resume job: ${e.message}`);
+        fetchJobs();
     }
 }
 

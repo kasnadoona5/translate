@@ -1023,8 +1023,23 @@ class LLMClient:
             "reported_reasoning_tokens": usage_evidence["reported_reasoning_tokens"],
             "normalized_reasoning_tokens": usage_evidence["reasoning_tokens"],
             "visible_completion_tokens": usage_evidence["visible_tokens"],
+            "visible_output_present": bool((content or "").strip()),
+            "usage_reported": any(
+                usage.get(key) is not None
+                for key in (
+                    "prompt_tokens", "completion_tokens", "total_tokens",
+                    "input_tokens", "output_tokens",
+                )
+            ),
             **prompt_metrics,
         }
+        event["token_accounting_status"] = (
+            "reported"
+            if event["usage_reported"]
+            else "provider_usage_missing"
+            if event["visible_output_present"]
+            else "no_visible_output"
+        )
         if failure_reason:
             event["failure_reason"] = failure_reason
         if error:

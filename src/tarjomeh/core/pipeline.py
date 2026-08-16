@@ -528,6 +528,7 @@ def _validate_recovery_part(
     *,
     previous_target: str = "",
     source_context: str = "",
+    structural_role: str = "body",
 ) -> dict[str, Any]:
     """Apply conservative reject-only checks before recovery assembly."""
     source_chars = len((source or "").strip())
@@ -539,8 +540,21 @@ def _validate_recovery_part(
     )
     if not minimum_ratio <= ratio <= maximum_ratio:
         errors.append("source_output_size_ratio")
-    if len(re.findall(r"[\u0600-\u06ff]", candidate or "")) < 3:
+    source_identifiers = extract_identifiers(source)
+    candidate_identifiers = extract_identifiers(candidate)
+    source_words = re.findall(r"[A-Za-z\u00c0-\u024f]{3,}", source or "")
+    prose_required = bool(source_words)
+    if str(structural_role or "body").casefold() in {
+        "bibliography", "catalog", "index", "table",
+    }:
+        prose_required = False
+    elif source_identifiers and len(source_words) <= 2:
+        prose_required = False
+
+    if prose_required and len(re.findall(r"[\u0600-\u06ff]", candidate or "")) < 3:
         errors.append("target_language_missing")
+    if source_identifiers and bool(source_identifiers - candidate_identifiers):
+        errors.append("source_identifier_missing")
 
     context_words = re.findall(r"[A-Za-z][A-Za-z'-]+", source_context or "")
     context_sequences = {
@@ -568,6 +582,8 @@ def _validate_recovery_part(
         "size_ratio": round(ratio, 4),
         "previous_overlap": round(overlap, 4),
         "context_chars": len(source_context or ""),
+        "target_script_required": prose_required,
+        "source_identifier_count": len(source_identifiers),
     }
 
 
@@ -933,6 +949,37 @@ def _salvage_local_refinement_edits(
     attempts: list[dict[str, Any]] = []
     committed = 0
 
+    spans: dict[str, tuple[int, int]] = {}
+    for raw in issue_decisions:
+        issue_id = str(raw.get("issue_id", "")).strip()
+        current_span = str(
+            issues.get(issue_id, {}).get("current_persian_quote", "")
+        ).strip()
+        if current_span and previous.count(current_span) == 1:
+            start = previous.find(current_span)
+            spans[issue_id] = (start, start + len(current_span))
+    overlapping_ids: set[str] = set()
+    ordered_spans = sorted(spans.items(), key=lambda item: item[1])
+    for position, (issue_id, (start, end)) in enumerate(ordered_spans):
+        for other_id, (other_start, other_end) in ordered_spans[position + 1:]:
+            if other_start >= end:
+                break
+            if start < other_end and other_start < end:
+                overlapping_ids.update({issue_id, other_id})
+
+    def newly_repeated_adjacent_words(before: str, after: str) -> list[str]:
+        token_re = re.compile(r"[\w\u0600-\u06ff]+", re.UNICODE)
+
+        def repeats(value: str) -> set[str]:
+            words = [word.casefold() for word in token_re.findall(value)]
+            return {
+                words[index]
+                for index in range(1, len(words))
+                if words[index] == words[index - 1]
+            }
+
+        return sorted(repeats(after) - repeats(before))
+
     for raw in issue_decisions:
         decision = dict(raw)
         issue_id = str(decision.get("issue_id", "")).strip()
@@ -951,6 +998,8 @@ def _salvage_local_refinement_edits(
             reason = "missing_local_span"
         elif normalize_for_match(current_span) == normalize_for_match(resulting_span):
             reason = "no_textual_change"
+        elif issue_id in overlapping_ids:
+            reason = "overlapping_local_span"
         elif current.count(current_span) != 1:
             reason = "current_span_not_unique"
         elif resulting_span not in proposed:
@@ -963,22 +1012,27 @@ def _salvage_local_refinement_edits(
             reason = "local_size_ratio_out_of_bounds"
         else:
             candidate = current.replace(current_span, resulting_span, 1)
-            integrity = integrity_gate.evaluate(
-                source,
-                candidate,
-                previous=current,
-                stage="refinement_local_salvage",
-                protected_terms=protected_terms,
-                protect_inline_english=protect_inline_english,
-                allowed_inline_originals=allowed_inline_originals,
-            )
-            integrity_payload = integrity.to_dict()
-            if integrity.accepted:
-                current = candidate
-                committed += 1
-                reason = "local_edit_committed"
+            repeated_words = newly_repeated_adjacent_words(current, candidate)
+            if repeated_words:
+                reason = "new_adjacent_word_repetition"
+                integrity_payload = {"repeated_words": repeated_words}
             else:
-                reason = "local_integrity_rejected"
+                integrity = integrity_gate.evaluate(
+                    source,
+                    candidate,
+                    previous=current,
+                    stage="refinement_local_salvage",
+                    protected_terms=protected_terms,
+                    protect_inline_english=protect_inline_english,
+                    allowed_inline_originals=allowed_inline_originals,
+                )
+                integrity_payload = integrity.to_dict()
+                if integrity.accepted:
+                    current = candidate
+                    committed += 1
+                    reason = "local_edit_committed"
+                else:
+                    reason = "local_integrity_rejected"
 
         was_committed = reason == "local_edit_committed"
         decision.update({
@@ -4122,6 +4176,9 @@ class TranslationPipeline:
                         candidate,
                         previous_target=previous,
                         source_context=effective_context,
+                        structural_role=str(
+                            chunk.metadata.get("structural_role", "body")
+                        ),
                     )
                     errors = list(envelope.get("errors", []))
                     errors.extend(content_check.get("errors", []))

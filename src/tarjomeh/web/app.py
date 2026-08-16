@@ -75,9 +75,28 @@ def _install_request_log_redaction() -> None:
         werkzeug_logger.addFilter(_QuerySecretLogFilter())
 
 
-def _schedule_progress_queue_cleanup(job_id: str, delay: float = _PROGRESS_QUEUE_TTL_SECONDS) -> None:
+def _remove_progress_queue_if_current(
+    job_id: str,
+    expected_queue: queue.Queue | None,
+) -> bool:
+    """Remove a queue only while it is still the same stream generation."""
+    if expected_queue is not None and _progress_queues.get(job_id) is expected_queue:
+        _progress_queues.pop(job_id, None)
+        return True
+    return False
+
+
+def _schedule_progress_queue_cleanup(
+    job_id: str,
+    expected_queue: queue.Queue | None = None,
+    delay: float = _PROGRESS_QUEUE_TTL_SECONDS,
+) -> None:
     """Drop finished-job SSE queues even if the browser never consumed them."""
-    timer = Timer(delay, lambda: _progress_queues.pop(job_id, None))
+    expected = expected_queue or _progress_queues.get(job_id)
+    timer = Timer(
+        delay,
+        lambda: _remove_progress_queue_if_current(job_id, expected),
+    )
     timer.daemon = True
     timer.start()
 
@@ -387,7 +406,8 @@ def _register_api(app: Flask) -> None:
                 }), 400
 
         # Create progress queue for SSE
-        _progress_queues[job_id] = queue.Queue()
+        worker_queue = queue.Queue()
+        _progress_queues[job_id] = worker_queue
 
         # Submit translation job to thread pool
         def run_job():
@@ -406,9 +426,9 @@ def _register_api(app: Flask) -> None:
                 pipeline = TranslationPipeline(config)
 
                 def progress_callback(stage: str, pct: float, message: str = "") -> None:
-                    q = _progress_queues.get(job_id)
-                    if q:
-                        q.put({"stage": stage, "progress": pct, "message": message})
+                    worker_queue.put({
+                        "stage": stage, "progress": pct, "message": message
+                    })
 
                 result = pipeline.run(
                     input_path=saved_path,
@@ -419,37 +439,33 @@ def _register_api(app: Flask) -> None:
                 db = JobDatabase()
                 current_job = db.get_job(job_id)
                 if current_job and current_job.get("status") == JobStatus.PAUSED:
-                    q = _progress_queues.get(job_id)
-                    if q:
-                        q.put({
-                            "stage": "paused",
-                            "progress": current_job.get("pct", 0),
-                            "message": "Job paused. Resume when ready.",
-                        })
+                    worker_queue.put({
+                        "stage": "paused",
+                        "progress": current_job.get("pct", 0),
+                        "message": "Job paused. Resume when ready.",
+                    })
                     return
 
                 # Signal completion
-                q = _progress_queues.get(job_id)
-                if q:
-                    q.put({
-                        "stage": "complete",
-                        "progress": 1.0,
-                        "message": f"Output: {result.output_path}",
-                        "output_path": str(result.output_path),
-                    })
+                worker_queue.put({
+                    "stage": "complete",
+                    "progress": 1.0,
+                    "message": f"Output: {result.output_path}",
+                    "output_path": str(result.output_path),
+                })
 
                 # Send webhook notification
                 _send_webhook(app.config.get("TARJOMEH_CONFIG"), job_id, "completed")
 
             except Exception as e:
                 logger.exception(f"Job {job_id} failed: {e}")
-                q = _progress_queues.get(job_id)
-                if q:
-                    q.put({"stage": "error", "progress": 0, "message": str(e)})
+                worker_queue.put({
+                    "stage": "error", "progress": 0, "message": str(e)
+                })
                 _send_webhook(app.config.get("TARJOMEH_CONFIG"), job_id, "failed", str(e))
             finally:
                 _active_jobs.pop(job_id, None)
-                _schedule_progress_queue_cleanup(job_id)
+                _schedule_progress_queue_cleanup(job_id, worker_queue)
 
         future = _executor.submit(run_job)
         _active_jobs[job_id] = future
@@ -1535,8 +1551,10 @@ def _register_api(app: Flask) -> None:
     @_require_auth
     def api_job_stream(job_id: str):
         """SSE endpoint for real-time job progress."""
+        stream_queue = _progress_queues.get(job_id)
+
         def generate():
-            q = _progress_queues.get(job_id)
+            q = stream_queue
             if not q:
                 # Job already finished (queue cleaned up) — tell the client the
                 # stream is done so its EventSource stops reconnecting.
@@ -1552,7 +1570,7 @@ def _register_api(app: Flask) -> None:
                         # Terminal event delivered — drop the queue so a
                         # reconnecting EventSource gets 'closed' and stops,
                         # instead of looping on keepalives forever.
-                        _progress_queues.pop(job_id, None)
+                        _remove_progress_queue_if_current(job_id, q)
                         break
                 except queue.Empty:
                     # Comment-only keepalive: keeps the connection alive without
@@ -1581,7 +1599,7 @@ def _register_api(app: Flask) -> None:
             return jsonify({
                 "status": "pausing",
                 "job_id": job_id,
-                "message": "Pause requested. Current LLM call may finish before the job stops.",
+                "message": "Pause requested. The current pipeline stage will finish before the job stops.",
             })
         return jsonify({"status": "paused", "job_id": job_id})
 
@@ -1610,7 +1628,8 @@ def _register_api(app: Flask) -> None:
         db.log_event(job_id, "INFO", "Resume requested by user.")
 
         # Re-submit to executor
-        _progress_queues[job_id] = queue.Queue()
+        worker_queue = queue.Queue()
+        _progress_queues[job_id] = worker_queue
 
         def run_resume():
             try:
@@ -1621,9 +1640,9 @@ def _register_api(app: Flask) -> None:
                 pipeline = TranslationPipeline(config)
 
                 def progress_callback(stage: str, pct: float, message: str = "") -> None:
-                    q = _progress_queues.get(job_id)
-                    if q:
-                        q.put({"stage": stage, "progress": pct, "message": message})
+                    worker_queue.put({
+                        "stage": stage, "progress": pct, "message": message
+                    })
 
                 result = pipeline.run(
                     input_path=Path(job["input_path"]),
@@ -1634,30 +1653,26 @@ def _register_api(app: Flask) -> None:
                 db_after = JobDatabase()
                 current_job = db_after.get_job(job_id)
                 if current_job and current_job.get("status") == JobStatus.PAUSED:
-                    q = _progress_queues.get(job_id)
-                    if q:
-                        q.put({
-                            "stage": "paused",
-                            "progress": current_job.get("pct", 0),
-                            "message": "Job paused. Resume when ready.",
-                        })
+                    worker_queue.put({
+                        "stage": "paused",
+                        "progress": current_job.get("pct", 0),
+                        "message": "Job paused. Resume when ready.",
+                    })
                     return
 
-                q = _progress_queues.get(job_id)
-                if q:
-                    q.put({
-                        "stage": "complete",
-                        "progress": 1.0,
-                        "output_path": str(result.output_path),
-                    })
+                worker_queue.put({
+                    "stage": "complete",
+                    "progress": 1.0,
+                    "output_path": str(result.output_path),
+                })
             except Exception as e:
                 logger.exception(f"Resume job {job_id} failed: {e}")
-                q = _progress_queues.get(job_id)
-                if q:
-                    q.put({"stage": "error", "progress": 0, "message": str(e)})
+                worker_queue.put({
+                    "stage": "error", "progress": 0, "message": str(e)
+                })
             finally:
                 _active_jobs.pop(job_id, None)
-                _schedule_progress_queue_cleanup(job_id)
+                _schedule_progress_queue_cleanup(job_id, worker_queue)
 
         future = _executor.submit(run_resume)
         _active_jobs[job_id] = future

@@ -738,6 +738,25 @@ def unexpected_latin_prose(
         protected_spans.extend(_grounded_phrase_spans(text, phrase))
     protected_spans.extend(_source_grounded_parenthetical_spans(source, text))
 
+    # Preserve source-attested foreign phrases carrying an apostrophe or
+    # non-ASCII Latin spelling. Ordinary English sequences remain subject to
+    # the leak check, so untranslated source prose cannot pass this exception.
+    phrase_token = rf"[{_LATIN_LETTERS}][{_LATIN_LETTERS}'\u2019-]*"
+    source_tokens = list(re.finditer(phrase_token, source or ""))
+    for index, token_match in enumerate(source_tokens):
+        token = token_match.group()
+        if not (
+            re.search(r"['\u2019]", token)
+            or re.search(r"[^\x00-\x7f]", token)
+        ):
+            continue
+        for start_index in range(max(0, index - 2), index + 1):
+            for end_index in range(index, min(len(source_tokens), index + 3)):
+                phrase = (source or "")[
+                    source_tokens[start_index].start():source_tokens[end_index].end()
+                ]
+                protected_spans.extend(_grounded_phrase_spans(text, phrase))
+
     source_identities = _source_latin_identities(source)
     source_is_apparatus = bool(
         str(structural_role or "body").casefold() in {
