@@ -60,6 +60,14 @@ _SENTINEL_CLOSE = ""
 _SENTINEL_BASE = 0xE100
 _SENTINEL_RE = re.compile(f"{_SENTINEL_OPEN}(.){_SENTINEL_CLOSE}")
 
+# hazm pads U+066B as if it were sentence punctuation, turning a decimal
+# like "10.5" or a table number like "1.1" into "N <sep> N". Rejoin after
+# normalisation. Restricted to the Persian decimal separator and to
+# spaces/tabs (never newlines) so a paragraph boundary is never merged.
+_SPACED_DECIMAL_RE = re.compile(
+    "([0-9\u06f0-\u06f9])[ \t]*\u066b[ \t]*([0-9\u06f0-\u06f9])"
+)
+
 
 class PersianTypographer:
     """Applies configurable Persian typography post-processing.
@@ -138,6 +146,7 @@ class PersianTypographer:
 
         if self._normalize_zwnj:
             text = self.normalize_zwnj(text)
+            text = _SPACED_DECIMAL_RE.sub("\\1\u066b\\2", text)
         if self._convert_numerals:
             text = self.convert_numerals(text)
         if self._fix_punctuation:

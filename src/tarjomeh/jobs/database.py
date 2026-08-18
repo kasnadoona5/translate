@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import shutil
 import sqlite3
 import uuid
 from datetime import datetime
@@ -16,6 +18,10 @@ from typing import Any
 from tarjomeh.chunking.chunker import Chunk
 
 logger = logging.getLogger(__name__)
+
+# Job ids reach the filesystem (upload cleanup, OCR directories). Restrict
+# them to characters that cannot act as glob or path metacharacters.
+_JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def _decode_payload_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -226,6 +232,11 @@ class JobDatabase:
 
     def create_job(self, job_id: str, input_path: str | Path, config_dict: dict[str, Any]) -> None:
         """Register a new job in the database."""
+        if not _JOB_ID_RE.match(job_id or ""):
+            raise ValueError(
+                f"Invalid job id {job_id!r}: use only letters, digits, "
+                "'-' and '_' (max 64 characters)."
+            )
         created_at = datetime.utcnow().isoformat()
         with self._get_connection() as conn:
             conn.execute(
@@ -803,12 +814,25 @@ class JobDatabase:
         # Preserving database records and logs. Do NOT run DELETE database statements.
         pass
 
-        # Delete temporary upload files if they exist in the jobs/uploads folder
+        # Delete temporary upload files. Compare stems rather than building a
+        # glob from the job id, so no id can ever act as a pattern.
         upload_dir = Path("jobs/uploads")
-        for p in upload_dir.glob(f"{job_id}.*"):
+        if upload_dir.is_dir():
+            for p in upload_dir.iterdir():
+                if p.is_file() and p.stem == job_id:
+                    try:
+                        p.unlink()
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to delete upload file %s: %s", p, e
+                        )
+
+        # OCR output for this job lives under jobs/ocr/<job_id>/.
+        ocr_dir = Path("jobs") / "ocr" / job_id
+        if ocr_dir.is_dir():
             try:
-                p.unlink()
+                shutil.rmtree(ocr_dir)
             except Exception as e:
-                logger.warning("Failed to delete upload file %s: %s", p, e)
+                logger.warning("Failed to delete OCR dir %s: %s", ocr_dir, e)
 
         return True

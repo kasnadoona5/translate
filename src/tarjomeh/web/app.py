@@ -121,7 +121,9 @@ def _job_critique_threshold(job: dict[str, Any]) -> float:
     try:
         return float(job.get("config", {}).get("translation", {}).get("critique_threshold", 9.0))
     except (TypeError, ValueError):
-        return 7.0
+        # Must match the default above: falling back to 7.0 silently
+        # loosened review flagging by two points on a malformed config.
+        return 9.0
 
 
 def create_app(config: Any = None) -> Flask:

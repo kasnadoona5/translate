@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -345,8 +346,23 @@ def cmd_serve(args: argparse.Namespace) -> int:
     except FileNotFoundError:
         config = TarjomehConfig()
 
-    host = args.host or config.server.get("host", "127.0.0.1")
-    port = args.port or config.server.get("port", 8080)
+    # ServerConfig is a dataclass, not a mapping. .get() raised
+    # AttributeError whenever --host/--port were omitted, so `tarjomeh
+    # serve` never started without both flags.
+    host = args.host or config.server.host
+    port = args.port or config.server.port
+
+    _LOOPBACK = {"127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1"}
+    if host not in _LOOPBACK and not os.environ.get(
+        "UI_SECRET_TOKEN", ""
+    ).strip():
+        console.print(
+            f"[red]Refusing to start.[/red] Binding to {host} without "
+            "UI_SECRET_TOKEN would expose every API route, including "
+            "document download and job submission.\n"
+            "  Set UI_SECRET_TOKEN, or bind to 127.0.0.1 and use an SSH tunnel."
+        )
+        return 1
 
     app = create_app(config)
 
