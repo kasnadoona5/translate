@@ -53,3 +53,8 @@ extract_translated_chunks.py
 inspect_chunk_database.py
 inspect_chunk_history_log.py
 show_all_db_rows.py
+
+# CodeGraph index (local, regenerable)
+.codegraph/
+.playwright-cli/
+_patch_batch*.py
