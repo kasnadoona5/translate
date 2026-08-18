@@ -30,6 +30,7 @@ from tarjomeh.core.paragraph_protocol import (
     encode_paragraphs,
     protocol_instruction,
     repair_prompt as paragraph_repair_prompt,
+    split_paragraphs,
 )
 from tarjomeh.core.llm_client import (
     EmptyCompletionError,
@@ -1828,6 +1829,35 @@ def _compliance_report_for_event(report: Any) -> dict[str, Any]:
     }
 
 
+class ParagraphIdentityError(ValueError):
+    """Raised when a chunk translation violates strict paragraph identity.
+
+    A ValueError subclass so existing handlers keep working unchanged.
+    """
+
+
+def _used_paragraph_protocol(chunk: Chunk) -> bool:
+    """Whether *chunk* was actually translated under the marker protocol.
+
+    Mirrors ``use_paragraph_protocol`` in ``_translate_single_chunk`` exactly:
+    ``encode_paragraphs`` emits one marker per ``split_paragraphs`` element, so
+    ``len(split_paragraphs(text)) > 1`` is the same condition.
+
+    This alignment is the whole fix. Translation applies the protocol only when
+    a chunk has MORE THAN ONE paragraph, but assembly used to enforce strict
+    identity whenever paragraph_protocol_version was set -- which SemanticChunker
+    sets on EVERY chunk. So a single-paragraph chunk was translated with no
+    markers, no protocol instruction and no repair pass, then judged as if it
+    had them. A model returning that one paragraph as two blank-line-separated
+    blocks aborted the run after all LLM spend.
+    """
+    raw_version = chunk.metadata.get("paragraph_protocol_version", 0)
+    # A non-integer version falls back to 0, i.e. NOT strict. That is the
+    # fail-safe direction: lenient alignment degrades, strict alignment aborts.
+    version = raw_version if isinstance(raw_version, int) else 0
+    return bool(len(split_paragraphs(chunk.text)) > 1 and version >= 1)
+
+
 def _align_chunk_translation(
     *,
     original_paragraphs: list[Any],
@@ -1849,7 +1879,7 @@ def _align_chunk_translation(
     )
     if strict_paragraph_identity:
         if len(para_indices) != len(tgt_paras):
-            raise ValueError(
+            raise ParagraphIdentityError(
                 "Stable paragraph identity failed during assembly: "
                 f"expected {len(para_indices)}, received {len(tgt_paras)}."
             )
@@ -3101,18 +3131,51 @@ class TranslationPipeline:
             chunk = chunks[idx]
             chunk_translation = translations.get(idx, "")
             tgt_paras = [p.strip() for p in chunk_translation.split("\n\n") if p.strip()]
-            para_indices = chunk.metadata.get("paragraph_indices", [])
+            # chunk.metadata is dict[str, object], so narrow once here rather
+            # than leaving every downstream len()/index/call site untyped.
+            _raw_indices = chunk.metadata.get("paragraph_indices")
+            para_indices: list[int] = (
+                [int(value) for value in _raw_indices]
+                if isinstance(_raw_indices, list) else []
+            )
 
             if para_indices:
-                aligned = _align_chunk_translation(
-                    original_paragraphs=original_paragraphs,
-                    para_indices=para_indices,
-                    tgt_paras=tgt_paras,
-                    chunk_translation=chunk_translation,
-                    strict_paragraph_identity=bool(
-                        chunk.metadata.get("paragraph_protocol_version")
-                    ),
-                )
+                try:
+                    aligned = _align_chunk_translation(
+                        original_paragraphs=original_paragraphs,
+                        para_indices=para_indices,
+                        tgt_paras=tgt_paras,
+                        chunk_translation=chunk_translation,
+                        strict_paragraph_identity=_used_paragraph_protocol(chunk),
+                    )
+                except ParagraphIdentityError as exc:
+                    # Never discard fully-paid translations over a formatting
+                    # mismatch. Reconstruct the alignment, flag the chunk for
+                    # human review, and finish the export.
+                    logger.warning(
+                        "Chunk %d: %s Falling back to proportional alignment.",
+                        idx, exc,
+                    )
+                    self.db.log_chunk_event(
+                        job_id, idx, "paragraph_identity_degraded", {
+                            "expected": len(para_indices),
+                            "received": len(tgt_paras),
+                        },
+                    )
+                    self.db.update_chunk(
+                        job_id, idx, ChunkStatus.NEEDS_REVIEW, chunk_translation
+                    )
+                    self.warnings.append(
+                        f"Chunk {idx}: paragraph alignment was reconstructed "
+                        "from an off-count translation; review recommended."
+                    )
+                    aligned = _align_chunk_translation(
+                        original_paragraphs=original_paragraphs,
+                        para_indices=para_indices,
+                        tgt_paras=tgt_paras,
+                        chunk_translation=chunk_translation,
+                        strict_paragraph_identity=False,
+                    )
                 if len(para_indices) != len(tgt_paras):
                     logger.warning(
                         "Chunk %d: translation has %d paragraph(s) but source has %d; "
@@ -3845,18 +3908,37 @@ class TranslationPipeline:
         for idx, chunk in enumerate(chunks):
             chunk_translation = translations.get(idx, "")
             tgt_paras = [p.strip() for p in chunk_translation.split("\n\n") if p.strip()]
-            para_indices = chunk.metadata.get("paragraph_indices", [])
+            # chunk.metadata is dict[str, object], so narrow once here rather
+            # than leaving every downstream len()/index/call site untyped.
+            _raw_indices = chunk.metadata.get("paragraph_indices")
+            para_indices: list[int] = (
+                [int(value) for value in _raw_indices]
+                if isinstance(_raw_indices, list) else []
+            )
 
             if para_indices:
-                aligned = _align_chunk_translation(
-                    original_paragraphs=original_paragraphs,
-                    para_indices=para_indices,
-                    tgt_paras=tgt_paras,
-                    chunk_translation=chunk_translation,
-                    strict_paragraph_identity=bool(
-                        chunk.metadata.get("paragraph_protocol_version")
-                    ),
-                )
+                try:
+                    aligned = _align_chunk_translation(
+                        original_paragraphs=original_paragraphs,
+                        para_indices=para_indices,
+                        tgt_paras=tgt_paras,
+                        chunk_translation=chunk_translation,
+                        strict_paragraph_identity=_used_paragraph_protocol(chunk),
+                    )
+                except ParagraphIdentityError as exc:
+                    # No job_id in scope here, so this path only warns and
+                    # reconstructs; the run() assembly above records the event.
+                    logger.warning(
+                        "Chunk %d: %s Falling back to proportional alignment.",
+                        idx, exc,
+                    )
+                    aligned = _align_chunk_translation(
+                        original_paragraphs=original_paragraphs,
+                        para_indices=para_indices,
+                        tgt_paras=tgt_paras,
+                        chunk_translation=chunk_translation,
+                        strict_paragraph_identity=False,
+                    )
                 for pid, t in aligned:
                     if pid < len(original_paragraphs):
                         orig_para = original_paragraphs[pid]
