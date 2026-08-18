@@ -74,6 +74,7 @@ from tarjomeh.quality.back_translator import BackTranslator
 from tarjomeh.quality.integrity import (
     PostEditIntegrityGate,
     extract_identifiers,
+    repair_corruption,
     mixed_script_artifacts,
     restore_source_identifiers,
     normalize_for_match,
@@ -4687,6 +4688,25 @@ class TranslationPipeline:
                     "edit_count": sum(
                         int(edit.get("count", 0)) for edit in orthography_edits
                     ),
+                },
+            )
+        # Item 15: reconstruct corrupted numerals the source disambiguates
+        # completely, BEFORE the integrity gate and before typography. Without
+        # this, a single stray replacement character costs a human review even
+        # when the source makes the fix unambiguous. Anything ambiguous is left
+        # untouched, so it still blocks and still reaches a reviewer.
+        translation, corruption_repairs = repair_corruption(chunk.text, translation)
+        if corruption_repairs:
+            self.db.log_chunk_event(
+                job_id, idx, "unicode_corruption_repair", {
+                    "stage": "initial_translation",
+                    "repaired": sum(
+                        1 for entry in corruption_repairs if entry["repaired"]
+                    ),
+                    "left_for_review": sum(
+                        1 for entry in corruption_repairs if not entry["repaired"]
+                    ),
+                    "details": corruption_repairs[:10],
                 },
             )
         self.db.update_chunk(job_id, idx, ChunkStatus.TRANSLATED, translation)

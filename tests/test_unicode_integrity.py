@@ -148,3 +148,105 @@ def test_a_repair_that_removes_damage_is_never_blocked_for_corruption() -> None:
     previous = CLEAN.replace("نهادی", f"نهاد{REPLACEMENT}ی")
     assert _corruption_findings(CLEAN, previous=previous) == []
     assert "unicode_corruption" not in _blocking(CLEAN, previous=previous)
+
+
+# ---------------------------------------------------------------------------
+# Item 15, repair half — reconstruct only what the source disambiguates
+# ---------------------------------------------------------------------------
+
+PERSIAN_DIGITS = "۰۱۲۳۴۵۶۷۸۹"
+
+
+def _fa(digits: str) -> str:
+    """Render ASCII digits as Persian digits."""
+    return "".join(
+        PERSIAN_DIGITS[int(char)] if char.isdigit() else char for char in digits
+    )
+
+
+def _repair(source: str, candidate: str):
+    from tarjomeh.quality.integrity import repair_corruption
+
+    return repair_corruption(source, candidate)
+
+
+def test_a_unique_source_number_is_reconstructed() -> None:
+    """The shipped defect: one digit replaced by U+FFFD, source says 1990."""
+    text, repairs = _repair(
+        "It changed during the 1990s.", f"دهه {_fa('1')}{REPLACEMENT}{_fa('90')}"
+    )
+    assert _fa("1990") in text
+    assert corruption_artifacts(text) == {}
+    assert [entry["repaired"] for entry in repairs] == [True]
+    assert repairs[0]["reason"] == "unique_source_reconstruction"
+
+
+def test_the_repaired_numeral_keeps_the_persian_script() -> None:
+    text, _ = _repair(
+        "It changed during the 1990s.", f"دهه {_fa('1')}{REPLACEMENT}{_fa('90')}"
+    )
+    assert "1990" not in text, "must not switch the output to Latin digits"
+    assert _fa("1990") in text
+
+
+def test_latin_digits_stay_latin() -> None:
+    text, _ = _repair("It changed during the 1990s.", f"decade 1{REPLACEMENT}90")
+    assert "1990" in text
+
+
+def test_an_ambiguous_reconstruction_is_refused() -> None:
+    """1990 and 1890 both fit `1?90`, so repairing would be a guess. The
+    corruption must survive so the gate still blocks and a human still sees it."""
+    candidate = f"دهه {_fa('1')}{REPLACEMENT}{_fa('90')}"
+    text, repairs = _repair("Compare 1990 and 1890 closely.", candidate)
+    assert text == candidate, "ambiguous damage must be left untouched"
+    assert corruption_artifacts(text), "corruption must still be detectable"
+    assert repairs[0]["repaired"] is False
+    assert repairs[0]["reason"] == "ambiguous_source_match"
+
+
+def test_no_source_number_means_no_repair() -> None:
+    candidate = f"دهه {_fa('1')}{REPLACEMENT}{_fa('90')}"
+    text, repairs = _repair("No figures appear in this sentence.", candidate)
+    assert text == candidate
+    assert repairs[0]["reason"] == "no_source_match"
+
+
+def test_a_source_number_of_the_wrong_length_is_not_used() -> None:
+    candidate = f"عدد {_fa('1')}{REPLACEMENT}{_fa('90')}"
+    text, repairs = _repair("Only 42 appears here.", candidate)
+    assert text == candidate
+    assert repairs[0]["repaired"] is False
+
+
+def test_clean_text_is_never_rewritten() -> None:
+    candidate = f"دهه {_fa('1990')} و {_fa('10')}٫{_fa('5')} درصد"
+    text, repairs = _repair("The 1990s and 10.5 percent.", candidate)
+    assert text == candidate
+    assert repairs == []
+
+
+def test_corruption_outside_a_number_is_left_to_the_gate() -> None:
+    """Repair is numeral-only: a damaged word has no unique reconstruction."""
+    candidate = CLEAN.replace("نهادی", f"نهاد{REPLACEMENT}ی")
+    text, repairs = _repair(SOURCE, candidate)
+    assert text == candidate
+    assert repairs == []
+    assert "unicode_corruption" in _blocking(candidate)
+
+
+def test_repair_then_gate_leaves_nothing_to_review() -> None:
+    """End to end: a repairable chunk must stop costing a human review."""
+    source = "It changed during the 1990s."
+    corrupted = f"دهه {_fa('1')}{REPLACEMENT}{_fa('90')} تغییر کرد."
+    assert "unicode_corruption" in _blocking(corrupted, source=source)
+
+    repaired, _ = _repair(source, corrupted)
+    assert "unicode_corruption" not in _blocking(repaired, source=source)
+
+
+@pytest.mark.parametrize("candidate", ["", "   ", "بدون عدد"])
+def test_repair_tolerates_text_with_no_numerals(candidate) -> None:
+    text, repairs = _repair("Some source text.", candidate)
+    assert text == candidate
+    assert repairs == []

@@ -362,6 +362,90 @@ def newly_repeated_spans(
     )
 
 
+_PERSIAN_DIGITS = "\u06f0\u06f1\u06f2\u06f3\u06f4\u06f5\u06f6\u06f7\u06f8\u06f9"
+# A run of digits in any supported script, interrupted by corruption. Requires at
+# least one digit AND one corrupt character, so clean numbers are never touched.
+_CORRUPT_NUMBER_RE = re.compile(
+    "(?<![0-9\u06f0-\u06f9])"
+    "(?=[0-9\u06f0-\u06f9\ufffd\ue000-\uf8ff]*[0-9\u06f0-\u06f9])"
+    "(?=[0-9\u06f0-\u06f9\ufffd\ue000-\uf8ff]*[\ufffd\ue000-\uf8ff])"
+    "[0-9\u06f0-\u06f9\ufffd\ue000-\uf8ff]+"
+    "(?![0-9\u06f0-\u06f9])"
+)
+
+
+def repair_corruption(source: str, candidate: str) -> tuple[str, list[dict[str, Any]]]:
+    """Reconstruct corrupted numerals that the source disambiguates completely.
+
+    Item 15's rule, and the whole safety argument: a value is repaired **only
+    when the source provides one unique reconstruction**. A corrupted decade
+    becomes the source's year only when exactly one source number has the same
+    length and agrees on every surviving digit. Anything ambiguous is left
+    alone, so it still reaches the gate, is still blocked, and still reaches a
+    human. Repairing on a guess would corrupt a translation that a reviewer
+    could have fixed correctly.
+
+    Returns the (possibly unchanged) text plus a record of every repair, so the
+    QA report can show exactly what was reconstructed and from what.
+    """
+    candidate = candidate or ""
+    if not _CORRUPT_NUMBER_RE.search(candidate):
+        return candidate, []
+
+    source_numbers = [
+        match.group().strip()
+        for match in _NUMBER_RE.finditer(_numeric_text(source or ""))
+    ]
+
+    repairs: list[dict[str, Any]] = []
+
+    def _rebuild(match: re.Match[str]) -> str:
+        token = match.group()
+        # Persian output stays Persian; the script is taken from the survivors.
+        persian = any(char in _PERSIAN_DIGITS for char in token)
+        known = [
+            char.translate(_DIGIT_MAP) if char.isdigit() or char in _PERSIAN_DIGITS
+            else None
+            for char in token
+        ]
+        matches = [
+            number for number in source_numbers
+            if len(number) == len(known)
+            and all(
+                digit is None or digit == number[index]
+                for index, digit in enumerate(known)
+            )
+        ]
+        unique = sorted(set(matches))
+        if len(unique) != 1:
+            repairs.append({
+                "token_length": len(token),
+                "known_digits": sum(1 for digit in known if digit is not None),
+                "source_candidates": len(unique),
+                "repaired": False,
+                "reason": (
+                    "no_source_match" if not unique else "ambiguous_source_match"
+                ),
+            })
+            return token
+        rebuilt = unique[0]
+        if persian:
+            rebuilt = "".join(
+                _PERSIAN_DIGITS[int(char)] if char.isdigit() else char
+                for char in rebuilt
+            )
+        repairs.append({
+            "token_length": len(token),
+            "known_digits": sum(1 for digit in known if digit is not None),
+            "source_candidates": 1,
+            "repaired": True,
+            "reason": "unique_source_reconstruction",
+        })
+        return rebuilt
+
+    return _CORRUPT_NUMBER_RE.sub(_rebuild, candidate), repairs
+
+
 def corruption_artifacts(text: str) -> dict[str, int]:
     """Count Unicode damage by category. Empty dict means clean."""
     text = text or ""
