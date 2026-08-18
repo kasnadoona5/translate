@@ -5,10 +5,10 @@ branch `fix/remediation`, on top of baseline commit `f6b863e`.
 
 | | |
 |---|---|
-| Fixes shipped | Stage 1 (20) + Phase 8 (6 parts) + items 15, 16, 12, 19 + Tier 1 (4) + 10.1 |
-| Commits | 18 total |
-| Source files changed | 13 (plus `.gitignore`), 1 of them new |
-| Tests | **352 baseline → 625 passing** (+273 new, 0 failures) |
+| Fixes shipped | Stage 1 (20) + Phase 8 (6 parts) + items 15, 16, 12, 19 + Tier 1 (4) + 10.1 + Option A |
+| Commits | 21 total |
+| Source files changed | 11 changed + 2 new; **50 of 61 untouched** |
+| Tests | **352 baseline → 636 passing** (+284 new, 0 failures) |
 | mypy | 93 errors before, **89 after** — four *fewer*; no new findings |
 | ruff | 244 before, **240 after** — 4 *fewer*; no new findings |
 | Prompt files edited | **none** |
@@ -43,7 +43,7 @@ Two further constraints you set:
 
 ```bash
 cd /c/Users/admin/Downloads/VSCODE/Translate-v84-fix
-./.venv/Scripts/python.exe -m pytest -q                      # 625 passed
+./.venv/Scripts/python.exe -m pytest -q                      # 636 passed
 ./.venv/Scripts/python.exe -m ruff check src/tarjomeh/       # 240 (all pre-existing)
 ./.venv/Scripts/python.exe -m mypy src/tarjomeh/             # 89 (all pre-existing)
 ```
@@ -607,6 +607,69 @@ never forces the refiner to accept anything.
 | **14** refiner protection | Semantic weakening / unrelated rewriting on the full-candidate path |
 | **18** (2 of 5 parts) | Summary terminology reconciliation; broaden research-source survival |
 
+---
+
+# Round four: Option A — the restore contract, and crash isolation
+
+Two problems, both of which let damage reach the reader.
+
+## 1. A rejection had nothing to restore
+
+Four gate call sites passed no `previous`, so a rejection could only be *logged*.
+The final gate matters most: it is the last thing between a candidate and the
+export, and it logged `integrity_final_failed` and then returned the rejected
+text anyway.
+
+**That is chunk 7.** The gate correctly said "reject". "Reject" meant "retain
+prior". Prior was also damaged. So the damage shipped.
+
+`core/pipeline.py` now tracks `last_accepted_translation` — the most recent text
+that passed a gate — updated after the initial translation, after each accepted
+refinement, and after each accepted glossary auto-correction. The final gate
+receives it as `previous`, which is also what lets the corruption and duplicate
+checks tell damage *this* step introduced from damage carried in from earlier. On
+rejection the last accepted text is restored, the swap is logged as
+`integrity_final_restored`, and the chunk is marked for review.
+
+The other three sites are deliberately left without `previous`: `initial_translation`
+and the two adaptive-recovery assembly stages all produce the **first** text for a
+chunk, so no prior valid version exists by definition. The two recovery stages
+already escalate on rejection via a strict retry.
+
+**Considered and rejected:** blocking the initial translation on rejection.
+Critique/refine exists precisely to repair a poor first draft — in the audited
+run the refiner produced the correct numeral — so stopping there would prevent
+the repair rather than enable it.
+
+## 2. A report-only helper could stop a book
+
+`repair_corruption` and `audit_payload` sat unguarded in
+`_translate_single_chunk`. Because `retry.pause_on_sequential_error` defaults to
+**True** and academic mode forces `parallel_workers = 1`, an exception from
+either one would set `PAUSED_ERROR` on the **first** affected chunk — not after
+`max_consecutive_errors = 3` — and resume would hit the same chunk again. A hard
+loop, with the book stuck.
+
+Both are now wrapped. On failure they log `structure_audit_failed` /
+`unicode_corruption_repair_failed` and the translation continues. A report-only
+feature must be report-only in its failure mode too.
+
+This was not hypothetical. The `isdigit`/`isdecimal` defect fixed in `d84e647`
+was exactly this shape: `str.isdigit()` is True for superscript footnote markers
+but `int()` rejects them, so a chunk carrying a footnote marker *and* an
+enumeration would have raised `ValueError`. It never reached the user —
+`audit_payload` did not exist before `d56716a`, and the user's book runs predate
+it — but the exposure was real, and it was found by running the audit over the
+real delivered translation rather than over fixtures. That is the argument for
+item 20 in one incident.
+
+## Change map additions
+
+| Fix | File | Symbols | Commit |
+|---|---|---|---|
+| Option A | `core/pipeline.py` | `last_accepted_translation` (new local, 3 update points); final gate `previous=`; `integrity_final_restored`; `try/except` around both helpers | `71ed5bf` |
+| crash fix | `quality/structure_audit.py` | `announced_counts` — `isdecimal` not `isdigit` | `d84e647` |
+
 ## Test coverage added
 
 | File | Tests | Covers |
@@ -618,7 +681,8 @@ never forces the refiner to accept anything.
 | `tests/test_paragraph_identity.py` | 15 | 3.1 gate alignment and graceful degradation |
 | `tests/test_table_chunking.py` | 11 | 10.1 table boundaries; no paragraph lost or reordered |
 | `tests/test_duplicate_guard.py` | 17 | item 16 — mostly false-positive guards |
-| `tests/test_structure_audit.py` | 34 | item 12 — weighted toward silence |
+| `tests/test_structure_audit.py` | 39 | item 12 — weighted toward silence, plus the superscript crash |
+| `tests/test_admission_restore.py` | 6 | Option A — restore contract and crash isolation |
 
 Two design notes on this suite:
 
