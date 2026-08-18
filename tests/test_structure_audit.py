@@ -191,3 +191,21 @@ def test_findings_carry_both_sides_of_the_evidence() -> None:
         "source_announced", "source_items", "candidate_announced", "candidate_items"
     ):
         assert key in finding.details
+
+
+@pytest.mark.parametrize("marker", ["¹", "²", "⁵", "⁰"])
+def test_superscript_footnote_markers_do_not_crash(marker) -> None:
+    """Found by running the audit over the real delivered translation.
+
+    str.isdigit() is True for superscripts but int() rejects them, so a footnote
+    marker raised ValueError. Academic prose is full of them, and the crash
+    reached the pipeline. isdecimal() is the correct predicate.
+    """
+    assert announced_counts(f"claim{marker} and two objections") == [2]
+    text = f"There are two objections.{marker} First a; second b."
+    assert audit_structure(text, "دو ایراد. نخست الف؛ دوم ب.") == []
+
+
+def test_persian_and_arabic_indic_digits_still_count() -> None:
+    assert announced_counts("۲ objections") == [2]
+    assert announced_counts("٣ reasons") == [3]

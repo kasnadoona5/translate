@@ -137,8 +137,11 @@ def announced_counts(text: str) -> list[int]:
             continue
         # A single bare digit can announce ("2 objections"); a multi-digit
         # number is a year, page or quantity, never an announcement.
+        # isdecimal(), NOT isdigit(): isdigit() is True for superscripts such as
+        # U+00B9, which are footnote markers and would crash int(). Academic
+        # prose is full of them.
         normalised = word.translate(_DIGIT_TRANSLATION)
-        if len(normalised) == 1 and normalised.isdigit() and int(normalised) >= 2:
+        if len(normalised) == 1 and normalised.isdecimal() and int(normalised) >= 2:
             found.append(int(normalised))
     return found
 
