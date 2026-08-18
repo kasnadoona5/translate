@@ -2107,10 +2107,16 @@ class TranslationPipeline:
                 self.db.update_job_status(job_id, JobStatus.RUNNING)
             else:
                 logger.info("Starting new job with supplied ID: %s", job_id)
-                self.db.create_job(job_id, input_path, self.config.to_dict())
+                self.db.create_job(
+                    job_id, input_path, self.config.to_dict(redact_secrets=True)
+                )
         else:
             self.current_job_id = uuid.uuid4().hex[:12]
-            self.db.create_job(self.current_job_id, input_path, self.config.to_dict())
+            self.db.create_job(
+                self.current_job_id,
+                input_path,
+                self.config.to_dict(redact_secrets=True),
+            )
 
         job_id = self.current_job_id
 

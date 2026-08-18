@@ -333,7 +333,10 @@ def test_critic_source_is_indexed_once_without_extra_llm_call() -> None:
     assert warnings == ["issue_source_segment_id_corrected"]
 
 
-def test_web_recovery_controls_follow_runtime_defaults() -> None:
+def test_web_recovery_controls_follow_runtime_defaults(monkeypatch) -> None:
+    # The UI now refuses to serve without UI_SECRET_TOKEN; this test only
+    # exercises template rendering, so take the documented local opt-out.
+    monkeypatch.setenv("TARJOMEH_ALLOW_INSECURE_UI", "true")
     from tarjomeh.web.app import create_app
 
     app = create_app()
@@ -348,7 +351,8 @@ def test_web_recovery_controls_follow_runtime_defaults() -> None:
     assert "Optional 24K recovery model or combo" not in page
 
 
-def test_web_critic_allowance_never_displays_below_effective_floor() -> None:
+def test_web_critic_allowance_never_displays_below_effective_floor(monkeypatch) -> None:
+    monkeypatch.setenv("TARJOMEH_ALLOW_INSECURE_UI", "true")
     from tarjomeh.web.app import create_app
 
     app = create_app()

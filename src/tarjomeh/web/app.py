@@ -13,6 +13,7 @@ import logging
 import os
 import queue
 import re
+import secrets
 import uuid
 from concurrent.futures import ThreadPoolExecutor, Future
 from datetime import datetime
@@ -145,7 +146,14 @@ def create_app(config: Any = None) -> Flask:
         static_folder=str(Path(__file__).parent / "static"),
     )
 
-    app.secret_key = os.environ.get("FLASK_SECRET_KEY", uuid.uuid4().hex)
+    flask_secret = os.environ.get("FLASK_SECRET_KEY", "").strip()
+    if not flask_secret:
+        flask_secret = uuid.uuid4().hex
+        logger.warning(
+            "FLASK_SECRET_KEY is not set; using a per-process key. Every "
+            "signed-in browser session will be invalidated on restart."
+        )
+    app.secret_key = flask_secret
     app.config["TARJOMEH_CONFIG"] = config
     app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500MB max upload
     app.config["UPLOAD_FOLDER"] = Path("jobs") / "uploads"
@@ -158,30 +166,55 @@ def create_app(config: Any = None) -> Flask:
     return app
 
 
+def _insecure_ui_allowed() -> bool:
+    """Whether the operator explicitly opted out of UI authentication."""
+    return os.environ.get(
+        "TARJOMEH_ALLOW_INSECURE_UI", ""
+    ).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _tokens_match(candidate: str, secret: str) -> bool:
+    """Constant-time token comparison that tolerates non-ASCII input."""
+    return secrets.compare_digest(
+        candidate.encode("utf-8"), secret.encode("utf-8")
+    )
+
+
 def _require_auth(f):
     """Decorator to require authentication for a route."""
     @wraps(f)
     def decorated(*args, **kwargs):
-        # Check if auth is configured
-        secret = os.environ.get("UI_SECRET_TOKEN", "")
+        secret = os.environ.get("UI_SECRET_TOKEN", "").strip()
         if not secret:
-            # No auth configured — allow access (development mode)
-            return f(*args, **kwargs)
+            # Fail CLOSED. An unset token used to authorize every request,
+            # which is remotely exploitable under the shipped Docker config
+            # (binds 0.0.0.0, publishes 8080).
+            if _insecure_ui_allowed():
+                return f(*args, **kwargs)
+            logger.error(
+                "Rejected request to %s: UI_SECRET_TOKEN is not set.",
+                request.path,
+            )
+            return jsonify({
+                "error": (
+                    "This server has no UI token configured. Set "
+                    "UI_SECRET_TOKEN and restart. For a trusted "
+                    "localhost-only session, set "
+                    "TARJOMEH_ALLOW_INSECURE_UI=true."
+                )
+            }), 503
 
-        # Check session
         if session.get("authenticated"):
             return f(*args, **kwargs)
 
-        # Check query parameter (first-time auth)
         token = request.args.get("token", "")
-        if token == secret:
+        if token and _tokens_match(token, secret):
             session["authenticated"] = True
             session.permanent = True
             return f(*args, **kwargs)
 
-        # Check Authorization header (API access)
         auth_header = request.headers.get("Authorization", "")
-        if auth_header == f"Bearer {secret}":
+        if auth_header and _tokens_match(auth_header, f"Bearer {secret}"):
             return f(*args, **kwargs)
 
         return jsonify({"error": "Authentication required. Pass ?token=YOUR_TOKEN"}), 401

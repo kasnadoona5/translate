@@ -353,6 +353,33 @@ class SystemPromptConfig:
 
 
 # ---------------------------------------------------------------------------
+# Credential redaction
+# ---------------------------------------------------------------------------
+
+# Configuration paths holding credentials. These are stripped before a config
+# is persisted to the job database or returned by the HTTP API; the live
+# values always come from the environment instead. Declared at module level
+# so it is never mistaken for a dataclass field.
+_SECRET_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
+    ("llm", "openrouter", "api_keys"),
+    ("llm", "critic", "api_keys"),
+)
+
+
+def redact_config_secrets(data: dict[str, Any]) -> dict[str, Any]:
+    """Blank every credential field in a serialised config, in place."""
+    for path in _SECRET_CONFIG_PATHS:
+        node: Any = data
+        for key in path[:-1]:
+            node = node.get(key) if isinstance(node, dict) else None
+            if node is None:
+                break
+        if isinstance(node, dict) and node.get(path[-1]):
+            node[path[-1]] = []
+    return data
+
+
+# ---------------------------------------------------------------------------
 # Main configuration dataclass
 # ---------------------------------------------------------------------------
 
@@ -412,6 +439,9 @@ class TarjomehConfig:
         config = cls._from_raw(expanded)
         config._apply_mode_preset(expanded)
         config._apply_env_overrides()
+        # Persisted configs carry redacted credentials; refill from the
+        # environment before validation rejects the empty key list.
+        config._rehydrate_redacted_secrets()
         if not config.translation.country:
             config.translation.country = "Iran"
         config.validate()
@@ -580,6 +610,23 @@ class TarjomehConfig:
         value = env("CRITIC_RECOVERY_MAX_TOKENS", "").strip()
         if value.isdigit():
             self.llm.critic.recovery_max_tokens = int(value)
+
+    def _rehydrate_redacted_secrets(self) -> None:
+        """Restore credentials that were stripped before persistence.
+
+        Job records store empty ``api_keys``; the live key comes from the
+        environment. ``llm.critic.api_keys == []`` already means "inherit
+        the OpenRouter keys", so only the primary list needs a fallback
+        here - ``CRITIC_API_KEY`` is handled by _apply_env_overrides.
+        """
+        if any(self.llm.openrouter.api_keys):
+            return
+        fallback = (
+            os.environ.get("TRANSLATOR_API_KEY", "").strip()
+            or os.environ.get("OPENROUTER_API_KEY", "").strip()
+        )
+        if fallback:
+            self.llm.openrouter.api_keys = [fallback]
 
     def _apply_mode_preset(self, raw: dict[str, Any]) -> None:
         """Apply mode-specific defaults for keys not explicitly provided."""
@@ -882,10 +929,17 @@ class TarjomehConfig:
 
     # -- Serialisation helpers ----------------------------------------------
 
-    def to_dict(self) -> dict[str, Any]:
-        """Serialise the entire configuration to a plain dictionary."""
+    def to_dict(self, *, redact_secrets: bool = False) -> dict[str, Any]:
+        """Serialise the entire configuration to a plain dictionary.
+
+        With ``redact_secrets=True`` every credential field is emptied,
+        making the result safe to store in the job database and to return
+        from the API. :meth:`from_dict` re-supplies credentials from the
+        environment.
+        """
         from dataclasses import asdict
-        return asdict(self)
+        data = asdict(self)
+        return redact_config_secrets(data) if redact_secrets else data
 
 
 # ---------------------------------------------------------------------------

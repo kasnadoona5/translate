@@ -24,6 +24,29 @@ logger = logging.getLogger(__name__)
 _JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
+_REDACTED_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
+    ("llm", "openrouter", "api_keys"),
+    ("llm", "critic", "api_keys"),
+)
+
+
+def _scrub_config_secrets(config: dict[str, Any]) -> dict[str, Any]:
+    """Blank credentials in a persisted job config, in place.
+
+    Defence in depth: rows written by earlier releases still contain live
+    keys, and no config should ever leave this module carrying one.
+    """
+    for path in _REDACTED_CONFIG_PATHS:
+        node: Any = config
+        for key in path[:-1]:
+            node = node.get(key) if isinstance(node, dict) else None
+            if node is None:
+                break
+        if isinstance(node, dict) and node.get(path[-1]):
+            node[path[-1]] = []
+    return config
+
+
 def _decode_payload_row(row: sqlite3.Row) -> dict[str, Any]:
     item = dict(row)
     try:
@@ -228,6 +251,29 @@ class JobDatabase:
                 CREATE INDEX IF NOT EXISTS idx_issue_decisions_job_chunk
                 ON issue_decisions (job_id, chunk_index, refinement_iteration)
             """)
+            # One-time migration: releases before the credential fix stored
+            # live API keys in jobs.config. The LIKE pattern matches only a
+            # NON-empty list, so this is a no-op once every row is clean.
+            legacy = conn.execute(
+                """SELECT id, config FROM jobs
+                   WHERE config LIKE '%\"api_keys\": [\"%'"""
+            ).fetchall()
+            for row in legacy:
+                try:
+                    parsed = json.loads(row["config"] or "{}")
+                except json.JSONDecodeError:
+                    continue
+                conn.execute(
+                    "UPDATE jobs SET config = ? WHERE id = ?",
+                    (json.dumps(_scrub_config_secrets(parsed)), row["id"]),
+                )
+            if legacy:
+                logger.warning(
+                    "Removed persisted API keys from %d legacy job record(s). "
+                    "Rotate any key that was stored in jobs.db.",
+                    len(legacy),
+                )
+
             conn.commit()
 
     def create_job(self, job_id: str, input_path: str | Path, config_dict: dict[str, Any]) -> None:
@@ -392,9 +438,10 @@ class JobDatabase:
                 return None
             job = dict(row)
             try:
-                job["config"] = json.loads(job["config"]) if job["config"] else {}
+                parsed_config = json.loads(job["config"]) if job["config"] else {}
             except json.JSONDecodeError:
-                job["config"] = {}
+                parsed_config = {}
+            job["config"] = _scrub_config_secrets(parsed_config)
             
             # Add progress estimation
             chunks = self.get_chunk_summary(job_id)
@@ -434,6 +481,10 @@ class JobDatabase:
                     config_dict = json.loads(job["config"]) if job["config"] else {}
                 except Exception:
                     config_dict = {}
+                # The raw column used to be returned verbatim, leaking any
+                # key it still held. Return the scrubbed structure instead.
+                config_dict = _scrub_config_secrets(config_dict)
+                job["config"] = config_dict
                 
                 # Map properties for frontend compatibility
                 raw_status = job["status"]
