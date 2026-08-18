@@ -176,15 +176,31 @@ class SemanticChunker:
                 buffer_para_indices: list[int] = []
                 buffer_roles: list[str] = []
                 buffer_style_eligible: list[bool] = []
+                buffer_is_table: bool | None = None
 
                 for para in section.paragraphs:
                     para_text = para.text.strip()
                     if not para_text:
                         continue
                     para_tokens = self._count(para_text)
+                    para_metadata = getattr(para, "metadata", {}) or {}
+                    para_is_table = bool(para_metadata.get("is_table"))
+                    # Tables must not share a chunk with prose. The chunkers
+                    # grouped by token budget and section only, so an 85-paragraph
+                    # table was sent to the model as one prose chunk
+                    # (prompt_tokens=29335, truncated at 50,000) and came back
+                    # with every column boundary lost.
+                    table_boundary = (
+                        buffer_is_table is not None
+                        and para_is_table != buffer_is_table
+                    )
 
-                    # Would adding this paragraph exceed the budget?
-                    if buffer and (buffer_tokens + para_tokens) > self.max_tokens:
+                    # Would adding this paragraph exceed the budget, or cross a
+                    # table/prose boundary?
+                    if buffer and (
+                        (buffer_tokens + para_tokens) > self.max_tokens
+                        or table_boundary
+                    ):
                         # Flush current buffer as a chunk.
                         chunk = self._make_chunk(
                             index=len(chunks),
@@ -209,18 +225,20 @@ class SemanticChunker:
                         buffer_para_indices = []
                         buffer_roles = []
                         buffer_style_eligible = []
+                        buffer_is_table = None
 
+                    if buffer_is_table is None:
+                        buffer_is_table = para_is_table
                     buffer.append(para_text)
                     buffer_tokens += para_tokens
                     buffer_para_indices.append(para_to_idx[id(para)])
-                    metadata = getattr(para, "metadata", {}) or {}
-                    role = str(metadata.get("structure_role", "body"))
+                    role = str(para_metadata.get("structure_role", "body"))
                     buffer_roles.append(role)
                     buffer_style_eligible.append(
                         role == "body"
-                        and not bool(metadata.get("is_footnote"))
-                        and not bool(metadata.get("is_table"))
-                        and not bool(metadata.get("heading_level"))
+                        and not bool(para_metadata.get("is_footnote"))
+                        and not para_is_table
+                        and not bool(para_metadata.get("heading_level"))
                     )
 
                 # Flush remaining buffer for this section.
