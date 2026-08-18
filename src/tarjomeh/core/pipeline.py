@@ -71,6 +71,7 @@ from tarjomeh.jobs.database import JobDatabase, JobStatus, ChunkStatus
 from tarjomeh.quality.critique import TranslationCritique
 from tarjomeh.quality.refiner import TranslationRefiner
 from tarjomeh.quality.back_translator import BackTranslator
+from tarjomeh.quality.structure_audit import audit_payload
 from tarjomeh.quality.integrity import (
     PostEditIntegrityGate,
     extract_identifiers,
@@ -4715,6 +4716,15 @@ class TranslationPipeline:
             "translation_paragraphs": _paragraph_count(translation),
             "expected_paragraphs": n_source_paras,
         })
+        # Item 12: structural audit, REPORT-ONLY. It classifies announced counts
+        # and enumerations; it never rejects. Promotion to a gate rule belongs to
+        # item 13, and only once the item-20 corpus shows it does not fire on
+        # correct translations.
+        structure_payload = audit_payload(chunk.text, translation)
+        if structure_payload["finding_count"]:
+            self.db.log_chunk_event(
+                job_id, idx, "structure_audit", structure_payload
+            )
         if integrity_enabled and initial_integrity is None:
             initial_integrity = integrity_gate.evaluate(
                 chunk.text,
