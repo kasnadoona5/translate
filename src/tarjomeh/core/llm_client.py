@@ -177,7 +177,9 @@ class LLMClient:
         self._api_key_index = 0
         self._api_key_lock = threading.Lock()
         self._attempt_observer: Any = None
-        self._budget_history: dict[tuple[str, str], dict[str, int]] = {}
+        # Keyed (operation, transport profile, serving model); the value is a
+        # bounded rolling list of observed completion sizes.
+        self._budget_history: dict[tuple[str, str, str], dict[str, list[int]]] = {}
         self._budget_lock = threading.Lock()
 
         # _thread_local only ever exposes the CALLING thread's clients, so
@@ -334,11 +336,40 @@ class LLMClient:
             "visible_tokens": visible,
         }
 
-    def _history_high_water(self, model: str, operation: str) -> tuple[int, int]:
-        key = (model, operation)
+    def _budget_key(
+        self,
+        operation: str,
+        payload: dict[str, Any],
+        response_model: str = "",
+    ) -> tuple[str, str, str]:
+        """Key demand history by what actually served the request.
+
+        payload["model"] is the configured model name, which in a 9router
+        deployment is a COMBO name fronting many models. Keying on it merged
+        every model behind that combo into one statistic, so one looping
+        model's demand poisoned the budget every other model inherited.
+        At preflight no response model is known yet, so this falls back to the
+        configured name and a first call simply has no history.
+        """
+        profile = str(getattr(self.config.llm.transport, "profile", "auto"))
+        served = (response_model or str(payload.get("model", ""))).strip()
+        return (operation, profile, served)
+
+    def _history_demand(self, key: tuple[str, str, str]) -> tuple[int, int]:
+        """Return (p90 demand, sample count) over the retained window.
+
+        Replaces an all-time high_water max() that never decayed: one
+        exceptional call set the floor permanently. p90 tolerates a single
+        long-but-legitimate response without letting it define the floor, and
+        it decays as the window rolls.
+        """
         with self._budget_lock:
-            stats = dict(self._budget_history.get(key, {}))
-        return int(stats.get("high_water", 0)), int(stats.get("samples", 0))
+            samples = list(self._budget_history.get(key, {}).get("samples", []))
+        if not samples:
+            return 0, 0
+        ordered = sorted(samples)
+        index = min(len(ordered) - 1, int(round(0.90 * (len(ordered) - 1))))
+        return int(ordered[index]), len(ordered)
 
     def _record_budget_observation(
         self,
@@ -348,24 +379,34 @@ class LLMClient:
         usage: dict[str, Any],
         content: str,
         finish_reason: str | None,
+        response_model: str = "",
     ) -> None:
+        """Learn output demand only from completions that actually finished.
+
+        A truncated or empty response is evidence the model looped, not
+        evidence it needed a larger budget. Recording it at 1.5x the FAILED
+        budget ratcheted the floor upward permanently and irreversibly:
+        failing at 61,944 recorded 92,916, and failing at 85,000 recorded
+        127,500.
+        """
+        if finish_reason != "stop":
+            return
+        if not (content or "").strip():
+            return
         evidence = self._usage_evidence(usage, content)
+        # completion_tokens includes reasoning, which is correct here: the
+        # budget has to cover reasoning + answer. Sizing from visible output
+        # alone would under-budget a reasoning model.
         consumed = max(evidence["completion_tokens"], evidence["visible_tokens"])
-        if finish_reason == "length":
-            failed_budget = int(payload.get("max_tokens", 0))
-            consumed = max(consumed, math.ceil(failed_budget * 1.50))
         if consumed <= 0:
             return
-        key = (str(payload.get("model", "")), operation)
+        key = self._budget_key(operation, payload, response_model)
+        window = int(self.config.llm.recovery.history_window)
         with self._budget_lock:
-            stats = self._budget_history.setdefault(
-                key, {"high_water": 0, "samples": 0}
-            )
-            stats["high_water"] = max(int(stats["high_water"]), consumed)
-            stats["samples"] = min(
-                int(self.config.llm.recovery.history_window),
-                int(stats["samples"]) + 1,
-            )
+            stats = self._budget_history.setdefault(key, {"samples": []})
+            samples = stats["samples"]
+            samples.append(consumed)
+            del samples[: max(0, len(samples) - window)]
 
     def _answer_estimate(
         self,
@@ -380,14 +421,21 @@ class LLMClient:
     def _adaptive_ceiling(self, payload: dict[str, Any]) -> tuple[int, int]:
         recovery = self.config.llm.recovery
         prompt_tokens = self._prompt_metrics(payload)["estimated_prompt_tokens"]
+        # How much answer room is GENUINELY left in the window. An upper bound,
+        # never a floor: the previous max() reported more room than physically
+        # exists (a 100k prompt has 29,024 tokens left, not 50,000), producing
+        # requests the provider cannot serve, which were then retried. The old
+        # trailing max(payload_max, ceiling) repeated the mistake by flooring
+        # the result at whatever had already been requested, so the ceiling
+        # could never bind.
         context_room = max(
-            int(payload.get("max_tokens", self.config.llm.max_tokens)),
+            0,
             int(recovery.context_window_tokens)
             - prompt_tokens
             - int(recovery.context_safety_tokens),
         )
         ceiling = min(int(recovery.adaptive_max_tokens), context_room)
-        return max(int(payload.get("max_tokens", 0)), ceiling), prompt_tokens
+        return ceiling, prompt_tokens
 
     def _preflight_payload(
         self,
@@ -404,15 +452,15 @@ class LLMClient:
         answer_estimate, answer_evidence = self._answer_estimate(
             payload, expected_output_tokens
         )
-        historical_total, history_samples = self._history_high_water(
-            str(payload.get("model", "")), operation
+        historical_total, history_samples = self._history_demand(
+            self._budget_key(operation, payload)
         )
         reasoning_estimate = max(
             int(recovery.bootstrap_reasoning_tokens),
             historical_total - answer_estimate,
         )
         reasoning_evidence = (
-            "model_operation_high_water" if historical_total else "bootstrap"
+            "served_model_operation_p90" if historical_total else "bootstrap"
         )
 
         answer_headroom = math.ceil(answer_estimate * 1.35) + 512
@@ -437,7 +485,7 @@ class LLMClient:
             "reasoning_estimate_tokens": reasoning_estimate,
             "reasoning_evidence": reasoning_evidence,
             "history_samples": history_samples,
-            "historical_high_water_tokens": historical_total,
+            "historical_demand_p90_tokens": historical_total,
             "answer_headroom_tokens": answer_headroom,
             "reasoning_headroom_tokens": reasoning_headroom,
             "uncertainty_multiplier": 1.25,
@@ -880,8 +928,32 @@ class LLMClient:
         ):
             calculated = max(calculated, int(recovery.max_tokens))
         ceiling, prompt_tokens = self._adaptive_ceiling(payload)
+        # 8.5: within-request growth is useful -- if THIS call truncated, its
+        # next attempt should get more room -- but it must be clamped by the
+        # corrected ceiling so it cannot ask for more than the window holds.
         minimum_growth = max(1024, math.ceil(original_max * 0.50))
         requested = min(max(original_max + minimum_growth, calculated), ceiling)
+
+        # 8.6: the previous attempt already ran AT the ceiling and still
+        # truncated, and no extra room is available. An identical prompt at the
+        # same cap cannot produce a different outcome -- in production this
+        # burned three attempts of 11-14 minutes each on one chunk.
+        exhausted_strategy = ""
+        if (
+            failure_reason == "length"
+            and original_max >= ceiling
+            and requested <= original_max
+        ):
+            if recovery.model.strip():
+                payload["model"] = recovery.model.strip()
+                exhausted_strategy = "ceiling_exhausted_fallback_model"
+            else:
+                # For critique the honest outcome is to stop here and let the
+                # existing qa_unavailable path mark the chunk for review.
+                raise TruncatedCompletionError(
+                    "Output ceiling reached and no escalation is configured."
+                )
+
         payload["max_tokens"] = requested
         calculation = {
             "stage": "recovery",
@@ -901,6 +973,8 @@ class LLMClient:
             "applied_max_tokens": requested,
             "ceiling_applied": requested < max(original_max + minimum_growth, calculated),
         }
+        if exhausted_strategy:
+            calculation["strategy"] = exhausted_strategy
         return payload, calculation
 
     def _initial_payload_for_operation(
@@ -1194,6 +1268,7 @@ class LLMClient:
                     usage=usage,
                     content=content,
                     finish_reason=finish_reason,
+                    response_model=response_model,
                 )
 
                 event = self._attempt_event(
@@ -1269,6 +1344,7 @@ class LLMClient:
                     usage=usage,
                     content=failure_content,
                     finish_reason=finish_reason,
+                    response_model=response_model,
                 )
 
                 event = self._attempt_event(
@@ -1439,6 +1515,7 @@ class LLMClient:
                     usage=usage,
                     content=content,
                     finish_reason=finish_reason,
+                    response_model=response_model,
                 )
 
                 event = self._attempt_event(
@@ -1514,6 +1591,7 @@ class LLMClient:
                     usage=usage,
                     content=failure_content,
                     finish_reason=finish_reason,
+                    response_model=response_model,
                 )
 
                 event = self._attempt_event(

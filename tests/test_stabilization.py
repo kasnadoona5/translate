@@ -256,7 +256,19 @@ class TestBoundedRecovery(unittest.TestCase):
         self.assertEqual(payloads[0]["max_tokens"], 50000)
         self.assertEqual(payloads[3]["max_tokens"], 50000)
 
-    def test_length_failure_raises_next_first_attempt_immediately(self) -> None:
+    def test_length_failure_raises_only_its_own_retry(self) -> None:
+        """A truncation must escalate THIS call, not the next one.
+
+        Contract change (Phase 8.2). This test previously asserted that
+        payloads[2] -- the FIRST attempt of the SECOND call -- jumped straight
+        to adaptive_max_tokens, because a truncated call recorded
+        ceil(failed_budget * 1.5) as observed demand. That ratchet is what
+        drove the production escalation 32,280 -> 150,494 requested against an
+        85,000 clamp, and it never decayed.
+
+        Within-request growth is deliberately unchanged (payloads[1]): if THIS
+        call truncated, its own next attempt still gets more room.
+        """
         payloads = []
         responses = iter([
             _response("partial", "length"),
@@ -274,10 +286,14 @@ class TestBoundedRecovery(unittest.TestCase):
         self.client.complete(messages=messages, _operation="translation")
 
         self.assertEqual(payloads[0]["max_tokens"], 50000)
+        # Unchanged: this call's own retry still escalates.
         self.assertEqual(payloads[1]["max_tokens"], 75000)
+        # Changed: the next call opens at the predictive floor again, because
+        # the truncated attempt taught nothing. The successful recovery at
+        # 75,000 consumed far less than that, so it does not raise the floor.
         self.assertEqual(
             payloads[2]["max_tokens"],
-            self.config.llm.recovery.adaptive_max_tokens,
+            self.config.llm.recovery.predictive_min_tokens,
         )
 
     def test_budget_high_water_is_isolated_by_operation(self) -> None:
