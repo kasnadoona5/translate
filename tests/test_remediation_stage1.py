@@ -454,3 +454,195 @@ def test_valid_glossary_upload_replaces_and_leaves_no_staging_file(
     target = tmp_path / "glossary" / "philosophy.csv"
     assert target.read_bytes() == replacement
     assert not list((tmp_path / "glossary").glob("*.part"))
+
+
+# ---------------------------------------------------------------------------
+# Fix 4.1 — resume refuses a changed source
+# ---------------------------------------------------------------------------
+
+def _chunk(index: int, text: str):
+    from tarjomeh.chunking.chunker import Chunk
+
+    return Chunk(index=index, text=text, chapter_title="Ch", section_title="")
+
+
+def _pipeline_with_db(db):
+    """A pipeline shell for testing _verify_resume_alignment in isolation.
+
+    The verifier touches nothing but self.db, so a full __init__ (which builds
+    an LLM client) would only add coupling.
+    """
+    from tarjomeh.core.pipeline import TranslationPipeline
+
+    pipeline = TranslationPipeline.__new__(TranslationPipeline)
+    pipeline.db = db
+    return pipeline
+
+
+def test_chunk_fingerprint_ignores_whitespace_only_differences() -> None:
+    from tarjomeh.core.pipeline import TranslationPipeline
+
+    fingerprint = TranslationPipeline._chunk_fingerprint
+    assert fingerprint("the state") == fingerprint("the   state")
+    assert fingerprint("the state") == fingerprint("  the\nstate\t")
+    assert fingerprint("the state") != fingerprint("the estate")
+    # A missing chunk row must not collide with a genuinely empty one.
+    assert fingerprint(None) == fingerprint("")
+
+
+def test_resume_alignment_accepts_an_unchanged_source(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    db = JobDatabase()
+    db.create_job("aligned", "book.pdf", {})
+    chunks = [_chunk(0, "The state persists."), _chunk(1, "Power is relational.")]
+    db.save_chunks("aligned", chunks)
+
+    # Reformatted whitespace is not a content change.
+    reparsed = [_chunk(0, "The  state   persists."), _chunk(1, "Power is relational.")]
+    _pipeline_with_db(db)._verify_resume_alignment("aligned", reparsed)
+
+
+def test_resume_alignment_allows_a_job_with_no_saved_chunks(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    db = JobDatabase()
+    db.create_job("fresh", "book.pdf", {})
+    _pipeline_with_db(db)._verify_resume_alignment("fresh", [_chunk(0, "anything")])
+
+
+@pytest.mark.parametrize(
+    "reparsed_texts,label",
+    [
+        (["The state persists.", "Power is coercive."], "edited chunk text"),
+        (["The state persists."], "a chunk disappeared"),
+        (["The state persists.", "Power is relational.", "New tail."], "a chunk was added"),
+        (["Power is relational.", "The state persists."], "chunks were reordered"),
+    ],
+)
+def test_resume_alignment_refuses_a_changed_source(
+    tmp_path, monkeypatch, reparsed_texts, label
+) -> None:
+    """Reuse is by chunk index alone, so a source edit must not pass silently."""
+    from tarjomeh.core.pipeline import ResumeSourceMismatchError
+    from tarjomeh.jobs.database import JobStatus
+
+    monkeypatch.chdir(tmp_path)
+    db = JobDatabase()
+    db.create_job("drifted", "book.pdf", {})
+    db.save_chunks(
+        "drifted",
+        [_chunk(0, "The state persists."), _chunk(1, "Power is relational.")],
+    )
+
+    reparsed = [_chunk(i, text) for i, text in enumerate(reparsed_texts)]
+    with pytest.raises(ResumeSourceMismatchError):
+        _pipeline_with_db(db)._verify_resume_alignment("drifted", reparsed)
+
+    # The job must be parked for a human, not left looking runnable.
+    assert JobDatabase().get_job("drifted")["raw_status"] == JobStatus.PAUSED_ERROR, label
+
+
+def test_resume_mismatch_message_names_the_counts(tmp_path, monkeypatch) -> None:
+    from tarjomeh.core.pipeline import ResumeSourceMismatchError
+
+    monkeypatch.chdir(tmp_path)
+    db = JobDatabase()
+    db.create_job("counted", "book.pdf", {})
+    db.save_chunks("counted", [_chunk(0, "alpha"), _chunk(1, "beta")])
+
+    with pytest.raises(ResumeSourceMismatchError) as excinfo:
+        _pipeline_with_db(db)._verify_resume_alignment("counted", [_chunk(0, "alpha")])
+    message = str(excinfo.value)
+    assert "saved=2" in message and "current=1" in message
+    assert "dropped=[1]" in message
+
+
+# ---------------------------------------------------------------------------
+# Fix 4.2 — chunk completion and memory commit atomically
+# ---------------------------------------------------------------------------
+
+def test_checkpoint_commits_chunk_memory_and_search_together(tmp_path, monkeypatch) -> None:
+    from tarjomeh.jobs.database import ChunkStatus
+
+    monkeypatch.chdir(tmp_path)
+    db = JobDatabase()
+    db.create_job("atomic", "book.pdf", {})
+    db.save_chunks("atomic", [_chunk(0, "The state persists.")])
+
+    db.commit_chunk_checkpoint(
+        "atomic",
+        0,
+        ChunkStatus.COMPLETED,
+        "دولت پایدار است.",
+        {"short_term": ["one"]},
+        search_state={"queries_used": 3},
+    )
+
+    fresh = JobDatabase()
+    record = fresh.get_chunks("atomic")[0]
+    assert record["status"] == ChunkStatus.COMPLETED
+    assert record["translation"] == "دولت پایدار است."
+    assert fresh.get_memory_state("atomic") == {"short_term": ["one"]}
+    assert fresh.get_job_artifact("atomic", "web_search_state") == {"queries_used": 3}
+
+
+def test_checkpoint_without_translation_keeps_the_previous_one(tmp_path, monkeypatch) -> None:
+    """Mirrors update_chunk: translation=None means status-only."""
+    from tarjomeh.jobs.database import ChunkStatus
+
+    monkeypatch.chdir(tmp_path)
+    db = JobDatabase()
+    db.create_job("status-only", "book.pdf", {})
+    db.save_chunks("status-only", [_chunk(0, "source")])
+    db.update_chunk("status-only", 0, ChunkStatus.TRANSLATED, "prior translation")
+
+    db.commit_chunk_checkpoint(
+        "status-only", 0, ChunkStatus.NEEDS_REVIEW, None, {"short_term": []}
+    )
+
+    record = JobDatabase().get_chunks("status-only")[0]
+    assert record["status"] == ChunkStatus.NEEDS_REVIEW
+    assert record["translation"] == "prior translation"
+
+
+def test_checkpoint_without_search_state_leaves_the_artifact_untouched(
+    tmp_path, monkeypatch
+) -> None:
+    from tarjomeh.jobs.database import ChunkStatus
+
+    monkeypatch.chdir(tmp_path)
+    db = JobDatabase()
+    db.create_job("no-search", "book.pdf", {})
+    db.save_chunks("no-search", [_chunk(0, "source")])
+    db.save_job_artifact("no-search", "web_search_state", {"queries_used": 9})
+
+    db.commit_chunk_checkpoint(
+        "no-search", 0, ChunkStatus.COMPLETED, "ترجمه", {"short_term": []}
+    )
+    assert JobDatabase().get_job_artifact("no-search", "web_search_state") == {
+        "queries_used": 9
+    }
+
+
+def test_a_failed_checkpoint_rolls_back_the_chunk_update(tmp_path, monkeypatch) -> None:
+    """The whole point of the fix: no half-written checkpoint survives.
+
+    Previously update_chunk committed on its own, so a crash before the memory
+    write left a COMPLETED chunk whose memory contribution was missing.
+    """
+    from tarjomeh.jobs.database import ChunkStatus
+
+    monkeypatch.chdir(tmp_path)
+    db = JobDatabase()
+    db.create_job("rollback", "book.pdf", {})
+    db.save_chunks("rollback", [_chunk(0, "source")])
+    db.update_chunk("rollback", 0, ChunkStatus.TRANSLATED, "prior translation")
+
+    unserialisable = {"memory": object()}
+    with pytest.raises(TypeError):
+        db.commit_chunk_checkpoint(
+            "rollback", 0, ChunkStatus.COMPLETED, "new translation", unserialisable
+        )
+
+    record = JobDatabase().get_chunks("rollback")[0]
+    assert record["status"] == ChunkStatus.TRANSLATED, "chunk status was not rolled back"
+    assert record["translation"] == "prior translation", "translation was not rolled back"

@@ -6,6 +6,7 @@ web search, translation, critique/refinement, and final output exporting.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import time
@@ -92,6 +93,10 @@ logger = logging.getLogger(__name__)
 class PipelinePausedException(Exception):
     """Raised when the translation pipeline is cooperatively paused."""
     pass
+
+
+class ResumeSourceMismatchError(RuntimeError):
+    """Raised when a resumed job's input no longer matches its saved chunks."""
 
 
 class ChapterCheckpointReached(PipelinePausedException):
@@ -2076,6 +2081,49 @@ class TranslationPipeline:
             )
         return artifact
 
+    @staticmethod
+    def _chunk_fingerprint(text: str) -> str:
+        """Whitespace-insensitive fingerprint of chunk source text."""
+        normalized = " ".join((text or "").split())
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    def _verify_resume_alignment(self, job_id: str, chunks: list[Chunk]) -> None:
+        """Refuse to resume when the input no longer matches the saved chunks.
+
+        Completed translations are reused by chunk index alone, so a source
+        edit between pause and resume would silently attach translation N to
+        different source text. Fail loudly instead of corrupting the book.
+        """
+        saved = {
+            int(record["chunk_index"]): (record.get("text") or "")
+            for record in self.db.get_chunks(job_id)
+        }
+        if not saved:
+            return
+
+        mismatched = [
+            idx for idx, text in sorted(saved.items())
+            if idx < len(chunks)
+            and self._chunk_fingerprint(text)
+            != self._chunk_fingerprint(chunks[idx].text)
+        ]
+        dropped = sorted(idx for idx in saved if idx >= len(chunks))
+        added = max(0, len(chunks) - len(saved))
+        if not mismatched and not dropped and not added:
+            return
+
+        message = (
+            "Cannot resume: the input document no longer matches the chunks "
+            f"saved for this job (saved={len(saved)} current={len(chunks)} "
+            f"mismatched={mismatched[:10]} dropped={dropped[:10]} "
+            f"added={added}). Resuming would attach existing translations to "
+            "different source text. Restore the original input file, or start "
+            "a new job."
+        )
+        self.db.log_event(job_id, "ERROR", message)
+        self.db.update_job_status(job_id, JobStatus.PAUSED_ERROR, message)
+        raise ResumeSourceMismatchError(message)
+
     def run(
         self,
         input_path: Path,
@@ -2172,6 +2220,9 @@ class TranslationPipeline:
                     token_counter=token_counter
                 )
             chunks = chunker.chunk(document)
+            # Translations below are reused by chunk index alone. Verify the
+            # source still matches before trusting any of them.
+            self._verify_resume_alignment(job_id, chunks)
         else:
             # Fresh parse and chunk
             parser = self._get_parser(input_path)
@@ -2553,12 +2604,16 @@ class TranslationPipeline:
                             if _chunk_needs_review(self.db, job_id, idx)
                             else ChunkStatus.COMPLETED
                         )
-                        self.db.update_chunk(job_id, idx, final_status, translation)
-                        self.db.save_memory_state(job_id, memory_manager.to_dict())
-                        self.db.save_job_artifact(
+                        # One transaction: a crash between these three
+                        # writes used to leave a COMPLETED chunk whose memory
+                        # contribution was missing on resume.
+                        self.db.commit_chunk_checkpoint(
                             job_id,
-                            "web_search_state",
-                            web_searcher.export_state(),
+                            idx,
+                            final_status,
+                            translation,
+                            memory_manager.to_dict(),
+                            search_state=web_searcher.export_state(),
                         )
                     
                     return idx, translation
@@ -2757,12 +2812,16 @@ class TranslationPipeline:
                             if _chunk_needs_review(self.db, job_id, idx)
                             else ChunkStatus.COMPLETED
                         )
-                        self.db.update_chunk(job_id, idx, final_status, translation)
-                        self.db.save_memory_state(job_id, memory_manager.to_dict())
-                        self.db.save_job_artifact(
+                        # One transaction: a crash between these three
+                        # writes used to leave a COMPLETED chunk whose memory
+                        # contribution was missing on resume.
+                        self.db.commit_chunk_checkpoint(
                             job_id,
-                            "web_search_state",
-                            web_searcher.export_state(),
+                            idx,
+                            final_status,
+                            translation,
+                            memory_manager.to_dict(),
+                            search_state=web_searcher.export_state(),
                         )
 
                         if self._claim_chapter_checkpoint(job_id, chunks, idx):
@@ -3402,6 +3461,8 @@ class TranslationPipeline:
             Path(job["input_path"]),
             structure_version=int(structure_artifact.get("version", 1)),
         )
+        # Same index-only assumption as resume, so the same guard applies.
+        self._verify_resume_alignment(job_id, chunks)
         if chunk_index < 0 or chunk_index >= len(chunks):
             raise ValueError(f"Chunk {chunk_index} is out of range.")
 

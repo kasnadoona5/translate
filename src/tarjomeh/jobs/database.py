@@ -785,6 +785,57 @@ class JobDatabase:
                 )
             conn.commit()
 
+    def commit_chunk_checkpoint(
+        self,
+        job_id: str,
+        chunk_index: int,
+        status: str,
+        translation: str | None,
+        memory_state: dict[str, Any],
+        search_state: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist chunk completion and its memory snapshot in ONE transaction.
+
+        These were three separate commits, so a crash landing between them left
+        a chunk marked COMPLETED whose memory contribution was never saved --
+        and resume trusts both. The SQL mirrors update_chunk, save_memory_state
+        and save_job_artifact exactly; only the transaction boundary changes.
+        """
+        timestamp = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            if translation is not None:
+                conn.execute(
+                    "UPDATE chunks SET status = ?, translation = ? "
+                    "WHERE job_id = ? AND chunk_index = ?",
+                    (status, translation, job_id, chunk_index)
+                )
+            else:
+                conn.execute(
+                    "UPDATE chunks SET status = ? WHERE job_id = ? AND chunk_index = ?",
+                    (status, job_id, chunk_index)
+                )
+            conn.execute(
+                "INSERT OR REPLACE INTO memory_state (job_id, state_data) VALUES (?, ?)",
+                (job_id, json.dumps(memory_state))
+            )
+            if search_state is not None:
+                conn.execute(
+                    """
+                    INSERT INTO job_artifacts (job_id, artifact_key, payload, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(job_id, artifact_key) DO UPDATE SET
+                        payload = excluded.payload,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        job_id,
+                        "web_search_state",
+                        json.dumps(search_state, ensure_ascii=False, sort_keys=True),
+                        timestamp,
+                    ),
+                )
+            conn.commit()
+
     def get_chunks(self, job_id: str) -> list[dict[str, Any]]:
         """Retrieve all chunk records for a job."""
         with self._get_connection() as conn:
