@@ -5,10 +5,10 @@ branch `fix/remediation`, on top of baseline commit `f6b863e`.
 
 | | |
 |---|---|
-| Fixes shipped | Stage 1 (20) + Phase 8 (6 parts) + Unicode corruption + Tier 1 (4) + 10.1 |
-| Commits | 12 (+1 chore, +2 docs) |
-| Source files changed | 13 (plus `.gitignore`) |
-| Tests | **352 baseline → 562 passing** (+210 new, 0 failures) |
+| Fixes shipped | Stage 1 (20) + Phase 8 (6 parts) + items 15, 16, 12, 19 + Tier 1 (4) + 10.1 |
+| Commits | 18 total |
+| Source files changed | 13 (plus `.gitignore`), 1 of them new |
+| Tests | **352 baseline → 625 passing** (+273 new, 0 failures) |
 | mypy | 93 errors before, **89 after** — four *fewer*; no new findings |
 | ruff | 244 before, **240 after** — 4 *fewer*; no new findings |
 | Prompt files edited | **none** |
@@ -43,7 +43,7 @@ Two further constraints you set:
 
 ```bash
 cd /c/Users/admin/Downloads/VSCODE/Translate-v84-fix
-./.venv/Scripts/python.exe -m pytest -q                      # 562 passed
+./.venv/Scripts/python.exe -m pytest -q                      # 625 passed
 ./.venv/Scripts/python.exe -m ruff check src/tarjomeh/       # 240 (all pre-existing)
 ./.venv/Scripts/python.exe -m mypy src/tarjomeh/             # 89 (all pre-existing)
 ```
@@ -474,16 +474,151 @@ already specified that way ("Output impact: none directly"), and item 16 can mar
 `needs_review` instead of rejecting — then promote them to blocking only after the
 item-20 corpus shows they do not fire on correct translations.
 
+---
+
+# Change map — which file, which symbol, which commit
+
+Everything below is keyed by **symbol name, not line number**. Line numbers drift:
+`core/pipeline.py` moved by roughly 200 lines over this work, so grep the symbol
+rather than trusting the number. Line numbers are given as of commit `39d209b`.
+
+To see any fix's exact diff:
+
+```bash
+git show <commit> -- <path>          # one file from one commit
+git log --oneline f6b863e..HEAD      # every commit in this work
+git diff f6b863e..HEAD -- <path>     # cumulative change to one file
+```
+
+| Fix | File | Symbols (new / rewritten) | Line | Commit |
+|---|---|---|---|---|
+| 7.1 | `cli/main.py` | `cmd_serve` — dataclass access + non-loopback refusal | — | `3b437a1` |
+| 7.8 | `parsers/__init__.py` | **new file**; `get_parser`, model re-exports | 1 | `3b437a1` |
+| 7.9 | `jobs/database.py` | `_JOB_ID_RE` (new); `create_job`, `cleanup_job` | 24 | `3b437a1` |
+| 6.4 | `web/app.py` | `_job_critique_threshold` — fallback 7.0 → 9.0 | — | `3b437a1` |
+| 11.2 / 11.3 | `persian/typography.py` | `_SPACED_DECIMAL_RE` (new); `process` | 67 | `3b437a1` |
+| 1.1 | `web/app.py` | `_insecure_ui_allowed`, `_tokens_match` (new); `_require_auth` (rewritten) | 269, 276, 283 | `daa5655` |
+| 1.2 | `core/config.py` | `_SECRET_CONFIG_PATHS`, `redact_config_secrets`, `_rehydrate_redacted_secrets` (new); `to_dict` | 363, 369, 628, 952 | `daa5655` |
+| 1.2 | `jobs/database.py` | `_scrub_config_secrets` (new); `_init_db` migration, `get_job`, `list_jobs` | 33 | `daa5655` |
+| 1.2 | `core/pipeline.py` | both `create_job` call sites → `to_dict(redact_secrets=True)` | — | `daa5655` |
+| 2.1 | `core/pipeline.py` | `run` — `update_job_status(RUNNING)` on every path | — | `b7f859a` |
+| 2.1 | `web/app.py` | `_record_job_failure` (new) | 202 | `b7f859a` |
+| 2.1 | `cli/main.py` | `cmd_translate` — persists PAUSED / FAILED | — | `b7f859a` |
+| 2.2 | `web/app.py` | `_JobClaim`, `_try_claim_job`, `_assign_job_worker`, `_release_job_claim` (new) | 135, 148, 163, 169 | `b7f859a` |
+| 2.3 | `web/app.py` | `_reject` (new, nested in `api_translate`) | 441 | `b7f859a` |
+| 2.4 | `web/app.py` | glossary upload — staged `.part` + `os.replace` | — | `b7f859a` |
+| 4.1 | `core/pipeline.py` | `ResumeSourceMismatchError`, `_chunk_fingerprint`, `_verify_resume_alignment` (new) | 101, 2192, 2197 | `faf3e74` |
+| 4.2 | `jobs/database.py` | `commit_chunk_checkpoint` (new) | 788 | `faf3e74` |
+| 7.2 | `core/config.py` | `load`, `from_toml` — `validate=` keyword | 411, 457 | `8620891` |
+| 7.2 | `cli/main.py` | `cmd_translate`, `cmd_serve` — override order + clean errors | — | `8620891` |
+| 7.3 | `core/config.py` | `_apply_env_overrides`, `update_from_overrides` — mirror to `llm.ollama.model` | — | `8620891` |
+| 7.10 | `context/web_searcher.py` | term loop — skip non-dict candidates | — | `8620891` |
+| 7.4 | `core/pipeline.py` | `_run_async` (rewritten) | 2097 | `c6976e1` |
+| 7.5 | `core/llm_client.py` | `_aclient`, `aclose` (rewritten); `_all_async_clients` registry | 192, 231 | `c6976e1` |
+| 7.5 | `core/pipeline.py` | `close`, `__enter__`, `__exit__` (new) | 2160 | `c6976e1` |
+| 7.5 | `web/app.py` | `_close_pipeline` (new) | 192 | `c6976e1` |
+| 7.6 | `core/pipeline.py` | `run` — OCR after job creation, `jobs/ocr/<job_id>/`, `ocr_output` artifact | — | `c6976e1` |
+| 7.7 | `context/search_providers.py` | `_budget_lock` — atomic check-and-reserve | — | `c6976e1` |
+| 7.7 | `context/web_searcher.py` | `_lock` — guards `cache` / `result_audit` | — | `c6976e1` |
+| 7.7 | `web/app.py` | `_glossary_write_lock`, `_serialise_glossary_writes` (new) | 45, 177 | `c6976e1` |
+| 8.1–8.6 | `core/llm_client.py` | `_budget_key`, `_history_demand` (new); `_record_budget_observation`, `_adaptive_ceiling`, `_recovery_payload` | 339, 358, 374, 421 | `3457644` |
+| 0e / 0f | `quality/integrity.py` | `corruption_artifacts`, `describe_corruption` (new); gate check | 449, 460 | `51adba0` |
+| 10.2 / 11.6 | `core/pipeline.py` | `_FRONT_MATTER_TITLES`, `_is_front_matter` (new); both extraction sites | 1326, 1346 | `82e34a7` |
+| 5.2 | `core/pipeline.py` | chapter-end test + grouping → `_chunk_chapter_position` | — | `82e34a7` |
+| 6.3 | `chunking/chunker.py` | `FixedChunker.chunk` — `para_style_eligible`, structural metadata | 376 | `82e34a7` |
+| 3.1 | `core/pipeline.py` | `ParagraphIdentityError`, `_used_paragraph_protocol` (new); both assembly sites | 1834, 1841 | `9373726` |
+| 10.1 | `chunking/chunker.py` | `SemanticChunker.chunk` — `buffer_is_table` table boundary | 179, 194, 228 | `362eba5` |
+| 16 | `quality/integrity.py` | `_repeated_spans`, `newly_repeated_spans` (new); `duplicate_paragraph` baselined | 332, 349 | `1424cd7` |
+| 15 repair | `quality/integrity.py` | `repair_corruption` (new) | 377 | `f5559ac` |
+| 15 repair | `core/pipeline.py` | `_translate_single_chunk` — repair before gate and typography | — | `f5559ac` |
+| 12 | `quality/structure_audit.py` | **new file**; `announced_counts`, `audit_structure`, `audit_payload` | 127, 186, 273 | `d56716a` |
+| 12 | `core/pipeline.py` | `structure_audit` chunk event (report-only) | — | `d56716a` |
+| 19 | `web/app.py` | `api_job_qa_report` — new categories, `actionable_structure` | 1271 | `39d209b` |
+
+## Reverse index — what touched each file
+
+| File | Fixes |
+|---|---|
+| `core/pipeline.py` | 1.2, 2.1, 4.1, 4.2, 7.4, 7.5, 7.6, 10.2/11.6, 5.2, 3.1, 15-repair, 12 |
+| `web/app.py` | 6.4, 1.1, 2.1, 2.2, 2.3, 2.4, 7.5, 7.7, 19 |
+| `quality/integrity.py` | 0e/0f, 16, 15-repair |
+| `core/config.py` | 1.2, 7.2, 7.3 |
+| `jobs/database.py` | 7.9, 1.2, 4.2 |
+| `core/llm_client.py` | 7.5, 8.1–8.6 |
+| `cli/main.py` | 7.1, 2.1, 7.2 |
+| `chunking/chunker.py` | 6.3, 10.1 |
+| `context/web_searcher.py` | 7.10, 7.7 |
+| `context/search_providers.py` | 7.7 |
+| `persian/typography.py` | 11.2 / 11.3 |
+| `parsers/__init__.py` | 7.8 (new file) |
+| `quality/structure_audit.py` | 12 (new file) |
+
+---
+
+# Round three: items 16, 15-repair, 12, 19
+
+Chosen to cut human-review load rather than add to it.
+
+| Item | What changed | Review load |
+|---|---|---|
+| **16** | `duplicate_paragraph` now baselined; new `duplicate_span_introduced` | **down** — removes a false positive, adds a real catch |
+| **15 repair** | `repair_corruption` reconstructs only what the source settles | **down** — unambiguous damage stops needing a human |
+| **12** | `structure_audit.py`, report-only | neutral — only 2 of 4 classifications escalate |
+| **19** | QA report shows the new categories | neutral — separates "note only" from "review required" |
+
+## Corrections to earlier rounds of this report
+
+Two items were described here as unimplemented. Both were **substantially built
+already**, and the earlier description was wrong:
+
+* **Item 16** — the per-issue salvage path in
+  `_salvage_local_refinement_edits` already rejected an edit that doubled an
+  ADJACENT word (`newly_repeated_adjacent_words`), already guarded overlapping
+  issue spans (`overlapping_local_span`), and already enforced span uniqueness,
+  locality and size ratios. The genuine gap was the **full-candidate refinement
+  path**, which had no repetition check beyond whole-paragraph duplication.
+* **Item 14** — the same salvage path already requires an accepted edit to name
+  a real span, be uniquely locatable, stay within size bounds, and not cross a
+  paragraph boundary. The gap is semantic weakening and unrelated rewriting on
+  the full-candidate path.
+
+A third correction, on my own work: the first version of the
+`duplicate_paragraph` baseline used set subtraction against the source. That
+silently did nothing, because the source is English and the candidate Persian, so
+normalised spans never intersect. Only the **count** of duplicated paragraphs is
+comparable across languages. Caught while testing and replaced.
+
+## The refiner keeps its veto
+
+Confirmed by `git diff f6b863e..HEAD`: **zero changes** to the refiner's
+per-issue decision handling. `_salvage_local_refinement_edits` still treats
+anything that is not `accepted` or `partially_applied` as `refiner_rejected`, so
+the refiner accepts, partially applies or rejects each MQM finding
+independently. Item 14 adds conditions on what an *accepted* edit may commit; it
+never forces the refiner to accept anything.
+
+## Still outstanding
+
+| Item | Why it is still open |
+|---|---|
+| **20** verification corpus | Prerequisite for promoting 12/16 to blocking |
+| **17 / 11.4** real Word tables | Needs cell rejoining + a confidence gate. Measured: 37 distinct x0 and 78 distinct y0 values across 82 table paragraphs on one page |
+| **13** unified admission gate | 8 scattered `evaluate()` call sites to route through one entry point with uniform restore |
+| **14** refiner protection | Semantic weakening / unrelated rewriting on the full-candidate path |
+| **18** (2 of 5 parts) | Summary terminology reconciliation; broaden research-source survival |
+
 ## Test coverage added
 
 | File | Tests | Covers |
 |---|---|---|
 | `tests/test_remediation_stage1.py` | 96 | fixes 1.1, 1.2, 2.1–2.4, 4.1, 4.2, 7.2–7.7, 7.9, 7.10 |
 | `tests/test_llm_budget.py` | 27 | Phase 8 — split into 14 invariants + 13 target behaviours |
-| `tests/test_unicode_integrity.py` | 16 | Unicode corruption, incl. false-positive guards |
+| `tests/test_unicode_integrity.py` | 28 | Unicode corruption + item 15 repair refusals |
 | `tests/test_tier1_memory.py` | 45 | 10.2/11.6 front matter, 5.2 positions, 6.3 chunker policy |
 | `tests/test_paragraph_identity.py` | 15 | 3.1 gate alignment and graceful degradation |
 | `tests/test_table_chunking.py` | 11 | 10.1 table boundaries; no paragraph lost or reordered |
+| `tests/test_duplicate_guard.py` | 17 | item 16 — mostly false-positive guards |
+| `tests/test_structure_audit.py` | 34 | item 12 — weighted toward silence |
 
 Two design notes on this suite:
 
