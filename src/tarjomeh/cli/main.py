@@ -163,6 +163,8 @@ def cmd_translate(args: argparse.Namespace) -> int:
             logging.exception("Translation failed")
             return 1
 
+    pipeline.close()
+
     console.print(f"\n[bold green]✓ Translation complete![/bold green]")
     console.print(f"  Output: [cyan]{result.output_path}[/cyan]")
     console.print(f"  Chunks: {result.total_chunks}")

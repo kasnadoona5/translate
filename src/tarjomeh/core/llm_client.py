@@ -180,25 +180,38 @@ class LLMClient:
         self._budget_history: dict[tuple[str, str], dict[str, int]] = {}
         self._budget_lock = threading.Lock()
 
+        # _thread_local only ever exposes the CALLING thread's clients, so
+        # aclose() could never reach a worker thread's AsyncClient and every
+        # worker leaked its connection pool. Keep a process-wide registry.
+        self._all_async_clients: list[httpx.AsyncClient] = []
+        self._async_registry_lock = threading.Lock()
+
     @property
     def _aclient(self) -> httpx.AsyncClient:
-        """Get or create an AsyncClient bound to the active event loop for the current thread."""
+        """Get or create an AsyncClient bound to this thread's active loop."""
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
         except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        loop_id = id(loop)
-        if not hasattr(self._thread_local, "clients"):
-            self._thread_local.clients = {}
-            
-        if loop_id not in self._thread_local.clients or self._thread_local.clients[loop_id].is_closed:
-            self._thread_local.clients[loop_id] = httpx.AsyncClient(
-                timeout=self._timeout
-            )
-            
-        return self._thread_local.clients[loop_id]
+            loop = asyncio.get_event_loop_policy().get_event_loop()
+
+        clients: dict[int, httpx.AsyncClient] = (
+            getattr(self._thread_local, "clients", None) or {}
+        )
+        self._thread_local.clients = clients
+
+        # Drop entries whose loop is gone. _run_async creates a fresh loop per
+        # call, so without this the cache grows without bound.
+        for stale_id, stale in list(clients.items()):
+            if stale_id != id(loop) and stale.is_closed:
+                clients.pop(stale_id, None)
+
+        client = clients.get(id(loop))
+        if client is None or client.is_closed:
+            client = httpx.AsyncClient(timeout=self._timeout)
+            clients[id(loop)] = client
+            with self._async_registry_lock:
+                self._all_async_clients.append(client)
+        return client
 
     def _http_timeout(self) -> httpx.Timeout:
         transport = self.config.llm.transport
@@ -214,11 +227,18 @@ class LLMClient:
         self._client.close()
 
     async def aclose(self) -> None:
-        """Close all thread-local async HTTP clients."""
-        if hasattr(self._thread_local, "clients"):
-            for client in self._thread_local.clients.values():
-                if not client.is_closed:
+        """Close every async HTTP client this instance created, on any thread."""
+        with self._async_registry_lock:
+            clients = list(self._all_async_clients)
+            self._all_async_clients.clear()
+        for client in clients:
+            if not client.is_closed:
+                try:
                     await client.aclose()
+                except Exception:
+                    logger.debug("AsyncClient close failed", exc_info=True)
+        if hasattr(self._thread_local, "clients"):
+            self._thread_local.clients.clear()
 
     def _get_next_api_key(self) -> str:
         """Retrieve the next non-empty API key from the rotation list."""

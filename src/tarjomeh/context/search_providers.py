@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import re
 import urllib.parse
 import logging
@@ -482,6 +483,10 @@ class SearchProviderChain(BaseSearchProvider):
         self.max_retries = max(0, max_retries)
         self.query_budget = max(0, query_budget)
         self.queries_used = 0
+        # The budget check and the increment were separate statements, so
+        # concurrent workers could both pass the check and overrun a PAID
+        # search budget. Reserve the slot atomically instead.
+        self._budget_lock = threading.Lock()
         self.cache: dict[str, list[SearchResult]] = {}
         self.diagnostics: list[dict[str, Any]] = []
 
@@ -495,7 +500,15 @@ class SearchProviderChain(BaseSearchProvider):
                 "result_count": len(self.cache[cache_key]),
             })
             return self.cache[cache_key]
-        if self.queries_used >= self.query_budget:
+        with self._budget_lock:
+            if self.queries_used >= self.query_budget:
+                over_budget = True
+            else:
+                # Reserve the slot before the await below, so two concurrent
+                # workers cannot both pass the check.
+                self.queries_used += 1
+                over_budget = False
+        if over_budget:
             self.last_error = "query budget exhausted"
             self.diagnostics.append({
                 "query": query,
@@ -505,7 +518,6 @@ class SearchProviderChain(BaseSearchProvider):
             })
             return []
 
-        self.queries_used += 1
         for provider in self.providers:
             if not provider.available:
                 self.diagnostics.append({

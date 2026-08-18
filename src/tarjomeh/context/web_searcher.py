@@ -7,6 +7,7 @@ definitions, caches results, and returns them for prompt injection.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 from tarjomeh.core.config import TarjomehConfig
@@ -33,6 +34,9 @@ class WebContextSearcher:
         self.llm_client = llm_client
         self.cache: dict[str, str] = {}  # term_lower -> definition_str
         self.result_audit: dict[str, list[dict[str, Any]]] = {}
+        # One searcher instance is shared by every parallel worker, so the
+        # cache and audit dicts need a lock. Never held across an await.
+        self._lock = threading.Lock()
 
         phase7_reserve = (
             config.web_search.phase7_max_queries
@@ -89,7 +93,9 @@ class WebContextSearcher:
                     continue
                 
                 term_lower = term.lower()
-                if term_lower in self.cache:
+                with self._lock:
+                    already_cached = term_lower in self.cache
+                if already_cached:
                     continue
                 if query_count >= self.config.web_search.max_queries_per_chunk:
                     continue
@@ -102,7 +108,8 @@ class WebContextSearcher:
                     results,
                     identity=term,
                 )
-                self.result_audit[term_lower] = result_diagnostics
+                with self._lock:
+                    self.result_audit[term_lower] = result_diagnostics
                 accepted_count += sum(
                     1 for item in result_diagnostics if item.get("accepted")
                 )
@@ -114,9 +121,10 @@ class WebContextSearcher:
                         f"- {r.snippet[:650]} (source: {r.url})"
                         for r in ranked[:3]
                     )
-                    self.cache[term_lower] = def_str
                 else:
-                    self.cache[term_lower] = ""
+                    def_str = ""
+                with self._lock:
+                    self.cache[term_lower] = def_str
 
             diagnostics = (
                 self.provider.diagnostics[diagnostic_start:]

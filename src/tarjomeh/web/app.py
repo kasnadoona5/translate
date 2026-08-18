@@ -40,6 +40,9 @@ logger = logging.getLogger(__name__)
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tarjomeh-job")
 _active_jobs: dict[str, Future | _JobClaim] = {}
 _active_jobs_lock = threading.Lock()
+# Every glossary route does load -> mutate -> full rewrite. Without one lock
+# around that whole sequence, concurrent edits silently lose updates.
+_glossary_write_lock = threading.Lock()
 _progress_queues: dict[str, queue.Queue] = {}
 _PROGRESS_QUEUE_TTL_SECONDS = 300.0
 _QUERY_SECRET_RE = re.compile(
@@ -169,6 +172,31 @@ def _release_job_claim(job_id: str, expected: Any = None) -> None:
         current = _active_jobs.get(job_id)
         if expected is None or current is expected:
             _active_jobs.pop(job_id, None)
+
+
+def _serialise_glossary_writes(f):
+    """Serialise a glossary handler's whole read-modify-write sequence.
+
+    The lock has to span gm.load() through _save_glossary_entries(): the read
+    is part of the transaction, so locking only the write would still lose
+    concurrent edits.
+    """
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        with _glossary_write_lock:
+            return f(*args, **kwargs)
+
+    return wrapper
+
+
+def _close_pipeline(pipeline: Any) -> None:
+    """Release a pipeline's HTTP connection pools, never raising."""
+    if pipeline is None:
+        return
+    try:
+        pipeline.close()
+    except Exception:
+        logger.debug("Pipeline close failed", exc_info=True)
 
 
 def _record_job_failure(job_id: str, error: str) -> None:
@@ -526,6 +554,8 @@ def _register_api(app: Flask) -> None:
 
         # Submit translation job to thread pool
         def run_job():
+            # Hoisted so the finally can close it even if setup fails.
+            pipeline = None
             try:
                 from tarjomeh.core.config import TarjomehConfig
                 from tarjomeh.core.pipeline import TranslationPipeline
@@ -580,6 +610,7 @@ def _register_api(app: Flask) -> None:
                 })
                 _send_webhook(app.config.get("TARJOMEH_CONFIG"), job_id, "failed", str(e))
             finally:
+                _close_pipeline(pipeline)
                 _release_job_claim(job_id)
                 _schedule_progress_queue_cleanup(job_id, worker_queue)
 
@@ -1638,11 +1669,13 @@ def _register_api(app: Flask) -> None:
                            "Pause it before retranslating a chunk.",
             }), 409
 
+        pipeline = None
         try:
             config = TarjomehConfig.from_dict(job.get("config", {}))
             pipeline = TranslationPipeline(config)
             translation = pipeline.retranslate_chunk(job_id, chunk_index)
         finally:
+            _close_pipeline(pipeline)
             _release_job_claim(job_id)
 
         return jsonify({
@@ -1673,12 +1706,15 @@ def _register_api(app: Flask) -> None:
         input_path = Path(job["input_path"])
         extension = "md" if fmt == "markdown" else fmt
         output_path = input_path.parent / f"{input_path.stem}_reviewed.{extension}"
-        exported = pipeline.export_completed_job(
-            job_id,
-            output_path,
-            output_format=fmt,
-            bilingual_mode=bilingual,
-        )
+        try:
+            exported = pipeline.export_completed_job(
+                job_id,
+                output_path,
+                output_format=fmt,
+                bilingual_mode=bilingual,
+            )
+        finally:
+            _close_pipeline(pipeline)
         return jsonify({"status": "exported", "output_path": str(exported)})
 
     @app.route("/api/jobs/<job_id>/stream")
@@ -1768,6 +1804,7 @@ def _register_api(app: Flask) -> None:
         _progress_queues[job_id] = worker_queue
 
         def run_resume():
+            pipeline = None
             try:
                 from tarjomeh.core.config import TarjomehConfig
                 from tarjomeh.core.pipeline import TranslationPipeline
@@ -1808,6 +1845,7 @@ def _register_api(app: Flask) -> None:
                     "stage": "error", "progress": 0, "message": str(e)
                 })
             finally:
+                _close_pipeline(pipeline)
                 _release_job_claim(job_id)
                 _schedule_progress_queue_cleanup(job_id, worker_queue)
 
@@ -1858,6 +1896,7 @@ def _register_api(app: Flask) -> None:
         methods=["POST"],
     )
     @_require_auth
+    @_serialise_glossary_writes
     def api_job_research_term(job_id: str, index: int, action: str):
         """Approve or reject one job-scoped research suggestion."""
         from tarjomeh.glossary.manager import GlossaryEntry, GlossaryManager
@@ -1969,6 +2008,7 @@ def _register_api(app: Flask) -> None:
 
     @app.route("/api/glossary/terms", methods=["GET", "POST"])
     @_require_auth
+    @_serialise_glossary_writes
     def api_glossary_terms():
         """List or add terms in the working glossary."""
         from tarjomeh.glossary.manager import GlossaryEntry, GlossaryManager
@@ -2004,6 +2044,7 @@ def _register_api(app: Flask) -> None:
 
     @app.route("/api/glossary/terms/<int:index>", methods=["PUT", "DELETE"])
     @_require_auth
+    @_serialise_glossary_writes
     def api_glossary_term(index: int):
         """Update or delete a working glossary term by row index."""
         from tarjomeh.glossary.manager import GlossaryEntry, GlossaryManager
@@ -2042,6 +2083,7 @@ def _register_api(app: Flask) -> None:
 
     @app.route("/api/glossary/terms/<int:index>/approve", methods=["POST"])
     @_require_auth
+    @_serialise_glossary_writes
     def api_glossary_approve(index: int):
         """Approve an auto-extracted glossary term."""
         from tarjomeh.glossary.manager import GlossaryEntry, GlossaryManager

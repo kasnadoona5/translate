@@ -2020,22 +2020,23 @@ class TranslationPipeline:
             logger.warning("Failed to send pipeline webhook: %s", e)
 
     def _run_async(self, coro: Any) -> Any:
-        """Run an async coroutine synchronously, managing event loops properly."""
+        """Run a coroutine to completion from sync OR async callers."""
         import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
 
-        if loop.is_running():
-            new_loop = asyncio.new_event_loop()
-            try:
-                return new_loop.run_until_complete(coro)
-            finally:
-                new_loop.close()
-        else:
-            return loop.run_until_complete(coro)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # Nothing running in this thread -- drive a loop directly.
+            return asyncio.run(coro)
+
+        # A loop is already running here (Jupyter / ASGI / async caller).
+        # The previous code built a SECOND loop and called run_until_complete
+        # on it, which raises "Cannot run the event loop while another loop is
+        # running". Hand the coroutine to a worker thread that owns its own.
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
 
     def _prepare_book_research(
         self,
@@ -2080,6 +2081,37 @@ class TranslationPipeline:
                 + str(artifact.get("error", "")),
             )
         return artifact
+
+    def close(self) -> None:
+        """Release HTTP resources held by the translator and critic clients.
+
+        close()/aclose() previously had zero call sites anywhere in src/, so
+        every job leaked its connection pools for the process lifetime.
+        """
+        seen: set[int] = set()
+        for client in (
+            getattr(self, "llm_client", None),
+            getattr(self, "critic_client", None),
+        ):
+            # _build_critic_client returns self.llm_client when the critic is
+            # disabled, so the same object can appear twice.
+            if client is None or id(client) in seen:
+                continue
+            seen.add(id(client))
+            try:
+                client.close()
+            except Exception:
+                logger.debug("Sync client close failed", exc_info=True)
+            try:
+                self._run_async(client.aclose())
+            except Exception:
+                logger.debug("Async client close failed", exc_info=True)
+
+    def __enter__(self) -> TranslationPipeline:
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        self.close()
 
     @staticmethod
     def _chunk_fingerprint(text: str) -> str:
@@ -2136,14 +2168,6 @@ class TranslationPipeline:
         input_path = Path(input_path)
         self.warnings = []
 
-        # Run OCR preprocessing first if enabled
-        if input_path.suffix.lower() == ".pdf" and getattr(self.config.pdf, "enable_ocr", False):
-            if progress_callback:
-                progress_callback("Ingestion", 0.02, "Running OCR Preprocessing...")
-            from tarjomeh.parsers.ocr_preprocessor import OCRPreprocessor
-            ocr_processor = OCRPreprocessor()
-            input_path = ocr_processor.preprocess(input_path)
-
         # 1. Establish Job ID and Database Record
         is_resume = False
         if job_id:
@@ -2171,6 +2195,35 @@ class TranslationPipeline:
         # render identically in the UI, which hid the difference. Mark every
         # path explicitly.
         self.db.update_job_status(job_id, JobStatus.RUNNING)
+
+        # OCR runs AFTER the job record exists, so jobs.input_path holds the
+        # ORIGINAL file (resume could not find the old temp path), and the
+        # derived PDF lands in a durable, job-scoped directory instead of a
+        # tempfile.mkdtemp() that nothing ever removed.
+        if input_path.suffix.lower() == ".pdf" and getattr(
+            self.config.pdf, "enable_ocr", False
+        ):
+            ocr_artifact = self.db.get_job_artifact(job_id, "ocr_output") or {}
+            ocr_cached_path = (
+                Path(ocr_artifact["path"]) if ocr_artifact.get("path") else None
+            )
+            if ocr_cached_path is not None and ocr_cached_path.is_file():
+                logger.info("Reusing existing OCR output for job %s", job_id)
+                input_path = ocr_cached_path
+            else:
+                if progress_callback:
+                    progress_callback(
+                        "Ingestion", 0.02, "Running OCR Preprocessing..."
+                    )
+                from tarjomeh.parsers.ocr_preprocessor import OCRPreprocessor
+
+                ocr_processor = OCRPreprocessor(
+                    output_dir=Path("jobs") / "ocr" / job_id
+                )
+                input_path = ocr_processor.preprocess(input_path)
+                self.db.save_job_artifact(job_id, "ocr_output", {
+                    "path": str(input_path),
+                })
 
         # Determine default output path if not provided
         if output_path is None:

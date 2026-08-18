@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -824,6 +825,7 @@ def _searcher_with(items, tmp_path):
     searcher.result_audit = {}
     searcher.provider = _FakeProvider()
     searcher.last_report = {}
+    searcher._lock = threading.Lock()
     return searcher
 
 
@@ -868,3 +870,333 @@ def test_candidates_with_blank_fields_are_still_skipped(tmp_path) -> None:
     searcher = _searcher_with(items, tmp_path)
     _run_chunk(searcher)
     assert list(searcher.cache) == ["state"]
+
+
+# ---------------------------------------------------------------------------
+# Fix 7.4 — _run_async survives an already-running loop
+# ---------------------------------------------------------------------------
+
+def _bare_pipeline():
+    """A pipeline shell for exercising _run_async / close() in isolation."""
+    from tarjomeh.core.pipeline import TranslationPipeline
+
+    return TranslationPipeline.__new__(TranslationPipeline)
+
+
+def test_run_async_works_from_a_sync_caller() -> None:
+    async def answer():
+        return 41 + 1
+
+    assert _bare_pipeline()._run_async(answer()) == 42
+
+
+def test_run_async_works_inside_a_running_loop() -> None:
+    """The old code built a second loop and raised RuntimeError here."""
+    import asyncio
+
+    pipeline = _bare_pipeline()
+
+    async def inner():
+        return "done"
+
+    async def outer():
+        # Calling a sync API that itself needs a loop - Jupyter/ASGI shape.
+        return await asyncio.to_thread(pipeline._run_async, inner())
+
+    assert asyncio.run(outer()) == "done"
+
+
+def test_run_async_propagates_exceptions() -> None:
+    async def boom():
+        raise KeyError("propagated")
+
+    with pytest.raises(KeyError):
+        _bare_pipeline()._run_async(boom())
+
+
+# ---------------------------------------------------------------------------
+# Fix 7.5 — HTTP clients are actually closed
+# ---------------------------------------------------------------------------
+
+class _RecordingClient:
+    def __init__(self) -> None:
+        self.closed = 0
+        self.aclosed = 0
+
+    def close(self) -> None:
+        self.closed += 1
+
+    async def aclose(self) -> None:
+        self.aclosed += 1
+
+
+def test_pipeline_close_closes_both_clients() -> None:
+    pipeline = _bare_pipeline()
+    translator, critic = _RecordingClient(), _RecordingClient()
+    pipeline.llm_client = translator
+    pipeline.critic_client = critic
+
+    pipeline.close()
+    assert (translator.closed, translator.aclosed) == (1, 1)
+    assert (critic.closed, critic.aclosed) == (1, 1)
+
+
+def test_pipeline_close_does_not_double_close_a_shared_client() -> None:
+    """_build_critic_client returns llm_client when the critic is disabled."""
+    pipeline = _bare_pipeline()
+    shared = _RecordingClient()
+    pipeline.llm_client = shared
+    pipeline.critic_client = shared
+
+    pipeline.close()
+    assert (shared.closed, shared.aclosed) == (1, 1)
+
+
+def test_pipeline_close_survives_a_client_that_raises() -> None:
+    class _Angry(_RecordingClient):
+        def close(self) -> None:
+            raise RuntimeError("no")
+
+        async def aclose(self) -> None:
+            raise RuntimeError("also no")
+
+    pipeline = _bare_pipeline()
+    pipeline.llm_client = _Angry()
+    pipeline.critic_client = None
+    pipeline.close()  # must not raise
+
+
+def test_pipeline_is_a_context_manager() -> None:
+    pipeline = _bare_pipeline()
+    client = _RecordingClient()
+    pipeline.llm_client = client
+    pipeline.critic_client = None
+
+    with pipeline as entered:
+        assert entered is pipeline
+    assert client.closed == 1
+
+
+def test_aclose_reaches_a_client_created_on_another_thread() -> None:
+    """_thread_local only exposed the CALLING thread's clients, so workers leaked."""
+    import asyncio
+    import threading as _threading
+
+    from tarjomeh.core.llm_client import LLMClient
+
+    client = LLMClient.__new__(LLMClient)
+    client._timeout = None
+    client._thread_local = _threading.local()
+    client._all_async_clients = []
+    client._async_registry_lock = _threading.Lock()
+
+    created: list = []
+
+    def make_on_worker() -> None:
+        async def touch():
+            created.append(client._aclient)
+
+        asyncio.run(touch())
+
+    worker = _threading.Thread(target=make_on_worker)
+    worker.start()
+    worker.join()
+
+    assert len(created) == 1
+    assert not created[0].is_closed
+    # The registry, not thread-local state, is what makes this reachable.
+    assert client._all_async_clients == created
+
+    asyncio.run(client.aclose())
+    assert created[0].is_closed
+    assert client._all_async_clients == []
+
+
+def test_aclient_evicts_clients_whose_loop_is_gone() -> None:
+    """_run_async makes a fresh loop per call; the cache must not grow forever."""
+    import asyncio
+    import threading as _threading
+
+    from tarjomeh.core.llm_client import LLMClient
+
+    client = LLMClient.__new__(LLMClient)
+    client._timeout = None
+    client._thread_local = _threading.local()
+    client._all_async_clients = []
+    client._async_registry_lock = _threading.Lock()
+
+    async def touch_and_close():
+        acquired = client._aclient
+        await acquired.aclose()
+        return acquired
+
+    for _ in range(5):
+        asyncio.run(touch_and_close())
+
+    # Each round ran on its own loop and closed its client; the per-thread cache
+    # must not retain all five.
+    assert len(client._thread_local.clients) <= 1
+
+    asyncio.run(client.aclose())
+
+
+# ---------------------------------------------------------------------------
+# Fix 7.6 — OCR output is job-scoped
+# ---------------------------------------------------------------------------
+
+def test_ocr_output_path_is_job_scoped_when_a_dir_is_given(tmp_path) -> None:
+    """Without output_dir this used tempfile.mkdtemp(), which nothing removed."""
+    from tarjomeh.parsers.ocr_preprocessor import OCRPreprocessor
+
+    ocr_dir = tmp_path / "jobs" / "ocr" / "job123"
+    resolved = OCRPreprocessor(output_dir=ocr_dir)._resolve_output_path(
+        tmp_path / "book.pdf"
+    )
+    assert resolved == ocr_dir / "book_ocr.pdf"
+    assert ocr_dir.is_dir(), "the job-scoped directory must be created"
+
+
+def test_cleanup_job_removes_the_job_ocr_directory(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    db = JobDatabase()
+    db.create_job("ocr-job", "book.pdf", {})
+
+    ocr_dir = tmp_path / "jobs" / "ocr" / "ocr-job"
+    ocr_dir.mkdir(parents=True)
+    (ocr_dir / "book_ocr.pdf").write_bytes(b"%PDF-1.4 fake")
+
+    db.cleanup_job("ocr-job")
+    assert not ocr_dir.exists(), "OCR output outlived its job"
+
+
+# ---------------------------------------------------------------------------
+# Fix 7.7 — search budget and glossary writes are locked
+# ---------------------------------------------------------------------------
+
+def test_concurrent_searches_cannot_overrun_the_paid_query_budget() -> None:
+    """The budget check and the increment must be one atomic step.
+
+    One WebContextSearcher - and so one provider chain - is shared by every
+    parallel worker thread, each driving its own event loop via _run_async.
+    The reader below sleeps, which releases the GIL and forces threads to
+    interleave exactly where the old check-then-increment was split. Without
+    the lock this overruns a PAID search budget; with it, it cannot.
+    """
+    import asyncio
+    import time
+
+    from tarjomeh.context.search_providers import (
+        BaseSearchProvider,
+        SearchProviderChain,
+    )
+
+    class _Provider(BaseSearchProvider):
+        name = "p"
+
+        async def search(self, query: str):
+            return []
+
+    class _InterleavingChain(SearchProviderChain):
+        """Chain whose queries_used read yields the GIL, widening the window."""
+
+        _used = 0
+
+        @property
+        def queries_used(self) -> int:
+            time.sleep(0.004)
+            return self._used
+
+        @queries_used.setter
+        def queries_used(self, value: int) -> None:
+            self._used = value
+
+    budget = 3
+    workers = 24
+    start = threading.Barrier(workers)
+    chain = _InterleavingChain([_Provider()], max_retries=0, query_budget=budget)
+
+    def worker(i: int) -> None:
+        start.wait()
+        asyncio.run(chain.search(f"query {i}"))
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert chain.queries_used <= budget, (
+        f"overran a paid budget: used {chain.queries_used} of {budget}"
+    )
+
+
+def test_over_budget_search_still_reports_and_returns_empty() -> None:
+    """The over-budget branch's observable behaviour must be unchanged."""
+    import asyncio
+
+    from tarjomeh.context.search_providers import (
+        BaseSearchProvider,
+        SearchProviderChain,
+    )
+
+    class _Provider(BaseSearchProvider):
+        name = "p"
+
+        async def search(self, query: str):
+            return []
+
+    chain = SearchProviderChain([_Provider()], max_retries=0, query_budget=0)
+    assert asyncio.run(chain.search("anything")) == []
+    assert chain.last_error == "query budget exhausted"
+    assert chain.diagnostics[-1]["status"] == "budget_exhausted"
+
+
+def test_searcher_has_a_lock_for_its_shared_caches() -> None:
+    """One searcher is shared by every parallel worker."""
+    from tarjomeh.context.web_searcher import WebContextSearcher
+
+    config = TarjomehConfig()
+    config.llm.openrouter.api_keys = ["sk-test"]
+    searcher = WebContextSearcher(config, llm_client=None)
+    assert hasattr(searcher, "_lock")
+
+
+def test_concurrent_glossary_adds_do_not_lose_updates(tmp_path, monkeypatch) -> None:
+    """load -> mutate -> full rewrite, unlocked, silently dropped edits."""
+    from tarjomeh.web.app import create_app
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("UI_SECRET_TOKEN", TOKEN)
+    app = create_app()
+    app.config["TESTING"] = True
+
+    total = 12
+    errors: list = []
+
+    def add(i: int) -> None:
+        try:
+            response = app.test_client().post(
+                "/api/glossary/terms",
+                json={"source": f"term{i:02d}", "target": f"واژه{i:02d}"},
+                headers={"Authorization": f"Bearer {TOKEN}"},
+            )
+            if response.status_code != 201:
+                errors.append((i, response.status_code, response.get_data(as_text=True)))
+        except Exception as exc:  # pragma: no cover - surfaced via `errors`
+            errors.append((i, "exception", repr(exc)))
+
+    threads = [threading.Thread(target=add, args=(i,)) for i in range(total)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not errors, f"failed adds: {errors}"
+
+    listed = app.test_client().get(
+        "/api/glossary/terms", headers={"Authorization": f"Bearer {TOKEN}"}
+    ).get_json()["terms"]
+    sources = sorted(entry["source"] for entry in listed)
+    assert sources == [f"term{i:02d}" for i in range(total)], (
+        f"lost updates: only {len(sources)} of {total} survived"
+    )
