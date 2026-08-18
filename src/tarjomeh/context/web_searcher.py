@@ -76,8 +76,14 @@ class WebContextSearcher:
                 if isinstance(self.provider, SearchProviderChain) else []
             )
             for item in items:
-                term = item.get("term", "").strip()
-                search_query = item.get("search_query", "").strip()
+                if not isinstance(item, dict):
+                    # A single malformed element used to raise AttributeError,
+                    # which the broad handler below turned into "skip every
+                    # remaining term in this chunk" plus an error stub report.
+                    logger.debug("Skipping non-object search candidate: %r", item)
+                    continue
+                term = str(item.get("term", "") or "").strip()
+                search_query = str(item.get("search_query", "") or "").strip()
                 
                 if not term or not search_query:
                     continue
@@ -123,7 +129,11 @@ class WebContextSearcher:
                 "rejected_result_count": rejected_count,
                 "result_relevance": {
                     term: audit for term, audit in self.result_audit.items()
-                    if term in {str(item.get("term", "")).strip().lower() for item in items}
+                    if term in {
+                        str(item.get("term", "")).strip().lower()
+                        for item in items
+                        if isinstance(item, dict)
+                    }
                 },
                 "diagnostics": diagnostics,
                 "budget_used": getattr(self.provider, "queries_used", None),

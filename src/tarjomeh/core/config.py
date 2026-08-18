@@ -408,11 +408,17 @@ class TarjomehConfig:
     # -- Construction helpers -----------------------------------------------
 
     @classmethod
-    def load(cls, path: str | Path | None = None) -> TarjomehConfig:
+    def load(
+        cls, path: str | Path | None = None, *, validate: bool = True
+    ) -> TarjomehConfig:
         """Load configuration from a file path.
 
         If path is None, looks for config.toml, and if not found, falls back
         to config.example.toml or returns a default configuration.
+
+        Pass ``validate=False`` when CLI overrides are about to be merged:
+        ``--provider ollama`` must be able to satisfy a file-level config
+        whose provider requires an API key.
         """
         if path is None:
             path = Path("config.toml")
@@ -423,7 +429,7 @@ class TarjomehConfig:
                     config = cls()
                     config._apply_env_overrides()
                     return config
-        return cls.from_toml(path)
+        return cls.from_toml(path, validate=validate)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TarjomehConfig:
@@ -448,7 +454,9 @@ class TarjomehConfig:
         return config
 
     @classmethod
-    def from_toml(cls, path: str | Path) -> TarjomehConfig:
+    def from_toml(
+        cls, path: str | Path, *, validate: bool = True
+    ) -> TarjomehConfig:
         """Load configuration from a TOML file.
 
         Processing order:
@@ -490,7 +498,10 @@ class TarjomehConfig:
         if not config.translation.country:
             config.translation.country = "Iran"
 
-        config.validate()
+        # Callers that are about to merge CLI overrides defer validation;
+        # update_from_overrides() validates once the merge is complete.
+        if validate:
+            config.validate()
         return config
 
     @classmethod
@@ -547,6 +558,9 @@ class TarjomehConfig:
         value = env("TRANSLATOR_MODEL", "").strip()
         if value:
             self.llm.model = value
+            # The Ollama request path reads llm.ollama.model directly, so an
+            # explicit model choice has to reach it too or it is ignored.
+            self.llm.ollama.model = value
         value = env("TRANSLATOR_API_KEY", "").strip()
         if value:
             self.llm.openrouter.api_keys = [value]
@@ -708,6 +722,12 @@ class TarjomehConfig:
         # Re-enforce mode constraints after overrides
         if self.translation.mode == "academic":
             self.translation.parallel_workers = 1
+
+        # --model must apply to whichever provider is active. llm.ollama.model
+        # is a separate field the Ollama request path reads directly, so
+        # without this `--provider ollama --model X` silently ignored X.
+        if "llm.model" in overrides and "llm.ollama.model" not in overrides:
+            self.llm.ollama.model = overrides["llm.model"]
 
         self.validate()
 

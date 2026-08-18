@@ -646,3 +646,225 @@ def test_a_failed_checkpoint_rolls_back_the_chunk_update(tmp_path, monkeypatch) 
     record = JobDatabase().get_chunks("rollback")[0]
     assert record["status"] == ChunkStatus.TRANSLATED, "chunk status was not rolled back"
     assert record["translation"] == "prior translation", "translation was not rolled back"
+
+
+# ---------------------------------------------------------------------------
+# Fix 7.2 — CLI overrides apply before validation
+# ---------------------------------------------------------------------------
+
+KEYLESS_TOML = """
+[llm]
+provider = "openrouter"
+
+[llm.openrouter]
+api_keys = []
+"""
+
+
+@pytest.fixture()
+def keyless_config_file(tmp_path, monkeypatch):
+    """A config.toml that cannot pass validate() without an API key."""
+    for name in ("TRANSLATOR_API_KEY", "OPENROUTER_API_KEY", "CRITIC_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    path = tmp_path / "config.toml"
+    path.write_text(KEYLESS_TOML, encoding="utf-8")
+    return path
+
+
+def test_from_toml_still_validates_by_default(keyless_config_file) -> None:
+    with pytest.raises(ValueError):
+        TarjomehConfig.from_toml(keyless_config_file)
+
+
+def test_from_toml_can_defer_validation(keyless_config_file) -> None:
+    """Deferred validation is what lets --provider ollama fix a keyless config."""
+    config = TarjomehConfig.from_toml(keyless_config_file, validate=False)
+    assert config.llm.provider == "openrouter"
+    config.update_from_overrides({"llm.provider": "ollama", "llm.model": "llama3"})
+    assert config.llm.provider == "ollama"
+
+
+def test_load_forwards_the_validate_flag(keyless_config_file) -> None:
+    with pytest.raises(ValueError):
+        TarjomehConfig.load(keyless_config_file)
+    assert TarjomehConfig.load(keyless_config_file, validate=False) is not None
+
+
+def test_translate_with_provider_override_survives_a_keyless_config(
+    tmp_path, monkeypatch, keyless_config_file
+) -> None:
+    """`tarjomeh translate f.txt --provider ollama` used to die on a traceback."""
+    import argparse
+    from unittest.mock import patch as mock_patch
+
+    from tarjomeh.cli.main import cmd_translate
+
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "book.txt"
+    source.write_text("A paragraph about the state.", encoding="utf-8")
+
+    args = argparse.Namespace(
+        file=str(source), config=str(keyless_config_file), output=None,
+        mode=None, output_format=None, bilingual=None, term_notes=None,
+        book_research=False, provider="ollama", model="llama3", resume=None,
+    )
+
+    with mock_patch("tarjomeh.core.pipeline.TranslationPipeline.run") as run:
+        run.return_value = type(
+            "R", (), {
+                "output_path": tmp_path / "out.txt", "total_chunks": 1,
+                "duration_str": "0s", "warnings": [],
+            },
+        )()
+        assert cmd_translate(args) == 0, "override path must reach the pipeline"
+
+
+def test_translate_without_override_reports_a_clean_config_error(
+    tmp_path, monkeypatch, keyless_config_file, capsys
+) -> None:
+    import argparse
+
+    from tarjomeh.cli.main import cmd_translate
+
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "book.txt"
+    source.write_text("A paragraph about the state.", encoding="utf-8")
+
+    args = argparse.Namespace(
+        file=str(source), config=str(keyless_config_file), output=None,
+        mode=None, output_format=None, bilingual=None, term_notes=None,
+        book_research=False, provider=None, model=None, resume=None,
+    )
+    assert cmd_translate(args) == 1, "must exit 1, not raise"
+    assert "Configuration error" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Fix 7.3 — --model reaches Ollama
+# ---------------------------------------------------------------------------
+
+def test_model_override_reaches_the_ollama_field() -> None:
+    """The Ollama payload reads llm.ollama.model, which --model never set."""
+    config = TarjomehConfig()
+    config.llm.provider = "ollama"
+    config.update_from_overrides({"llm.provider": "ollama", "llm.model": "llama3:70b"})
+    assert config.llm.model == "llama3:70b"
+    assert config.llm.ollama.model == "llama3:70b"
+
+
+def test_an_explicit_ollama_model_override_wins() -> None:
+    config = TarjomehConfig()
+    config.update_from_overrides({
+        "llm.provider": "ollama",
+        "llm.model": "generic",
+        "llm.ollama.model": "specific",
+    })
+    assert config.llm.ollama.model == "specific"
+
+
+def test_translator_model_env_reaches_the_ollama_field(monkeypatch) -> None:
+    monkeypatch.setenv("TRANSLATOR_MODEL", "qwen3:32b")
+    monkeypatch.setenv("TRANSLATOR_API_KEY", "sk-test")
+    config = TarjomehConfig.from_dict({"llm": {"provider": "ollama"}})
+    assert config.llm.model == "qwen3:32b"
+    assert config.llm.ollama.model == "qwen3:32b"
+
+
+def test_a_config_that_sets_models_per_provider_is_left_alone() -> None:
+    """No override => the two fields stay independent, as configs may intend."""
+    config = TarjomehConfig()
+    config.llm.openrouter.api_keys = ["sk-test"]  # so validate() can pass
+    config.llm.model = "openrouter/some-model"
+    config.llm.ollama.model = "llama3"
+    config.update_from_overrides({"translation.mode": "fast"})
+    assert config.llm.model == "openrouter/some-model"
+    assert config.llm.ollama.model == "llama3"
+
+
+# ---------------------------------------------------------------------------
+# Fix 7.10 — one malformed search candidate no longer skips the rest
+# ---------------------------------------------------------------------------
+
+class _FakeProvider:
+    """A search provider that returns nothing but records what it was asked."""
+
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+        self.queries_used = 0
+        self.query_budget = 100
+
+    async def search(self, query: str):
+        self.queries.append(query)
+        self.queries_used += 1
+        return []
+
+
+def _searcher_with(items, tmp_path):
+    """A WebContextSearcher wired to a canned term list and a stub provider.
+
+    __init__ builds a real search provider from config; bypassing it keeps the
+    test focused on the term loop.
+    """
+    import json as _json
+
+    from tarjomeh.context.web_searcher import WebContextSearcher
+
+    class _LLM:
+        async def chat(self, _prompt):
+            return _json.dumps(items)
+
+    config = TarjomehConfig()
+    config.translation.enable_web_context = True
+    config.web_search.max_queries_per_chunk = 10
+
+    searcher = WebContextSearcher.__new__(WebContextSearcher)
+    searcher.config = config
+    searcher.llm_client = _LLM()
+    searcher.cache = {}
+    searcher.result_audit = {}
+    searcher.provider = _FakeProvider()
+    searcher.last_report = {}
+    return searcher
+
+
+def _run_chunk(searcher, text="The state and sovereignty."):
+    import asyncio
+
+    return asyncio.run(searcher.get_context_for_chunk(_chunk(0, text)))
+
+
+@pytest.mark.parametrize("bad", [None, "just a string", 42, ["nested"]])
+def test_a_malformed_candidate_does_not_skip_the_remaining_terms(tmp_path, bad) -> None:
+    items = [
+        {"term": "state", "search_query": "definition of state"},
+        bad,
+        {"term": "sovereignty", "search_query": "definition of sovereignty"},
+    ]
+    searcher = _searcher_with(items, tmp_path)
+    _run_chunk(searcher)
+
+    # The term AFTER the bad element is what used to be lost.
+    assert "sovereignty" in searcher.cache, f"terms after {bad!r} were skipped"
+    assert "state" in searcher.cache
+    assert "error" not in searcher.last_report, searcher.last_report
+    assert searcher.last_report["new_query_count"] == 2
+
+
+def test_result_relevance_survives_a_malformed_candidate(tmp_path) -> None:
+    items = [{"term": "state", "search_query": "definition of state"}, "bad"]
+    searcher = _searcher_with(items, tmp_path)
+    _run_chunk(searcher)
+    assert "error" not in searcher.last_report
+    assert "state" in searcher.last_report["result_relevance"]
+
+
+def test_candidates_with_blank_fields_are_still_skipped(tmp_path) -> None:
+    items = [
+        {"term": "", "search_query": "no term"},
+        {"term": "power", "search_query": ""},
+        {"term": None, "search_query": None},
+        {"term": "state", "search_query": "definition of state"},
+    ]
+    searcher = _searcher_with(items, tmp_path)
+    _run_chunk(searcher)
+    assert list(searcher.cache) == ["state"]

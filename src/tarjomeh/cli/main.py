@@ -47,18 +47,10 @@ def cmd_translate(args: argparse.Namespace) -> int:
         console.print(f"[red]Error:[/red] File not found: {input_path}")
         return 1
 
-    # Load config
-    config_path = Path(args.config) if args.config else None
-    try:
-        config = TarjomehConfig.load(config_path)
-    except FileNotFoundError:
-        console.print(
-            "[yellow]Warning:[/yellow] No config.toml found. Using defaults. "
-            "Copy config.example.toml to config.toml to customize."
-        )
-        config = TarjomehConfig()
-
-    # Apply CLI overrides
+    # Build CLI overrides BEFORE loading, so validation can be deferred until
+    # after they are merged. Otherwise `--provider ollama` fails validation
+    # against a config.toml whose file-level provider needs an API key, and the
+    # ValueError escapes as a traceback.
     overrides: dict = {}
     if args.mode:
         overrides["translation.mode"] = args.mode
@@ -74,8 +66,29 @@ def cmd_translate(args: argparse.Namespace) -> int:
         overrides["llm.provider"] = args.provider
     if args.model:
         overrides["llm.model"] = args.model
+
+    config_path = Path(args.config) if args.config else None
+    try:
+        config = TarjomehConfig.load(config_path, validate=not overrides)
+    except FileNotFoundError:
+        console.print(
+            "[yellow]Warning:[/yellow] No config.toml found. Using defaults. "
+            "Copy config.example.toml to config.toml to customize."
+        )
+        config = TarjomehConfig()
+    except ValueError as exc:
+        console.print(f"[red]Configuration error:[/red] {exc}")
+        return 1
+
     if overrides:
-        config.update_from_overrides(overrides)
+        # update_from_overrides() validates once the merge is complete.
+        try:
+            config.update_from_overrides(overrides)
+        except ValueError as exc:
+            console.print(f"[red]Configuration error:[/red] {exc}")
+            return 1
+    else:
+        config.validate()
 
     # Determine output path
     output_path = Path(args.output) if args.output else None
@@ -376,6 +389,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
         config = TarjomehConfig.load(config_path)
     except FileNotFoundError:
         config = TarjomehConfig()
+    except ValueError as exc:
+        console.print(f"[red]Configuration error:[/red] {exc}")
+        return 1
 
     # ServerConfig is a dataclass, not a mapping. .get() raised
     # AttributeError whenever --host/--port were omitted, so `tarjomeh
