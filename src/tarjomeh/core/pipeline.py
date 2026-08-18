@@ -4696,7 +4696,23 @@ class TranslationPipeline:
         # this, a single stray replacement character costs a human review even
         # when the source makes the fix unambiguous. Anything ambiguous is left
         # untouched, so it still blocks and still reaches a reviewer.
-        translation, corruption_repairs = repair_corruption(chunk.text, translation)
+        # Guarded: a defect in a repair helper must never pause a book. The
+        # translation is already valid without the repair, so on failure we log
+        # and carry on rather than letting the exception reach the chunk loop -
+        # where pause_on_sequential_error (default True) would stop the job on
+        # the very first affected chunk.
+        try:
+            translation, corruption_repairs = repair_corruption(
+                chunk.text, translation
+            )
+        except Exception:
+            logger.exception("Corruption repair failed for chunk %s", idx)
+            self.db.log_chunk_event(
+                job_id, idx, "unicode_corruption_repair_failed", {
+                    "stage": "initial_translation",
+                }
+            )
+            corruption_repairs = []
         if corruption_repairs:
             self.db.log_chunk_event(
                 job_id, idx, "unicode_corruption_repair", {
@@ -4711,6 +4727,11 @@ class TranslationPipeline:
                 },
             )
         self.db.update_chunk(job_id, idx, ChunkStatus.TRANSLATED, translation)
+        # The last text that passed a gate, so a later rejection has
+        # something valid to restore. Four gate sites previously passed no
+        # `previous` at all, which is why rejection at the final gate could
+        # only log - it had no alternative text to fall back to.
+        last_accepted_translation = translation
         self.db.log_chunk_event(job_id, idx, "translation_completed", {
             "translation_chars": len(translation),
             "translation_paragraphs": _paragraph_count(translation),
@@ -4720,7 +4741,16 @@ class TranslationPipeline:
         # and enumerations; it never rejects. Promotion to a gate rule belongs to
         # item 13, and only once the item-20 corpus shows it does not fire on
         # correct translations.
-        structure_payload = audit_payload(chunk.text, translation)
+        try:
+            structure_payload = audit_payload(chunk.text, translation)
+        except Exception:
+            # Report-only means report-only, including its failure mode. A bug
+            # here costs a missing report line, never a stopped translation.
+            logger.exception("Structure audit failed for chunk %s", idx)
+            self.db.log_chunk_event(
+                job_id, idx, "structure_audit_failed", {"stage": "initial_translation"}
+            )
+            structure_payload = {"finding_count": 0}
         if structure_payload["finding_count"]:
             self.db.log_chunk_event(
                 job_id, idx, "structure_audit", structure_payload
@@ -5202,6 +5232,7 @@ class TranslationPipeline:
                     )
                 elif translation_changed and not convergence_reason:
                     accepted_versions.append(translation)
+                    last_accepted_translation = translation
 
                 self.db.update_chunk(job_id, idx, ChunkStatus.REFINED, translation)
                 self.db.log_chunk_event(job_id, idx, "refinement_completed", {
@@ -5458,6 +5489,7 @@ Output ONLY the corrected Persian translation.
                                 )
                         if correction_accepted:
                             translation = proposed_correction
+                            last_accepted_translation = translation
                             report = compliance_checker.check(
                                 translation=translation,
                                 source_text=chunk.text,
@@ -5535,6 +5567,10 @@ Output ONLY the corrected Persian translation.
             final_integrity = integrity_gate.evaluate(
                 chunk.text,
                 translation,
+                # Supplying `previous` is what lets the gate tell damage this
+                # last step introduced from damage carried in from earlier. The
+                # corruption and duplicate checks both baseline against it.
+                previous=last_accepted_translation,
                 stage="final_translation",
                 protected_terms=protected_targets,
                 protect_inline_english=protect_inline_english,
@@ -5549,6 +5585,21 @@ Output ONLY the corrected Persian translation.
                 self.db.log_chunk_event(
                     job_id, idx, "integrity_final_failed", final_integrity_payload
                 )
+                # Rejection now restores the last text that passed a gate,
+                # instead of returning the rejected text. Previously the final
+                # gate could only log, so damage introduced after the last
+                # accepted version was still what shipped.
+                restored = (last_accepted_translation or "").strip()
+                if restored and restored != (translation or "").strip():
+                    self.db.log_chunk_event(
+                        job_id, idx, "integrity_final_restored", {
+                            "restored_from": "last_accepted_translation",
+                            "rejected_chars": len(translation or ""),
+                            "restored_chars": len(last_accepted_translation),
+                        },
+                    )
+                    translation = last_accepted_translation
+                _ensure_chunk_review_reason(self.db, job_id, idx)
 
         structural_roles = {
             str(role).casefold()
