@@ -307,6 +307,45 @@ def _number_occurrences(text: str) -> list[_NumberOccurrence]:
     return occurrences
 
 
+# Unicode damage that must never reach the reader. Nothing previously looked
+# for any of it, which is how a U+FFFD survived into the delivered DOCX.
+#   * U+FFFD  - a decoder or provider replaced a character it could not encode
+#   * U+E000-U+F8FF - private use; here it means a PersianTypographer sentinel
+#     was never restored (typography.py uses U+E000/U+E001 and base U+E100)
+#   * C0/C1 control characters other than tab, newline and carriage return
+_REPLACEMENT_CHAR = "\ufffd"
+_PRIVATE_USE_RE = re.compile("[\ue000-\uf8ff]")
+_CONTROL_CHAR_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def corruption_artifacts(text: str) -> dict[str, int]:
+    """Count Unicode damage by category. Empty dict means clean."""
+    text = text or ""
+    counts = {
+        "replacement_character": text.count(_REPLACEMENT_CHAR),
+        "unrestored_sentinel": len(_PRIVATE_USE_RE.findall(text)),
+        "control_character": len(_CONTROL_CHAR_RE.findall(text)),
+    }
+    return {name: total for name, total in counts.items() if total}
+
+
+def describe_corruption(text: str) -> list[str]:
+    """Human-readable samples of corrupted spans, for QA evidence."""
+    text = text or ""
+    samples: list[str] = []
+    for match in re.finditer(
+        f"[{_REPLACEMENT_CHAR}\ue000-\uf8ff\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]",
+        text,
+    ):
+        start = max(0, match.start() - 12)
+        end = min(len(text), match.end() + 12)
+        codepoint = f"U+{ord(match.group()):04X}"
+        samples.append(f"{codepoint} in {text[start:end]!r}")
+        if len(samples) >= 5:
+            break
+    return samples
+
+
 def classify_numbers(text: str) -> dict[str, Counter[str]]:
     """Classify comparable numbers for QA evidence without changing matching.
 
@@ -1323,6 +1362,39 @@ class PostEditIntegrityGate:
             add(
                 "structured_response_leak", "blocking",
                 "JSON or refiner control fields leaked into translation text.",
+            )
+
+        # Unicode corruption. Baselined against BOTH source and previous so a
+        # flaw already present in the source is reported, never treated as
+        # something the translation introduced -- source anomalies are
+        # preserved and noted, not silently corrected or rejected.
+        candidate_corruption = corruption_artifacts(candidate)
+        source_corruption = corruption_artifacts(source)
+        previous_corruption = corruption_artifacts(previous)
+        introduced_corruption = {
+            name: total - max(
+                source_corruption.get(name, 0), previous_corruption.get(name, 0)
+            )
+            for name, total in candidate_corruption.items()
+            if total > max(
+                source_corruption.get(name, 0), previous_corruption.get(name, 0)
+            )
+        }
+        if introduced_corruption:
+            add(
+                "unicode_corruption", "blocking",
+                "The proposed translation contains replacement, private-use, or "
+                "control characters that the source does not.",
+                categories=introduced_corruption,
+                samples=describe_corruption(candidate),
+            )
+        elif candidate_corruption:
+            add(
+                "unicode_corruption_still_present", "warning",
+                "The edit did not introduce Unicode corruption, but earlier "
+                "damage remains.",
+                categories=candidate_corruption,
+                samples=describe_corruption(candidate),
             )
 
         mixed_artifacts = mixed_script_artifacts(candidate)
