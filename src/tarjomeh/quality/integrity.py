@@ -318,6 +318,50 @@ _PRIVATE_USE_RE = re.compile("[\ue000-\uf8ff]")
 _CONTROL_CHAR_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
 
+# Item 16. The existing per-issue salvage path already rejects an edit that
+# doubles an ADJACENT word (pipeline._salvage_local_refinement_edits). Nothing
+# looked for a duplicated multi-word span, and nothing checked the
+# full-candidate refinement path at all -- which is how a salvage patch
+# duplicated the clause it inserted and the next critique iteration had to find
+# it. Spans are compared against the PREVIOUS translation, same language, so
+# repetition the translation already contained is never blamed on this edit.
+_SPAN_TOKEN_RE = re.compile(r"[\w\u0600-\u06ff]+", re.UNICODE)
+_MIN_REPEATED_SPAN_WORDS = 8
+
+
+def _repeated_spans(text: str, min_words: int = _MIN_REPEATED_SPAN_WORDS) -> set[str]:
+    """Return normalised word spans of >= *min_words* that occur more than once.
+
+    Only maximal-length duplicates matter for reporting, but every window is
+    collected because a shorter window inside a longer duplicate is itself a
+    genuine repeat; set arithmetic against the baseline removes the noise.
+    """
+    words = [word.casefold() for word in _SPAN_TOKEN_RE.findall(text or "")]
+    if len(words) < min_words * 2:
+        return set()
+    seen: dict[str, int] = {}
+    for start in range(len(words) - min_words + 1):
+        window = " ".join(words[start:start + min_words])
+        seen[window] = seen.get(window, 0) + 1
+    return {span for span, count in seen.items() if count > 1}
+
+
+def newly_repeated_spans(
+    previous: str,
+    candidate: str,
+    min_words: int = _MIN_REPEATED_SPAN_WORDS,
+) -> list[str]:
+    """Word spans the candidate repeats that the previous translation did not."""
+    if not (previous or "").strip():
+        # An initial translation has no same-language baseline, and source
+        # repetition cannot be matched across languages. Staying silent is the
+        # only safe answer: this is an EDIT guard.
+        return []
+    return sorted(
+        _repeated_spans(candidate, min_words) - _repeated_spans(previous, min_words)
+    )
+
+
 def corruption_artifacts(text: str) -> dict[str, int]:
     """Count Unicode damage by category. Empty dict means clean."""
     text = text or ""
@@ -1422,16 +1466,50 @@ class PostEditIntegrityGate:
                 "The proposed output does not contain enough Persian text.",
             )
 
-        duplicate_paragraphs = [
-            text for text, count in Counter(
-                normalize_for_match(p) for p in candidate_paragraphs if len(p) >= 80
-            ).items() if count > 1
-        ]
+        def _duplicated(paragraphs: list[str]) -> set[str]:
+            return {
+                text for text, count in Counter(
+                    normalize_for_match(p) for p in paragraphs if len(p) >= 80
+                ).items() if count > 1
+            }
+
+        # A book that legitimately repeats a long paragraph used to be blocked
+        # and sent to human review for nothing. Two different baselines are
+        # needed, because only one of them is same-language:
+        #   * previous translation -- Persian, so the exact spans cancel;
+        #   * source -- English, so normalised spans can NEVER match the
+        #     candidate's. Only the COUNT of duplicated paragraphs is
+        #     comparable across languages, so it is used as an allowance.
+        candidate_duplicates = _duplicated(candidate_paragraphs)
+        duplicate_paragraphs = sorted(
+            candidate_duplicates - _duplicated(_paragraphs(previous))
+        )
+        source_duplicate_allowance = len(_duplicated(source_paragraphs))
+        if len(duplicate_paragraphs) <= source_duplicate_allowance:
+            duplicate_paragraphs = []
         if duplicate_paragraphs:
             add(
                 "duplicate_paragraph", "blocking",
                 "A substantial translated paragraph is duplicated.",
                 duplicate_count=len(duplicate_paragraphs),
+            )
+        elif candidate_duplicates:
+            add(
+                "duplicate_paragraph_preserved", "info",
+                "A duplicated paragraph mirrors repetition already present in "
+                "the source or the previous translation.",
+                duplicate_count=len(candidate_duplicates),
+            )
+
+        # Item 16: a duplicated multi-word span, which is smaller than a whole
+        # paragraph and so invisible to the check above.
+        introduced_spans = newly_repeated_spans(previous, candidate)
+        if introduced_spans:
+            add(
+                "duplicate_span_introduced", "blocking",
+                "The edit repeats a passage that the previous translation did not.",
+                span_count=len(introduced_spans),
+                samples=introduced_spans[:3],
             )
 
         missing_terms = []
