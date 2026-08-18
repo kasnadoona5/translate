@@ -111,10 +111,41 @@ def cmd_translate(args: argparse.Namespace) -> int:
                 progress_callback=on_progress,
             )
         except KeyboardInterrupt:
+            # Persist the pause, otherwise the job stays RUNNING and the
+            # message below promises a state that was never written.
+            try:
+                from tarjomeh.jobs.database import JobDatabase, JobStatus
+
+                if pipeline.current_job_id:
+                    db = JobDatabase()
+                    db.update_job_status(pipeline.current_job_id, JobStatus.PAUSED)
+                    db.log_event(
+                        pipeline.current_job_id,
+                        "INFO",
+                        "Paused by keyboard interrupt.",
+                    )
+            except Exception:
+                logging.exception("Could not persist paused state")
             console.print("\n[yellow]Translation paused.[/yellow] Resume with: "
                           f"tarjomeh jobs resume {pipeline.current_job_id}")
             return 130
         except Exception as e:
+            try:
+                from tarjomeh.jobs.database import JobDatabase, JobStatus
+
+                if pipeline.current_job_id:
+                    db = JobDatabase()
+                    current = db.get_job(pipeline.current_job_id)
+                    if not current or current.get("raw_status") not in (
+                        JobStatus.PAUSED,
+                        JobStatus.PAUSED_ERROR,
+                        JobStatus.COMPLETED,
+                    ):
+                        db.update_job_status(
+                            pipeline.current_job_id, JobStatus.FAILED, str(e)
+                        )
+            except Exception:
+                logging.exception("Could not persist failed state")
             console.print(f"\n[red]Error:[/red] {e}")
             logging.exception("Translation failed")
             return 1

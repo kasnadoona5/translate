@@ -2104,7 +2104,6 @@ class TranslationPipeline:
             if job_record:
                 is_resume = True
                 logger.info("Resuming existing job: %s", job_id)
-                self.db.update_job_status(job_id, JobStatus.RUNNING)
             else:
                 logger.info("Starting new job with supplied ID: %s", job_id)
                 self.db.create_job(
@@ -2119,6 +2118,11 @@ class TranslationPipeline:
             )
 
         job_id = self.current_job_id
+        # create_job() writes PENDING and only the resume branch used to write
+        # RUNNING, so a fresh job stayed PENDING for its entire life. Both
+        # render identically in the UI, which hid the difference. Mark every
+        # path explicitly.
+        self.db.update_job_status(job_id, JobStatus.RUNNING)
 
         # Determine default output path if not provided
         if output_path is None:

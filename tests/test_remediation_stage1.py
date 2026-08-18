@@ -208,3 +208,249 @@ def test_safe_job_ids_are_accepted(tmp_path, job_id) -> None:
     database = JobDatabase(tmp_path / "jobs.db")
     database.create_job(job_id, "book.pdf", {})
     assert database.get_job(job_id) is not None
+
+
+# ---------------------------------------------------------------------------
+# Fix 2.1 — jobs actually reach RUNNING and FAILED
+# ---------------------------------------------------------------------------
+
+def test_pipeline_marks_a_fresh_job_running(tmp_path, monkeypatch) -> None:
+    """A new job used to sit at PENDING for its whole life."""
+    from unittest.mock import patch as mock_patch
+
+    from tarjomeh.core.pipeline import TranslationPipeline
+    from tarjomeh.jobs.database import JobStatus
+
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "chapter.txt"
+    source.write_text("Chapter 1: The State\nA paragraph about theory.", encoding="utf-8")
+
+    config = TarjomehConfig()
+    config.translation.mode = "fast"
+    config.translation.enable_critique = False
+    config.translation.enable_web_context = False
+    config.translation.enable_back_translation = False
+    config.glossary.enable_auto_extraction = False
+    config.output.format = "txt"
+
+    with mock_patch("tarjomeh.core.pipeline.JobDatabase") as db_cls, \
+            mock_patch("tarjomeh.core.pipeline.LLMClient") as llm_cls:
+        db = db_cls.return_value
+        db.get_job.return_value = None
+        db.get_chunk_summary.return_value = {
+            "total": 0, "completed": 0, "pending": 0, "errors": 0
+        }
+        llm = llm_cls.return_value
+        llm.count_tokens.return_value = 10
+        llm.complete.return_value = "ترجمه تست"
+
+        pipeline = TranslationPipeline(config)
+        pipeline.llm_client = llm
+        pipeline.db = db
+        pipeline.run(input_path=source, output_path=tmp_path / "out.txt")
+
+        statuses = [
+            call.args[1]
+            for call in db.update_job_status.call_args_list
+            if len(call.args) >= 2
+        ]
+        assert JobStatus.RUNNING in statuses, f"never marked RUNNING (saw {statuses})"
+
+
+def test_record_job_failure_writes_failed(tmp_path, monkeypatch) -> None:
+    from tarjomeh.jobs.database import JobStatus
+    from tarjomeh.web.app import _record_job_failure
+
+    monkeypatch.chdir(tmp_path)
+    db = JobDatabase()
+    db.create_job("crashed", "book.pdf", {})
+    _record_job_failure("crashed", "parser exploded")
+
+    job = JobDatabase().get_job("crashed")
+    assert job["raw_status"] == JobStatus.FAILED
+    assert "parser exploded" in (job.get("error_message") or "")
+
+
+@pytest.mark.parametrize("already", ["completed", "paused", "paused_error", "failed"])
+def test_record_job_failure_never_overwrites_a_terminal_status(
+    tmp_path, monkeypatch, already
+) -> None:
+    """PAUSED/COMPLETED are deliberate states; a late crash must not mask them."""
+    from tarjomeh.web.app import _record_job_failure
+
+    monkeypatch.chdir(tmp_path)
+    db = JobDatabase()
+    db.create_job("settled", "book.pdf", {})
+    db.update_job_status("settled", already)
+    _record_job_failure("settled", "late traceback")
+    assert JobDatabase().get_job("settled")["raw_status"] == already
+
+
+# ---------------------------------------------------------------------------
+# Fix 2.2 — exactly one worker per job
+# ---------------------------------------------------------------------------
+
+def test_claim_is_exclusive_and_releasable() -> None:
+    from tarjomeh.web.app import _release_job_claim, _try_claim_job
+
+    assert _try_claim_job("solo")
+    assert not _try_claim_job("solo"), "a second claim must lose"
+    _release_job_claim("solo")
+    assert _try_claim_job("solo"), "claim must be reusable after release"
+    _release_job_claim("solo")
+
+
+def test_concurrent_claims_produce_exactly_one_winner() -> None:
+    """The old check-then-submit sequence let two racing requests both win."""
+    import threading
+
+    from tarjomeh.web.app import _release_job_claim, _try_claim_job
+
+    start = threading.Barrier(8)
+    wins: list[bool] = []
+    lock = threading.Lock()
+
+    def contend() -> None:
+        start.wait()
+        won = _try_claim_job("contended")
+        with lock:
+            wins.append(won)
+
+    threads = [threading.Thread(target=contend) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    _release_job_claim("contended")
+    assert sum(wins) == 1, f"expected exactly 1 winner, got {sum(wins)}"
+
+
+def test_release_only_drops_the_matching_claim() -> None:
+    from tarjomeh.web.app import _active_jobs, _release_job_claim, _try_claim_job
+
+    assert _try_claim_job("owned")
+    stale = object()
+    _release_job_claim("owned", expected=stale)
+    assert "owned" in _active_jobs, "a stale releaser must not drop a live claim"
+    _release_job_claim("owned")
+    assert "owned" not in _active_jobs
+
+
+def test_retranslate_is_refused_while_a_worker_owns_the_job(tmp_path, monkeypatch) -> None:
+    from tarjomeh.web.app import _release_job_claim, _try_claim_job, create_app
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("UI_SECRET_TOKEN", TOKEN)
+    JobDatabase().create_job("busy-job", "book.pdf", {})
+
+    app = create_app()
+    app.config["TESTING"] = True
+
+    assert _try_claim_job("busy-job")
+    try:
+        response = app.test_client().post(
+            "/api/jobs/busy-job/chunks/0/retranslate",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+        )
+        assert response.status_code == 409
+        assert "busy" in response.get_json()["error"].lower()
+    finally:
+        _release_job_claim("busy-job")
+
+
+# ---------------------------------------------------------------------------
+# Fix 2.3 — a rejected upload is deleted
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"config": "{not json"},
+        {"max_refine_iterations": "abc"},
+        {"selected_chapters": "[0]"},
+        {"selected_chapters": "not-json"},
+    ],
+)
+def test_rejected_uploads_do_not_linger(tmp_path, monkeypatch, extra) -> None:
+    """Validation runs before the job row exists, so nothing else can clean up."""
+    import io
+
+    from tarjomeh.web.app import create_app
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("UI_SECRET_TOKEN", TOKEN)
+    app = create_app()
+    app.config["TESTING"] = True
+    upload_dir = app.config["UPLOAD_FOLDER"]
+
+    before = {p.name for p in upload_dir.glob("*")}
+    response = app.test_client().post(
+        "/api/translate",
+        data={"file": (io.BytesIO(b"hello"), "book.txt"), **extra},
+        content_type="multipart/form-data",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    after = {p.name for p in upload_dir.glob("*")}
+
+    assert response.status_code == 400
+    assert after == before, f"leaked upload(s): {after - before}"
+
+
+# ---------------------------------------------------------------------------
+# Fix 2.4 — a bad glossary upload must not destroy the good one
+# ---------------------------------------------------------------------------
+
+GOOD_CSV = "source,target,tgt_lng\nstate,دولت,fa\n".encode()
+
+
+def _post_glossary(app, payload: bytes, filename: str = "philosophy.csv"):
+    import io
+
+    return app.test_client().post(
+        "/api/glossary/upload",
+        data={"file": (io.BytesIO(payload), filename)},
+        content_type="multipart/form-data",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+
+
+def test_invalid_glossary_upload_preserves_the_existing_file(tmp_path, monkeypatch) -> None:
+    from tarjomeh.web.app import create_app
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("UI_SECRET_TOKEN", TOKEN)
+    app = create_app()
+    app.config["TESTING"] = True
+
+    assert _post_glossary(app, GOOD_CSV).status_code == 200
+    target = tmp_path / "glossary" / "philosophy.csv"
+    assert target.read_bytes() == GOOD_CSV
+
+    # Same filename => same destination. This used to overwrite, then unlink.
+    response = _post_glossary(app, b"\xff\xfe\x00not,utf,8\xff")
+    assert response.status_code == 400
+    assert target.exists(), "the valid glossary was destroyed by a bad upload"
+    assert target.read_bytes() == GOOD_CSV, "the valid glossary was corrupted"
+    leftovers = list((tmp_path / "glossary").glob("*.part"))
+    assert not leftovers, f"staging files left behind: {leftovers}"
+
+
+def test_valid_glossary_upload_replaces_and_leaves_no_staging_file(
+    tmp_path, monkeypatch
+) -> None:
+    from tarjomeh.web.app import create_app
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("UI_SECRET_TOKEN", TOKEN)
+    app = create_app()
+    app.config["TESTING"] = True
+
+    _post_glossary(app, GOOD_CSV)
+    replacement = GOOD_CSV + "power,قدرت,fa\n".encode()
+    response = _post_glossary(app, replacement)
+
+    assert response.status_code == 200
+    assert response.get_json()["terms"] == 2
+    target = tmp_path / "glossary" / "philosophy.csv"
+    assert target.read_bytes() == replacement
+    assert not list((tmp_path / "glossary").glob("*.part"))

@@ -14,6 +14,7 @@ import os
 import queue
 import re
 import secrets
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, Future
 from datetime import datetime
@@ -37,7 +38,8 @@ logger = logging.getLogger(__name__)
 
 # Global job executor — bounded to 2 concurrent workers
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tarjomeh-job")
-_active_jobs: dict[str, Future] = {}
+_active_jobs: dict[str, Future | _JobClaim] = {}
+_active_jobs_lock = threading.Lock()
 _progress_queues: dict[str, queue.Queue] = {}
 _PROGRESS_QUEUE_TTL_SECONDS = 300.0
 _QUERY_SECRET_RE = re.compile(
@@ -125,6 +127,76 @@ def _job_critique_threshold(job: dict[str, Any]) -> float:
         # Must match the default above: falling back to 7.0 silently
         # loosened review flagging by two points on a malformed config.
         return 9.0
+
+
+class _JobClaim:
+    """Placeholder holding an ``_active_jobs`` slot until the Future exists.
+
+    Reports itself as not-done so a racing request loses the claim check.
+    """
+
+    def done(self) -> bool:
+        return False
+
+    def cancel(self) -> bool:
+        return False
+
+
+def _try_claim_job(job_id: str) -> bool:
+    """Reserve exclusive worker ownership of *job_id*.
+
+    Returns False when another worker already owns it. The check and the
+    reservation happen under one lock, so two concurrent requests cannot both
+    win - the previous check-then-submit sequence allowed exactly that.
+    """
+    with _active_jobs_lock:
+        existing = _active_jobs.get(job_id)
+        if existing is not None and not existing.done():
+            return False
+        _active_jobs[job_id] = _JobClaim()
+        return True
+
+
+def _assign_job_worker(job_id: str, future: Future) -> None:
+    """Replace a claim placeholder with the real Future."""
+    with _active_jobs_lock:
+        _active_jobs[job_id] = future
+
+
+def _release_job_claim(job_id: str, expected: Any = None) -> None:
+    """Drop the claim, but only if it is still the same one."""
+    with _active_jobs_lock:
+        current = _active_jobs.get(job_id)
+        if expected is None or current is expected:
+            _active_jobs.pop(job_id, None)
+
+
+def _record_job_failure(job_id: str, error: str) -> None:
+    """Persist FAILED unless the pipeline already set a terminal status.
+
+    PAUSED / PAUSED_ERROR / COMPLETED are deliberate states the pipeline
+    recorded on its way out; only an otherwise-unreported crash becomes
+    FAILED. Without this, JobStatus.FAILED was never written by any code path
+    and a crashed job showed as "processing" forever.
+    """
+    try:
+        from tarjomeh.jobs.database import JobDatabase, JobStatus
+
+        db = JobDatabase()
+        current = db.get_job(job_id)
+        terminal = {
+            JobStatus.PAUSED,
+            JobStatus.PAUSED_ERROR,
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+        }
+        # get_job() rewrites `status` for the frontend; raw_status is the truth.
+        if current and current.get("raw_status") in terminal:
+            return
+        db.update_job_status(job_id, JobStatus.FAILED, error)
+        db.log_event(job_id, "ERROR", f"Job failed: {error}")
+    except Exception:
+        logger.exception("Could not record FAILED status for job %s", job_id)
 
 
 def create_app(config: Any = None) -> Flask:
@@ -338,6 +410,16 @@ def _register_api(app: Flask) -> None:
         saved_path = upload_dir / f"{job_id}{file_ext}"
         file.save(str(saved_path))
 
+        def _reject(message: str, code: int = 400):
+            """Delete the just-saved upload before rejecting the request.
+
+            Nothing else can clean these up: validation runs before the job row
+            exists, so a rejected upload would linger with no owner, and
+            MAX_CONTENT_LENGTH allows 500 MB per attempt.
+            """
+            saved_path.unlink(missing_ok=True)
+            return jsonify({"error": message}), code
+
         # Build config overrides from the individual UI form fields and/or a
         # `config` JSON blob (for API callers). The web UI sends flat fields
         # (mode/format/bilingual_mode); map them to dotted config keys so they
@@ -347,7 +429,7 @@ def _register_api(app: Flask) -> None:
             try:
                 config_overrides.update(json.loads(request.form["config"]))
             except json.JSONDecodeError:
-                return jsonify({"error": "Invalid config JSON"}), 400
+                return _reject("Invalid config JSON")
 
         _form_field_map = {
             "mode": "translation.mode",
@@ -421,9 +503,7 @@ def _register_api(app: Flask) -> None:
                 try:
                     config_overrides[dotted_key] = converter(value)
                 except ValueError:
-                    return jsonify({
-                        "error": f"Invalid numeric setting: {form_key}"
-                    }), 400
+                    return _reject(f"Invalid numeric setting: {form_key}")
 
         selected_raw = request.form.get("selected_chapters", "").strip()
         if selected_raw:
@@ -436,9 +516,9 @@ def _register_api(app: Flask) -> None:
                     raise ValueError
                 config_overrides["translation.chapter_selection"] = selected
             except (TypeError, ValueError, json.JSONDecodeError):
-                return jsonify({
-                    "error": "selected_chapters must be a JSON list of positive integers"
-                }), 400
+                return _reject(
+                    "selected_chapters must be a JSON list of positive integers"
+                )
 
         # Create progress queue for SSE
         worker_queue = queue.Queue()
@@ -494,16 +574,21 @@ def _register_api(app: Flask) -> None:
 
             except Exception as e:
                 logger.exception(f"Job {job_id} failed: {e}")
+                _record_job_failure(job_id, str(e))
                 worker_queue.put({
                     "stage": "error", "progress": 0, "message": str(e)
                 })
                 _send_webhook(app.config.get("TARJOMEH_CONFIG"), job_id, "failed", str(e))
             finally:
-                _active_jobs.pop(job_id, None)
+                _release_job_claim(job_id)
                 _schedule_progress_queue_cleanup(job_id, worker_queue)
 
-        future = _executor.submit(run_job)
-        _active_jobs[job_id] = future
+        try:
+            future = _executor.submit(run_job)
+        except Exception:
+            _release_job_claim(job_id)
+            raise
+        _assign_job_worker(job_id, future)
 
         return jsonify({
             "job_id": job_id,
@@ -1543,9 +1628,23 @@ def _register_api(app: Flask) -> None:
         if not job:
             return jsonify({"error": "Job not found"}), 404
 
-        config = TarjomehConfig.from_dict(job.get("config", {}))
-        pipeline = TranslationPipeline(config)
-        translation = pipeline.retranslate_chunk(job_id, chunk_index)
+        # Retranslation writes chunk rows, memory state and QA events.
+        # Running it while the pipeline owns the job interleaves those writes.
+        if not _try_claim_job(job_id):
+            return jsonify({
+                "error": "Job is busy",
+                "job_id": job_id,
+                "message": "A worker is already processing this job. "
+                           "Pause it before retranslating a chunk.",
+            }), 409
+
+        try:
+            config = TarjomehConfig.from_dict(job.get("config", {}))
+            pipeline = TranslationPipeline(config)
+            translation = pipeline.retranslate_chunk(job_id, chunk_index)
+        finally:
+            _release_job_claim(job_id)
+
         return jsonify({
             "status": "retranslated",
             "job_id": job_id,
@@ -1648,8 +1747,10 @@ def _register_api(app: Flask) -> None:
         if not job:
             return jsonify({"error": "Job not found"}), 404
 
-        future = _active_jobs.get(job_id)
-        if future and not future.done():
+        # Claiming under a lock is what makes this safe: the old
+        # check-then-submit let two concurrent POSTs both pass and both submit,
+        # so two writers raced on the same chunks, memory state and output.
+        if not _try_claim_job(job_id):
             db.log_event(job_id, "WARNING", "Resume requested while an existing worker was still running.")
             return jsonify({
                 "error": "Job is still pausing",
@@ -1702,15 +1803,20 @@ def _register_api(app: Flask) -> None:
                 })
             except Exception as e:
                 logger.exception(f"Resume job {job_id} failed: {e}")
+                _record_job_failure(job_id, str(e))
                 worker_queue.put({
                     "stage": "error", "progress": 0, "message": str(e)
                 })
             finally:
-                _active_jobs.pop(job_id, None)
+                _release_job_claim(job_id)
                 _schedule_progress_queue_cleanup(job_id, worker_queue)
 
-        future = _executor.submit(run_resume)
-        _active_jobs[job_id] = future
+        try:
+            future = _executor.submit(run_resume)
+        except Exception:
+            _release_job_claim(job_id)
+            raise
+        _assign_job_worker(job_id, future)
 
         return jsonify({"status": "resumed", "job_id": job_id}), 202
 
@@ -1838,21 +1944,28 @@ def _register_api(app: Flask) -> None:
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
 
-        file.save(str(save_path))
-
-        # Validate
         from tarjomeh.glossary.manager import GlossaryManager
+
+        # Validate a staged copy, then swap it in atomically. Saving straight to
+        # save_path destroyed the existing glossary whenever the replacement
+        # turned out to be invalid - same filename means same path, and the
+        # error branch then unlinked the destination.
+        staged = save_path.with_name(f"{save_path.name}.{uuid.uuid4().hex[:8]}.part")
+        file.save(str(staged))
         try:
             gm = GlossaryManager()
-            gm.load(save_path)
-            return jsonify({
-                "status": "uploaded",
-                "path": str(save_path),
-                "terms": len(gm.entries),
-            })
+            gm.load(staged)
         except Exception as e:
-            save_path.unlink(missing_ok=True)
+            staged.unlink(missing_ok=True)
             return jsonify({"error": f"Invalid glossary: {e}"}), 400
+
+        # Same directory, therefore same filesystem, therefore atomic.
+        os.replace(staged, save_path)
+        return jsonify({
+            "status": "uploaded",
+            "path": str(save_path),
+            "terms": len(gm.entries),
+        })
 
     @app.route("/api/glossary/terms", methods=["GET", "POST"])
     @_require_auth
