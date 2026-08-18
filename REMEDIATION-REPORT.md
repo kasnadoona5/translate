@@ -5,11 +5,11 @@ branch `fix/remediation`, on top of baseline commit `f6b863e`.
 
 | | |
 |---|---|
-| Fixes shipped | Stage 1 (20 fixes) + Phase 8 (6 parts) + Unicode corruption |
-| Commits | 8 (+1 chore) |
-| Source files changed | 11 (plus `.gitignore`) |
-| Tests | **352 baseline → 491 passing** (+139 new, 0 failures) |
-| mypy | 93 errors before, **93 after** — identical, all pre-existing |
+| Fixes shipped | Stage 1 (20) + Phase 8 (6 parts) + Unicode corruption + Tier 1 (4) + 10.1 |
+| Commits | 12 (+1 chore, +2 docs) |
+| Source files changed | 13 (plus `.gitignore`) |
+| Tests | **352 baseline → 562 passing** (+210 new, 0 failures) |
+| mypy | 93 errors before, **89 after** — four *fewer*; no new findings |
 | ruff | 244 before, **240 after** — 4 *fewer*; no new findings |
 | Prompt files edited | **none** |
 | Pipeline order changed | **no** |
@@ -43,9 +43,9 @@ Two further constraints you set:
 
 ```bash
 cd /c/Users/admin/Downloads/VSCODE/Translate-v84-fix
-./.venv/Scripts/python.exe -m pytest -q                      # 491 passed
+./.venv/Scripts/python.exe -m pytest -q                      # 562 passed
 ./.venv/Scripts/python.exe -m ruff check src/tarjomeh/       # 240 (all pre-existing)
-./.venv/Scripts/python.exe -m mypy src/tarjomeh/             # 93 (all pre-existing)
+./.venv/Scripts/python.exe -m mypy src/tarjomeh/             # 89 (all pre-existing)
 ```
 
 Windows note: prefix with `PYTHONIOENCODING=utf-8` for anything printing Persian —
@@ -370,6 +370,110 @@ against the pre-fix code. A full translation of a scanned PDF would additionally
 4. **Do not ship the Werkzeug dev server.** `cmd_serve` still ends in `app.run(...)` and
    `Dockerfile:34` makes that the entrypoint. Outside this fix list, still recommended.
 
+---
+
+# Follow-up round: Tier 1 memory fixes and 10.1
+
+Added after the first report. This is the subset that improves memory and
+reliability without granting any new gate the power to reject a translation.
+
+| Fix | Output impact | Commit |
+|---|---|---|
+| 10.2 + 11.6 front matter stops teaching terminology | **yes** — better prompts everywhere | `82e34a7` |
+| 5.2 chapter summaries keyed by position | memory only | `82e34a7` |
+| 6.3 FixedChunker carries structural policy | memory only (latent) | `82e34a7` |
+| 3.1 paragraph-identity gate aligned; degrades instead of aborting | **yes** — stops losing whole jobs | `9373726` |
+| 10.1 a table never shares a chunk with prose | **yes** — moves chunk boundaries | `362eba5` |
+
+Note on 10.2: memory feeds prompts, so a memory change *is* a translation
+change. That is the mechanism by which it helps; there is no version of this
+that improves memory and leaves output byte-identical. What is unchanged is
+pipeline order, prompt templates, model, and reasoning policy.
+
+## Three further plan diagnoses that do not reproduce
+
+Fix `0d` was withdrawn in the first round. Verification against the code and
+against the real source PDF withdrew two more, and deferred a third. Your agent
+should not implement any of them as written.
+
+**10.3 "empty completions are handled inconsistently" — already correct.**
+`_attempt_event` already computes a content-based `visible_output_present` plus a
+`token_accounting_status` separating `reported` / `provider_usage_missing` /
+`no_visible_output`. The three empty-checks in the sync path, the async path and
+the recorder are already logically equivalent
+(`not content or not content.strip()` is the same test as
+`not bool((content or "").strip())`). The audited
+`prompt=0 completion=0 finish=None success=True` was *accurate*: content was
+present and the provider reported no counters, which is precisely what
+`provider_usage_missing_but_content_present: 6` records. Nothing changed — the
+LLM hot path is not worth touching to "fix" correct code.
+
+**11.5 "TOC merged into run-on paragraphs" — wrong mechanism, and the harm is
+already gone.** Measured on the real PDF: the offending paragraphs (indices 25,
+27, 29, 30 on page 8) each contain about five page-number-like tokens and all
+carry `cross_page_join=False`. They were never produced by
+`_merge_continuation_paragraphs`, so the plan's proposed change to the merge
+predicate is a **no-op** — they arrive as single blocks from PyMuPDF. Both real
+harms are already handled:
+
+* memory — the TOC sits in a chapter titled `Contents`, which fix 10.2 now
+  excludes from proper-noun extraction. Confirmed against the PDF: the parser
+  reports chapters `Contents`, `Tables` and `Abbreviations`, all in the
+  front-matter set, while `Preface` is deliberately kept;
+* style — measured across all 66 chunks of the book, **zero** front-matter
+  chunks are `style_eligible`, so the style profile was never at risk.
+
+What remains is cosmetic run-on text in a section readers skim, and the only
+available fix is a "line ends with a page number" heuristic that risks misfiring
+on real prose. Deliberately not done.
+
+**Item 17 "export real Word tables" — measured; it needs a confidence gate
+before it is safe.** On page 19 (Table 1.1, 82 table paragraphs) the parser
+exposes `bbox`, `page`, `font_size` and `reading_order`, but there are **37
+distinct x0 values and 78 distinct y0 values** across those 82 paragraphs: every
+wrapped cell line gets its own y and its own indent, and the x values cluster in
+near-duplicate pairs (80.9/81.2, 128.0/128.2, 175.0/175.2, 233.0/233.3). Neither
+axis separates cleanly, so a grid can only be recovered by clustering both — with
+a real chance of placing cells in the wrong column. A misaligned six-column
+table actively misinforms the reader; 82 loose paragraphs are ugly but readable.
+The exporter is already built for the handover: `apply_structural_format` styles
+table paragraphs and documents that native cells are emitted "only when a parser
+provides an actual matrix".
+
+Prerequisites, in order:
+
+1. cell rejoining in `pdf_parser` — x/y clustering with tolerance;
+2. a confidence test that refuses to emit a grid when the column count is
+   ambiguous;
+3. the plan's specified fallback — a bounded preformatted block with a review
+   marker;
+4. validation across the book's 369 table paragraphs on six or more pages, plus a
+   second book.
+
+## Why Tier 3 was held back
+
+The mechanism is not hypothetical — it is in the audited log. Every Tier 3 item
+is a gate, and when a gate rejects a candidate the pipeline retains the PREVIOUS
+text:
+
+```
+Decision mqm-50974ca7046d: accepted -> [corrected text] [commit=not_committed; integrity=rejected]
+INTEGRITY REJECTED: stage=refinement blocking=1 prior translation retained
+```
+
+One gate rejected a better candidate and the corrupted text shipped. Items 12,
+13, 14, 16 and 15-repair would add five more reject-or-rewrite authorities, each
+firing on Persian output using patterns designed for English structure. Item 16
+in particular must separate repetition the translation *introduced* from
+repetition already present in the source, and Persian legitimately repeats where
+English does not. Item 15's repair half does not reject but *rewrites*, so a
+wrong reconstruction damages an already-correct translation.
+
+Recommended path: build these as **detection and reporting only** — item 12 is
+already specified that way ("Output impact: none directly"), and item 16 can mark
+`needs_review` instead of rejecting — then promote them to blocking only after the
+item-20 corpus shows they do not fire on correct translations.
+
 ## Test coverage added
 
 | File | Tests | Covers |
@@ -377,6 +481,9 @@ against the pre-fix code. A full translation of a scanned PDF would additionally
 | `tests/test_remediation_stage1.py` | 96 | fixes 1.1, 1.2, 2.1–2.4, 4.1, 4.2, 7.2–7.7, 7.9, 7.10 |
 | `tests/test_llm_budget.py` | 27 | Phase 8 — split into 14 invariants + 13 target behaviours |
 | `tests/test_unicode_integrity.py` | 16 | Unicode corruption, incl. false-positive guards |
+| `tests/test_tier1_memory.py` | 45 | 10.2/11.6 front matter, 5.2 positions, 6.3 chunker policy |
+| `tests/test_paragraph_identity.py` | 15 | 3.1 gate alignment and graceful degradation |
+| `tests/test_table_chunking.py` | 11 | 10.1 table boundaries; no paragraph lost or reordered |
 
 Two design notes on this suite:
 
