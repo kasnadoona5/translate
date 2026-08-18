@@ -349,10 +349,27 @@ class FixedChunker:
                         section_title=section.title,
                         start_index=len(chunks),
                     )
+                    # Structural policy must travel with the chunk. Without
+                    # it MemoryManager defaults style_eligible to True, so
+                    # headings, tables and footnotes became style exemplars and
+                    # polluted the long-term style profile.
+                    para_metadata = getattr(para, "metadata", {}) or {}
+                    para_role = str(para_metadata.get("structure_role", "body"))
+                    para_style_eligible = (
+                        para_role == "body"
+                        and not bool(para_metadata.get("is_footnote"))
+                        and not bool(para_metadata.get("is_table"))
+                        and not bool(para_metadata.get("heading_level"))
+                    )
                     for c in sub_chunks:
                         c.metadata["paragraph_indices"] = [para_to_idx[id(para)]]
                         c.metadata["chapter_position"] = original_position
                         c.metadata["chapter_number"] = chapter_number
+                        c.metadata["structural_roles"] = [para_role]
+                        c.metadata["style_eligible"] = para_style_eligible
+                        c.metadata["style_body_paragraphs"] = (
+                            [0] if para_style_eligible else []
+                        )
                         for key in ("start_page", "end_page"):
                             if key in chapter_metadata:
                                 c.metadata[key] = chapter_metadata[key]

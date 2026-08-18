@@ -1315,6 +1315,49 @@ def _bounded_qa_context(chunk: Chunk, adjacent: str, memory: Any) -> str:
     return "\n\n".join(parts)
 
 
+# Front matter (copyright page, contents, list of tables/abbreviations) yields
+# publisher and address noise, not book terminology. In the audited run 44 of 83
+# stored proper nouns came from it -- street names, printers, binderies, "ISBN",
+# "hardback" -- none of which recur in the book, yet all of which were injected
+# into every later translation prompt as established renderings.
+_FRONT_MATTER_TITLES = frozenset({
+    "contents",
+    "table of contents",
+    "tables",
+    "list of tables",
+    "figures",
+    "list of figures",
+    "abbreviations",
+    "list of abbreviations",
+    "copyright",
+    "copyright page",
+    "frontmatter",
+    "front matter",
+    "title page",
+    "dedication",
+    "acknowledgements",
+    "acknowledgments",
+})
+
+
+def _is_front_matter(chunk: Any) -> bool:
+    """Whether a chunk is front matter and must not teach terminology.
+
+    Deliberately conservative: a chunk qualifies only when its chapter title is
+    a known front-matter heading, or when it contains no body prose at all.
+    Misclassifying a real chapter would DISCARD legitimate terminology, which is
+    worse than the noise this filter removes.
+    """
+    title = (getattr(chunk, "chapter_title", "") or "").strip().casefold()
+    title = title.strip(":.-–— ")
+    if title in _FRONT_MATTER_TITLES:
+        return True
+    metadata = getattr(chunk, "metadata", None) or {}
+    roles = [str(role) for role in (metadata.get("structural_roles") or [])]
+    # No structural evidence => assume body, so nothing is discarded by guessing.
+    return bool(roles) and not any(role == "body" for role in roles)
+
+
 def _chunk_needs_review(db: Any, job_id: str, chunk_index: int) -> bool:
     """Return True when QA recorded an unresolved critic/translator disagreement."""
     events = db.get_chunk_events(job_id, chunk_index)
@@ -2584,6 +2627,25 @@ class TranslationPipeline:
                                         ),
                                     },
                                 )
+                            elif _is_front_matter(chunk):
+                                # 10.2/11.6: the copyright page taught 44 bogus
+                                # mappings, which also authorised inline English
+                                # glossing of street names and printers.
+                                self.db.log_chunk_event(
+                                    job_id,
+                                    idx,
+                                    "proper_noun_extraction",
+                                    {
+                                        "status": "skipped_front_matter",
+                                        "reason": (
+                                            "Front matter yields publisher and "
+                                            "address noise, not book terminology."
+                                        ),
+                                        "chapter_title": (
+                                            chunk.chapter_title or ""
+                                        ),
+                                    },
+                                )
                             else:
                                 try:
                                     noun_report = self._run_async(
@@ -2605,7 +2667,14 @@ class TranslationPipeline:
                                 is_chapter_end = True
                             else:
                                 next_chunk = chunks[idx + 1]
-                                if next_chunk.chapter_title != chunk.chapter_title:
+                                # Titles are not unique: edited volumes repeat
+                                # "Introduction", "Conclusion", "Notes". Two such
+                                # chapters merged into one summary and this
+                                # end-of-chapter test misfired. chapter_position
+                                # is set by both chunkers and IS unique.
+                                if self._chunk_chapter_position(
+                                    next_chunk
+                                ) != self._chunk_chapter_position(chunk):
                                     is_chapter_end = True
 
                             if is_chapter_end:
@@ -2613,7 +2682,9 @@ class TranslationPipeline:
                                 chap_trans = []
                                 for i in range(idx + 1):
                                     c = chunks[i]
-                                    if c.chapter_title == chunk.chapter_title:
+                                    if self._chunk_chapter_position(
+                                        c
+                                    ) == self._chunk_chapter_position(chunk):
                                         chap_source.append(c.text)
                                         chap_trans.append(translations.get(i, ""))
                                 
@@ -2792,6 +2863,25 @@ class TranslationPipeline:
                                         ),
                                     },
                                 )
+                            elif _is_front_matter(chunk):
+                                # 10.2/11.6: the copyright page taught 44 bogus
+                                # mappings, which also authorised inline English
+                                # glossing of street names and printers.
+                                self.db.log_chunk_event(
+                                    job_id,
+                                    idx,
+                                    "proper_noun_extraction",
+                                    {
+                                        "status": "skipped_front_matter",
+                                        "reason": (
+                                            "Front matter yields publisher and "
+                                            "address noise, not book terminology."
+                                        ),
+                                        "chapter_title": (
+                                            chunk.chapter_title or ""
+                                        ),
+                                    },
+                                )
                             else:
                                 try:
                                     noun_report = self._run_async(
@@ -2813,7 +2903,14 @@ class TranslationPipeline:
                                 is_chapter_end = True
                             else:
                                 next_chunk = chunks[idx + 1]
-                                if next_chunk.chapter_title != chunk.chapter_title:
+                                # Titles are not unique: edited volumes repeat
+                                # "Introduction", "Conclusion", "Notes". Two such
+                                # chapters merged into one summary and this
+                                # end-of-chapter test misfired. chapter_position
+                                # is set by both chunkers and IS unique.
+                                if self._chunk_chapter_position(
+                                    next_chunk
+                                ) != self._chunk_chapter_position(chunk):
                                     is_chapter_end = True
 
                             if is_chapter_end:
@@ -2821,7 +2918,9 @@ class TranslationPipeline:
                                 chap_trans = []
                                 for i in range(idx + 1):
                                     c = chunks[i]
-                                    if c.chapter_title == chunk.chapter_title:
+                                    if self._chunk_chapter_position(
+                                        c
+                                    ) == self._chunk_chapter_position(chunk):
                                         chap_source.append(c.text)
                                         chap_trans.append(translations.get(i, ""))
                                 
