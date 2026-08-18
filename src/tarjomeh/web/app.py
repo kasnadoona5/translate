@@ -1254,6 +1254,7 @@ def _register_api(app: Flask) -> None:
             "integrity_final_failed": "integrity_final_failed",
             "language_quality_review": "foreign_text_quality_risk",
             "chunk_review_required": "explicit_chunk_review_reason",
+            "paragraph_identity_degraded": "paragraph_alignment_reconstructed",
         }
         for event in all_events:
             reason = review_event_reasons.get(event["event_type"])
@@ -1261,6 +1262,40 @@ def _register_api(app: Flask) -> None:
                 review_reasons.add(reason)
         if final_text_audit and final_text_audit.get("review_required"):
             review_reasons.add("final_text_quality_risk")
+
+        # Item 19. Structural-audit findings are reported for every
+        # classification, but only two of the four are actionable. A source that
+        # contradicts itself is preserved and NOTED, so it must never create
+        # review load, and neither may "cannot be established".
+        structure_counts: dict[str, int] = {}
+        actionable_structure = {
+            "translation_structure_mismatch",
+            "unauthorized_source_correction",
+        }
+        for event in all_events:
+            if event["event_type"] != "structure_audit":
+                continue
+            for finding in event.get("payload", {}).get("findings", []) or []:
+                classification = str(finding.get("classification", "unknown"))
+                structure_counts[classification] = (
+                    structure_counts.get(classification, 0) + 1
+                )
+        for classification in sorted(structure_counts):
+            if classification in actionable_structure:
+                review_reasons.add(classification)
+
+        # Corruption that was reconstructed from an unambiguous source needs no
+        # human at all; only what was deferred does.
+        corruption_repaired = 0
+        corruption_deferred = 0
+        for event in all_events:
+            if event["event_type"] != "unicode_corruption_repair":
+                continue
+            payload = event.get("payload", {}) or {}
+            corruption_repaired += int(payload.get("repaired", 0) or 0)
+            corruption_deferred += int(payload.get("left_for_review", 0) or 0)
+        if corruption_deferred:
+            review_reasons.add("unicode_corruption_unresolved")
         missing_output = any(
             "translation" in chunk
             and chunk.get("status") in {"completed", "needs_review"}
@@ -1315,6 +1350,25 @@ def _register_api(app: Flask) -> None:
             ),
             "",
         ])
+
+        if structure_counts or corruption_repaired or corruption_deferred:
+            lines.append("Structural and Unicode audit:")
+            for classification in sorted(structure_counts):
+                actionable = classification in actionable_structure
+                lines.append(
+                    f"  {classification}={structure_counts[classification]}"
+                    + ("  (review required)" if actionable else "  (note only)")
+                )
+            if corruption_repaired or corruption_deferred:
+                lines.append(
+                    f"  unicode_repaired_from_source={corruption_repaired}"
+                    "  (no review needed)"
+                )
+                lines.append(
+                    f"  unicode_left_for_review={corruption_deferred}"
+                    + ("  (review required)" if corruption_deferred else "")
+                )
+            lines.append("")
 
         for chunk in all_chunks:
             idx = int(chunk["chunk_index"])
