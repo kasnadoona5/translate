@@ -1053,7 +1053,11 @@ class LLMClient:
             if operation in _JSON_OBJECT_HELPER_OPERATIONS:
                 payload["response_format"] = {"type": "json_object"}
             return payload
-        if operation in {"translation", "translation_split_recovery"}:
+        if operation in {
+            "translation",
+            "translation_integrity_repair",
+            "translation_split_recovery",
+        }:
             mode = self.config.llm.translation_reasoning
             if mode == "enabled":
                 payload = dict(original)

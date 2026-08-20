@@ -10,6 +10,7 @@ from tarjomeh.exporters.base import TranslatedDocument
 from tarjomeh.glossary.manager import GlossaryManager
 from tarjomeh.glossary.compliance import term_occurs_only_in_citations
 from tarjomeh.persian.typography import PersianTypographer
+from tarjomeh.quality.integrity import source_abbreviation_expansions
 
 
 NOTE_CAPABLE_FORMATS = {"docx", "epub", "markdown"}
@@ -587,6 +588,10 @@ def audit_inline_english_originals(
     for paragraph in document.paragraphs:
         source_text = paragraph.source_text or ""
         source_folded = source_text.casefold()
+        source_expansions = {
+            _original_identity(value)
+            for value in source_abbreviation_expansions(source_text)
+        }
 
         def replace(match: re.Match[str]) -> str:
             nonlocal preserved_citations
@@ -596,7 +601,11 @@ def audit_inline_english_originals(
 
             key = _original_identity(content)
             exact_source_parenthetical = f"({content})".casefold() in source_folded
-            if any(char.isdigit() for char in content) or exact_source_parenthetical:
+            if (
+                any(char.isdigit() for char in content)
+                or exact_source_parenthetical
+                or key in source_expansions
+            ):
                 leading_original = _original_identity(content.split(",", 1)[0])
                 if leading_original in authorized:
                     seen.add(leading_original)

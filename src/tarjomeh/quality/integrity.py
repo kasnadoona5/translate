@@ -90,6 +90,14 @@ _MIXED_SCRIPT_TOKEN_RE = re.compile(
     rf"(?<![\w/.-])(?:[A-Za-z]+[{_PERSIAN_LETTER_CLASS}]+|"
     rf"[{_PERSIAN_LETTER_CLASS}]+[A-Za-z]+)(?![\w/.-])"
 )
+_ABBREVIATION_DEFINITION_RE = re.compile(
+    r"(?<!\w)(?P<acronym>[A-Z]{2,}(?:\s+[A-Z]{2,}){0,3})"
+    r"(?:\s+(?P<label>Act|Agreement|Agency|Convention|Law|Organisation|"
+    r"Organization|Program|Programme|Protocol|Treaty))?\s+"
+)
+_ABBREVIATION_CONNECTORS = frozenset({
+    "and", "by", "for", "from", "in", "of", "on", "the", "to", "with",
+})
 _PARENTHETICAL_PERSIAN_SUFFIX_RE = re.compile(
     rf"\([^()\n]*[A-Za-z][^()\n]*\)\u200c?"
     rf"[{_PERSIAN_LETTER_CLASS}]{{1,8}}"
@@ -786,6 +794,35 @@ def protected_english_originals(source: str, translation: str) -> list[str]:
     return sorted(set(values), key=str.casefold)
 
 
+def source_abbreviation_expansions(source: str) -> list[str]:
+    """Find source-authored acronym definitions from their initials.
+
+    This is intentionally structural rather than lexical.  It covers abbreviation
+    lists and compact definitions while refusing ordinary English prose whose
+    significant-word initials do not reproduce the preceding acronym.
+    """
+    text = source or ""
+    expansions: list[str] = []
+    for match in _ABBREVIATION_DEFINITION_RE.finditer(text):
+        acronym = re.sub(r"[^A-Z]", "", match.group("acronym"))
+        if not 2 <= len(acronym) <= 20:
+            continue
+        tail = text[match.end():match.end() + 360]
+        words = list(re.finditer(r"[A-Za-z][A-Za-z'\u2019-]*", tail))[:30]
+        initials = ""
+        for index, word in enumerate(words):
+            folded = word.group().casefold()
+            if folded not in _ABBREVIATION_CONNECTORS:
+                initials += word.group()[0].upper()
+            if not acronym.startswith(initials):
+                break
+            if initials == acronym and index >= 2:
+                value = tail[words[0].start():word.end()]
+                expansions.append(" ".join(value.split()))
+                break
+    return sorted(set(expansions), key=str.casefold)
+
+
 def protected_source_citations(source: str, translation: str) -> list[str]:
     """Return source-grounded author-year atoms retained in a translation.
 
@@ -816,6 +853,7 @@ def protected_source_apparatus(source: str, translation: str) -> list[str]:
     translation_folded = normalize_for_match(translation)
     values: list[str] = []
     candidates: list[str] = []
+    candidates.extend(source_abbreviation_expansions(source))
     for parenthetical in _SOURCE_PAREN_RE.findall(source or ""):
         years = list(_CITATION_YEAR_RE.finditer(parenthetical))
         if years:
@@ -864,7 +902,8 @@ def _grounded_phrase_spans(text: str, phrase: str) -> list[tuple[int, int]]:
 
 def _latin_token_identity(value: str) -> str:
     """Normalize a Latin token for source-provenance comparison only."""
-    return re.sub(r"[-\u2010-\u2015]", "", value or "").casefold()
+    normalized = re.sub(r"[-\u2010-\u2015]", "", value or "").casefold()
+    return re.sub(r"(?:['\u2019]s)$", "", normalized)
 
 
 def _source_latin_identity_sequence(source: str) -> list[str]:
@@ -1697,9 +1736,14 @@ class PostEditIntegrityGate:
                 )
 
             if allowed_folded is not None:
+                source_expansions = {
+                    value.casefold()
+                    for value in source_abbreviation_expansions(source)
+                }
                 unauthorized = [
                     value for value in candidate_originals
                     if value.casefold() not in allowed_folded
+                    and value.casefold() not in source_expansions
                     and value.casefold() not in previous_folded
                     and not any(char.isdigit() for char in value)
                     and not (

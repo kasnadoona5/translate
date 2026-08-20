@@ -30,6 +30,12 @@ _CATEGORY_ALIASES = {
     "transliteration": "technical_loanword",
 }
 _PERSIAN_LETTER_RE = re.compile(r"[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]")
+_PERSIAN_WORD_RE = re.compile(
+    r"[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]+"
+    r"(?:\u200c[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]+)*"
+)
+_PERSIAN_DIACRITICS_RE = re.compile(r"[\u064b-\u065f\u0670\u06d6-\u06ed]")
+_OBSERVED_MAPPING_BOUNDARY_RE = re.compile(r"[\n\r.!?\u061f\u061b]")
 _UNUSABLE_TARGET_RE = re.compile(
     r"\b(?:n/?a|none|unknown|not available|no persian|no established|"
     r"not supported|insufficient evidence|untranslated)\b",
@@ -84,6 +90,43 @@ def is_usable_memory_mapping(english: str, persian: str) -> bool:
     if _UNUSABLE_TARGET_RE.search(target):
         return False
     if not _PERSIAN_LETTER_RE.search(target):
+        return False
+    return True
+
+
+def is_usable_observed_mapping(
+    english: str,
+    persian: str,
+    category: str = "proper_noun",
+) -> bool:
+    """Admit only compact, local evidence learned from ``Persian (English)``.
+
+    Observed mappings have less provenance than curated or reviewed entries.  A
+    sentence fragment, cross-paragraph capture, or partial multi-token name must
+    therefore never become book-wide memory merely because it contains Persian
+    letters.
+    """
+    source = " ".join((english or "").split()).strip()
+    raw_target = (persian or "").strip()
+    if not is_usable_memory_mapping(source, raw_target):
+        return False
+    if _OBSERVED_MAPPING_BOUNDARY_RE.search(raw_target):
+        return False
+    if re.search(r"[A-Za-z]", raw_target):
+        return False
+
+    source_words = re.findall(r"[A-Za-z\u00c0-\u024f]+", source)
+    target_plain = _PERSIAN_DIACRITICS_RE.sub("", raw_target)
+    target_words = _PERSIAN_WORD_RE.findall(target_plain)
+    if not source_words or not target_words:
+        return False
+    if len(source_words) >= 2 and len(target_words) < 2:
+        return False
+    if len(target_words) > max(5, len(source_words) * 2):
+        return False
+    if _CONTEXTUAL_TARGET_TOKEN_RE.search(target_plain):
+        return False
+    if _TRAILING_CONNECTIVE_RE.search(target_plain):
         return False
     return True
 
@@ -228,7 +271,12 @@ class ProperNouns:
         """
         en_key = " ".join(english.split()).strip()
         fa_val = persian.strip()
-        if not is_usable_memory_mapping(en_key, fa_val):
+        usable = is_usable_memory_mapping(en_key, fa_val)
+        if provenance == "observed_translation":
+            usable = usable and is_usable_observed_mapping(
+                en_key, fa_val, category
+            )
+        if not usable:
             return {
                 "action": "ignored",
                 "source": en_key,
@@ -522,17 +570,39 @@ class ProperNouns:
             return
 
         if "nouns" in data and isinstance(data.get("nouns"), dict):
+            stored_categories = data.get("categories", {})
+            stored_provenance = data.get("provenance", {})
+
+            def resumable(source: Any, target: Any) -> bool:
+                source_text = str(source)
+                target_text = str(target)
+                if not is_usable_memory_mapping(source_text, target_text):
+                    return False
+                record = (
+                    stored_provenance.get(source_text, {})
+                    if isinstance(stored_provenance, dict) else {}
+                )
+                if not isinstance(record, dict):
+                    record = {}
+                if record.get("origin") != "observed_translation":
+                    return True
+                category = (
+                    stored_categories.get(source_text, "proper_noun")
+                    if isinstance(stored_categories, dict) else "proper_noun"
+                )
+                return is_usable_observed_mapping(
+                    source_text, target_text, str(category)
+                )
+
             self._nouns = {
                 str(source): str(target)
                 for source, target in data["nouns"].items()
-                if is_usable_memory_mapping(str(source), str(target))
+                if resumable(source, target)
             }
-            stored_categories = data.get("categories", {})
             self._categories = {
                 source: _normalise_category(str(stored_categories.get(source, "proper_noun")))
                 for source in self._nouns
             }
-            stored_provenance = data.get("provenance", {})
             self._provenance = {
                 source: dict(stored_provenance.get(source, {}))
                 for source in self._nouns
@@ -555,7 +625,10 @@ class ProperNouns:
                 if isinstance(stored_aliases, dict)
                 and isinstance(stored_aliases.get(source), list)
             }
-            self._introduced = set(data.get("introduced", []))
+            self._introduced = {
+                source for source in data.get("introduced", [])
+                if source in self._nouns
+            }
         else:
             # Legacy checkpoint: flat mapping, no introduction tracking.
             self._nouns = {

@@ -45,7 +45,7 @@ from tarjomeh.memory.manager import MemoryManager, MemoryContext
 from tarjomeh.memory.proper_nouns import (
     INLINE_ORIGINAL_CATEGORIES,
     is_reusable_terminology_mapping,
-    is_usable_memory_mapping,
+    is_usable_observed_mapping,
 )
 from tarjomeh.context.web_searcher import WebContextSearcher
 from tarjomeh.glossary.manager import GlossaryManager
@@ -474,6 +474,53 @@ def _truncate_for_event(value: str, limit: int = 2000) -> str:
     return text[:limit] + f"... [truncated {len(text) - limit} chars]"
 
 
+def _integrity_repair_prompt(
+    *,
+    source: str,
+    rejected_translation: str,
+    integrity_payload: dict[str, Any],
+    terminology: str,
+    inline_policy: str,
+    paragraph_count: int,
+    paragraph_instruction: str = "",
+) -> str:
+    """Build a complete-translation repair from deterministic gate evidence."""
+    blocking = [
+        finding for finding in integrity_payload.get("findings", [])
+        if finding.get("severity") == "blocking"
+    ]
+    evidence = json.dumps(blocking, ensure_ascii=False, indent=2)
+    return f"""\
+The completed Persian translation below failed deterministic integrity checks.
+Repair only the evidenced defects while preserving all correct content.
+
+### English source
+{source}
+
+### Rejected Persian translation
+{rejected_translation}
+
+### Blocking integrity evidence
+{evidence}
+
+### Terminology policy
+{terminology}
+
+### English-original policy
+{inline_policy}
+
+Requirements:
+1. Return the complete corrected Persian translation, not a patch or explanation.
+2. Preserve every source proposition, paragraph, citation, year, number, name,
+   footnote marker, and source-authored multilingual expression.
+3. Repair mixed-script corruption and omissions only from source evidence; never guess.
+4. Preserve unrelated wording. Keep exactly {paragraph_count} paragraph(s).
+5. Use publication-quality formal Iranian Persian and established academic equivalents;
+   avoid opaque calques or transliteration when a precise standard Persian rendering exists.
+6. Output only the corrected translation.
+{paragraph_instruction}"""
+
+
 def _paragraph_count(text: str) -> int:
     return len([p for p in (text or "").split("\n\n") if p.strip()])
 
@@ -642,22 +689,41 @@ _ENTITY_NON_NAME_TOKENS = frozenset({
     "theory", "world",
 })
 _NON_PERSON_ENTITY_ENDINGS = frozenset({
-    "academy", "america", "association", "bank", "committee", "company",
-    "council", "europe", "foundation", "institute", "library", "ministry",
-    "organization", "organisation", "party", "press", "project", "society",
-    "university",
+    "academy", "act", "africa", "america", "association", "atlantic", "bank",
+    "committee", "company", "copyright", "council", "east", "europe",
+    "foundation", "institute", "library", "ministry", "north", "organization",
+    "organisation", "pacific", "party", "press", "project", "society", "south",
+    "street", "title", "university", "west",
 })
+_PLACE_ENTITY_ENDINGS = frozenset({
+    "africa", "america", "asia", "atlantic", "east", "europe", "north",
+    "pacific", "south", "west",
+})
+_ORGANIZATION_ENTITY_ENDINGS = frozenset({
+    "academy", "association", "bank", "committee", "company", "council",
+    "foundation", "institute", "library", "ministry", "organization",
+    "organisation", "party", "press", "society", "university",
+})
+_ENTITY_POSSESSIVE_RE = re.compile(r"(?:['\u2019]s)\Z", re.IGNORECASE)
 _PERSIAN_ANCHOR_TOKEN_RE = re.compile(
-    r"[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]+"
-    r"(?:\u200c[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]+)*"
+    r"[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]"
+    r"(?:[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]"
+    r"|[\u064b-\u065f\u0670\u06d6-\u06ed]"
+    r"|\u200c(?=[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]))*"
 )
+
+
+def _canonical_source_entity(value: str) -> str:
+    """Normalize citation possessives without changing the printed original."""
+    compact = " ".join((value or "").split()).strip(" ,.;:()[]{}")
+    return _ENTITY_POSSESSIVE_RE.sub("", compact).strip()
 
 
 def _source_entity_inventory(source_text: str, limit: int = 24) -> list[str]:
     """Return bounded, high-precision current-passage entity candidates."""
     candidates: list[str] = []
     for match in _LATIN_ENTITY_RE.finditer(source_text or ""):
-        value = " ".join(match.group(1).split()).strip(" ,.;:()[]{}")
+        value = _canonical_source_entity(match.group(1))
         tokens = re.findall(r"[A-Za-z\u00c0-\u024f\u1e00-\u1eff]+", value)
         folded = [token.casefold() for token in tokens]
         if not 2 <= len(tokens) <= 5 or folded[0] in _ENTITY_LEADING_NOISE:
@@ -673,7 +739,44 @@ def _source_entity_inventory(source_text: str, limit: int = 24) -> list[str]:
     return candidates
 
 
-def _high_confidence_person_candidates(candidates: list[str]) -> list[str]:
+def _source_entity_category(source_text: str, candidate: str) -> str:
+    """Classify provisional entities conservatively from local source evidence."""
+    tokens = re.findall(r"[A-Za-z\u00c0-\u024f]+", candidate or "")
+    if not tokens:
+        return "source_entity_candidate"
+    ending = tokens[-1].casefold()
+    if ending in _PLACE_ENTITY_ENDINGS:
+        return "place"
+    if ending in _ORGANIZATION_ENTITY_ENDINGS:
+        return "organization"
+    occurrence = re.compile(
+        rf"(?<!\w){re.escape(candidate)}(?P<possessive>['\u2019]s)?"
+        rf"(?P<citation>\s*\(\s*(?:1[5-9]\d{{2}}|20\d{{2}})[a-z]?)?",
+        re.IGNORECASE,
+    ).search(source_text or "")
+    if occurrence and (
+        occurrence.group("possessive") or occurrence.group("citation")
+    ):
+        return "person"
+    if 2 <= len(tokens) <= 4 and ending not in _NON_PERSON_ENTITY_ENDINGS:
+        return "person"
+    return "source_entity_candidate"
+
+
+def _source_entity_categories(
+    source_text: str,
+    candidates: list[str],
+) -> dict[str, str]:
+    return {
+        candidate: _source_entity_category(source_text, candidate)
+        for candidate in candidates
+    }
+
+
+def _high_confidence_person_candidates(
+    candidates: list[str],
+    source_text: str = "",
+) -> list[str]:
     """Narrow review-blocking candidates to plausible multi-token people."""
     selected: list[str] = []
     for candidate in candidates:
@@ -684,6 +787,8 @@ def _high_confidence_person_candidates(candidates: list[str]) -> list[str]:
             continue
         if any(token.casefold() in _ENTITY_NON_NAME_TOKENS for token in tokens):
             continue
+        if source_text and _source_entity_category(source_text, candidate) != "person":
+            continue
         selected.append(candidate)
     return selected
 
@@ -691,42 +796,59 @@ def _high_confidence_person_candidates(candidates: list[str]) -> list[str]:
 def _observed_anchor_target(
     translation: str,
     source: str,
+    category: str = "proper_noun",
 ) -> str:
     """Read a Persian name immediately preceding an exact English original."""
+    source = _canonical_source_entity(source)
     original = re.search(
-        rf"\(\s*{re.escape(source)}\s*\)", translation or "", re.IGNORECASE
+        rf"\(\s*{re.escape(source)}"
+        rf"(?:\s*,?\s*(?:1[5-9]\d{{2}}|20\d{{2}})[a-z]?"
+        rf"(?:\s*[,;]\s*(?:1[5-9]\d{{2}}|20\d{{2}})[a-z]?)*)?\s*\)",
+        translation or "",
+        re.IGNORECASE,
     )
     if original is None:
         return ""
     prefix = (translation or "")[:original.start()].rstrip()
-    tokens = list(_PERSIAN_ANCHOR_TOKEN_RE.finditer(prefix))
+    boundary = max(
+        prefix.rfind("\n"),
+        prefix.rfind("."),
+        prefix.rfind("!"),
+        prefix.rfind("?"),
+        prefix.rfind("\u061f"),
+        prefix.rfind("\u061b"),
+    )
+    local_prefix = prefix[boundary + 1:]
+    tokens = list(_PERSIAN_ANCHOR_TOKEN_RE.finditer(local_prefix))
     source_token_count = len(re.findall(r"[A-Za-z\u00c0-\u024f]+", source))
     if not tokens or source_token_count < 1:
         return ""
     selected = tokens[-min(source_token_count, 5):]
-    if selected[-1].end() != len(prefix):
+    if selected[-1].end() != len(local_prefix):
         return ""
-    target = prefix[selected[0].start():selected[-1].end()].strip()
-    return target if is_usable_memory_mapping(source, target) else ""
+    target = local_prefix[selected[0].start():selected[-1].end()].strip()
+    return target if is_usable_observed_mapping(source, target, category) else ""
 
 
 def _reconcile_current_entity_anchors(
     memory_manager: MemoryManager,
     source_entities: list[str],
     translation: str,
+    categories: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Persist only mappings explicitly evidenced by ``Persian (English)``."""
     observed: list[dict[str, Any]] = []
     missing: list[str] = []
     for source in source_entities:
-        target = _observed_anchor_target(translation, source)
+        category = (categories or {}).get(source, "proper_noun")
+        target = _observed_anchor_target(translation, source, category)
         if not target:
             missing.append(source)
             continue
         outcome = memory_manager.proper_nouns.add_noun(
             source,
             target,
-            category="proper_noun",
+            category=category,
             provenance="observed_translation",
         )
         if outcome.get("action") != "ignored":
@@ -4475,8 +4597,11 @@ class TranslationPipeline:
             ]
             if not _is_front_matter(chunk) else []
         )
+        source_entity_categories = _source_entity_categories(
+            chunk.text, source_entity_candidates
+        )
         required_person_candidates = _high_confidence_person_candidates(
-            source_entity_candidates
+            source_entity_candidates, chunk.text
         )
         allowed_inline_originals = (
             sorted(
@@ -4514,7 +4639,10 @@ class TranslationPipeline:
             "categories": {
                 source: (
                     memory_manager.proper_nouns.category_for(source)
-                    if source in pending_originals else "source_entity_candidate"
+                    if source in pending_originals
+                    else source_entity_categories.get(
+                        source, "source_entity_candidate"
+                    )
                 )
                 for source in allowed_inline_originals
             },
@@ -4973,6 +5101,158 @@ class TranslationPipeline:
                         "action": "quarantine_until_repaired",
                     },
                 )
+                self.db.log_chunk_event(
+                    job_id,
+                    idx,
+                    "translation_baseline_quarantined",
+                    {
+                        "translation_chars": len(translation),
+                        "repair_path": (
+                            "targeted_integrity_then_critique_refinement_and_glossary"
+                        ),
+                        "memory_eligible": False,
+                        "export_eligible": False,
+                    },
+                )
+
+                repair_source = chunk.text
+                repair_translation = translation
+                repair_markers: list[str] = []
+                marked_translation, target_markers = encode_paragraphs(translation)
+                if use_paragraph_protocol and target_markers == paragraph_markers:
+                    repair_source = encoded_source
+                    repair_translation = marked_translation
+                    repair_markers = paragraph_markers
+                repair_prompt = _integrity_repair_prompt(
+                    source=repair_source,
+                    rejected_translation=repair_translation,
+                    integrity_payload=initial_integrity.to_dict(),
+                    terminology=terminology_ctx,
+                    inline_policy=inline_policy_context,
+                    paragraph_count=n_source_paras,
+                    paragraph_instruction=(
+                        protocol_instruction(repair_markers)
+                        if repair_markers else ""
+                    ),
+                )
+                repair_event: dict[str, Any] = {
+                    "stage": "initial_translation_integrity_repair",
+                    "attempted": True,
+                    "accepted": False,
+                    "blocking_checks": [
+                        finding.check_id for finding in initial_integrity.blocking
+                    ],
+                }
+                try:
+                    self.llm_client.limit_next_call_attempts(2)
+                    repaired_translation = self.llm_client.complete(
+                        messages=[{"role": "user", "content": repair_prompt}],
+                        system_prompt=sys_prompt,
+                        _operation="translation_integrity_repair",
+                        _recovery_source_text=chunk.text,
+                    )
+                    protocol_valid = True
+                    protocol_errors: list[str] = []
+                    if repair_markers:
+                        repair_protocol = decode_paragraphs(
+                            repaired_translation, repair_markers
+                        )
+                        protocol_valid = repair_protocol.valid
+                        protocol_errors = repair_protocol.errors
+                        self.db.log_chunk_event(
+                            job_id, idx, "paragraph_protocol_checked", {
+                                "stage": "initial_translation_integrity_repair",
+                                "valid": protocol_valid,
+                                "expected_markers": repair_markers,
+                                "errors": protocol_errors,
+                            },
+                        )
+                        if protocol_valid:
+                            repaired_translation = repair_protocol.text
+                    if protocol_valid and repaired_translation.strip():
+                        repaired_translation, repair_orthography = (
+                            apply_safe_persian_orthography(repaired_translation)
+                        )
+                        repaired_translation, repair_identifiers = (
+                            restore_source_identifiers(
+                                chunk.text, repaired_translation
+                            )
+                        )
+                        try:
+                            repaired_translation, repair_corruptions = (
+                                repair_corruption(
+                                    chunk.text, repaired_translation
+                                )
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Corruption repair failed during integrity recovery "
+                                "for chunk %s",
+                                idx,
+                            )
+                            repair_corruptions = []
+                        repair_integrity = integrity_gate.evaluate(
+                            chunk.text,
+                            repaired_translation,
+                            stage="initial_translation_integrity_repair",
+                            protected_terms=protected_targets,
+                            protect_inline_english=protect_inline_english,
+                            allowed_inline_originals=allowed_inline_originals,
+                            enforce_all_terms=False,
+                        )
+                        self.db.log_chunk_event(
+                            job_id,
+                            idx,
+                            "integrity_check_completed",
+                            repair_integrity.to_dict(),
+                        )
+                        repair_event.update({
+                            "accepted": repair_integrity.accepted,
+                            "translation_chars": len(repaired_translation),
+                            "integrity": repair_integrity.to_dict(),
+                            "orthography_edit_count": sum(
+                                int(edit.get("count", 0))
+                                for edit in repair_orthography
+                            ),
+                            "identifier_repair_count": int(
+                                repair_identifiers.get("repair_count", 0)
+                            ),
+                            "corruption_repair_count": len(
+                                repair_corruptions
+                            ),
+                        })
+                        if repair_integrity.accepted:
+                            translation = repaired_translation
+                            initial_integrity = repair_integrity
+                            self.db.log_chunk_event(
+                                job_id,
+                                idx,
+                                "translation_baseline_repaired",
+                                {
+                                    "stage": (
+                                        "initial_translation_integrity_repair"
+                                    ),
+                                    "translation_chars": len(translation),
+                                },
+                            )
+                    else:
+                        repair_event["protocol_errors"] = protocol_errors
+                except _QUALITY_STAGE_ERRORS as exc:
+                    repair_event.update({
+                        "failure_type": type(exc).__name__,
+                        "error": str(exc),
+                    })
+                except Exception as exc:
+                    logger.exception(
+                        "Targeted integrity recovery failed for chunk %s", idx
+                    )
+                    repair_event.update({
+                        "failure_type": type(exc).__name__,
+                        "error": str(exc),
+                    })
+                self.db.log_chunk_event(
+                    job_id, idx, "translation_integrity_repair", repair_event
+                )
             baseline_integrity_accepted = initial_integrity.accepted
 
         self.db.update_chunk(job_id, idx, ChunkStatus.TRANSLATED, translation)
@@ -4982,18 +5262,6 @@ class TranslationPipeline:
         last_accepted_translation: str | None = (
             translation if baseline_integrity_accepted else None
         )
-        if not baseline_integrity_accepted:
-            self.db.log_chunk_event(
-                job_id,
-                idx,
-                "translation_baseline_quarantined",
-                {
-                    "translation_chars": len(translation),
-                    "repair_path": "critique_refinement_and_glossary",
-                    "memory_eligible": False,
-                    "export_eligible": False,
-                },
-            )
         self.db.log_chunk_event(job_id, idx, "translation_completed", {
             "translation_chars": len(translation),
             "translation_paragraphs": _paragraph_count(translation),
@@ -5186,7 +5454,10 @@ class TranslationPipeline:
                     break
                 if current_integrity_accepted:
                     evaluated_versions.append((translation, critique_rep))
-                if _critique_passes_quality_gate(critique_rep, threshold):
+                if (
+                    current_integrity_accepted
+                    and _critique_passes_quality_gate(critique_rep, threshold)
+                ):
                     break
                 if ref_iter == self.config.translation.max_refine_iterations:
                     blocking_issues = _blocking_critique_issues(critique_rep)
@@ -5360,7 +5631,10 @@ class TranslationPipeline:
                     edit_integrity = integrity_gate.evaluate(
                         chunk.text,
                         proposed_translation,
-                        previous=before_translation,
+                        previous=(
+                            before_translation
+                            if current_integrity_accepted else ""
+                        ),
                         stage="refinement",
                         protected_terms=protected_targets,
                         protect_inline_english=protect_inline_english,
@@ -5375,31 +5649,32 @@ class TranslationPipeline:
                         self.db.log_chunk_event(
                             job_id, idx, "integrity_edit_rejected", integrity_payload
                         )
-                        (
-                            salvaged_translation,
-                            issue_decisions,
-                            local_salvage,
-                        ) = _salvage_local_refinement_edits(
-                            source=chunk.text,
-                            previous=before_translation,
-                            proposed=proposed_translation,
-                            issue_details=issue_details,
-                            issue_decisions=issue_decisions,
-                            integrity_gate=integrity_gate,
-                            protected_terms=protected_targets,
-                            protect_inline_english=protect_inline_english,
-                            allowed_inline_originals=allowed_inline_originals,
-                        )
-                        if local_salvage["committed_count"]:
-                            self.db.log_chunk_event(
-                                job_id,
-                                idx,
-                                "refinement_local_edits_recovered",
-                                {
-                                    "iteration": ref_iter + 1,
-                                    **local_salvage,
-                                },
+                        if current_integrity_accepted:
+                            (
+                                salvaged_translation,
+                                issue_decisions,
+                                local_salvage,
+                            ) = _salvage_local_refinement_edits(
+                                source=chunk.text,
+                                previous=before_translation,
+                                proposed=proposed_translation,
+                                issue_details=issue_details,
+                                issue_decisions=issue_decisions,
+                                integrity_gate=integrity_gate,
+                                protected_terms=protected_targets,
+                                protect_inline_english=protect_inline_english,
+                                allowed_inline_originals=allowed_inline_originals,
                             )
+                            if local_salvage["committed_count"]:
+                                self.db.log_chunk_event(
+                                    job_id,
+                                    idx,
+                                    "refinement_local_edits_recovered",
+                                    {
+                                        "iteration": ref_iter + 1,
+                                        **local_salvage,
+                                    },
+                                )
                 if edit_accepted:
                     issue_decisions = _refinement_decisions_with_commit_state(
                         issue_decisions,
@@ -5905,11 +6180,17 @@ Output ONLY the corrected Persian translation.
             if lock:
                 with lock:
                     entity_coverage.update(_reconcile_current_entity_anchors(
-                        memory_manager, source_entity_candidates, translation
+                        memory_manager,
+                        source_entity_candidates,
+                        translation,
+                        source_entity_categories,
                     ))
             else:
                 entity_coverage.update(_reconcile_current_entity_anchors(
-                    memory_manager, source_entity_candidates, translation
+                    memory_manager,
+                    source_entity_candidates,
+                    translation,
+                    source_entity_categories,
                 ))
             memory_manager.proper_nouns.mark_seen_in_text(chunk.text)
         entity_coverage["required_person_candidates"] = required_person_candidates

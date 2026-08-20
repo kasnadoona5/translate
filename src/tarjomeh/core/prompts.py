@@ -69,7 +69,10 @@ Core directives:
 ACADEMIC_REGISTER_MODIFIER: str = """\
 Use a highly formal, precise, and scholarly academic register. \
 Employ complex sentence structures where appropriate, utilize established scholarly terminology, \
-and avoid any colloquialisms, slang, or overly simplified vocabulary. The tone must reflect that of \
+and avoid any colloquialisms, slang, or overly simplified vocabulary. Prefer established, transparent \
+Persian academic equivalents to opaque calques or phonetic borrowing. Transliterate a specialist \
+label only when that borrowing is established in Persian scholarship or no precise Persian equivalent \
+exists, and then apply the configured first-occurrence original policy. The tone must reflect that of \
 a publication by a reputable university press (نثر فاخر و دانشگاهی).\
 """
 
