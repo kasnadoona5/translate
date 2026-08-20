@@ -8,6 +8,7 @@ to OpenRouter and Ollama.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import json
 import logging
@@ -132,6 +133,10 @@ class TruncatedCompletionError(Exception):
     pass
 
 
+class ContextWindowExceededError(TruncatedCompletionError):
+    """Raised locally when a prompt leaves no usable completion allowance."""
+
+
 class MalformedLLMResponseError(Exception):
     """Raised when an OpenAI-compatible endpoint returns malformed response JSON."""
     pass
@@ -166,6 +171,14 @@ class LLMClient:
         self._timeout = self._http_timeout()
         self._client = httpx.Client(timeout=self._timeout)
         self._thread_local = threading.local()
+        self._trace_context: contextvars.ContextVar[dict[str, Any] | None] = (
+            contextvars.ContextVar(
+                f"tarjomeh_trace_{id(self)}", default=None
+            )
+        )
+        self._operation = contextvars.ContextVar(
+            f"tarjomeh_operation_{id(self)}", default="chat"
+        )
 
         # Track usage
         self.total_prompt_tokens = 0
@@ -180,40 +193,43 @@ class LLMClient:
         # Keyed (operation, transport profile, serving model); the value is a
         # bounded rolling list of observed completion sizes.
         self._budget_history: dict[tuple[str, str, str], dict[str, list[int]]] = {}
+        self._route_served_model: dict[tuple[str, str, str], str] = {}
         self._budget_lock = threading.Lock()
 
-        # _thread_local only ever exposes the CALLING thread's clients, so
-        # aclose() could never reach a worker thread's AsyncClient and every
-        # worker leaked its connection pool. Keep a process-wide registry.
+        # Key by the loop object, never id(loop): CPython may reuse an object's
+        # integer id after a short-lived loop is destroyed, which can return a
+        # client bound to an unrelated closed loop.
+        self._async_clients: dict[asyncio.AbstractEventLoop, httpx.AsyncClient] = {}
         self._all_async_clients: list[httpx.AsyncClient] = []
         self._async_registry_lock = threading.Lock()
 
     @property
     def _aclient(self) -> httpx.AsyncClient:
-        """Get or create an AsyncClient bound to this thread's active loop."""
+        """Get or create one AsyncClient for the active event-loop object."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = asyncio.get_event_loop_policy().get_event_loop()
 
-        clients: dict[int, httpx.AsyncClient] = (
-            getattr(self._thread_local, "clients", None) or {}
-        )
-        self._thread_local.clients = clients
-
-        # Drop entries whose loop is gone. _run_async creates a fresh loop per
-        # call, so without this the cache grows without bound.
-        for stale_id, stale in list(clients.items()):
-            if stale_id != id(loop) and stale.is_closed:
-                clients.pop(stale_id, None)
-
-        client = clients.get(id(loop))
-        if client is None or client.is_closed:
-            client = httpx.AsyncClient(timeout=self._timeout)
-            clients[id(loop)] = client
-            with self._async_registry_lock:
-                self._all_async_clients.append(client)
-        return client
+        with self._async_registry_lock:
+            clients = getattr(self, "_async_clients", None)
+            if clients is None:
+                clients = {}
+                self._async_clients = clients
+            for owner_loop, stale in list(clients.items()):
+                if stale.is_closed:
+                    clients.pop(owner_loop, None)
+            self._thread_local.clients = clients
+            client = clients.get(loop)
+            if client is None or client.is_closed:
+                client = httpx.AsyncClient(timeout=self._timeout)
+                clients[loop] = client
+                registry = getattr(self, "_all_async_clients", None)
+                if registry is None:
+                    registry = []
+                    self._all_async_clients = registry
+                registry.append(client)
+            return client
 
     def _http_timeout(self) -> httpx.Timeout:
         transport = self.config.llm.transport
@@ -229,18 +245,32 @@ class LLMClient:
         self._client.close()
 
     async def aclose(self) -> None:
-        """Close every async HTTP client this instance created, on any thread."""
+        """Close every async HTTP client this instance created."""
         with self._async_registry_lock:
-            clients = list(self._all_async_clients)
-            self._all_async_clients.clear()
-        for client in clients:
+            by_loop = getattr(self, "_async_clients", {})
+            clients = list(by_loop.items())
+            by_loop.clear()
+            registered = list(getattr(self, "_all_async_clients", []))
+            if hasattr(self, "_all_async_clients"):
+                self._all_async_clients.clear()
+            known = {id(client) for _, client in clients}
+            clients.extend(
+                (asyncio.get_running_loop(), client)
+                for client in registered if id(client) not in known
+            )
+        current_loop = asyncio.get_running_loop()
+        for owner_loop, client in clients:
             if not client.is_closed:
                 try:
-                    await client.aclose()
+                    if owner_loop is current_loop or not owner_loop.is_running():
+                        await client.aclose()
+                    else:
+                        close_future = asyncio.run_coroutine_threadsafe(
+                            client.aclose(), owner_loop
+                        )
+                        await asyncio.wrap_future(close_future)
                 except Exception:
                     logger.debug("AsyncClient close failed", exc_info=True)
-        if hasattr(self._thread_local, "clients"):
-            self._thread_local.clients.clear()
 
     def _get_next_api_key(self) -> str:
         """Retrieve the next non-empty API key from the rotation list."""
@@ -355,6 +385,17 @@ class LLMClient:
         served = (response_model or str(payload.get("model", ""))).strip()
         return (operation, profile, served)
 
+    def _preflight_budget_key(
+        self,
+        operation: str,
+        payload: dict[str, Any],
+    ) -> tuple[str, str, str]:
+        """Use the most recently served model for a configured route/combo."""
+        route = self._budget_key(operation, payload)
+        with self._budget_lock:
+            served = getattr(self, "_route_served_model", {}).get(route, "")
+        return self._budget_key(operation, payload, served) if served else route
+
     def _history_demand(self, key: tuple[str, str, str]) -> tuple[int, int]:
         """Return (p90 demand, sample count) over the retained window.
 
@@ -401,8 +442,13 @@ class LLMClient:
         if consumed <= 0:
             return
         key = self._budget_key(operation, payload, response_model)
+        route = self._budget_key(operation, payload)
         window = int(self.config.llm.recovery.history_window)
         with self._budget_lock:
+            if not hasattr(self, "_route_served_model"):
+                self._route_served_model = {}
+            if response_model and key != route:
+                self._route_served_model[route] = response_model.strip()
             stats = self._budget_history.setdefault(key, {"samples": []})
             samples = stats["samples"]
             samples.append(consumed)
@@ -453,7 +499,7 @@ class LLMClient:
             payload, expected_output_tokens
         )
         historical_total, history_samples = self._history_demand(
-            self._budget_key(operation, payload)
+            self._preflight_budget_key(operation, payload)
         )
         reasoning_estimate = max(
             int(recovery.bootstrap_reasoning_tokens),
@@ -468,6 +514,11 @@ class LLMClient:
         calculated = math.ceil((answer_headroom + reasoning_headroom) * 1.25)
         original_max = int(payload.get("max_tokens", self.config.llm.max_tokens))
         ceiling, prompt_tokens = self._adaptive_ceiling(payload)
+        if ceiling <= 0:
+            raise ContextWindowExceededError(
+                "The prompt leaves no completion room inside the configured "
+                "context window; split or reduce the request before sending it."
+            )
         requested = min(
             max(
                 original_max,
@@ -778,21 +829,21 @@ class LLMClient:
 
     def set_trace_context(self, job_id: str | None, chunk_index: int | None) -> None:
         """Attach job context to attempt events in the current worker thread."""
-        self._thread_local.trace_context = {
+        self._trace_context.set({
             "job_id": job_id,
             "chunk_index": chunk_index,
-        }
+        })
 
     def set_operation(self, operation: str) -> None:
         """Label subsequent calls in this worker without changing chat protocols."""
-        self._thread_local.operation = operation
+        self._operation.set(operation)
 
     def set_attempt_observer(self, observer: Any) -> None:
         """Register a callback that receives sanitized per-attempt diagnostics."""
         self._attempt_observer = observer
 
     def _emit_attempt(self, payload: dict[str, Any]) -> None:
-        context = getattr(self._thread_local, "trace_context", {})
+        context: dict[str, Any] = self._trace_context.get() or {}
         event = {**context, **payload}
         observer = self._attempt_observer
         if observer is not None:
@@ -844,6 +895,7 @@ class LLMClient:
         payload = dict(original)
         recovery = self.config.llm.recovery
         calculation: dict[str, Any] = {}
+        incoming_model = str(payload.get("model", "")).strip()
 
         # The first transport recovery is an exact logical replay. Increasing
         # output budget or changing reasoning cannot repair missing/corrupted
@@ -944,9 +996,20 @@ class LLMClient:
             and original_max >= ceiling
             and requested <= original_max
         ):
-            if recovery.model.strip():
-                payload["model"] = recovery.model.strip()
+            fallback_model = recovery.model.strip()
+            if fallback_model and incoming_model != fallback_model:
+                payload["model"] = fallback_model
                 exhausted_strategy = "ceiling_exhausted_fallback_model"
+            elif (
+                fallback_model
+                and incoming_model == fallback_model
+                and payload.get("reasoning") != original.get("reasoning")
+            ):
+                # A same-size request is still a real recovery when its model
+                # or reasoning contract changed. This preserves the bounded
+                # final no-reasoning rung without allowing byte-equivalent
+                # 85K retries to consume another provider call.
+                exhausted_strategy = "ceiling_exhausted_changed_contract"
             else:
                 # For critique the honest outcome is to stop here and let the
                 # existing qa_unavailable path mark the chunk for review.
@@ -1197,6 +1260,7 @@ class LLMClient:
         failure_reason = ""
         failure_usage: dict[str, Any] = {}
         failure_content = ""
+        last_payload = original_payload
 
         for attempt in range(max_attempts):
             self._thread_local.last_call_attempts = attempt + 1
@@ -1205,7 +1269,7 @@ class LLMClient:
                 payload = original_payload
             else:
                 payload, recovery_calculation = self._recovery_payload(
-                    original_payload,
+                    last_payload,
                     attempt,
                     max_attempts,
                     failure_reason,
@@ -1214,6 +1278,7 @@ class LLMClient:
                     failure_content,
                     expected_output_tokens,
                 )
+            last_payload = payload
             started = time.monotonic()
             finish_reason = None
             status_code = None
@@ -1444,6 +1509,7 @@ class LLMClient:
         failure_reason = ""
         failure_usage: dict[str, Any] = {}
         failure_content = ""
+        last_payload = original_payload
 
         for attempt in range(max_attempts):
             self._thread_local.last_call_attempts = attempt + 1
@@ -1452,7 +1518,7 @@ class LLMClient:
                 payload = original_payload
             else:
                 payload, recovery_calculation = self._recovery_payload(
-                    original_payload,
+                    last_payload,
                     attempt,
                     max_attempts,
                     failure_reason,
@@ -1461,6 +1527,7 @@ class LLMClient:
                     failure_content,
                     expected_output_tokens,
                 )
+            last_payload = payload
             started = time.monotonic()
             finish_reason = None
             status_code = None
@@ -1660,8 +1727,8 @@ class LLMClient:
         raise RuntimeError("LLM request exhausted its bounded attempt budget.")
     async def chat(self, prompt: str) -> str:
         """Compatibility method for async quality and context tools."""
-        operation = getattr(self._thread_local, "operation", "chat")
-        self._thread_local.operation = "chat"
+        operation = self._operation.get()
+        self._operation.set("chat")
         return await self.acomplete(
             messages=[{"role": "user", "content": prompt}],
             _operation=operation,

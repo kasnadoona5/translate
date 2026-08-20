@@ -576,11 +576,12 @@ def test_single_paragraph_translation_uses_sentence_groups_after_length() -> Non
         assert len(context.strip()) <= 600
 
 
-def test_invalid_recovery_assembly_never_reaches_critique_or_baseline() -> None:
+def test_invalid_recovery_assembly_is_quarantined_until_refiner_repairs_it() -> None:
     config = TarjomehConfig()
     config.translation.enable_web_context = False
     config.translation.enable_back_translation = False
     config.translation.enable_critique = True
+    config.translation.max_refine_iterations = 1
     config.translation.enable_integrity_gate = True
     config.glossary.enable_compliance_check = False
     config.glossary.enable_auto_extraction = False
@@ -619,34 +620,137 @@ def test_invalid_recovery_assembly_never_reaches_critique_or_baseline() -> None:
     glossary = MagicMock()
     glossary.find_terms.return_value = []
     glossary.format_for_prompt.return_value = ""
-    critic = MagicMock()
+    repaired = (
+        "\u062f\u0631 \u0633\u0627\u0644 1973 \u0646\u062a\u06cc\u062c\u0647 \u062b\u0628\u062a \u0634\u062f.\n\n"
+        "\u062f\u0631 \u0633\u0627\u0644 2014 \u0645\u0642\u062f\u0627\u0631 \u0628\u0647 40% \u0631\u0633\u06cc\u062f."
+    )
+
+    class Critic:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def critique(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return CritiqueResult(
+                    accuracy=5,
+                    fluency=8,
+                    terminology=8,
+                    register=8,
+                    average=7.25,
+                    issues=["[MAJOR/accuracy] Restore omitted numerical evidence."],
+                )
+            return CritiqueResult(
+                accuracy=10,
+                fluency=9,
+                terminology=10,
+                register=9,
+                average=9.5,
+            )
+
+    class Refiner:
+        async def refine_with_decision(self, *args, **kwargs):
+            return RefinementResult(
+                translation=(
+                    "[[P0001]]\n"
+                    + repaired.split("\n\n", 1)[0]
+                    + "\n\n[[P0002]]\n"
+                    + repaired.split("\n\n", 1)[1]
+                ),
+                decision="revised",
+                rationale="Restored source-grounded numerical evidence.",
+            )
+
+    critic = Critic()
     source = "In 1973 the result was recorded.\n\nIn 2014 the value reached 40%."
 
-    try:
-        pipeline._translate_single_chunk(
-            idx=0,
-            chunk=Chunk(0, source, "", ""),
-            memory_manager=memory_manager,
-            web_searcher=MagicMock(),
-            glossary_manager=glossary,
-            compliance_checker=MagicMock(),
-            critique_tool=critic,
-            refiner_tool=MagicMock(),
-            back_translator=MagicMock(),
-            translations={},
-            job_id="job-invalid-recovery",
-        )
-        assert False, "invalid adaptive recovery should fail the chunk"
-    except ValueError as exc:
-        assert "integrity-valid baseline" in str(exc)
+    result = pipeline._translate_single_chunk(
+        idx=0,
+        chunk=Chunk(0, source, "", ""),
+        memory_manager=memory_manager,
+        web_searcher=MagicMock(),
+        glossary_manager=glossary,
+        compliance_checker=MagicMock(),
+        critique_tool=critic,
+        refiner_tool=Refiner(),
+        back_translator=MagicMock(),
+        translations={},
+        job_id="job-invalid-recovery",
+    )
 
-    critic.critique.assert_not_called()
+    assert result == repaired
+    assert critic.calls == 2
     event_types = [
         call.args[2] for call in pipeline.db.log_chunk_event.call_args_list
     ]
     assert "translation_recovery_assembly_rejected" in event_types
     assert "integrity_initial_failed" in event_types
+    assert "translation_baseline_quarantined" in event_types
+    assert "translation_baseline_repaired" in event_types
+    assert "integrity_final_failed" not in event_types
     stored_statuses = [
         call.args[2] for call in pipeline.db.update_chunk.call_args_list
     ]
-    assert "translated" not in stored_statuses
+    assert "translated" in stored_statuses
+
+
+def test_quarantined_initial_draft_cannot_escape_without_valid_repair() -> None:
+    config = TarjomehConfig()
+    config.translation.enable_web_context = False
+    config.translation.enable_back_translation = False
+    config.translation.enable_critique = False
+    config.translation.enable_integrity_gate = True
+    config.glossary.enable_compliance_check = False
+    config.glossary.enable_auto_extraction = False
+
+    pipeline = object.__new__(TranslationPipeline)
+    pipeline.config = config
+    pipeline.db = MagicMock()
+    pipeline.db.get_job.return_value = {"status": "running"}
+    pipeline.llm_client = MagicMock()
+    pipeline.llm_client.complete.return_value = (
+        "\u0645\u0642\u062f\u0627\u0631 \u062f\u0631 \u0645\u062a\u0646 "
+        "\u062b\u0628\u062a \u0634\u062f."
+    )
+
+    memory_context = MagicMock()
+    memory_context.style_profile = ""
+    memory_context.proper_nouns = ""
+    memory_context.long_term = ""
+    memory_context.short_term = ""
+    memory_context.bilingual_summary = ""
+    memory_context.format.return_value = ""
+    memory_manager = MagicMock()
+    memory_manager.get_context_for_chunk.return_value = memory_context
+    memory_manager.proper_nouns.pending_inline_originals.return_value = []
+
+    glossary = MagicMock()
+    glossary.find_terms.return_value = []
+    glossary.format_for_prompt.return_value = ""
+
+    try:
+        pipeline._translate_single_chunk(
+            idx=0,
+            chunk=Chunk(0, "The value was 2004.", "", ""),
+            memory_manager=memory_manager,
+            web_searcher=MagicMock(),
+            glossary_manager=glossary,
+            compliance_checker=MagicMock(),
+            critique_tool=MagicMock(),
+            refiner_tool=MagicMock(),
+            back_translator=MagicMock(),
+            translations={},
+            job_id="job-unrepaired-baseline",
+        )
+    except ValueError as exc:
+        assert "No integrity-valid translation" in str(exc)
+    else:
+        raise AssertionError(
+            "an unrepaired quarantined draft must fail the chunk"
+        )
+
+    event_types = [
+        call.args[2] for call in pipeline.db.log_chunk_event.call_args_list
+    ]
+    assert "translation_baseline_quarantined" in event_types
+    assert "integrity_final_failed" in event_types

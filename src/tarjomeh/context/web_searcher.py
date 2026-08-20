@@ -6,12 +6,12 @@ definitions, caches results, and returns them for prompt injection.
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import logging
 import threading
 from typing import Any
 
-from tarjomeh.core.config import TarjomehConfig
-from tarjomeh.core.structured_output import parse_structured_output
 from tarjomeh.chunking.chunker import Chunk
 from tarjomeh.context.search_providers import (
     BaseSearchProvider,
@@ -19,6 +19,8 @@ from tarjomeh.context.search_providers import (
     build_search_provider,
     rank_search_results,
 )
+from tarjomeh.core.config import TarjomehConfig
+from tarjomeh.core.structured_output import parse_structured_output
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,7 @@ class WebContextSearcher:
         self.llm_client = llm_client
         self.cache: dict[str, str] = {}  # term_lower -> definition_str
         self.result_audit: dict[str, list[dict[str, Any]]] = {}
+        self._inflight_terms: dict[str, concurrent.futures.Future[str]] = {}
         # One searcher instance is shared by every parallel worker, so the
         # cache and audit dicts need a lock. Never held across an await.
         self._lock = threading.Lock()
@@ -61,7 +64,8 @@ class WebContextSearcher:
         from tarjomeh.core.prompts import WEB_CONTEXT_PROMPT
 
         # Identify ambiguous terms
-        known_terms = str(list(self.cache.keys()))
+        with self._lock:
+            known_terms = str(list(self.cache.keys()))
         prompt = WEB_CONTEXT_PROMPT.format(text=chunk.text, known_terms=known_terms)
 
         try:
@@ -75,9 +79,10 @@ class WebContextSearcher:
             query_count = 0
             accepted_count = 0
             rejected_count = 0
-            diagnostic_start = len(
-                self.provider.diagnostics
-                if isinstance(self.provider, SearchProviderChain) else []
+            issued_queries: set[str] = set()
+            diagnostic_start = (
+                self.provider.diagnostic_count()
+                if isinstance(self.provider, SearchProviderChain) else 0
             )
             for item in items:
                 if not isinstance(item, dict):
@@ -94,55 +99,91 @@ class WebContextSearcher:
                 
                 term_lower = term.lower()
                 with self._lock:
+                    if not hasattr(self, "_inflight_terms"):
+                        self._inflight_terms = {}
                     already_cached = term_lower in self.cache
+                    pending = self._inflight_terms.get(term_lower)
                 if already_cached:
+                    continue
+                if pending is not None:
+                    await asyncio.wrap_future(pending)
                     continue
                 if query_count >= self.config.web_search.max_queries_per_chunk:
                     continue
 
+                with self._lock:
+                    # Recheck after parsing work in case another worker won.
+                    if term_lower in self.cache:
+                        continue
+                    pending = self._inflight_terms.get(term_lower)
+                    if pending is None:
+                        pending = concurrent.futures.Future()
+                        self._inflight_terms[term_lower] = pending
+                        owns_term = True
+                    else:
+                        owns_term = False
+                if not owns_term:
+                    await asyncio.wrap_future(pending)
+                    continue
+
                 # Run search query
                 query_count += 1
-                results = await self.provider.search(search_query)
-                ranked, result_diagnostics = rank_search_results(
-                    search_query,
-                    results,
-                    identity=term,
-                )
-                with self._lock:
-                    self.result_audit[term_lower] = result_diagnostics
-                accepted_count += sum(
-                    1 for item in result_diagnostics if item.get("accepted")
-                )
-                rejected_count += sum(
-                    1 for item in result_diagnostics if not item.get("accepted")
-                )
-                if ranked:
-                    def_str = "\n".join(
-                        f"- {r.snippet[:650]} (source: {r.url})"
-                        for r in ranked[:3]
+                issued_queries.add(" ".join(search_query.casefold().split()))
+                def_str = ""
+                try:
+                    results = await self.provider.search(search_query)
+                    ranked, result_diagnostics = rank_search_results(
+                        search_query,
+                        results,
+                        identity=term,
                     )
-                else:
-                    def_str = ""
-                with self._lock:
-                    self.cache[term_lower] = def_str
+                    accepted_count += sum(
+                        1 for item in result_diagnostics if item.get("accepted")
+                    )
+                    rejected_count += sum(
+                        1 for item in result_diagnostics if not item.get("accepted")
+                    )
+                    if ranked:
+                        def_str = "\n".join(
+                            f"- {r.snippet[:650]} (source: {r.url})"
+                            for r in ranked[:3]
+                        )
+                    with self._lock:
+                        self.result_audit[term_lower] = result_diagnostics
+                finally:
+                    with self._lock:
+                        self.cache[term_lower] = def_str
+                        self._inflight_terms.pop(term_lower, None)
+                        if not pending.done():
+                            pending.set_result(def_str)
 
             diagnostics = (
-                self.provider.diagnostics[diagnostic_start:]
+                self.provider.diagnostics_since(diagnostic_start)
                 if isinstance(self.provider, SearchProviderChain) else []
             )
+            diagnostics = [
+                diagnostic for diagnostic in diagnostics
+                if " ".join(
+                    str(diagnostic.get("query", "")).casefold().split()
+                ) in issued_queries
+            ]
+            with self._lock:
+                relevant_terms = {
+                    str(item.get("term", "")).strip().lower()
+                    for item in items
+                    if isinstance(item, dict)
+                }
+                relevance_snapshot = {
+                    term: list(audit)
+                    for term, audit in self.result_audit.items()
+                    if term in relevant_terms
+                }
             self.last_report = {
                 "candidate_count": len(items),
                 "new_query_count": query_count,
                 "accepted_result_count": accepted_count,
                 "rejected_result_count": rejected_count,
-                "result_relevance": {
-                    term: audit for term, audit in self.result_audit.items()
-                    if term in {
-                        str(item.get("term", "")).strip().lower()
-                        for item in items
-                        if isinstance(item, dict)
-                    }
-                },
+                "result_relevance": relevance_snapshot,
                 "diagnostics": diagnostics,
                 "budget_used": getattr(self.provider, "queries_used", None),
                 "budget_limit": getattr(self.provider, "query_budget", None),
@@ -156,7 +197,9 @@ class WebContextSearcher:
         matched_definitions = []
         
         import re
-        for term_lower, definition in self.cache.items():
+        with self._lock:
+            cache_snapshot = list(self.cache.items())
+        for term_lower, definition in cache_snapshot:
             if not definition:
                 continue
             escaped_term = re.escape(term_lower)
@@ -178,9 +221,14 @@ class WebContextSearcher:
 
     def export_state(self) -> dict[str, Any]:
         """Return resume-safe context and provider caches."""
+        with self._lock:
+            term_cache = dict(self.cache)
+            result_audit = {
+                key: list(value) for key, value in self.result_audit.items()
+            }
         return {
-            "term_cache": dict(self.cache),
-            "result_audit": dict(self.result_audit),
+            "term_cache": term_cache,
+            "result_audit": result_audit,
             "provider": (
                 self.provider.export_state()
                 if isinstance(self.provider, SearchProviderChain) else {}
@@ -189,14 +237,15 @@ class WebContextSearcher:
 
     def import_state(self, state: dict[str, Any]) -> None:
         """Restore persisted caches without repeating paid searches."""
-        self.cache = {
-            str(key): str(value)
-            for key, value in state.get("term_cache", {}).items()
-        }
-        self.result_audit = {
-            str(key): list(value)
-            for key, value in state.get("result_audit", {}).items()
-            if isinstance(value, list)
-        }
+        with self._lock:
+            self.cache = {
+                str(key): str(value)
+                for key, value in state.get("term_cache", {}).items()
+            }
+            self.result_audit = {
+                str(key): list(value)
+                for key, value in state.get("result_audit", {}).items()
+                if isinstance(value, list)
+            }
         if isinstance(self.provider, SearchProviderChain):
             self.provider.import_state(state.get("provider", {}))

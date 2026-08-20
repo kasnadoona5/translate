@@ -141,6 +141,7 @@ def cmd_translate(args: argparse.Namespace) -> int:
                 logging.exception("Could not persist paused state")
             console.print("\n[yellow]Translation paused.[/yellow] Resume with: "
                           f"tarjomeh jobs resume {pipeline.current_job_id}")
+            pipeline.close()
             return 130
         except Exception as e:
             try:
@@ -161,6 +162,7 @@ def cmd_translate(args: argparse.Namespace) -> int:
                 logging.exception("Could not persist failed state")
             console.print(f"\n[red]Error:[/red] {e}")
             logging.exception("Translation failed")
+            pipeline.close()
             return 1
 
     pipeline.close()
@@ -255,7 +257,10 @@ def cmd_jobs(args: argparse.Namespace) -> int:
             console.print(f"[red]Error:[/red] Job {args.job_id} not found.")
             return 1
 
-        config = TarjomehConfig.from_dict(job.get("config", {}))
+        live_config = TarjomehConfig.load(validate=False)
+        config = TarjomehConfig.from_dict(
+            job.get("config", {}), credential_source=live_config
+        )
         pipeline = TranslationPipeline(config)
 
         try:
@@ -267,6 +272,8 @@ def cmd_jobs(args: argparse.Namespace) -> int:
         except Exception as e:
             console.print(f"[red]Error resuming:[/red] {e}")
             return 1
+        finally:
+            pipeline.close()
         return 0
 
     elif args.jobs_action == "cleanup":
@@ -293,7 +300,10 @@ def cmd_jobs(args: argparse.Namespace) -> int:
             console.print(f"[red]Error:[/red] Job {args.job_id} not found.")
             return 1
 
-        config = TarjomehConfig.from_dict(job.get("config", {}))
+        live_config = TarjomehConfig.load(validate=False)
+        config = TarjomehConfig.from_dict(
+            job.get("config", {}), credential_source=live_config
+        )
         pipeline = TranslationPipeline(config)
         try:
             output = pipeline.export_completed_job(
@@ -305,6 +315,8 @@ def cmd_jobs(args: argparse.Namespace) -> int:
         except Exception as e:
             console.print(f"[red]Export failed:[/red] {e}")
             return 1
+        finally:
+            pipeline.close()
 
         console.print(f"[bold green]✓ Exported without re-translating:[/bold green] {output}")
         return 0

@@ -5,12 +5,12 @@ branch `fix/remediation`, on top of baseline commit `f6b863e`.
 
 | | |
 |---|---|
-| Fixes shipped | Stage 1 (20) + Phase 8 (6 parts) + items 15, 16, 12, 19 + Tier 1 (4) + 10.1 + Option A |
-| Commits | 21 total |
+| Fixes shipped | Stage 1 (20) + Phase 8 (6 parts) + items 15, 16, 12, 19 + Tier 1 (4) + 10.1 + v10 stabilization |
+| Commits | 23 total after the v10 release commit |
 | Source files changed | 11 changed + 2 new; **50 of 61 untouched** |
-| Tests | **352 baseline → 636 passing** (+284 new, 0 failures) |
-| mypy | 93 errors before, **89 after** — four *fewer*; no new findings |
-| ruff | 244 before, **240 after** — 4 *fewer*; no new findings |
+| Tests | **352 baseline to 646 passing** (+294 new, 0 failures) |
+| mypy | 93 errors before, **88 after** - five *fewer*; no new v10 finding |
+| ruff | 244 before, **236 after** - eight *fewer*; no new v10 finding |
 | Prompt files edited | **none** |
 | Pipeline order changed | **no** |
 | Memory layers changed | **no** |
@@ -38,6 +38,21 @@ Two further constraints you set:
 - **General, not tuned to one book.** The two constants that would have tuned to this
   book (`predictive_min_tokens`, `adaptive_max_tokens`) were left alone — see
   "Withdrawn" below.
+
+## v10 admission correction
+
+The historical Option A text below records the earlier implementation. The v10
+release supersedes its initial-draft admission behavior without changing the
+quality loop: a model call failure (transport, empty, truncated, or impossible
+context) still blocks sequential progress, while a non-empty first draft with a
+repairable integrity defect is quarantined and may enter the existing bounded
+critic/refiner and glossary-repair stages.
+
+A quarantined draft is never assigned to `last_accepted_translation`, memory, or
+export. Only a candidate that passes deterministic integrity becomes accepted.
+If no valid candidate exists after the bounded repair stages, the chunk fails and
+the sequential job pauses. This preserves the refiner's per-issue veto while
+restoring the intended repair path for omissions such as source-grounded numbers.
 
 ## How to verify
 

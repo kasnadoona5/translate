@@ -87,7 +87,22 @@ _ORDINALS: dict[str, int] = {
     "دهم": 10,
 }
 
-_WORD_RE = re.compile(r"[\w؀-ۿ]+", re.UNICODE)
+# U+0600-U+06FF includes Persian punctuation such as U+060C, so the old
+# expression returned an ordinal with its comma attached. Unicode ``\w``
+# already recognises Persian letters and digits; exclude underscore.
+_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
+_ANNOUNCEMENT_NOUNS = {
+    "issue", "issues", "objection", "objections", "task", "tasks", "point", "points",
+    "reason", "reasons", "argument", "arguments", "question", "questions",
+    "problem", "problems", "perspective", "perspectives", "approach", "approaches",
+    "element", "elements", "objective", "objectives", "theme", "themes",
+    "part", "parts", "way", "ways", "claim", "claims", "proposition", "propositions",
+    "dimension", "dimensions", "category", "categories", "type", "types",
+    "case", "cases", "step", "steps", "factor", "factors", "feature", "features",
+    "مسئله", "ایراد", "وظیفه", "نکته", "دلیل", "استدلال", "پرسش", "مشکل", "منظر",
+    "رویکرد", "عنصر", "هدف", "مضمون", "بخش", "شیوه", "ادعا", "گزاره",
+    "بعد", "دسته", "نوع", "مورد", "گام", "عامل", "ویژگی",
+}
 _DIGIT_TRANSLATION = str.maketrans(
     "۰۱۲۳۴۵۶۷۸۹"
     "٠١٢٣٤٥٦٧٨٩",
@@ -130,19 +145,31 @@ def announced_counts(text: str) -> list[int]:
     Digits are included only when written as a bare small integer, because a
     year or a page number is not an announcement.
     """
+    words = _words(text)
     found: list[int] = []
-    for word in _words(text):
+    for index, word in enumerate(words):
+        value: int | None = None
         if word in _CARDINALS:
-            found.append(_CARDINALS[word])
+            value = _CARDINALS[word]
+        else:
+            # A single bare digit can announce ("2 objections"); a multi-digit
+            # number is a year, page or quantity, never an announcement.
+            normalised = word.translate(_DIGIT_TRANSLATION)
+            if (
+                len(normalised) == 1
+                and normalised.isdecimal()
+                and int(normalised) >= 2
+            ):
+                value = int(normalised)
+        if value is None:
             continue
-        # A single bare digit can announce ("2 objections"); a multi-digit
-        # number is a year, page or quantity, never an announcement.
-        # isdecimal(), NOT isdigit(): isdigit() is True for superscripts such as
-        # U+00B9, which are footnote markers and would crash int(). Academic
-        # prose is full of them.
-        normalised = word.translate(_DIGIT_TRANSLATION)
-        if len(normalised) == 1 and normalised.isdecimal() and int(normalised) >= 2:
-            found.append(int(normalised))
+        # Bind the count to a nearby structural noun. This distinguishes
+        # "two issues" from unrelated prose such as "the two authors", even
+        # when an enumeration appears later in the same chunk.
+        neighborhood = words[max(0, index - 2): index]
+        neighborhood += words[index + 1: index + 6]
+        if any(token in _ANNOUNCEMENT_NOUNS for token in neighborhood):
+            found.append(value)
     return found
 
 

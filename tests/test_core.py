@@ -113,7 +113,10 @@ class TestTranslationPipeline(unittest.TestCase):
         # Mock LLM Client
         mock_llm = mock_llm_cls.return_value
         mock_llm.count_tokens.return_value = 10
-        mock_llm.complete.return_value = "ترجمه تست"
+        fake_translation = (
+            "ترجمه آزمایشی این بند درباره نظریه سیاسی است."
+        )
+        mock_llm.complete.return_value = fake_translation
 
         # Create temporary sample text file
         temp_file = Path("tests_sample_chapter.txt")
@@ -153,7 +156,7 @@ class TestTranslationPipeline(unittest.TestCase):
             # Check content of output
             with output_file.open("r", encoding="utf-8") as f:
                 content = f.read()
-                self.assertIn("ترجمه تست", content)
+                self.assertIn(fake_translation, content)
 
         finally:
             # Clean up files

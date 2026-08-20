@@ -1190,6 +1190,18 @@ def _register_api(app: Flask) -> None:
         events_by_chunk: dict[int, list[dict[str, Any]]] = {}
         for event in all_events:
             events_by_chunk.setdefault(int(event["chunk_index"]), []).append(event)
+        current_events_by_chunk: dict[int, list[dict[str, Any]]] = {}
+        for chunk_index, chunk_events in events_by_chunk.items():
+            last_start = 0
+            for index, event in enumerate(chunk_events):
+                if event.get("event_type") == "chunk_started":
+                    last_start = index
+            current_events_by_chunk[chunk_index] = chunk_events[last_start:]
+        current_events = [
+            event
+            for chunk_events in current_events_by_chunk.values()
+            for event in chunk_events
+        ]
 
         reached_positions = [
             int(value) for value in
@@ -1209,7 +1221,7 @@ def _register_api(app: Flask) -> None:
         )
 
         consistency_events = [
-            event for event in all_events
+            event for event in current_events
             if event["event_type"] == "terminology_consistency_advisory"
         ]
         consistency_issues = [
@@ -1256,7 +1268,7 @@ def _register_api(app: Flask) -> None:
             "chunk_review_required": "explicit_chunk_review_reason",
             "paragraph_identity_degraded": "paragraph_alignment_reconstructed",
         }
-        for event in all_events:
+        for event in current_events:
             reason = review_event_reasons.get(event["event_type"])
             if reason:
                 review_reasons.add(reason)
@@ -1272,7 +1284,7 @@ def _register_api(app: Flask) -> None:
             "translation_structure_mismatch",
             "unauthorized_source_correction",
         }
-        for event in all_events:
+        for event in current_events:
             if event["event_type"] != "structure_audit":
                 continue
             for finding in event.get("payload", {}).get("findings", []) or []:
@@ -1288,7 +1300,7 @@ def _register_api(app: Flask) -> None:
         # human at all; only what was deferred does.
         corruption_repaired = 0
         corruption_deferred = 0
-        for event in all_events:
+        for event in current_events:
             if event["event_type"] != "unicode_corruption_repair":
                 continue
             payload = event.get("payload", {}) or {}
@@ -1313,7 +1325,7 @@ def _register_api(app: Flask) -> None:
         )
         quality_fail = any(
             event["event_type"] == "integrity_final_failed"
-            for event in all_events
+            for event in current_events
         ) or bool(
             final_text_audit
             and int(final_text_audit.get("unresolved_identifier_count", 0) or 0) > 0
@@ -1725,7 +1737,10 @@ def _register_api(app: Flask) -> None:
 
         pipeline = None
         try:
-            config = TarjomehConfig.from_dict(job.get("config", {}))
+            config = TarjomehConfig.from_dict(
+                job.get("config", {}),
+                credential_source=app.config.get("TARJOMEH_CONFIG"),
+            )
             pipeline = TranslationPipeline(config)
             translation = pipeline.retranslate_chunk(job_id, chunk_index)
         finally:
@@ -1755,7 +1770,10 @@ def _register_api(app: Flask) -> None:
         data = request.get_json(silent=True) or {}
         fmt = data.get("format") or job.get("config", {}).get("output", {}).get("format", "docx")
         bilingual = data.get("bilingual_mode") or job.get("config", {}).get("output", {}).get("bilingual_mode")
-        config = TarjomehConfig.from_dict(job.get("config", {}))
+        config = TarjomehConfig.from_dict(
+            job.get("config", {}),
+            credential_source=app.config.get("TARJOMEH_CONFIG"),
+        )
         pipeline = TranslationPipeline(config)
         input_path = Path(job["input_path"])
         extension = "md" if fmt == "markdown" else fmt
@@ -1863,7 +1881,10 @@ def _register_api(app: Flask) -> None:
                 from tarjomeh.core.config import TarjomehConfig
                 from tarjomeh.core.pipeline import TranslationPipeline
 
-                config = TarjomehConfig.from_dict(job.get("config", {}))
+                config = TarjomehConfig.from_dict(
+                    job.get("config", {}),
+                    credential_source=app.config.get("TARJOMEH_CONFIG"),
+                )
                 pipeline = TranslationPipeline(config)
 
                 def progress_callback(stage: str, pct: float, message: str = "") -> None:

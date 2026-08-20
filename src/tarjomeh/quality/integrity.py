@@ -325,7 +325,7 @@ _CONTROL_CHAR_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 # duplicated the clause it inserted and the next critique iteration had to find
 # it. Spans are compared against the PREVIOUS translation, same language, so
 # repetition the translation already contained is never blamed on this edit.
-_SPAN_TOKEN_RE = re.compile(r"[\w\u0600-\u06ff]+", re.UNICODE)
+_SPAN_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
 _MIN_REPEATED_SPAN_WORDS = 8
 
 
@@ -360,6 +360,44 @@ def newly_repeated_spans(
     return sorted(
         _repeated_spans(candidate, min_words) - _repeated_spans(previous, min_words)
     )
+
+
+def _source_grounded_repeated_spans(
+    source: str,
+    candidate: str,
+    spans: list[str],
+    min_words: int = _MIN_REPEATED_SPAN_WORDS,
+) -> set[str]:
+    """Identify candidate repetition supported by aligned source repetition.
+
+    Exact phrases cannot be compared across languages.  Paragraph identity can
+    still provide conservative evidence: only exempt a Persian repeated span
+    when the corresponding source paragraph(s) themselves contain an exact
+    repeated source-language span of the same minimum size.
+    """
+    source_paragraphs = _paragraphs(source)
+    candidate_paragraphs = _paragraphs(candidate)
+    if not spans or len(source_paragraphs) != len(candidate_paragraphs):
+        return set()
+
+    normalized_candidates = [
+        " ".join(word.casefold() for word in _SPAN_TOKEN_RE.findall(paragraph))
+        for paragraph in candidate_paragraphs
+    ]
+    grounded: set[str] = set()
+    for span in spans:
+        aligned_indices = [
+            index for index, paragraph in enumerate(normalized_candidates)
+            if span in paragraph
+        ]
+        if not aligned_indices:
+            continue
+        aligned_source = "\n\n".join(
+            source_paragraphs[index] for index in aligned_indices
+        )
+        if _repeated_spans(aligned_source, min_words):
+            grounded.add(span)
+    return grounded
 
 
 _PERSIAN_DIGITS = "\u06f0\u06f1\u06f2\u06f3\u06f4\u06f5\u06f6\u06f7\u06f8\u06f9"
@@ -1588,12 +1626,24 @@ class PostEditIntegrityGate:
         # Item 16: a duplicated multi-word span, which is smaller than a whole
         # paragraph and so invisible to the check above.
         introduced_spans = newly_repeated_spans(previous, candidate)
+        grounded_spans = _source_grounded_repeated_spans(
+            source, candidate, introduced_spans
+        )
+        introduced_spans = [
+            span for span in introduced_spans if span not in grounded_spans
+        ]
         if introduced_spans:
             add(
                 "duplicate_span_introduced", "blocking",
                 "The edit repeats a passage that the previous translation did not.",
                 span_count=len(introduced_spans),
                 samples=introduced_spans[:3],
+            )
+        elif grounded_spans:
+            add(
+                "duplicate_span_source_grounded", "info",
+                "Repeated translated wording aligns with repeated source content.",
+                span_count=len(grounded_spans),
             )
 
         missing_terms = []

@@ -432,7 +432,12 @@ class TarjomehConfig:
         return cls.from_toml(path, validate=validate)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> TarjomehConfig:
+    def from_dict(
+        cls,
+        data: dict[str, Any],
+        *,
+        credential_source: TarjomehConfig | None = None,
+    ) -> TarjomehConfig:
         """Create a TarjomehConfig from a dictionary.
 
         Processing order (consistent with from_toml):
@@ -447,7 +452,7 @@ class TarjomehConfig:
         config._apply_env_overrides()
         # Persisted configs carry redacted credentials; refill from the
         # environment before validation rejects the empty key list.
-        config._rehydrate_redacted_secrets()
+        config._rehydrate_redacted_secrets(credential_source)
         if not config.translation.country:
             config.translation.country = "Iran"
         config.validate()
@@ -625,7 +630,10 @@ class TarjomehConfig:
         if value.isdigit():
             self.llm.critic.recovery_max_tokens = int(value)
 
-    def _rehydrate_redacted_secrets(self) -> None:
+    def _rehydrate_redacted_secrets(
+        self,
+        credential_source: TarjomehConfig | None = None,
+    ) -> None:
         """Restore credentials that were stripped before persistence.
 
         Job records store empty ``api_keys``; the live key comes from the
@@ -633,14 +641,35 @@ class TarjomehConfig:
         the OpenRouter keys", so only the primary list needs a fallback
         here - ``CRITIC_API_KEY`` is handled by _apply_env_overrides.
         """
-        if any(self.llm.openrouter.api_keys):
-            return
-        fallback = (
-            os.environ.get("TRANSLATOR_API_KEY", "").strip()
-            or os.environ.get("OPENROUTER_API_KEY", "").strip()
-        )
-        if fallback:
-            self.llm.openrouter.api_keys = [fallback]
+        source = credential_source
+        if source is None and Path("config.toml").is_file():
+            try:
+                with Path("config.toml").open("rb") as handle:
+                    raw = _expand_env_recursive(tomllib.load(handle))
+                source = type(self)._from_raw(raw)
+            except Exception:
+                logger.warning(
+                    "Could not read live credentials from config.toml.",
+                    exc_info=True,
+                )
+
+        if not any(self.llm.openrouter.api_keys):
+            fallback = (
+                os.environ.get("TRANSLATOR_API_KEY", "").strip()
+                or os.environ.get("OPENROUTER_API_KEY", "").strip()
+            )
+            if fallback:
+                self.llm.openrouter.api_keys = [fallback]
+            elif source is not None and any(source.llm.openrouter.api_keys):
+                self.llm.openrouter.api_keys = list(source.llm.openrouter.api_keys)
+
+        if (
+            self.llm.critic.is_active
+            and not any(self.llm.critic.api_keys)
+            and source is not None
+            and any(source.llm.critic.api_keys)
+        ):
+            self.llm.critic.api_keys = list(source.llm.critic.api_keys)
 
     def _apply_mode_preset(self, raw: dict[str, Any]) -> None:
         """Apply mode-specific defaults for keys not explicitly provided."""

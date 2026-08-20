@@ -7,18 +7,20 @@ for ambiguous academic terms.
 from __future__ import annotations
 
 import asyncio
-import os
-import threading
-import re
-import urllib.parse
-import logging
+import concurrent.futures
 import html
+import logging
+import os
+import re
+import threading
+import urllib.parse
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
 
 @dataclass
 class SearchResult:
@@ -486,98 +488,136 @@ class SearchProviderChain(BaseSearchProvider):
         # The budget check and the increment were separate statements, so
         # concurrent workers could both pass the check and overrun a PAID
         # search budget. Reserve the slot atomically instead.
-        self._budget_lock = threading.Lock()
+        self._state_lock = threading.RLock()
+        self._budget_lock = self._state_lock
         self.cache: dict[str, list[SearchResult]] = {}
         self.diagnostics: list[dict[str, Any]] = []
+        self._inflight: dict[
+            str, concurrent.futures.Future[Iterable[SearchResult]]
+        ] = {}
 
     async def search(self, query: str) -> list[SearchResult]:
         cache_key = " ".join(query.casefold().split())
-        if cache_key in self.cache:
-            self.diagnostics.append({
-                "query": query,
-                "provider": "cache",
-                "status": "hit",
-                "result_count": len(self.cache[cache_key]),
-            })
-            return self.cache[cache_key]
-        with self._budget_lock:
+        with self._state_lock:
+            if cache_key in self.cache:
+                cached = list(self.cache[cache_key])
+                self.diagnostics.append({
+                    "query": query,
+                    "provider": "cache",
+                    "status": "hit",
+                    "result_count": len(cached),
+                })
+                return cached
+            pending = self._inflight.get(cache_key)
+            if pending is not None:
+                owner = False
+            else:
+                pending = concurrent.futures.Future[Iterable[SearchResult]]()
+                self._inflight[cache_key] = pending
+                owner = True
             if self.queries_used >= self.query_budget:
                 over_budget = True
-            else:
+            elif owner:
                 # Reserve the slot before the await below, so two concurrent
                 # workers cannot both pass the check.
                 self.queries_used += 1
                 over_budget = False
+            else:
+                over_budget = False
+        if not owner:
+            return list(await asyncio.wrap_future(pending))
         if over_budget:
             self.last_error = "query budget exhausted"
-            self.diagnostics.append({
-                "query": query,
-                "provider": "none",
-                "status": "budget_exhausted",
-                "result_count": 0,
-            })
-            return []
-
-        for provider in self.providers:
-            if not provider.available:
+            with self._state_lock:
                 self.diagnostics.append({
                     "query": query,
-                    "provider": provider.name,
-                    "status": "unavailable",
-                    "error": provider.last_error or "API key not configured",
+                    "provider": "none",
+                    "status": "budget_exhausted",
                     "result_count": 0,
                 })
-                continue
-            for attempt in range(self.max_retries + 1):
-                provider.last_error = ""
-                provider.last_status = None
-                results = await provider.search(query)
-                status = "success" if results else "empty"
-                self.diagnostics.append({
-                    "query": query,
-                    "provider": provider.name,
-                    "status": status,
-                    "http_status": provider.last_status,
-                    "attempt": attempt + 1,
-                    "error": provider.last_error,
-                    "result_count": len(results),
-                })
-                if results:
-                    self.cache[cache_key] = results
-                    return results
-                if provider.last_status not in (429, 500, 502, 503, 504):
-                    break
-                await asyncio.sleep(min(0.5 * (2 ** attempt), 2.0))
+                self.cache[cache_key] = []
+                self._inflight.pop(cache_key, None)
+                pending.set_result([])
+            return []
 
-        self.cache[cache_key] = []
-        return []
+        results: list[SearchResult] = []
+        try:
+            for provider in self.providers:
+                if not provider.available:
+                    with self._state_lock:
+                        self.diagnostics.append({
+                            "query": query,
+                            "provider": provider.name,
+                            "status": "unavailable",
+                            "error": provider.last_error or "API key not configured",
+                            "result_count": 0,
+                        })
+                    continue
+                for attempt in range(self.max_retries + 1):
+                    provider.last_error = ""
+                    provider.last_status = None
+                    results = await provider.search(query)
+                    status = "success" if results else "empty"
+                    with self._state_lock:
+                        self.diagnostics.append({
+                            "query": query,
+                            "provider": provider.name,
+                            "status": status,
+                            "http_status": provider.last_status,
+                            "attempt": attempt + 1,
+                            "error": provider.last_error,
+                            "result_count": len(results),
+                        })
+                    if results:
+                        return list(results)
+                    if provider.last_status not in (429, 500, 502, 503, 504):
+                        break
+                    await asyncio.sleep(min(0.5 * (2 ** attempt), 2.0))
+            return []
+        finally:
+            with self._state_lock:
+                saved = list(results)
+                self.cache[cache_key] = saved
+                self._inflight.pop(cache_key, None)
+                if not pending.done():
+                    pending.set_result(saved)
 
     def export_state(self) -> dict[str, Any]:
-        return {
-            "queries_used": self.queries_used,
-            "cache": {
-                key: [
-                    {"title": r.title, "url": r.url, "snippet": r.snippet}
-                    for r in results
-                ]
-                for key, results in self.cache.items()
-            },
-        }
+        with self._state_lock:
+            return {
+                "queries_used": self.queries_used,
+                "cache": {
+                    key: [
+                        {"title": r.title, "url": r.url, "snippet": r.snippet}
+                        for r in results
+                    ]
+                    for key, results in self.cache.items()
+                },
+            }
+
+    def diagnostic_count(self) -> int:
+        with self._state_lock:
+            return len(self.diagnostics)
+
+    def diagnostics_since(self, index: int) -> list[dict[str, Any]]:
+        with self._state_lock:
+            return [dict(item) for item in self.diagnostics[index:]]
 
     def import_state(self, state: dict[str, Any]) -> None:
-        self.queries_used = max(0, int(state.get("queries_used", 0)))
-        self.cache = {
-            str(key): [
-                SearchResult(
-                    title=str(item.get("title", "")),
-                    url=str(item.get("url", "")),
-                    snippet=str(item.get("snippet", "")),
-                )
-                for item in items if isinstance(item, dict)
-            ]
-            for key, items in state.get("cache", {}).items()
-            if isinstance(items, list)
-        }
+        with self._state_lock:
+            self.queries_used = max(0, int(state.get("queries_used", 0)))
+            self.cache = {
+                str(key): [
+                    SearchResult(
+                        title=str(item.get("title", "")),
+                        url=str(item.get("url", "")),
+                        snippet=str(item.get("snippet", "")),
+                    )
+                    for item in items if isinstance(item, dict)
+                ]
+                for key, items in state.get("cache", {}).items()
+                if isinstance(items, list)
+            }
 
 
 def build_search_provider(
@@ -618,7 +658,3 @@ def build_search_provider(
             if query_budget is None else query_budget
         ),
     )
-    name = "duckduckgo"
-
-    def __init__(self) -> None:
-        super().__init__()

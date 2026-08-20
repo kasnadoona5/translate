@@ -1378,7 +1378,20 @@ def _chunk_needs_review(db: Any, job_id: str, chunk_index: int) -> bool:
         "glossary_needs_review",
         "chunk_review_required",
     }
-    return any(event.get("event_type") in review_events for event in events[last_start:])
+    current_events = events[last_start:]
+    if any(event.get("event_type") in review_events for event in current_events):
+        return True
+    actionable_structure = {
+        "translation_structure_mismatch",
+        "unauthorized_source_correction",
+    }
+    return any(
+        event.get("event_type") == "structure_audit"
+        and actionable_structure.intersection(
+            event.get("payload", {}).get("classifications", []) or []
+        )
+        for event in current_events
+    )
 
 
 def _chunk_style_approved(db: Any, job_id: str, chunk_index: int) -> bool:
@@ -1967,6 +1980,11 @@ class TranslationPipeline:
         self.critic_client = self._build_critic_client(config)
         self.db = JobDatabase()
         self.current_job_id: str | None = None
+        self._async_loop: Any = None
+        self._async_thread: threading.Thread | None = None
+        self._async_loop_lock = threading.Lock()
+        self._async_loop_ready = threading.Event()
+        self._closed = False
         observed: set[int] = set()
         for client in (self.llm_client, self.critic_client):
             if id(client) not in observed:
@@ -2095,23 +2113,58 @@ class TranslationPipeline:
             logger.warning("Failed to send pipeline webhook: %s", e)
 
     def _run_async(self, coro: Any) -> Any:
-        """Run a coroutine to completion from sync OR async callers."""
+        """Run a coroutine on the pipeline's single owned event loop.
+
+        One loop per operation defeats HTTP connection pooling and can bind a
+        cached ``AsyncClient`` to a loop that has already been destroyed.  A
+        dedicated loop also works when the caller already owns an event loop
+        (ASGI, notebooks) without nesting ``run_until_complete``.
+        """
         import asyncio
 
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            # Nothing running in this thread -- drive a loop directly.
-            return asyncio.run(coro)
+        if not hasattr(self, "_async_loop_lock"):
+            self._async_loop = None
+            self._async_thread = None
+            self._async_loop_lock = threading.Lock()
+            self._async_loop_ready = threading.Event()
+            self._closed = False
+        with self._async_loop_lock:
+            if self._closed:
+                close_coro = getattr(coro, "close", None)
+                if callable(close_coro):
+                    close_coro()
+                raise RuntimeError("TranslationPipeline is closed.")
+            if self._async_loop is None:
+                loop = asyncio.new_event_loop()
+                self._async_loop = loop
+                self._async_loop_ready.clear()
 
-        # A loop is already running here (Jupyter / ASGI / async caller).
-        # The previous code built a SECOND loop and called run_until_complete
-        # on it, which raises "Cannot run the event loop while another loop is
-        # running". Hand the coroutine to a worker thread that owns its own.
-        from concurrent.futures import ThreadPoolExecutor
+                def run_loop() -> None:
+                    asyncio.set_event_loop(loop)
+                    self._async_loop_ready.set()
+                    try:
+                        loop.run_forever()
+                    finally:
+                        pending = asyncio.all_tasks(loop)
+                        for task in pending:
+                            task.cancel()
+                        if pending:
+                            loop.run_until_complete(
+                                asyncio.gather(*pending, return_exceptions=True)
+                            )
+                        loop.run_until_complete(loop.shutdown_asyncgens())
+                        loop.close()
 
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, coro).result()
+                self._async_thread = threading.Thread(
+                    target=run_loop,
+                    name="tarjomeh-async",
+                    daemon=True,
+                )
+                self._async_thread.start()
+            loop = self._async_loop
+
+        self._async_loop_ready.wait()
+        return asyncio.run_coroutine_threadsafe(coro, loop).result()
 
     def _prepare_book_research(
         self,
@@ -2163,6 +2216,9 @@ class TranslationPipeline:
         close()/aclose() previously had zero call sites anywhere in src/, so
         every job leaked its connection pools for the process lifetime.
         """
+        if getattr(self, "_closed", False):
+            return
+
         seen: set[int] = set()
         for client in (
             getattr(self, "llm_client", None),
@@ -2174,13 +2230,27 @@ class TranslationPipeline:
                 continue
             seen.add(id(client))
             try:
-                client.close()
-            except Exception:
-                logger.debug("Sync client close failed", exc_info=True)
-            try:
                 self._run_async(client.aclose())
             except Exception:
                 logger.debug("Async client close failed", exc_info=True)
+            try:
+                client.close()
+            except Exception:
+                logger.debug("Sync client close failed", exc_info=True)
+
+        if not hasattr(self, "_async_loop_lock"):
+            self._async_loop = None
+            self._async_thread = None
+            self._async_loop_lock = threading.Lock()
+            self._async_loop_ready = threading.Event()
+        with self._async_loop_lock:
+            self._closed = True
+            loop = self._async_loop
+            thread = self._async_thread
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(loop.stop)
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=10.0)
 
     def __enter__(self) -> TranslationPipeline:
         return self
@@ -4660,11 +4730,13 @@ class TranslationPipeline:
                     )
                     if not initial_integrity.accepted:
                         self.db.log_chunk_event(
-                            job_id, idx, "integrity_initial_failed",
-                            initial_integrity.to_dict(),
-                        )
-                        raise ValueError(
-                            "Adaptive recovery produced no integrity-valid baseline."
+                            job_id,
+                            idx,
+                            "translation_recovery_assembly_rejected",
+                            {
+                                **initial_integrity.to_dict(),
+                                "action": "continue_to_quality_repair",
+                            },
                         )
         if not translation or not translation.strip():
             raise ValueError(f"LLM returned an empty or whitespace-only translation for chunk {idx}.")
@@ -4726,36 +4798,11 @@ class TranslationPipeline:
                     "details": corruption_repairs[:10],
                 },
             )
-        self.db.update_chunk(job_id, idx, ChunkStatus.TRANSLATED, translation)
-        # The last text that passed a gate, so a later rejection has
-        # something valid to restore. Four gate sites previously passed no
-        # `previous` at all, which is why rejection at the final gate could
-        # only log - it had no alternative text to fall back to.
-        last_accepted_translation = translation
-        self.db.log_chunk_event(job_id, idx, "translation_completed", {
-            "translation_chars": len(translation),
-            "translation_paragraphs": _paragraph_count(translation),
-            "expected_paragraphs": n_source_paras,
-        })
-        # Item 12: structural audit, REPORT-ONLY. It classifies announced counts
-        # and enumerations; it never rejects. Promotion to a gate rule belongs to
-        # item 13, and only once the item-20 corpus shows it does not fire on
-        # correct translations.
-        try:
-            structure_payload = audit_payload(chunk.text, translation)
-        except Exception:
-            # Report-only means report-only, including its failure mode. A bug
-            # here costs a missing report line, never a stopped translation.
-            logger.exception("Structure audit failed for chunk %s", idx)
-            self.db.log_chunk_event(
-                job_id, idx, "structure_audit_failed", {"stage": "initial_translation"}
-            )
-            structure_payload = {"finding_count": 0}
-        if structure_payload["finding_count"]:
-            self.db.log_chunk_event(
-                job_id, idx, "structure_audit", structure_payload
-            )
-        if integrity_enabled and initial_integrity is None:
+        # Always evaluate the finalized first draft after deterministic repairs.
+        # Adaptive recovery may have evaluated an earlier assembly, but identifier,
+        # orthography, and corruption repair can legitimately change that result.
+        baseline_integrity_accepted = not integrity_enabled
+        if integrity_enabled:
             initial_integrity = integrity_gate.evaluate(
                 chunk.text,
                 translation,
@@ -4768,13 +4815,47 @@ class TranslationPipeline:
             )
             if not initial_integrity.accepted:
                 self.db.log_chunk_event(
-                    job_id, idx, "integrity_initial_failed", initial_integrity.to_dict()
+                    job_id,
+                    idx,
+                    "integrity_initial_failed",
+                    {
+                        **initial_integrity.to_dict(),
+                        "action": "quarantine_until_repaired",
+                    },
                 )
+            baseline_integrity_accepted = initial_integrity.accepted
+
+        self.db.update_chunk(job_id, idx, ChunkStatus.TRANSLATED, translation)
+        # A repairable first draft may reach the bounded quality loop, but it is
+        # not trusted state.  Only an integrity-passing version can be restored,
+        # committed to memory, or exported by the caller.
+        last_accepted_translation: str | None = (
+            translation if baseline_integrity_accepted else None
+        )
+        if not baseline_integrity_accepted:
+            self.db.log_chunk_event(
+                job_id,
+                idx,
+                "translation_baseline_quarantined",
+                {
+                    "translation_chars": len(translation),
+                    "repair_path": "critique_refinement_and_glossary",
+                    "memory_eligible": False,
+                    "export_eligible": False,
+                },
+            )
+        self.db.log_chunk_event(job_id, idx, "translation_completed", {
+            "translation_chars": len(translation),
+            "translation_paragraphs": _paragraph_count(translation),
+            "expected_paragraphs": n_source_paras,
+            "baseline_integrity_accepted": baseline_integrity_accepted,
+        })
 
         # Critique and Refine (judge scores against the terminology mandate)
         if self.config.translation.enable_critique:
             threshold = getattr(self.config.translation, "critique_threshold", 9.0)
-            accepted_versions = [translation]
+            current_integrity_accepted = baseline_integrity_accepted
+            accepted_versions = [translation] if current_integrity_accepted else []
             evaluated_versions: list[tuple[str, Any]] = []
             for ref_iter in range(self.config.translation.max_refine_iterations + 1):
                 try:
@@ -4953,7 +5034,8 @@ class TranslationPipeline:
                         ),
                     })
                     break
-                evaluated_versions.append((translation, critique_rep))
+                if current_integrity_accepted:
+                    evaluated_versions.append((translation, critique_rep))
                 if _critique_passes_quality_gate(critique_rep, threshold):
                     break
                 if ref_iter == self.config.translation.max_refine_iterations:
@@ -5183,6 +5265,20 @@ class TranslationPipeline:
                     if (local_salvage or {}).get("committed_count")
                     else before_translation
                 )
+                baseline_was_quarantined = not current_integrity_accepted
+                if edit_accepted or (local_salvage or {}).get("committed_count"):
+                    current_integrity_accepted = True
+                if baseline_was_quarantined and current_integrity_accepted:
+                    self.db.log_chunk_event(
+                        job_id,
+                        idx,
+                        "translation_baseline_repaired",
+                        {
+                            "stage": "refinement",
+                            "iteration": ref_iter + 1,
+                            "translation_chars": len(translation),
+                        },
+                    )
                 translation_changed = (
                     _normalized_translation_version(translation)
                     != _normalized_translation_version(before_translation)
@@ -5215,6 +5311,8 @@ class TranslationPipeline:
                             item[0],
                         ),
                     )
+                    current_integrity_accepted = True
+                    last_accepted_translation = translation
                     self.db.log_chunk_event(
                         job_id,
                         idx,
@@ -5230,7 +5328,11 @@ class TranslationPipeline:
                             ),
                         },
                     )
-                elif translation_changed and not convergence_reason:
+                elif (
+                    translation_changed
+                    and not convergence_reason
+                    and current_integrity_accepted
+                ):
                     accepted_versions.append(translation)
                     last_accepted_translation = translation
 
@@ -5488,8 +5590,22 @@ Output ONLY the corrected Persian translation.
                                       "retains all protected content."
                                 )
                         if correction_accepted:
+                            baseline_was_quarantined = (
+                                last_accepted_translation is None
+                            )
                             translation = proposed_correction
                             last_accepted_translation = translation
+                            if baseline_was_quarantined:
+                                self.db.log_chunk_event(
+                                    job_id,
+                                    idx,
+                                    "translation_baseline_repaired",
+                                    {
+                                        "stage": "glossary_auto_correction",
+                                        "attempt": attempts,
+                                        "translation_chars": len(translation),
+                                    },
+                                )
                             report = compliance_checker.check(
                                 translation=translation,
                                 source_text=chunk.text,
@@ -5570,7 +5686,7 @@ Output ONLY the corrected Persian translation.
                 # Supplying `previous` is what lets the gate tell damage this
                 # last step introduced from damage carried in from earlier. The
                 # corruption and duplicate checks both baseline against it.
-                previous=last_accepted_translation,
+                previous=last_accepted_translation or "",
                 stage="final_translation",
                 protected_terms=protected_targets,
                 protect_inline_english=protect_inline_english,
@@ -5590,15 +5706,65 @@ Output ONLY the corrected Persian translation.
                 # gate could only log, so damage introduced after the last
                 # accepted version was still what shipped.
                 restored = (last_accepted_translation or "").strip()
+                restored_is_valid = False
                 if restored and restored != (translation or "").strip():
-                    self.db.log_chunk_event(
-                        job_id, idx, "integrity_final_restored", {
-                            "restored_from": "last_accepted_translation",
-                            "rejected_chars": len(translation or ""),
-                            "restored_chars": len(last_accepted_translation),
-                        },
+                    restored_integrity = integrity_gate.evaluate(
+                        chunk.text,
+                        restored,
+                        stage="final_translation_restored",
+                        protected_terms=protected_targets,
+                        protect_inline_english=protect_inline_english,
+                        allowed_inline_originals=allowed_inline_originals,
+                        enforce_all_terms=bool(
+                            self.config.glossary.enable_compliance_check
+                        ),
                     )
-                    translation = last_accepted_translation
+                    self.db.log_chunk_event(
+                        job_id,
+                        idx,
+                        "integrity_check_completed",
+                        restored_integrity.to_dict(),
+                    )
+                    restored_is_valid = restored_integrity.accepted
+                    if restored_is_valid:
+                        self.db.log_chunk_event(
+                            job_id, idx, "integrity_final_restored", {
+                                "restored_from": "last_accepted_translation",
+                                "rejected_chars": len(translation or ""),
+                                "restored_chars": len(restored),
+                            },
+                        )
+                        translation = restored
+                _ensure_chunk_review_reason(self.db, job_id, idx)
+                if not restored_is_valid:
+                    raise ValueError(
+                        "No integrity-valid translation remained after bounded "
+                        "critique, refinement, and glossary repair."
+                    )
+            else:
+                last_accepted_translation = translation
+
+        # Audit the text that will actually continue into memory and export,
+        # after every refinement, correction and integrity restoration. This is
+        # report-only: actionable findings mark review and lower memory trust,
+        # but never rewrite the author's source structure automatically.
+        try:
+            structure_payload = {
+                "stage": "final_translation",
+                **audit_payload(chunk.text, translation),
+            }
+        except Exception:
+            logger.exception("Structure audit failed for chunk %s", idx)
+            self.db.log_chunk_event(
+                job_id, idx, "structure_audit_failed", {"stage": "final_translation"}
+            )
+            structure_payload = {"finding_count": 0, "classifications": []}
+        if structure_payload["finding_count"]:
+            self.db.log_chunk_event(job_id, idx, "structure_audit", structure_payload)
+            if {
+                "translation_structure_mismatch",
+                "unauthorized_source_correction",
+            }.intersection(structure_payload.get("classifications", [])):
                 _ensure_chunk_review_reason(self.db, job_id, idx)
 
         structural_roles = {
