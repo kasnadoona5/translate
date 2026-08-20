@@ -90,6 +90,10 @@ _MIXED_SCRIPT_TOKEN_RE = re.compile(
     rf"(?<![\w/.-])(?:[A-Za-z]+[{_PERSIAN_LETTER_CLASS}]+|"
     rf"[{_PERSIAN_LETTER_CLASS}]+[A-Za-z]+)(?![\w/.-])"
 )
+_PARENTHETICAL_PERSIAN_SUFFIX_RE = re.compile(
+    rf"\([^()\n]*[A-Za-z][^()\n]*\)\u200c?"
+    rf"[{_PERSIAN_LETTER_CLASS}]{{1,8}}"
+)
 _LATIN_LETTERS = "A-Za-z\u00c0-\u024f\u1e00-\u1eff"
 _LATIN_PROSE_TOKEN_RE = re.compile(
     rf"(?<![{_LATIN_LETTERS}])[{_LATIN_LETTERS}]"
@@ -761,7 +765,9 @@ def restore_source_identifiers(source: str, translation: str) -> tuple[str, dict
 
 def mixed_script_artifacts(text: str) -> list[str]:
     """Return contiguous Latin/Persian tokens that indicate protocol corruption."""
-    return sorted(set(_MIXED_SCRIPT_TOKEN_RE.findall(text or "")), key=str.casefold)
+    artifacts = set(_MIXED_SCRIPT_TOKEN_RE.findall(text or ""))
+    artifacts.update(_PARENTHETICAL_PERSIAN_SUFFIX_RE.findall(text or ""))
+    return sorted(artifacts, key=str.casefold)
 
 
 def is_bibliographic_marker(value: str) -> bool:

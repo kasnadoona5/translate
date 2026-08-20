@@ -47,6 +47,8 @@ Core directives:
 • Follow established Persian academic conventions for transliteration of proper nouns.
   - For transliteration, use the accepted Iranian academic standard.
   - {term_notes_instruction}
+  - A specialist label explicitly marked as a technical loanword follows the same
+    first-occurrence original policy; ordinary translated concepts do not.
 • Preserve the author's argumentative structure and rhetorical style.
 • Use entries marked mandatory consistently. Evaluate advisory glossary candidates
   against the source context before using, revising, or rejecting them.
@@ -126,6 +128,8 @@ Instructions:
 5. Use ZWNJ (‌) correctly in compound verbs and affixed words (e.g. می‌خواهد).
 6. Proper nouns and first-occurrence originals:
    {term_notes_instruction}
+   Apply the same rule to entries explicitly marked as transliterated technical
+   loanwords. Never infer this for an ordinary concept with a Persian translation.
 7. Scholarly apparatus: keep in-text citations, years, page numbers, and footnote markers
    in Latin script and Western digits exactly as in the source (e.g. (Marx 1867, 92)).
    Translate quoted passages and ordinary citation connective prose, but leave citation
@@ -305,6 +309,9 @@ IMPORTANT — Identification method:
 • Detect: author/person names, place names, institution names, organisation names,
   book/article titles, journal names, named theories or doctrines, and specialised
   academic terms specific to the domain.
+• Use category "technical_loanword" only when Persian scholarly prose normally
+  transliterates the source label rather than replacing it with an established
+  Persian lexical equivalent. Do not use it for ordinary translated concepts.
 
 ### Text
 {text}
@@ -313,7 +320,7 @@ Return a JSON array where each element has this schema:
 [
   {{
     "term": "<English term as it appears in text>",
-    "category": "person" | "place" | "institution" | "organization" | "publication" | "product" | "theory" | "term",
+    "category": "person" | "place" | "institution" | "organization" | "publication" | "product" | "theory" | "technical_loanword" | "term",
     "context": "<short phrase showing how the term is used>",
     "suggested_persian": "<suggested Persian transliteration or translation, or null>"
   }}
@@ -333,7 +340,9 @@ IMPORTANT — Identification method:
 • Identify entities by their SEMANTIC ROLE in the sentence, NOT by capitalisation.
   Persian has no uppercase letters, so capitalisation-based detection is invalid.
 • Detect: person names, place names, institution names, publication titles,
-  named theories/doctrines, and domain-specific academic terms.
+  named theories/doctrines, and domain-specific academic terms. Classify a
+  specialist label as "technical_loanword" only when its Persian rendering is
+  a transliteration rather than an established lexical translation.
 
 ### Already-known entities (do NOT repeat these)
 {known_entities}
@@ -346,7 +355,7 @@ Each element must have this schema:
 [
   {{
     "term": "<English term>",
-    "category": "person" | "place" | "institution" | "organization" | "publication" | "product" | "theory" | "term",
+    "category": "person" | "place" | "institution" | "organization" | "publication" | "product" | "theory" | "technical_loanword" | "term",
     "context": "<short phrase showing how the term is used>",
     "suggested_persian": "<suggested Persian transliteration or translation, or null>"
   }}

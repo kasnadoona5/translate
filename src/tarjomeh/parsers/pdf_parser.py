@@ -698,6 +698,79 @@ def _merge_continuation_paragraphs(paragraphs: list[Paragraph]) -> list[Paragrap
     return merged
 
 
+def _merge_table_interrupted_continuations(
+    paragraphs: list[Paragraph],
+) -> list[Paragraph]:
+    """Rejoin one prose paragraph split by intervening table blocks.
+
+    A print table may occupy the next page while the surrounding sentence
+    resumes on the following page. Keeping the two prose fragments separate
+    causes each to be translated as an incomplete sentence. When geometry,
+    syntax, and structural roles all agree, move the preserved table block
+    after the completed prose paragraph and retain provenance in metadata.
+    """
+    result: list[Paragraph] = []
+    index = 0
+    while index < len(paragraphs):
+        left = paragraphs[index]
+        table_end = index + 1
+        while (
+            table_end < len(paragraphs)
+            and paragraphs[table_end].metadata.get("is_table")
+        ):
+            table_end += 1
+
+        if table_end == index + 1 or table_end >= len(paragraphs):
+            result.append(left)
+            index += 1
+            continue
+
+        right = paragraphs[table_end]
+        left_body = bool(
+            not left.metadata.get("is_table")
+            and not left.metadata.get("heading_level")
+            and not left.metadata.get("is_footnote")
+        )
+        right_body = bool(
+            not right.metadata.get("is_table")
+            and not right.metadata.get("heading_level")
+            and not right.metadata.get("is_footnote")
+        )
+        right_start = right.text.lstrip(" \t\"'\u2018\u201c(")[:1]
+        left_page = int(left.metadata.get("page", 0) or 0)
+        right_page = int(right.metadata.get("page", 0) or 0)
+        pages_advance = bool(left_page and right_page and right_page > left_page)
+        continuation = bool(
+            left_body
+            and right_body
+            and pages_advance
+            and left.text
+            and right.text
+            and left.text[-1] not in _SENTENCE_END_CHARS
+            and (right_start.islower() or left.text.endswith("-"))
+        )
+        if not continuation:
+            result.append(left)
+            index += 1
+            continue
+
+        tables = paragraphs[index + 1:table_end]
+        joiner = "" if left.text.endswith("-") else " "
+        left.text = left.text + joiner + right.text
+        left.metadata["end_page"] = right_page
+        left.metadata["cross_table_join"] = True
+        left.metadata["intervening_table_blocks"] = len(tables)
+        fragments = list(left.metadata.get("source_fragment_ids", []) or [])
+        fragments.extend(right.metadata.get("source_fragment_ids", []) or [])
+        left.metadata["source_fragment_ids"] = list(dict.fromkeys(fragments))
+        result.append(left)
+        for table in tables:
+            table.metadata["relocated_after_continuation"] = True
+            result.append(table)
+        index = table_end + 1
+    return result
+
+
 _HEADING_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
 _ROMAN_TOKEN_RE = re.compile(r"^[ivxlcdm]+$", re.IGNORECASE)
 
@@ -905,6 +978,11 @@ class PyMuPDFParser(BaseParser):
             structure_audit["chapter_headings_inserted_from_toc"] = sum(
                 bool(item.get("inserted_from_toc")) for item in heading_audits
             )
+            structure_audit["cross_table_continuation_joins"] = sum(
+                bool(paragraph.metadata.get("cross_table_join"))
+                for chapter in chapters
+                for paragraph in chapter.all_paragraphs
+            )
 
             raw_toc = [entry[1] for entry in toc] if toc else None
 
@@ -1015,7 +1093,9 @@ class PyMuPDFParser(BaseParser):
                 paragraphs, heading_audit = _canonicalize_chapter_heading(
                     title, paragraphs
                 )
-                paragraphs = _merge_continuation_paragraphs(paragraphs)
+                paragraphs = _merge_table_interrupted_continuations(
+                    _merge_continuation_paragraphs(paragraphs)
+                )
             else:
                 heading_audit = {"canonicalized": False, "legacy_resume": True}
             section = Section(title="", level=2, paragraphs=paragraphs)
@@ -1190,7 +1270,9 @@ class PyMuPDFParser(BaseParser):
                 chapter.sections = [Section(
                     title="",
                     level=2,
-                    paragraphs=_merge_continuation_paragraphs(canonical),
+                    paragraphs=_merge_table_interrupted_continuations(
+                        _merge_continuation_paragraphs(canonical)
+                    ),
                 )]
                 chapter.metadata["heading_audit"] = heading_audit
             else:

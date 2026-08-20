@@ -56,17 +56,17 @@ class TestProperNouns(unittest.TestCase):
 
     def test_categories_control_first_occurrence_originals(self) -> None:
         pn = ProperNouns()
-        pn.add_noun("capital", "sarmaye", category="term")
-        pn.add_noun("Monsanto", "monsanto", category="organization")
+        pn.add_noun("capital", "سرمایه", category="term")
+        pn.add_noun("Monsanto", "مونسانتو", category="organization")
 
         self.assertFalse(pn.is_inline_eligible("capital"))
         self.assertTrue(pn.is_inline_eligible("Monsanto"))
 
-        pn.add_noun("capital", "sarmaye", category="approved_term")
+        pn.add_noun("capital", "سرمایه", category="approved_term")
         self.assertTrue(pn.is_inline_eligible("capital"))
         self.assertEqual(
             pn.pending_inline_originals("capital and Monsanto"),
-            {"capital": "sarmaye", "Monsanto": "monsanto"},
+            {"Monsanto": "مونسانتو", "capital": "سرمایه"},
         )
 
         restored = ProperNouns()

@@ -45,6 +45,7 @@ from tarjomeh.memory.manager import MemoryManager, MemoryContext
 from tarjomeh.memory.proper_nouns import (
     INLINE_ORIGINAL_CATEGORIES,
     is_reusable_terminology_mapping,
+    is_usable_memory_mapping,
 )
 from tarjomeh.context.web_searcher import WebContextSearcher
 from tarjomeh.glossary.manager import GlossaryManager
@@ -620,6 +621,122 @@ def _term_notes_instruction(mode: str) -> str:
         "marked [first occurrence pending] get the English original in "
         "parentheses after the Persian rendering exactly once."
     )
+
+
+_LATIN_ENTITY_TOKEN = (
+    r"(?:[A-Z\u00c0-\u00d6\u00d8-\u00de]"
+    r"[A-Za-z\u00c0-\u024f\u1e00-\u1eff'\u2019-]+|[A-Z]\.)"
+)
+_LATIN_ENTITY_RE = re.compile(
+    rf"(?<![\w])({_LATIN_ENTITY_TOKEN}(?:\s+{_LATIN_ENTITY_TOKEN}){{1,4}})"
+)
+_ENTITY_LEADING_NOISE = frozenset({
+    "a", "an", "the", "this", "that", "these", "those", "in", "on", "for",
+    "from", "as", "at", "by", "while", "where", "when", "first", "second",
+    "third", "fourth", "fifth", "sixth", "chapter", "part", "table", "figure",
+    "introduction", "conclusion",
+})
+_ENTITY_NON_NAME_TOKENS = frozenset({
+    "approach", "chapter", "concept", "future", "government", "introduction",
+    "market", "method", "part", "politics", "present", "state", "table",
+    "theory", "world",
+})
+_NON_PERSON_ENTITY_ENDINGS = frozenset({
+    "academy", "america", "association", "bank", "committee", "company",
+    "council", "europe", "foundation", "institute", "library", "ministry",
+    "organization", "organisation", "party", "press", "project", "society",
+    "university",
+})
+_PERSIAN_ANCHOR_TOKEN_RE = re.compile(
+    r"[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]+"
+    r"(?:\u200c[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]+)*"
+)
+
+
+def _source_entity_inventory(source_text: str, limit: int = 24) -> list[str]:
+    """Return bounded, high-precision current-passage entity candidates."""
+    candidates: list[str] = []
+    for match in _LATIN_ENTITY_RE.finditer(source_text or ""):
+        value = " ".join(match.group(1).split()).strip(" ,.;:()[]{}")
+        tokens = re.findall(r"[A-Za-z\u00c0-\u024f\u1e00-\u1eff]+", value)
+        folded = [token.casefold() for token in tokens]
+        if not 2 <= len(tokens) <= 5 or folded[0] in _ENTITY_LEADING_NOISE:
+            continue
+        if all(token in _ENTITY_NON_NAME_TOKENS for token in folded):
+            continue
+        if value.isupper() or term_occurs_only_in_citations(source_text, value):
+            continue
+        if value.casefold() not in {item.casefold() for item in candidates}:
+            candidates.append(value)
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
+def _high_confidence_person_candidates(candidates: list[str]) -> list[str]:
+    """Narrow review-blocking candidates to plausible multi-token people."""
+    selected: list[str] = []
+    for candidate in candidates:
+        tokens = re.findall(r"[A-Za-z\u00c0-\u024f\u1e00-\u1eff]+", candidate)
+        if not 2 <= len(tokens) <= 4:
+            continue
+        if tokens[-1].casefold() in _NON_PERSON_ENTITY_ENDINGS:
+            continue
+        if any(token.casefold() in _ENTITY_NON_NAME_TOKENS for token in tokens):
+            continue
+        selected.append(candidate)
+    return selected
+
+
+def _observed_anchor_target(
+    translation: str,
+    source: str,
+) -> str:
+    """Read a Persian name immediately preceding an exact English original."""
+    original = re.search(
+        rf"\(\s*{re.escape(source)}\s*\)", translation or "", re.IGNORECASE
+    )
+    if original is None:
+        return ""
+    prefix = (translation or "")[:original.start()].rstrip()
+    tokens = list(_PERSIAN_ANCHOR_TOKEN_RE.finditer(prefix))
+    source_token_count = len(re.findall(r"[A-Za-z\u00c0-\u024f]+", source))
+    if not tokens or source_token_count < 1:
+        return ""
+    selected = tokens[-min(source_token_count, 5):]
+    if selected[-1].end() != len(prefix):
+        return ""
+    target = prefix[selected[0].start():selected[-1].end()].strip()
+    return target if is_usable_memory_mapping(source, target) else ""
+
+
+def _reconcile_current_entity_anchors(
+    memory_manager: MemoryManager,
+    source_entities: list[str],
+    translation: str,
+) -> dict[str, Any]:
+    """Persist only mappings explicitly evidenced by ``Persian (English)``."""
+    observed: list[dict[str, Any]] = []
+    missing: list[str] = []
+    for source in source_entities:
+        target = _observed_anchor_target(translation, source)
+        if not target:
+            missing.append(source)
+            continue
+        outcome = memory_manager.proper_nouns.add_noun(
+            source,
+            target,
+            category="proper_noun",
+            provenance="observed_translation",
+        )
+        if outcome.get("action") != "ignored":
+            observed.append({"source": source, "target": target, **outcome})
+    return {
+        "candidate_count": len(source_entities),
+        "observed_count": len(observed),
+        "observed": observed,
+        "missing": missing,
+    }
 
 
 def _research_context_for_memory(artifact: dict[str, Any] | None) -> str:
@@ -4346,26 +4463,59 @@ class TranslationPipeline:
             pending_originals = memory_manager.proper_nouns.pending_inline_originals(
                 chunk.text
             )
+        known_source_entities = {
+            value.casefold()
+            for value in memory_manager.proper_nouns.all_nouns()
+        }
+        source_entity_candidates = (
+            [
+                value for value in _source_entity_inventory(chunk.text)
+                if not memory_manager.proper_nouns.is_introduced(value)
+                and value.casefold() not in known_source_entities
+            ]
+            if not _is_front_matter(chunk) else []
+        )
+        required_person_candidates = _high_confidence_person_candidates(
+            source_entity_candidates
+        )
         allowed_inline_originals = (
-            sorted(pending_originals, key=str.casefold)
+            sorted(
+                set(pending_originals).union(source_entity_candidates),
+                key=str.casefold,
+            )
             if protect_inline_english else []
         )
-        allowed_originals_text = (
-            ", ".join(f"({value})" for value in allowed_inline_originals)
+        established_originals_text = (
+            ", ".join(f"({value})" for value in pending_originals)
+            or "(none)"
+        )
+        candidate_originals_text = (
+            ", ".join(f"({value})" for value in source_entity_candidates)
             or "(none)"
         )
         inline_policy_context = (
             "\n\n### Deterministic English-original allowlist for this chunk\n"
-            f"Authorized first-occurrence originals: {allowed_originals_text}\n"
-            "Only these listed originals may be added as English parentheticals. "
+            f"Established pending originals: {established_originals_text}\n"
+            f"Current-source entity candidates: {candidate_originals_text}\n"
+            "For every candidate that is genuinely a person, place, institution, "
+            "publication, product, or named theory in this passage, render it as "
+            "Persian followed immediately by its exact English original in parentheses. "
+            "A candidate is permission, not a command: reject title-cased ordinary "
+            "prose that is not an entity. Only listed originals may be added. "
             "Ordinary concepts and all unlisted terms must remain Persian-only. "
             "Source citations are separate and must be preserved."
         )
         self.db.log_chunk_event(job_id, idx, "inline_original_policy", {
             "enabled": protect_inline_english,
             "allowed_originals": allowed_inline_originals,
+            "established_originals": list(pending_originals),
+            "source_entity_candidates": source_entity_candidates,
+            "required_person_candidates": required_person_candidates,
             "categories": {
-                source: memory_manager.proper_nouns.category_for(source)
+                source: (
+                    memory_manager.proper_nouns.category_for(source)
+                    if source in pending_originals else "source_entity_candidate"
+                )
                 for source in allowed_inline_originals
             },
         })
@@ -5744,6 +5894,48 @@ Output ONLY the corrected Persian translation.
             else:
                 last_accepted_translation = translation
 
+        entity_coverage = {
+            "candidate_count": len(source_entity_candidates),
+            "observed_count": 0,
+            "observed": [],
+            "missing": [],
+            "policy_enabled": protect_inline_english,
+        }
+        if protect_inline_english and source_entity_candidates:
+            if lock:
+                with lock:
+                    entity_coverage.update(_reconcile_current_entity_anchors(
+                        memory_manager, source_entity_candidates, translation
+                    ))
+            else:
+                entity_coverage.update(_reconcile_current_entity_anchors(
+                    memory_manager, source_entity_candidates, translation
+                ))
+            memory_manager.proper_nouns.mark_seen_in_text(chunk.text)
+        entity_coverage["required_person_candidates"] = required_person_candidates
+        entity_coverage["required_missing"] = [
+            source for source in entity_coverage.get("missing", [])
+            if source in required_person_candidates
+        ]
+        self.db.log_chunk_event(
+            job_id, idx, "source_entity_coverage", entity_coverage
+        )
+        if protect_inline_english and entity_coverage.get("required_missing"):
+            self.db.log_chunk_event(
+                job_id,
+                idx,
+                "chunk_review_required",
+                {
+                    "reason": "missing_first_occurrence_entity_original",
+                    "missing": entity_coverage["required_missing"],
+                    "message": (
+                        "One or more high-confidence current-source entities did "
+                        "not produce an unambiguous Persian (English) anchor. The "
+                        "translation was retained without guessing an insertion."
+                    ),
+                },
+            )
+
         # Audit the text that will actually continue into memory and export,
         # after every refinement, correction and integrity restoration. This is
         # report-only: actionable findings mark review and lower memory trust,
@@ -5781,7 +5973,9 @@ Output ONLY the corrected Persian translation.
             chunk.text,
             translation,
             allowed_originals=tuple(
-                memory_manager.proper_nouns.inline_eligible_nouns()
+                set(memory_manager.proper_nouns.inline_eligible_nouns()).union(
+                    source_entity_candidates
+                )
             ),
             structural_role=language_role,
             chapter_title=chunk.chapter_title,

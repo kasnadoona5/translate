@@ -10,12 +10,14 @@ exactly once per book instead of once per chunk.
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 from typing import Any
 
 
 INLINE_ORIGINAL_CATEGORIES = frozenset({
     "proper_noun", "person", "place", "institution", "organization",
     "publication", "product", "theory", "approved_term",
+    "technical_loanword",
 })
 _CATEGORY_ALIASES = {
     "organisation": "organization",
@@ -24,6 +26,8 @@ _CATEGORY_ALIASES = {
     "journal": "publication",
     "work": "publication",
     "named_theory": "theory",
+    "loanword": "technical_loanword",
+    "transliteration": "technical_loanword",
 }
 _PERSIAN_LETTER_RE = re.compile(r"[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]")
 _UNUSABLE_TARGET_RE = re.compile(
@@ -50,6 +54,24 @@ _PROVENANCE_AUTHORITY = {
     "curated_glossary": 100,
 }
 
+_PERSIAN_ROMANIZATION = str.maketrans({
+    "\u0627": "a", "\u0622": "a", "\u0628": "b", "\u067e": "p", "\u062a": "t",
+    "\u062b": "s", "\u062c": "j", "\u0686": "ch", "\u062d": "h", "\u062e": "kh",
+    "\u062f": "d", "\u0630": "z", "\u0631": "r", "\u0632": "z", "\u0698": "zh",
+    "\u0633": "s", "\u0634": "sh", "\u0635": "s", "\u0636": "z", "\u0637": "t",
+    "\u0638": "z", "\u0639": "a", "\u063a": "gh", "\u0641": "f", "\u0642": "q",
+    "\u06a9": "k", "\u0643": "k", "\u06af": "g", "\u0644": "l", "\u0645": "m",
+    "\u0646": "n", "\u0648": "o", "\u0647": "h", "\u06cc": "i", "\u064a": "i",
+    "\u0626": "i", "\u0624": "o", "\u0621": "",
+})
+_AMBIGUOUS_ENTITY_CATEGORIES = frozenset({
+    "institution", "organization", "publication", "product",
+})
+_LOW_AUTHORITY_ORIGINS = frozenset({
+    "auto_extraction", "incremental_extraction", "research_suggestion",
+    "observed_translation",
+})
+
 
 def is_usable_memory_mapping(english: str, persian: str) -> bool:
     """Reject malformed/placeholder auto mappings from prompt-time memory."""
@@ -64,6 +86,23 @@ def is_usable_memory_mapping(english: str, persian: str) -> bool:
     if not _PERSIAN_LETTER_RE.search(target):
         return False
     return True
+
+
+def looks_like_transliterated_loanword(english: str, persian: str) -> bool:
+    """Recognize compact source/target transliterations without a word list."""
+    source = re.sub(r"[^a-z]", "", (english or "").casefold())
+    target = re.sub(
+        r"[^a-z]", "", (persian or "").translate(_PERSIAN_ROMANIZATION).casefold()
+    )
+    if not 4 <= len(source) <= 40 or not 3 <= len(target) <= 50:
+        return False
+    full_ratio = SequenceMatcher(None, source, target).ratio()
+    source_consonants = re.sub(r"[aeiouy]", "", source)
+    target_consonants = re.sub(r"[aeiouy]", "", target)
+    consonant_ratio = SequenceMatcher(
+        None, source_consonants, target_consonants
+    ).ratio()
+    return max(full_ratio, consonant_ratio) >= 0.58
 
 
 def is_reusable_terminology_mapping(english: str, persian: str) -> bool:
@@ -101,6 +140,39 @@ def _source_term_present(source_text: str, term: str) -> bool:
     separator = r"(?:\s+|\s*[-‐-―]\s*)"
     pattern = separator.join(re.escape(word) for word in words)
     return bool(re.search(rf"(?<!\w){pattern}(?!\w)", source_text or "", re.IGNORECASE))
+
+
+def _mapping_applies_to_source(
+    source_text: str,
+    term: str,
+    category: str,
+    provenance: dict[str, Any],
+) -> bool:
+    """Keep lowercase brand/entity mappings out of unrelated lexical senses."""
+    if not source_text or not _source_term_present(source_text, term):
+        return False
+    normalized_category = _normalise_category(category)
+    origin = str(provenance.get("origin", "legacy"))
+    compact = " ".join((term or "").split())
+    if (
+        normalized_category not in _AMBIGUOUS_ENTITY_CATEGORIES
+        or origin not in _LOW_AUTHORITY_ORIGINS
+        or len(compact.split()) != 1
+        or not compact.islower()
+    ):
+        return True
+
+    pattern = re.compile(rf"(?<!\w){re.escape(compact)}(?!\w)", re.IGNORECASE)
+    for match in pattern.finditer(source_text):
+        line_start = source_text.rfind("\n", 0, match.start()) + 1
+        line_end = source_text.find("\n", match.end())
+        if line_end < 0:
+            line_end = len(source_text)
+        if source_text[line_start:line_end].strip().casefold() == compact.casefold():
+            return True
+        if match.group() != match.group().lower():
+            return True
+    return False
 
 
 def _normalise_category(category: str) -> str:
@@ -156,8 +228,12 @@ class ProperNouns:
         """
         en_key = " ".join(english.split()).strip()
         fa_val = persian.strip()
-        if not en_key or not fa_val:
-            return {"action": "ignored", "source": en_key}
+        if not is_usable_memory_mapping(en_key, fa_val):
+            return {
+                "action": "ignored",
+                "source": en_key,
+                "reason": "unusable_memory_mapping",
+            }
 
         origin = provenance if provenance in _PROVENANCE_AUTHORITY else "legacy"
         authority = _PROVENANCE_AUTHORITY[origin]
@@ -268,7 +344,7 @@ class ProperNouns:
         for en in self._nouns:
             if en in self._introduced or not self.is_inline_eligible(en):
                 continue
-            if re.search(rf"\b{re.escape(en)}\b", source_text, re.IGNORECASE):
+            if self.applies_to_source(en, source_text):
                 self._introduced.add(en)
 
     def is_introduced(self, english: str) -> bool:
@@ -330,7 +406,27 @@ class ProperNouns:
 
     def is_inline_eligible(self, english: str) -> bool:
         """Return whether a noun may carry a first-occurrence English original."""
-        return self.category_for(english) in INLINE_ORIGINAL_CATEGORIES
+        key = self._stored_key(english) or english.strip()
+        category = self.category_for(key)
+        return bool(
+            category in INLINE_ORIGINAL_CATEGORIES
+            or (
+                category == "term"
+                and looks_like_transliterated_loanword(
+                    key, self._nouns.get(key, "")
+                )
+            )
+        )
+
+    def applies_to_source(self, english: str, source_text: str) -> bool:
+        """Return whether a mapping's stored semantic role fits this passage."""
+        key = self._stored_key(english) or english.strip()
+        return _mapping_applies_to_source(
+            source_text,
+            key,
+            self.category_for(key),
+            self._provenance.get(key, {}),
+        )
 
     def inline_eligible_nouns(self) -> dict[str, str]:
         """Return only deterministic inline-original candidates."""
@@ -342,13 +438,13 @@ class ProperNouns:
 
     def pending_inline_originals(self, source_text: str) -> dict[str, str]:
         """Return eligible, not-yet-introduced originals present in one chunk."""
-        return {
+        return dict(sorted({
             source: target for source, target in self._nouns.items()
             if self.is_inline_eligible(source)
             and not self.is_context_deferred(source)
             and source not in self._introduced
-            and re.search(rf"\b{re.escape(source)}\b", source_text, re.IGNORECASE)
-        }
+            and self.applies_to_source(source, source_text)
+        }.items(), key=lambda item: (-len(item[0]), item[0].casefold())))
 
     def get_context(
         self,
@@ -376,7 +472,7 @@ class ProperNouns:
                 continue
             if self.is_context_deferred(en):
                 continue
-            if source_text and not _source_term_present(source_text, en):
+            if source_text and not self.applies_to_source(en, source_text):
                 continue
             category = self.category_for(en)
             if not self.is_inline_eligible(en):
@@ -426,7 +522,11 @@ class ProperNouns:
             return
 
         if "nouns" in data and isinstance(data.get("nouns"), dict):
-            self._nouns = dict(data["nouns"])
+            self._nouns = {
+                str(source): str(target)
+                for source, target in data["nouns"].items()
+                if is_usable_memory_mapping(str(source), str(target))
+            }
             stored_categories = data.get("categories", {})
             self._categories = {
                 source: _normalise_category(str(stored_categories.get(source, "proper_noun")))
@@ -458,7 +558,10 @@ class ProperNouns:
             self._introduced = set(data.get("introduced", []))
         else:
             # Legacy checkpoint: flat mapping, no introduction tracking.
-            self._nouns = {k: v for k, v in data.items() if isinstance(v, str)}
+            self._nouns = {
+                k: v for k, v in data.items()
+                if isinstance(v, str) and is_usable_memory_mapping(k, v)
+            }
             self._categories = {source: "proper_noun" for source in self._nouns}
             self._provenance = {
                 source: {

@@ -52,6 +52,10 @@ def _clean_style_sample(text: str) -> str:
     sample = _complete_style_sample(text)
     if not sample or _STYLE_PROTOCOL_RE.search(sample):
         return ""
+    if sample.lstrip().startswith(("...", "\u2026")) or sample.rstrip().endswith(
+        ("...", "\u2026")
+    ):
+        return ""
     if _UNTRANSLATED_CITATION_PROSE_RE.search(sample):
         return ""
     if mixed_script_artifacts(sample):
@@ -452,7 +456,7 @@ class MemoryManager:
                 "proper_noun", "person", "place", "institution",
                 "organization", "organisation", "publication", "product",
                 "theory", "named_theory", "approved_term", "book", "article",
-                "journal", "work",
+                "journal", "work", "technical_loanword", "loanword",
             }
             normalized_translation = re.sub(
                 r"[\s\u200c]+", " ", translation.strip()
@@ -490,6 +494,7 @@ class MemoryManager:
                             self.proper_nouns.add_alias(term, persian)
                         )
                 accepted += 1
+            self.proper_nouns.mark_seen_in_text(text)
             return {
                 "status": (
                     "completed" if accepted else "completed_without_suggestions"
