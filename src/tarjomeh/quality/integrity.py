@@ -102,6 +102,14 @@ _FLEXIBLE_IDENTIFIER_LABEL_SUFFIX_RE = re.compile(
     rf"[{_IDENTIFIER_DIGITS}]\s*[{_IDENTIFIER_DIGITS}])?\s*:?\s*$",
     re.IGNORECASE,
 )
+_LOCALIZED_IDENTIFIER_LABEL_SUFFIX_RE = re.compile(
+    rf"(?:(?:\u0634\u0645\u0627\u0631\u0647\s+)?"
+    rf"\u0634\u0627\u0628\u06a9|"
+    rf"\u0634\u0645\u0627\u0631\u0647\s+\u0627\u0633\u062a\u0627\u0646\u062f\u0627\u0631\u062f\s+"
+    rf"\u0628\u06cc\u0646\u200c?\u0627\u0644\u0645\u0644\u0644\u06cc\s+\u06a9\u062a\u0627\u0628)"
+    rf"(?:\s*[-\u2010-\u2015]?\s*"
+    rf"[{_IDENTIFIER_DIGITS}]\s*[{_IDENTIFIER_DIGITS}])?\s*:?\s*$"
+)
 _ABBREVIATION_DEFINITION_RE = re.compile(
     r"(?<!\w)(?P<acronym>[A-Z]{2,}(?:\s+[A-Z]{2,}){0,3})"
     r"(?:\s+(?P<label>Act|Agreement|Agency|Convention|Law|Organisation|"
@@ -777,15 +785,26 @@ def restore_source_identifiers(source: str, translation: str) -> tuple[str, dict
         replacement_before = value
         if source_has_label:
             replacement = source_value
-            if not candidate_has_label:
-                prefix_start = max(0, start - 40)
-                prefix = (translation or "")[prefix_start:start]
-                label_match = _FLEXIBLE_IDENTIFIER_LABEL_SUFFIX_RE.search(prefix)
-                if label_match:
-                    replacement_start = prefix_start + label_match.start()
-                    replacement_before = (
-                        (translation or "")[replacement_start:start] + value
+            prefix_start = max(0, start - 80)
+            prefix = (translation or "")[prefix_start:start]
+            localized_label = _LOCALIZED_IDENTIFIER_LABEL_SUFFIX_RE.search(prefix)
+            if candidate_has_label and localized_label:
+                replacement_start = prefix_start + localized_label.start()
+                replacement_before = (
+                    (translation or "")[replacement_start:start] + value
+                )
+            elif not candidate_has_label:
+                if localized_label:
+                    replacement = source_payload
+                else:
+                    label_match = _FLEXIBLE_IDENTIFIER_LABEL_SUFFIX_RE.search(
+                        prefix
                     )
+                    if label_match:
+                        replacement_start = prefix_start + label_match.start()
+                        replacement_before = (
+                            (translation or "")[replacement_start:start] + value
+                        )
         else:
             replacement = source_value
         if replacement_before != replacement:
@@ -928,11 +947,26 @@ def protected_source_apparatus(source: str, translation: str) -> list[str]:
 
 
 def _grounded_phrase_spans(text: str, phrase: str) -> list[tuple[int, int]]:
-    """Locate a source-grounded phrase despite harmless whitespace changes."""
-    words = re.findall(r"\S+", phrase or "")
-    if not words:
+    """Locate a grounded phrase despite whitespace and typography variants."""
+    phrase = (phrase or "").strip()
+    if not phrase:
         return []
-    pattern = re.compile(r"\s+".join(re.escape(word) for word in words), re.IGNORECASE)
+    parts: list[str] = []
+    in_whitespace = False
+    for character in phrase:
+        if character.isspace():
+            if not in_whitespace:
+                parts.append(r"\s+")
+            in_whitespace = True
+            continue
+        in_whitespace = False
+        if character in {"'", "\u2019"}:
+            parts.append(r"['\u2019]")
+        elif character in "-\u2010\u2011\u2012\u2013\u2014\u2015":
+            parts.append(r"[-\u2010-\u2015]")
+        else:
+            parts.append(re.escape(character))
+    pattern = re.compile("".join(parts), re.IGNORECASE)
     return [match.span() for match in pattern.finditer(text or "")]
 
 

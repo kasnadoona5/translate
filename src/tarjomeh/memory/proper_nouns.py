@@ -10,6 +10,7 @@ exactly once per book instead of once per chunk.
 from __future__ import annotations
 
 import re
+import unicodedata
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -89,6 +90,75 @@ _ENTITY_CONNECTORS = frozenset({
     "and", "de", "del", "der", "di", "du", "la", "le", "of", "the",
     "van", "von",
 })
+_SOURCE_TERM_TOKEN_RE = re.compile(
+    r"[^\W_]+(?:['\u2019][^\W_]+)?",
+    re.UNICODE,
+)
+_SOURCE_TERM_SEPARATOR = (
+    r"(?:\s+|\s*[-\u2010-\u2015]\s*|"
+    r"\s*[,;:./&+()\[\]{}]\s*)+"
+)
+def _flexible_source_token(token: str, *, ignore_case: bool) -> str:
+    """Match harmless apostrophe and Latin-diacritic source variants."""
+    parts: list[str] = []
+    for character in token:
+        if character in "'\u2019":
+            parts.append(r"['\u2019]")
+            continue
+        decomposed = unicodedata.normalize("NFKD", character)
+        base = "".join(
+            item for item in decomposed if not unicodedata.combining(item)
+        )
+        if (
+            len(base) == 1
+            and base.isascii()
+            and base.isalpha()
+            and base.casefold() != character.casefold()
+        ):
+            equivalent = base.upper() if character.isupper() else base.lower()
+            parts.append("[" + re.escape(character + equivalent) + "]")
+            parts.append(r"[\u0300-\u036f]*")
+        else:
+            parts.append(re.escape(character))
+    return "".join(parts)
+
+
+def source_term_pattern(
+    term: str,
+    *,
+    ignore_case: bool = True,
+) -> re.Pattern[str] | None:
+    """Build a Unicode-aware source matcher for a stored name or title."""
+    normalized = unicodedata.normalize("NFKC", term or "")
+    tokens = _SOURCE_TERM_TOKEN_RE.findall(normalized)
+    if not tokens:
+        return None
+    body = _SOURCE_TERM_SEPARATOR.join(
+        _flexible_source_token(token, ignore_case=ignore_case)
+        for token in tokens
+    )
+    flags = re.IGNORECASE if ignore_case else 0
+    return re.compile(rf"(?<!\w){body}(?!\w)", flags | re.UNICODE)
+
+
+def source_term_present(source_text: str, term: str) -> bool:
+    """Match a source term across safe PDF punctuation and line-break variants."""
+    pattern = source_term_pattern(term)
+    if pattern is None:
+        return False
+    normalized_source = unicodedata.normalize("NFKC", source_text or "")
+    if pattern.search(normalized_source):
+        return True
+    folded_source = "".join(
+        item for item in unicodedata.normalize("NFKD", normalized_source)
+        if not unicodedata.combining(item)
+    )
+    folded_term = "".join(
+        item for item in unicodedata.normalize("NFKD", term or "")
+        if not unicodedata.combining(item)
+    )
+    folded_pattern = source_term_pattern(folded_term)
+    return bool(folded_pattern and folded_pattern.search(folded_source))
 
 
 def is_usable_memory_mapping(english: str, persian: str) -> bool:
@@ -148,10 +218,14 @@ def has_exact_observed_anchor(translation: str, english: str) -> bool:
     source = " ".join((english or "").split()).strip()
     if not source:
         return False
+    pattern = source_term_pattern(source)
+    if pattern is None:
+        return False
+    body = pattern.pattern.removeprefix(r"(?<!\w)").removesuffix(r"(?!\w)")
     return bool(re.search(
-        rf"\(\s*{re.escape(source)}(?:\s*,\s*[^()\n]{{1,120}})?\s*\)",
-        translation or "",
-        re.IGNORECASE,
+        rf"\(\s*{body}(?:\s*,\s*[^()\n]{{1,120}})?\s*\)",
+        unicodedata.normalize("NFKC", translation or ""),
+        pattern.flags,
     ))
 
 
@@ -174,7 +248,7 @@ def is_safe_automatic_entity_mapping(
     normalized_category = _normalise_category(category)
     if not is_usable_memory_mapping(source, persian):
         return False
-    if not _source_term_present(source_text, source):
+    if not source_term_present(source_text, source):
         return False
     if require_observed_anchor and not has_exact_observed_anchor(
         translation, source
@@ -194,21 +268,44 @@ def is_safe_automatic_entity_mapping(
     ):
         return False
 
-    # A candidate beginning immediately after ``Titlecase + connector`` is a
-    # truncated tail of a longer same-line name, not an independent entity.
-    occurrence = re.search(
-        rf"(?<!\w){re.escape(source)}(?!\w)", source_text or "", re.IGNORECASE
-    )
-    if occurrence:
-        line_start = (source_text or "").rfind("\n", 0, occurrence.start()) + 1
-        prefix = (source_text or "")[line_start:occurrence.start()].rstrip()
-        connector = "|".join(sorted(_ENTITY_CONNECTORS, key=len, reverse=True))
+    observed_anchor = has_exact_observed_anchor(translation, source)
+    if not observed_anchor:
+        # Lowercase intra-word dashes commonly come from PDF line wrapping.
+        # A visible accepted anchor can still establish a genuine compound.
         if re.search(
-            rf"[A-Z\u00c0-\u00d6\u00d8-\u00de][A-Za-z\u00c0-\u024f'\u2019-]*"
-            rf"[ \t]+(?:{connector})[ \t]*$",
-            prefix,
+            r"[a-z\u00df-\u024f][-\u2010-\u2015][a-z\u00df-\u024f]",
+            source,
             re.IGNORECASE,
         ):
+            return False
+        # A coordinated geographic or ambiguous phrase often names two things.
+        # Keep it contextual unless accepted output proves one bounded anchor.
+        if (
+            normalized_category
+            in {"place", "proper_noun", "source_entity_candidate"}
+            and re.search(r"\s+(?:and|&)\s+", source, re.IGNORECASE)
+        ):
+            return False
+
+    # A candidate beginning immediately after ``Titlecase + connector`` is a
+    # truncated tail of a longer same-line name, not an independent entity.
+    source_pattern = source_term_pattern(source)
+    normalized_source_text = unicodedata.normalize("NFKC", source_text or "")
+    occurrence = (
+        source_pattern.search(normalized_source_text)
+        if source_pattern is not None else None
+    )
+    if occurrence:
+        line_start = normalized_source_text.rfind("\n", 0, occurrence.start()) + 1
+        prefix = normalized_source_text[line_start:occurrence.start()].rstrip()
+        connector = "|".join(sorted(_ENTITY_CONNECTORS, key=len, reverse=True))
+        truncated_prefix = re.search(
+            rf"(?P<head>[^\W\d_][^\W_]*)[ \t]+"
+            rf"(?P<connector>{connector})[ \t]*$",
+            prefix,
+            re.IGNORECASE | re.UNICODE,
+        )
+        if truncated_prefix and truncated_prefix.group("head")[:1].isupper():
             return False
     return True
 
@@ -259,12 +356,7 @@ def is_reusable_terminology_mapping(english: str, persian: str) -> bool:
 
 def _source_term_present(source_text: str, term: str) -> bool:
     """Match a stored source term despite PDF whitespace/hyphen line breaks."""
-    words = re.findall(r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)?", term or "")
-    if not words:
-        return False
-    separator = r"(?:\s+|\s*[-‐-―]\s*)"
-    pattern = separator.join(re.escape(word) for word in words)
-    return bool(re.search(rf"(?<!\w){pattern}(?!\w)", source_text or "", re.IGNORECASE))
+    return source_term_present(source_text, term)
 
 
 def _mapping_applies_to_source(

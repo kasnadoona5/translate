@@ -9,6 +9,7 @@ from typing import Any
 from tarjomeh.exporters.base import TranslatedDocument
 from tarjomeh.glossary.manager import GlossaryManager
 from tarjomeh.glossary.compliance import term_occurs_only_in_citations
+from tarjomeh.memory.proper_nouns import source_term_pattern, source_term_present
 from tarjomeh.persian.typography import PersianTypographer
 from tarjomeh.quality.integrity import source_abbreviation_expansions
 
@@ -139,11 +140,13 @@ def ensure_inline_proper_noun_originals(
             if not key or key in seen:
                 continue
             category = str(categories.get(source, "proper_noun")).lower()
-            flags = 0 if category == "publication" else re.IGNORECASE
-            source_match = re.search(
-                rf"(?<!\w){re.escape(source)}(?!\w)",
-                paragraph.source_text,
-                flags=flags,
+            source_pattern = source_term_pattern(
+                source,
+                ignore_case=category != "publication",
+            )
+            source_match = (
+                source_pattern.search(paragraph.source_text)
+                if source_pattern is not None else None
             )
             if source_match is None:
                 continue
@@ -691,11 +694,7 @@ def audit_inline_english_originals(
                 })
                 return ""
 
-            grounded = re.search(
-                rf"(?<!\w){re.escape(content)}(?!\w)",
-                source_text,
-                flags=re.IGNORECASE,
-            )
+            grounded = source_term_present(source_text, content)
             if grounded:
                 removed_unauthorized.append({
                     "paragraph_index": paragraph.index,

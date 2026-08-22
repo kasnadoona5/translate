@@ -213,91 +213,160 @@ def enumeration_length(text: str) -> int:
     return max(ordinal_sequence_length(text), list_marker_count(text))
 
 
+@dataclass(frozen=True)
+class _StructuralEpisode:
+    paragraph_index: int
+    paragraph_span: int
+    announced: int | None
+    items: int
+    announcement_candidates: tuple[int, ...]
+
+
+def _paragraphs(text: str) -> list[str]:
+    return [
+        paragraph.strip()
+        for paragraph in re.split(r"\n\s*\n", text or "")
+        if paragraph.strip()
+    ]
+
+
+def _structural_episodes(
+    text: str,
+    *,
+    minimum_items: int = 2,
+) -> list[_StructuralEpisode]:
+    """Bind an announcement only to its paragraph or the next list paragraph.
+
+    Chunk-wide maxima confuse unrelated lists, such as a three-part argument
+    followed later by eight acknowledgements. The one-paragraph look-ahead is
+    deliberately narrow and supports ordinary ``the following`` list layouts.
+    """
+    paragraphs = _paragraphs(text)
+    episodes: list[_StructuralEpisode] = []
+    for index, paragraph in enumerate(paragraphs):
+        counts = announced_counts(paragraph)
+        if not counts:
+            continue
+        items = enumeration_length(paragraph)
+        span = 1
+        if items < minimum_items and index + 1 < len(paragraphs):
+            next_items = enumeration_length(paragraphs[index + 1])
+            if next_items >= 2:
+                items = next_items
+                span = 2
+        if items < minimum_items:
+            continue
+        announced = next((value for value in counts if value == items), None)
+        if announced is None and len(set(counts)) == 1:
+            announced = counts[0]
+        episodes.append(_StructuralEpisode(
+            paragraph_index=index,
+            paragraph_span=span,
+            announced=announced,
+            items=items,
+            announcement_candidates=tuple(counts),
+        ))
+    return episodes
+
+
 def audit_structure(source: str, candidate: str) -> list[StructureFinding]:
     """Compare announced structure in *source* against *candidate*.
 
     Returns findings only; nothing here rejects a translation.
     """
-    source_items = enumeration_length(source)
-    candidate_items = enumeration_length(candidate)
-    if source_items < 2 and candidate_items < 2:
-        # No enumeration on either side: there is nothing reliable to audit, and
-        # guessing from bare counting words would flood the report.
-        return []
+    source_episodes = _structural_episodes(source)
+    candidate_episodes = _structural_episodes(candidate, minimum_items=1)
+    if not source_episodes:
+        if not candidate_episodes:
+            return []
+        episode = candidate_episodes[0]
+        return [StructureFinding(
+            "announced_count_unverifiable",
+            INSUFFICIENT_SOURCE_EVIDENCE,
+            "The translation enumerates items but a local source announcement "
+            "could not be established; no automatic action.",
+            {
+                "source_announced": None,
+                "source_items": 0,
+                "candidate_announced": episode.announced,
+                "candidate_items": episode.items,
+                "candidate_paragraph": episode.paragraph_index,
+            },
+        )]
 
-    source_counts = announced_counts(source)
-    candidate_counts = announced_counts(candidate)
-    source_announced = next(
-        (value for value in source_counts if value == source_items), None
-    )
-    if source_announced is None:
-        source_announced = source_counts[0] if source_counts else None
-    candidate_announced = next(
-        (value for value in candidate_counts if value == candidate_items), None
-    )
-    if candidate_announced is None:
-        candidate_announced = candidate_counts[0] if candidate_counts else None
-
-    details: dict[str, Any] = {
-        "source_announced": source_announced,
-        "source_items": source_items,
-        "candidate_announced": candidate_announced,
-        "candidate_items": candidate_items,
-    }
-
-    if source_announced is None or source_items < 2:
-        return [
-            StructureFinding(
+    findings: list[StructureFinding] = []
+    for index, source_episode in enumerate(source_episodes):
+        candidate_episode = (
+            candidate_episodes[index]
+            if index < len(candidate_episodes) else None
+        )
+        candidate_announced = (
+            candidate_episode.announced if candidate_episode else None
+        )
+        candidate_items = candidate_episode.items if candidate_episode else 0
+        details: dict[str, Any] = {
+            "source_announced": source_episode.announced,
+            "source_items": source_episode.items,
+            "candidate_announced": candidate_announced,
+            "candidate_items": candidate_items,
+            "source_paragraph": source_episode.paragraph_index,
+            "source_paragraph_span": source_episode.paragraph_span,
+            "candidate_paragraph": (
+                candidate_episode.paragraph_index if candidate_episode else None
+            ),
+            "source_announcement_candidates": list(
+                source_episode.announcement_candidates
+            ),
+        }
+        if source_episode.announced is None:
+            findings.append(StructureFinding(
                 "announced_count_unverifiable",
                 INSUFFICIENT_SOURCE_EVIDENCE,
-                "The translation enumerates items but the source announcement "
-                "could not be established; no automatic action.",
+                "Several local source counts could apply to this enumeration; "
+                "no automatic action.",
                 details,
-            )
-        ]
+            ))
+            continue
 
-    source_consistent = source_announced == source_items
-    candidate_consistent = (
-        candidate_announced is not None and candidate_announced == candidate_items
-    )
-
-    if not source_consistent:
-        # The source contradicts itself. Preserving that is correct; silently
-        # repairing it is not.
-        # A silent repair changes the ANNOUNCEMENT to agree with the items it
-        # actually lists. Comparing item counts instead would miss it, because a
-        # faithful translation and a tidied one list the same number of items.
-        if candidate_consistent and candidate_announced != source_announced:
-            return [
-                StructureFinding(
+        source_consistent = source_episode.announced == source_episode.items
+        candidate_consistent = (
+            candidate_announced is not None
+            and candidate_announced == candidate_items
+        )
+        if not source_consistent:
+            if (
+                candidate_consistent
+                and candidate_announced != source_episode.announced
+            ):
+                findings.append(StructureFinding(
                     "announced_count_source_corrected",
                     UNAUTHORIZED_SOURCE_CORRECTION,
-                    "The source announcement and its enumeration disagree, and "
-                    "the translation silently reconciles them.",
+                    "The source announcement and its local enumeration disagree, "
+                    "and the translation silently reconciles them.",
                     details,
-                )
-            ]
-        return [
-            StructureFinding(
-                "announced_count_source_anomaly",
-                SOURCE_ANOMALY_PRESERVED,
-                "The source announcement and its enumeration disagree; the "
-                "translation preserves the discrepancy.",
-                details,
-            )
-        ]
+                ))
+            else:
+                findings.append(StructureFinding(
+                    "announced_count_source_anomaly",
+                    SOURCE_ANOMALY_PRESERVED,
+                    "The source announcement and its local enumeration disagree; "
+                    "the translation preserves the discrepancy.",
+                    details,
+                ))
+            continue
 
-    if candidate_items != source_items or candidate_announced != source_announced:
-        return [
-            StructureFinding(
+        if (
+            candidate_items != source_episode.items
+            or candidate_announced != source_episode.announced
+        ):
+            findings.append(StructureFinding(
                 "announced_count_mismatch",
                 TRANSLATION_STRUCTURE_MISMATCH,
-                "The source announces and delivers a consistent number of "
-                "items; the translation does not match it.",
+                "The source announces and delivers a locally consistent number "
+                "of items; the translation does not match it.",
                 details,
-            )
-        ]
-    return []
+            ))
+    return findings
 
 
 def audit_payload(source: str, candidate: str) -> dict[str, Any]:

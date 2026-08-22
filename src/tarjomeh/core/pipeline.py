@@ -47,6 +47,7 @@ from tarjomeh.memory.proper_nouns import (
     is_safe_automatic_entity_mapping,
     is_reusable_terminology_mapping,
     is_usable_observed_mapping,
+    source_term_pattern,
 )
 from tarjomeh.context.web_searcher import WebContextSearcher
 from tarjomeh.glossary.manager import GlossaryManager
@@ -703,6 +704,19 @@ _LATIN_ENTITY_RE = re.compile(
     rf"(?:[ \t]+(?:{_LATIN_ENTITY_CONNECTOR}[ \t]+)?"
     rf"{_LATIN_ENTITY_TOKEN}){{1,4}})"
 )
+_NAMED_INSTRUMENT_LABEL = (
+    r"(?:Act|Agreement|Charter|Code|Constitution|Convention|Directive|Law|"
+    r"Protocol|Regulation|Statute|Treaty)"
+)
+_NAMED_INSTRUMENT_WORD = (
+    r"(?:[A-Z\u00c0-\u00d6\u00d8-\u00de]"
+    r"[A-Za-z\u00c0-\u024f\u1e00-\u1eff'\u2019-]+|[A-Z]{2,})"
+)
+_NAMED_INSTRUMENT_RE = re.compile(
+    rf"(?<!\w)(?P<name>{_NAMED_INSTRUMENT_WORD}"
+    rf"(?:(?:[ \t]+|,[ \t]*)(?:(?:and|of|the)[ \t]+)?"
+    rf"{_NAMED_INSTRUMENT_WORD}){{0,8}}[ \t]+{_NAMED_INSTRUMENT_LABEL})\b"
+)
 _ENTITY_LEADING_NOISE = frozenset({
     "a", "an", "the", "this", "that", "these", "those", "in", "on", "for",
     "from", "as", "at", "by", "while", "where", "when", "first", "second",
@@ -752,7 +766,21 @@ def _canonical_source_entity(value: str) -> str:
 def _source_entity_inventory(source_text: str, limit: int = 24) -> list[str]:
     """Return bounded, high-precision current-passage entity candidates."""
     candidates: list[str] = []
+    instrument_spans: list[tuple[int, int]] = []
+    for match in _NAMED_INSTRUMENT_RE.finditer(source_text or ""):
+        value = _canonical_source_entity(match.group("name"))
+        value = re.sub(r"^(?:A|An|The)\s+", "", value)
+        if value.casefold() not in {item.casefold() for item in candidates}:
+            candidates.append(value)
+        instrument_spans.append(match.span("name"))
+        if len(candidates) >= limit:
+            return candidates
     for match in _LATIN_ENTITY_RE.finditer(source_text or ""):
+        if any(
+            match.start(1) < end and match.end(1) > start
+            for start, end in instrument_spans
+        ):
+            continue
         matched_value = _canonical_source_entity(match.group(1))
         values = [matched_value]
         if re.search(r"[ \t]+and[ \t]+", matched_value, re.IGNORECASE):
@@ -792,6 +820,8 @@ def _source_entity_category(source_text: str, candidate: str) -> str:
     if not tokens:
         return "source_entity_candidate"
     ending = tokens[-1].casefold()
+    if re.search(rf"\b{_NAMED_INSTRUMENT_LABEL}$", candidate):
+        return "publication"
     if ending in _PLACE_ENTITY_ENDINGS:
         return "place"
     if ending in _ORGANIZATION_ENTITY_ENDINGS:
@@ -836,6 +866,8 @@ def _high_confidence_person_candidates(
         tokens = re.findall(r"[A-Za-z\u00c0-\u024f\u1e00-\u1eff]+", candidate)
         if not 2 <= len(tokens) <= 4:
             continue
+        if re.search(r"\s+(?:and|&)\s+", candidate, re.IGNORECASE):
+            continue
         if tokens[-1].casefold() in _NON_PERSON_ENTITY_ENDINGS:
             continue
         if any(token.casefold() in _ENTITY_NON_NAME_TOKENS for token in tokens):
@@ -846,6 +878,16 @@ def _high_confidence_person_candidates(
     return selected
 
 
+def _high_confidence_instrument_candidates(
+    candidates: list[str],
+) -> list[str]:
+    """Return source-explicit named legal or institutional instruments."""
+    return [
+        candidate for candidate in candidates
+        if re.search(rf"\b{_NAMED_INSTRUMENT_LABEL}$", candidate)
+    ]
+
+
 def _observed_anchor_target(
     translation: str,
     source: str,
@@ -853,12 +895,18 @@ def _observed_anchor_target(
 ) -> str:
     """Read a Persian name immediately preceding an exact English original."""
     source = _canonical_source_entity(source)
+    source_matcher = source_term_pattern(source, ignore_case=True)
+    if source_matcher is None:
+        return ""
+    source_body = source_matcher.pattern.removeprefix(
+        r"(?<!\w)"
+    ).removesuffix(r"(?!\w)")
     original = re.search(
-        rf"\(\s*{re.escape(source)}"
+        rf"\(\s*{source_body}"
         rf"(?:\s*,?\s*(?:1[5-9]\d{{2}}|20\d{{2}})[a-z]?"
         rf"(?:\s*[,;]\s*(?:1[5-9]\d{{2}}|20\d{{2}})[a-z]?)*)?\s*\)",
         translation or "",
-        re.IGNORECASE,
+        source_matcher.flags,
     )
     if original is None:
         return ""
@@ -4760,6 +4808,13 @@ class TranslationPipeline:
         required_person_candidates = _high_confidence_person_candidates(
             source_entity_candidates, chunk.text
         )
+        required_instrument_candidates = _high_confidence_instrument_candidates(
+            source_entity_candidates
+        )
+        required_entity_candidates = list(dict.fromkeys([
+            *required_person_candidates,
+            *required_instrument_candidates,
+        ]))
         allowed_inline_originals = (
             sorted(
                 set(pending_originals).union(source_entity_candidates),
@@ -4793,6 +4848,8 @@ class TranslationPipeline:
             "established_originals": list(pending_originals),
             "source_entity_candidates": source_entity_candidates,
             "required_person_candidates": required_person_candidates,
+            "required_instrument_candidates": required_instrument_candidates,
+            "required_entity_candidates": required_entity_candidates,
             "categories": {
                 source: (
                     memory_manager.proper_nouns.category_for(source)
@@ -5119,7 +5176,25 @@ class TranslationPipeline:
                     )
                 return assembled
 
+            def log_recovery_protocol(stage: str, assembled: str) -> None:
+                if not use_paragraph_protocol:
+                    return
+                candidate_count = _paragraph_count(assembled)
+                self.db.log_chunk_event(
+                    job_id,
+                    idx,
+                    "paragraph_protocol_checked",
+                    {
+                        "stage": stage,
+                        "valid": candidate_count == len(recovery_paragraphs),
+                        "expected_paragraphs": len(recovery_paragraphs),
+                        "candidate_paragraphs": candidate_count,
+                        "recovery_assembly": True,
+                    },
+                )
+
             translation = recover_all_parts()
+            log_recovery_protocol("adaptive_recovery_assembly", translation)
 
             translation, identifier_repairs = restore_source_identifiers(
                 chunk.text, translation
@@ -5155,6 +5230,9 @@ class TranslationPipeline:
                         },
                     )
                     translation = recover_all_parts(strict_target_only=True)
+                    log_recovery_protocol(
+                        "adaptive_recovery_strict_assembly", translation
+                    )
                     translation, identifier_repairs = restore_source_identifiers(
                         chunk.text, translation
                     )
@@ -6368,9 +6446,16 @@ Output ONLY the corrected Persian translation.
                 chunk.text, translation
             )
         entity_coverage["required_person_candidates"] = required_person_candidates
+        entity_coverage["required_instrument_candidates"] = (
+            required_instrument_candidates
+        )
+        entity_coverage["required_entity_candidates"] = required_entity_candidates
+        missing_entities = entity_coverage.get("missing", [])
+        if not isinstance(missing_entities, (list, tuple, set)):
+            missing_entities = []
         entity_coverage["required_missing"] = [
-            source for source in entity_coverage.get("missing", [])
-            if source in required_person_candidates
+            source for source in missing_entities
+            if source in required_entity_candidates
         ]
         self.db.log_chunk_event(
             job_id, idx, "source_entity_coverage", entity_coverage
