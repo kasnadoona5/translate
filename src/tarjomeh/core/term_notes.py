@@ -165,7 +165,7 @@ def ensure_inline_proper_noun_originals(
                 )
 
         text = paragraph.translated_text
-        selected_candidates = []
+        selected_candidates: list[tuple[int, int, str, list[str], str, str]] = []
         for candidate in sorted(
             candidates,
             key=lambda item: (-(item[1] - item[0]), item[0], item[2].casefold()),
@@ -546,6 +546,75 @@ def normalize_adjacent_original_citations(
             **change,
         } for change in style_changes)
     return {"normalized_count": len(changes), "changes": changes}
+
+
+_ADJACENT_LATIN_PAREN_RE = re.compile(
+    r"(?P<full>\((?P<full_body>[^()\n]{2,180})\))"
+    r"(?P<space>\s+)"
+    r"(?P<fragment>\((?P<fragment_body>[^()\n]{1,100})\))"
+)
+
+
+def reconcile_redundant_original_fragments(
+    document: TranslatedDocument,
+    authorized_originals: dict[str, str],
+) -> dict[str, Any]:
+    """Remove only source-grounded partial duplicates beside a full original.
+
+    This covers cases where a complete authorized title/name is followed by a
+    leftover abbreviated parenthetical.  Independent citations are preserved:
+    removal requires the fragment's alphanumeric tokens to be a strict subset
+    of the complete authorized original's tokens.
+    """
+    authorized = {
+        _original_identity(source): source
+        for source in authorized_originals
+        if str(source).strip()
+    }
+    changes: list[dict[str, Any]] = []
+
+    def tokens(value: str) -> set[str]:
+        return {
+            token.casefold()
+            for token in re.findall(r"[A-Za-z0-9]+", value or "")
+        }
+
+    for paragraph in document.paragraphs:
+        source_folded = (paragraph.source_text or "").casefold()
+
+        def replace(match: re.Match[str]) -> str:
+            full = " ".join(match.group("full_body").split()).strip()
+            fragment = " ".join(
+                match.group("fragment_body").split()
+            ).strip()
+            full_key = _original_identity(full)
+            full_tokens = tokens(full)
+            fragment_tokens = tokens(fragment)
+            if full_key not in authorized:
+                return match.group(0)
+            if full.casefold() not in source_folded:
+                return match.group(0)
+            if (
+                not fragment_tokens
+                or not fragment_tokens < full_tokens
+                or not any(token.isalpha() for token in fragment_tokens)
+            ):
+                return match.group(0)
+            changes.append({
+                "paragraph_index": paragraph.index,
+                "kept": full,
+                "removed_fragment": fragment,
+            })
+            return match.group("full")
+
+        paragraph.translated_text = _ADJACENT_LATIN_PAREN_RE.sub(
+            replace, paragraph.translated_text or ""
+        )
+    return {
+        "removed_count": len(changes),
+        "changes": changes,
+        "policy": "strict token-subset duplicate beside authorized full original",
+    }
 
 
 _LATIN_PARENTHETICAL_RE = re.compile(r"\s*\(([^()\n]{1,160})\)")

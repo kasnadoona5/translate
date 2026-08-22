@@ -44,6 +44,7 @@ from tarjomeh.chunking.chunker import SemanticChunker, FixedChunker, Chunk
 from tarjomeh.memory.manager import MemoryManager, MemoryContext
 from tarjomeh.memory.proper_nouns import (
     INLINE_ORIGINAL_CATEGORIES,
+    is_safe_automatic_entity_mapping,
     is_reusable_terminology_mapping,
     is_usable_observed_mapping,
 )
@@ -65,6 +66,7 @@ from tarjomeh.core.term_notes import (
     effective_term_notes_mode,
     ensure_inline_proper_noun_originals,
     normalize_adjacent_original_citations,
+    reconcile_redundant_original_fragments,
 )
 from tarjomeh.exporters import get_exporter
 from tarjomeh.exporters.base import TranslatedDocument, TranslatedParagraph
@@ -76,6 +78,7 @@ from tarjomeh.quality.structure_audit import audit_payload
 from tarjomeh.quality.integrity import (
     PostEditIntegrityGate,
     extract_identifiers,
+    extract_labeled_identifier_surfaces,
     repair_corruption,
     mixed_script_artifacts,
     restore_source_identifiers,
@@ -205,6 +208,15 @@ def restore_document_source_identifiers(
                 - extract_identifiers(paragraph.translated_text)
             ).elements()
         )
+        missing.extend(
+            f"labeled:{value}"
+            for value in (
+                extract_labeled_identifier_surfaces(paragraph.source_text)
+                - extract_labeled_identifier_surfaces(
+                    paragraph.translated_text
+                )
+            ).elements()
+        )
         if missing:
             unresolved.append({
                 "paragraph_index": paragraph.index,
@@ -281,6 +293,15 @@ def audit_document_final_text(
             extract_identifiers(paragraph.source_text)
             - extract_identifiers(paragraph.translated_text)
         ).elements())
+        missing.extend(
+            f"labeled:{value}"
+            for value in (
+                extract_labeled_identifier_surfaces(paragraph.source_text)
+                - extract_labeled_identifier_surfaces(
+                    paragraph.translated_text
+                )
+            ).elements()
+        )
         if missing:
             unresolved_identifiers.append({
                 "paragraph_index": paragraph.index,
@@ -674,8 +695,13 @@ _LATIN_ENTITY_TOKEN = (
     r"(?:[A-Z\u00c0-\u00d6\u00d8-\u00de]"
     r"[A-Za-z\u00c0-\u024f\u1e00-\u1eff'\u2019-]+|[A-Z]\.)"
 )
+_LATIN_ENTITY_CONNECTOR = (
+    r"(?:and|de|del|der|di|du|la|le|of|the|van|von|&)"
+)
 _LATIN_ENTITY_RE = re.compile(
-    rf"(?<![\w])({_LATIN_ENTITY_TOKEN}(?:\s+{_LATIN_ENTITY_TOKEN}){{1,4}})"
+    rf"(?<![\w])({_LATIN_ENTITY_TOKEN}"
+    rf"(?:[ \t]+(?:{_LATIN_ENTITY_CONNECTOR}[ \t]+)?"
+    rf"{_LATIN_ENTITY_TOKEN}){{1,4}})"
 )
 _ENTITY_LEADING_NOISE = frozenset({
     "a", "an", "the", "this", "that", "these", "those", "in", "on", "for",
@@ -705,6 +731,10 @@ _ORGANIZATION_ENTITY_ENDINGS = frozenset({
     "organisation", "party", "press", "society", "university",
 })
 _ENTITY_POSSESSIVE_RE = re.compile(r"(?:['\u2019]s)\Z", re.IGNORECASE)
+_INITIALIZED_PERSON_RE = re.compile(
+    r"^(?:[A-Z]\.[ \t]+){1,5}"
+    r"[A-Z\u00c0-\u00d6\u00d8-\u00de][A-Za-z\u00c0-\u024f'\u2019-]+$"
+)
 _PERSIAN_ANCHOR_TOKEN_RE = re.compile(
     r"[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]"
     r"(?:[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]"
@@ -723,17 +753,34 @@ def _source_entity_inventory(source_text: str, limit: int = 24) -> list[str]:
     """Return bounded, high-precision current-passage entity candidates."""
     candidates: list[str] = []
     for match in _LATIN_ENTITY_RE.finditer(source_text or ""):
-        value = _canonical_source_entity(match.group(1))
-        tokens = re.findall(r"[A-Za-z\u00c0-\u024f\u1e00-\u1eff]+", value)
-        folded = [token.casefold() for token in tokens]
-        if not 2 <= len(tokens) <= 5 or folded[0] in _ENTITY_LEADING_NOISE:
-            continue
-        if all(token in _ENTITY_NON_NAME_TOKENS for token in folded):
-            continue
-        if value.isupper() or term_occurs_only_in_citations(source_text, value):
-            continue
-        if value.casefold() not in {item.casefold() for item in candidates}:
-            candidates.append(value)
+        matched_value = _canonical_source_entity(match.group(1))
+        values = [matched_value]
+        if re.search(r"[ \t]+and[ \t]+", matched_value, re.IGNORECASE):
+            parts = re.split(
+                r"[ \t]+and[ \t]+", matched_value,
+                maxsplit=1, flags=re.IGNORECASE,
+            )
+            ending = re.findall(r"[A-Za-z\u00c0-\u024f]+", matched_value)[-1]
+            if (
+                ending.casefold() not in _ORGANIZATION_ENTITY_ENDINGS
+                and all(2 <= len(part.split()) <= 4 for part in parts)
+            ):
+                values = parts
+        for value in values:
+            tokens = re.findall(
+                r"[A-Za-z\u00c0-\u024f\u1e00-\u1eff]+", value
+            )
+            folded = [token.casefold() for token in tokens]
+            if not 2 <= len(tokens) <= 8 or folded[0] in _ENTITY_LEADING_NOISE:
+                continue
+            if all(token in _ENTITY_NON_NAME_TOKENS for token in folded):
+                continue
+            if value.isupper() or term_occurs_only_in_citations(source_text, value):
+                continue
+            if value.casefold() not in {item.casefold() for item in candidates}:
+                candidates.append(value)
+            if len(candidates) >= limit:
+                break
         if len(candidates) >= limit:
             break
     return candidates
@@ -758,7 +805,13 @@ def _source_entity_category(source_text: str, candidate: str) -> str:
         occurrence.group("possessive") or occurrence.group("citation")
     ):
         return "person"
-    if 2 <= len(tokens) <= 4 and ending not in _NON_PERSON_ENTITY_ENDINGS:
+    if _INITIALIZED_PERSON_RE.fullmatch(candidate.strip()):
+        return "person"
+    if re.search(
+        rf"(?<!\w){re.escape(candidate)}\s*,\s*(?:who|whom|whose)\b",
+        source_text or "",
+        re.IGNORECASE,
+    ):
         return "person"
     return "source_entity_candidate"
 
@@ -835,6 +888,7 @@ def _reconcile_current_entity_anchors(
     source_entities: list[str],
     translation: str,
     categories: dict[str, str] | None = None,
+    source_text: str = "",
 ) -> dict[str, Any]:
     """Persist only mappings explicitly evidenced by ``Persian (English)``."""
     observed: list[dict[str, Any]] = []
@@ -845,11 +899,26 @@ def _reconcile_current_entity_anchors(
         if not target:
             missing.append(source)
             continue
+        durable_category = category in INLINE_ORIGINAL_CATEGORIES
+        provenance = (
+            "observed_translation" if durable_category
+            else "incremental_extraction"
+        )
+        if not is_safe_automatic_entity_mapping(
+            source,
+            target,
+            category,
+            source_text or source,
+            translation=translation,
+            require_observed_anchor=durable_category,
+        ):
+            missing.append(source)
+            continue
         outcome = memory_manager.proper_nouns.add_noun(
             source,
             target,
             category=category,
-            provenance="observed_translation",
+            provenance=provenance,
         )
         if outcome.get("action") != "ignored":
             observed.append({"source": source, "target": target, **outcome})
@@ -2007,10 +2076,31 @@ def _chunk_review_reason_payload(
     seen: set[tuple[str, str]] = set()
     for event in current:
         event_type = str(event.get("event_type", ""))
+        payload = event.get("payload", {}) or {}
+        if event_type == "chunk_review_required":
+            existing = list(payload.get("reasons", []) or [])
+            if not existing and payload.get("reason"):
+                existing = [{
+                    "reason": str(payload.get("reason")),
+                    "detail": str(payload.get("detail") or ""),
+                    "source_event": event_type,
+                }]
+            for item in existing:
+                reason = str(item.get("reason", "")).strip()
+                detail = str(item.get("detail", "")).strip()
+                if reason and (reason, detail) not in seen:
+                    seen.add((reason, detail))
+                    reasons.append({
+                        "reason": reason,
+                        "detail": detail,
+                        "source_event": str(
+                            item.get("source_event") or event_type
+                        ),
+                    })
+            continue
         reason = reason_map.get(event_type)
         if not reason:
             continue
-        payload = event.get("payload", {}) or {}
         detail = str(
             payload.get("review_reason")
             or payload.get("component")
@@ -2034,6 +2124,31 @@ def _chunk_review_reason_payload(
         "translation_available": True,
         "automatic_pipeline_continued": True,
         "human_review_required": True,
+    }
+
+
+def _explicit_chunk_review_payload(
+    reason: str,
+    *,
+    detail: str = "",
+    message: str = "",
+    **evidence: Any,
+) -> dict[str, Any]:
+    """Build the canonical review schema for direct review decisions."""
+    item = {
+        "reason": str(reason).strip() or "unspecified",
+        "detail": str(detail).strip(),
+        "source_event": "chunk_review_required",
+    }
+    return {
+        "reason": item["reason"],
+        "reason_codes": [item["reason"]],
+        "reasons": [item],
+        "message": message,
+        "translation_available": True,
+        "automatic_pipeline_continued": True,
+        "human_review_required": True,
+        **evidence,
     }
 
 
@@ -2953,7 +3068,9 @@ class TranslationPipeline:
                         if self.config.memory.enable_4layer:
                             # Seen-state is grounded in the source occurrence and is
                             # safe even when the target remains advisory.
-                            memory_manager.proper_nouns.mark_seen_in_text(chunk.text)
+                            memory_manager.proper_nouns.mark_introduced_from_translation(
+                                chunk.text, translation
+                            )
                             if _chunk_needs_review(self.db, job_id, idx):
                                 self.db.log_chunk_event(
                                     job_id,
@@ -3189,7 +3306,9 @@ class TranslationPipeline:
                         if self.config.memory.enable_4layer:
                             # Seen-state is grounded in the source occurrence and is
                             # safe even when the target remains advisory.
-                            memory_manager.proper_nouns.mark_seen_in_text(chunk.text)
+                            memory_manager.proper_nouns.mark_introduced_from_translation(
+                                chunk.text, translation
+                            )
                             if _chunk_needs_review(self.db, job_id, idx):
                                 self.db.log_chunk_event(
                                     job_id,
@@ -3645,6 +3764,12 @@ class TranslationPipeline:
         citation_audit = normalize_adjacent_original_citations(
             trans_doc, proper_nouns
         )
+        fragment_audit = reconcile_redundant_original_fragments(
+            trans_doc, proper_nouns
+        )
+        self.db.save_job_artifact(
+            job_id, "original_fragment_reconciliation", fragment_audit
+        )
         self.db.save_job_artifact(
             job_id, "citation_format_audit", citation_audit
         )
@@ -3701,6 +3826,19 @@ class TranslationPipeline:
                 )
             final_citation_audit = normalize_adjacent_original_citations(
                 trans_doc, proper_nouns
+            )
+            final_fragment_audit = reconcile_redundant_original_fragments(
+                trans_doc, proper_nouns
+            )
+            fragment_audit = {
+                "removed_count": int(fragment_audit.get("removed_count", 0))
+                + int(final_fragment_audit.get("removed_count", 0)),
+                "changes": list(fragment_audit.get("changes", []) or [])
+                + list(final_fragment_audit.get("changes", []) or []),
+                "final_anchor_reconciliation": True,
+            }
+            self.db.save_job_artifact(
+                job_id, "original_fragment_reconciliation", fragment_audit
             )
             citation_audit = {
                 "normalized_count": int(citation_audit.get("normalized_count", 0))
@@ -3873,6 +4011,12 @@ class TranslationPipeline:
         citation_audit = normalize_adjacent_original_citations(
             trans_doc, dict(proper_nouns)
         )
+        fragment_audit = reconcile_redundant_original_fragments(
+            trans_doc, dict(proper_nouns)
+        )
+        self.db.save_job_artifact(
+            job_id, "original_fragment_reconciliation", fragment_audit
+        )
         self.db.save_job_artifact(
             job_id, "citation_format_audit", citation_audit
         )
@@ -3906,6 +4050,19 @@ class TranslationPipeline:
             )
             final_citation_audit = normalize_adjacent_original_citations(
                 trans_doc, dict(proper_nouns)
+            )
+            final_fragment_audit = reconcile_redundant_original_fragments(
+                trans_doc, dict(proper_nouns)
+            )
+            fragment_audit = {
+                "removed_count": int(fragment_audit.get("removed_count", 0))
+                + int(final_fragment_audit.get("removed_count", 0)),
+                "changes": list(fragment_audit.get("changes", []) or [])
+                + list(final_fragment_audit.get("changes", []) or []),
+                "final_anchor_reconciliation": True,
+            }
+            self.db.save_job_artifact(
+                job_id, "original_fragment_reconciliation", fragment_audit
             )
             citation_audit = {
                 "normalized_count": int(citation_audit.get("normalized_count", 0))
@@ -4787,18 +4944,31 @@ class TranslationPipeline:
                         "using bounded paragraph recovery."
                     )
                 translation = protocol_result.text
-        except TruncatedCompletionError:
+        except (
+            TruncatedCompletionError,
+            EmptyCompletionError,
+            IncompleteCompletionError,
+        ) as recovery_trigger:
             recovery_paragraphs = source_paragraphs or [chunk.text.strip()]
+            if isinstance(recovery_trigger, EmptyCompletionError):
+                recovery_reason = "repeated_empty_completion"
+            elif isinstance(recovery_trigger, IncompleteCompletionError):
+                recovery_reason = "repeated_incomplete_stream"
+            elif "paragraph identity" in str(recovery_trigger).casefold():
+                recovery_reason = "paragraph_protocol_invalid"
+            else:
+                recovery_reason = "repeated_finish_reason_length"
             self.db.log_chunk_event(
                 job_id,
                 idx,
                 "translation_adaptive_split",
                 {
-                    "reason": "repeated_finish_reason_length",
+                    "reason": recovery_reason,
                     "part_count": len(recovery_paragraphs),
                     "message": (
-                        "The complete chunk exhausted its bounded output budget; "
-                        "paragraph-boundary recovery was activated."
+                        "The complete chunk remained unusable after bounded "
+                        "same-request recovery; validated paragraph-boundary "
+                        "recovery was activated."
                     ),
                 },
             )
@@ -6184,6 +6354,7 @@ Output ONLY the corrected Persian translation.
                         source_entity_candidates,
                         translation,
                         source_entity_categories,
+                        chunk.text,
                     ))
             else:
                 entity_coverage.update(_reconcile_current_entity_anchors(
@@ -6191,8 +6362,11 @@ Output ONLY the corrected Persian translation.
                     source_entity_candidates,
                     translation,
                     source_entity_categories,
+                    chunk.text,
                 ))
-            memory_manager.proper_nouns.mark_seen_in_text(chunk.text)
+            memory_manager.proper_nouns.mark_introduced_from_translation(
+                chunk.text, translation
+            )
         entity_coverage["required_person_candidates"] = required_person_candidates
         entity_coverage["required_missing"] = [
             source for source in entity_coverage.get("missing", [])
@@ -6206,15 +6380,16 @@ Output ONLY the corrected Persian translation.
                 job_id,
                 idx,
                 "chunk_review_required",
-                {
-                    "reason": "missing_first_occurrence_entity_original",
-                    "missing": entity_coverage["required_missing"],
-                    "message": (
+                _explicit_chunk_review_payload(
+                    "missing_first_occurrence_entity_original",
+                    detail="source_entity_coverage",
+                    missing=entity_coverage["required_missing"],
+                    message=(
                         "One or more high-confidence current-source entities did "
                         "not produce an unambiguous Persian (English) anchor. The "
                         "translation was retained without guessing an insertion."
                     ),
-                },
+                ),
             )
 
         # Audit the text that will actually continue into memory and export,

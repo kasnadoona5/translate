@@ -77,6 +77,18 @@ _LOW_AUTHORITY_ORIGINS = frozenset({
     "auto_extraction", "incremental_extraction", "research_suggestion",
     "observed_translation",
 })
+_AUTOMATIC_ENTITY_BLOCK_TOKENS = frozenset({
+    "act", "all", "bridge", "chapter", "contents", "copyright", "council",
+    "edition", "fellowship", "figure", "introduction", "library", "main",
+    "preface", "press", "research", "street", "table", "university",
+})
+_ADJECTIVAL_ENTITY_SUFFIXES = (
+    "ean", "ian", "ican", "ese", "ish",
+)
+_ENTITY_CONNECTORS = frozenset({
+    "and", "de", "del", "der", "di", "du", "la", "le", "of", "the",
+    "van", "von",
+})
 
 
 def is_usable_memory_mapping(english: str, persian: str) -> bool:
@@ -128,6 +140,76 @@ def is_usable_observed_mapping(
         return False
     if _TRAILING_CONNECTIVE_RE.search(target_plain):
         return False
+    return True
+
+
+def has_exact_observed_anchor(translation: str, english: str) -> bool:
+    """Return whether accepted text contains ``(English[, citation])`` exactly."""
+    source = " ".join((english or "").split()).strip()
+    if not source:
+        return False
+    return bool(re.search(
+        rf"\(\s*{re.escape(source)}(?:\s*,\s*[^()\n]{{1,120}})?\s*\)",
+        translation or "",
+        re.IGNORECASE,
+    ))
+
+
+def is_safe_automatic_entity_mapping(
+    english: str,
+    persian: str,
+    category: str,
+    source_text: str,
+    *,
+    translation: str = "",
+    require_observed_anchor: bool = False,
+) -> bool:
+    """Validate low-authority entity evidence before it becomes book memory.
+
+    The checks are structural and source-grounded.  They reject line/address
+    fragments, adjectival labels, and truncated organization names without
+    maintaining a vocabulary for any particular book.
+    """
+    source = " ".join((english or "").split()).strip()
+    normalized_category = _normalise_category(category)
+    if not is_usable_memory_mapping(source, persian):
+        return False
+    if not _source_term_present(source_text, source):
+        return False
+    if require_observed_anchor and not has_exact_observed_anchor(
+        translation, source
+    ):
+        return False
+
+    words = re.findall(r"[A-Za-z\u00c0-\u024f]+", source)
+    folded = [word.casefold() for word in words]
+    if not 1 <= len(words) <= 8:
+        return False
+    if len(words) == 1 and normalized_category != "person":
+        word = folded[0]
+        if word.endswith(_ADJECTIVAL_ENTITY_SUFFIXES):
+            return False
+    if normalized_category == "person" and any(
+        token in _AUTOMATIC_ENTITY_BLOCK_TOKENS for token in folded
+    ):
+        return False
+
+    # A candidate beginning immediately after ``Titlecase + connector`` is a
+    # truncated tail of a longer same-line name, not an independent entity.
+    occurrence = re.search(
+        rf"(?<!\w){re.escape(source)}(?!\w)", source_text or "", re.IGNORECASE
+    )
+    if occurrence:
+        line_start = (source_text or "").rfind("\n", 0, occurrence.start()) + 1
+        prefix = (source_text or "")[line_start:occurrence.start()].rstrip()
+        connector = "|".join(sorted(_ENTITY_CONNECTORS, key=len, reverse=True))
+        if re.search(
+            rf"[A-Z\u00c0-\u00d6\u00d8-\u00de][A-Za-z\u00c0-\u024f'\u2019-]*"
+            rf"[ \t]+(?:{connector})[ \t]*$",
+            prefix,
+            re.IGNORECASE,
+        ):
+            return False
     return True
 
 
@@ -394,6 +476,35 @@ class ProperNouns:
                 continue
             if self.applies_to_source(en, source_text):
                 self._introduced.add(en)
+
+    def mark_introduced_from_translation(
+        self,
+        source_text: str,
+        translation: str,
+    ) -> None:
+        """Mark first use only when the accepted target visibly renders it.
+
+        The English original may be emitted by the model or added later by the
+        deterministic exporter.  Requiring the established Persian target here
+        prevents a source-only candidate from consuming first-occurrence state.
+        """
+        compact_translation = re.sub(
+            r"[\s\u200c]+", " ", translation or ""
+        ).casefold()
+        for source, target in self._nouns.items():
+            if source in self._introduced or not self.is_inline_eligible(source):
+                continue
+            if not self.applies_to_source(source, source_text):
+                continue
+            compact_target = re.sub(r"[\s\u200c]+", " ", target).casefold()
+            target_rendered = bool(re.search(
+                rf"(?<!\w){re.escape(compact_target)}(?!\w)",
+                compact_translation,
+            ))
+            if target_rendered or has_exact_observed_anchor(
+                translation, source
+            ):
+                self._introduced.add(source)
 
     def is_introduced(self, english: str) -> bool:
         """Return True if the noun's first occurrence has already happened."""

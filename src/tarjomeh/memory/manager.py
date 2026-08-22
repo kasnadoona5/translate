@@ -15,7 +15,11 @@ from tarjomeh.core.config import TarjomehConfig
 from tarjomeh.core.structured_output import parse_structured_output
 from tarjomeh.core.term_notes import effective_term_notes_mode
 from tarjomeh.chunking.chunker import Chunk
-from tarjomeh.memory.proper_nouns import ProperNouns, is_usable_memory_mapping
+from tarjomeh.memory.proper_nouns import (
+    ProperNouns,
+    is_safe_automatic_entity_mapping,
+    is_usable_memory_mapping,
+)
 from tarjomeh.memory.bilingual_summary import BilingualSummary
 from tarjomeh.memory.long_term import LongTermMemory
 from tarjomeh.memory.short_term import ShortTermMemory
@@ -338,7 +342,9 @@ class MemoryManager:
             self._update_style_profile(style_translation)
         # Any known proper noun occurring in this chunk has now had its first
         # appearance — later chunks must not repeat the English parenthetical.
-        self.proper_nouns.mark_seen_in_text(chunk.text)
+        self.proper_nouns.mark_introduced_from_translation(
+            chunk.text, translation
+        )
         return {
             "short_term_added": True,
             "short_term_trust": resolved_short_term_trust,
@@ -474,11 +480,21 @@ class MemoryManager:
                     and re.sub(r"[\s\u200c]+", " ", persian).casefold()
                     in normalized_translation
                 )
-                provenance = (
-                    "observed_translation"
-                    if rendered
-                    and category.strip().lower().replace("-", "_")
+                inline_category = (
+                    category.strip().lower().replace("-", "_")
                     in inline_categories
+                )
+                observed_rendering = bool(rendered and inline_category)
+                if not is_safe_automatic_entity_mapping(
+                    term,
+                    persian,
+                    category,
+                    text,
+                    translation=translation,
+                ):
+                    continue
+                provenance = (
+                    "observed_translation" if observed_rendering
                     else "incremental_extraction"
                 )
                 outcome = self.proper_nouns.add_noun(
@@ -487,14 +503,18 @@ class MemoryManager:
                     category=category,
                     provenance=provenance,
                 )
-                if rendered and provenance == "observed_translation":
+                if outcome.get("action") == "ignored":
+                    continue
+                if observed_rendering and provenance == "observed_translation":
                     observed += 1
                     if outcome.get("action") == "preserved_higher_authority":
                         aliases_added += int(
                             self.proper_nouns.add_alias(term, persian)
                         )
                 accepted += 1
-            self.proper_nouns.mark_seen_in_text(text)
+            self.proper_nouns.mark_introduced_from_translation(
+                text, translation
+            )
             return {
                 "status": (
                     "completed" if accepted else "completed_without_suggestions"

@@ -46,7 +46,9 @@ _PUNCT_MAP: dict[str, str] = {
 #   3. Page/volume references: "p. 45", "pp. 12–34", "vol. 3", "no. 7"
 #   4. Standalone Gregorian years 1500–2099 (incl. "1973a" style)
 _SCHOLARLY_PROTECTED_RE = re.compile(
-    r"\([^)؀-ۿ]*[0-9][^)؀-ۿ]*\)"
+    r"\b(?:ISBN(?:-1[03])?|ISSN)\s*:?\s*"
+    r"[0-9Xx](?:[0-9Xx \t\-‐-―]{6,30})[0-9Xx]\b"
+    r"|\([^)؀-ۿ]*[0-9][^)؀-ۿ]*\)"
     r"|\[[^\]]*?[0-9][^\]]*?\]"
     r"|\b(?:pp?|vols?|nos?|chs?|fols?)\.\s*[0-9]+(?:\s*[-–—,]\s*[0-9]+)*"
     r"|\b(?:1[5-9][0-9]{2}|20[0-9]{2})[a-z]?\b",

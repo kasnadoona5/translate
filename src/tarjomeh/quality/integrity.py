@@ -90,6 +90,18 @@ _MIXED_SCRIPT_TOKEN_RE = re.compile(
     rf"(?<![\w/.-])(?:[A-Za-z]+[{_PERSIAN_LETTER_CLASS}]+|"
     rf"[{_PERSIAN_LETTER_CLASS}]+[A-Za-z]+)(?![\w/.-])"
 )
+_LABELED_IDENTIFIER_RE = re.compile(
+    rf"\b(?:ISBN(?:-1[03])?|ISSN)\s*:?\s*"
+    rf"[{_IDENTIFIER_DIGITS}Xx][{_IDENTIFIER_DIGITS}Xx\-\s]{{6,30}}"
+    rf"[{_IDENTIFIER_DIGITS}Xx]",
+    re.IGNORECASE,
+)
+_FLEXIBLE_IDENTIFIER_LABEL_SUFFIX_RE = re.compile(
+    rf"(?:I\s*S\s*B\s*N|I\s*S\s*S\s*N)"
+    rf"(?:\s*[-\u2010-\u2015]?\s*"
+    rf"[{_IDENTIFIER_DIGITS}]\s*[{_IDENTIFIER_DIGITS}])?\s*:?\s*$",
+    re.IGNORECASE,
+)
 _ABBREVIATION_DEFINITION_RE = re.compile(
     r"(?<!\w)(?P<acronym>[A-Z]{2,}(?:\s+[A-Z]{2,}){0,3})"
     r"(?:\s+(?P<label>Act|Agreement|Agency|Convention|Law|Organisation|"
@@ -565,6 +577,16 @@ def extract_identifiers(text: str) -> Counter[str]:
     return Counter(values)
 
 
+def extract_labeled_identifier_surfaces(text: str) -> Counter[str]:
+    """Extract complete ISBN/ISSN surfaces, including their source labels."""
+    values = []
+    for match in _LABELED_IDENTIFIER_RE.finditer(text or ""):
+        value = " ".join(match.group().split()).strip(".,;)")
+        value = re.sub(r"[\u2010-\u2015]", "-", value)
+        values.append(value.casefold())
+    return Counter(values)
+
+
 def _identifier_identity(value: str) -> str:
     """Return a script-insensitive identity used only to locate damaged IDs."""
     normalized = (value or "").translate(_DIGIT_MAP)
@@ -751,14 +773,28 @@ def restore_source_identifiers(source: str, translation: str) -> tuple[str, dict
         candidate_payload = _identifier_payload(value)
         source_has_label = source_payload != source_value
         candidate_has_label = candidate_payload != value
+        replacement_start = start
+        replacement_before = value
         if source_has_label:
-            replacement = source_payload
-            if candidate_has_label:
-                replacement = value[: len(value) - len(candidate_payload)] + source_payload
+            replacement = source_value
+            if not candidate_has_label:
+                prefix_start = max(0, start - 40)
+                prefix = (translation or "")[prefix_start:start]
+                label_match = _FLEXIBLE_IDENTIFIER_LABEL_SUFFIX_RE.search(prefix)
+                if label_match:
+                    replacement_start = prefix_start + label_match.start()
+                    replacement_before = (
+                        (translation or "")[replacement_start:start] + value
+                    )
         else:
             replacement = source_value
-        if value != replacement:
-            replacements.append((start, end, value, replacement))
+        if replacement_before != replacement:
+            replacements.append((
+                replacement_start,
+                end,
+                replacement_before,
+                replacement,
+            ))
 
     repaired = translation
     edits: list[dict[str, str]] = []

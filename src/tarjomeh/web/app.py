@@ -1682,11 +1682,20 @@ def _register_api(app: Flask) -> None:
                     for finding in payload.get("mixed_script_artifacts", []) or []:
                         lines.append(f"    mixed_script={finding!r}")
                 elif event["event_type"] == "chunk_review_required":
+                    reason_codes = list(payload.get("reason_codes", []) or [])
+                    if not reason_codes and payload.get("reason"):
+                        reason_codes = [str(payload.get("reason"))]
                     lines.append(
                         "  REVIEW REQUIRED: reasons="
-                        + ", ".join(payload.get("reason_codes", []) or ["unspecified"])
+                        + ", ".join(reason_codes or ["unspecified"])
                     )
-                    for reason in payload.get("reasons", []):
+                    reasons = list(payload.get("reasons", []) or [])
+                    if not reasons and payload.get("reason"):
+                        reasons = [{
+                            "reason": payload.get("reason"),
+                            "detail": payload.get("detail", ""),
+                        }]
+                    for reason in reasons:
                         detail = reason.get("detail")
                         lines.append(
                             "    "

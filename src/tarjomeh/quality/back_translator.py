@@ -30,8 +30,8 @@ class BackTranslationResult:
         Word-overlap ratio between the original English and the
         back-translated English (0.0 – 1.0).
     flagged : bool
-        ``True`` if the chunk should be flagged for human review
-        (similarity < threshold).
+        ``True`` only when structured semantic-risk evidence requests review.
+        Lexical overlap and its configured threshold remain advisory.
     differences : list[str]
         Words present in the original but missing from the
         back-translation (indicative of potential meaning loss).
@@ -327,6 +327,9 @@ class BackTranslator:
             "possible_omission": possible_omission,
             "possible_addition": possible_addition,
             "lexical_overlap_advisory": round(similarity, 4),
+            "similarity_threshold": self._similarity_threshold,
+            "below_similarity_threshold": similarity < self._similarity_threshold,
+            "similarity_policy": "advisory_only",
         }
         # Back-translation is a secondary review signal. It never replaces or
         # edits the Persian translation by itself.
