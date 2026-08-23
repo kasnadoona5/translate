@@ -12,10 +12,12 @@ from __future__ import annotations
 
 GENERAL_EDITORIAL_CONTRACT: str = """\
 ### General editorial contract
-- Resolve meaning from the proposition, neighboring discourse, book context, domain,
-  and approved terminology; never force an isolated dictionary equivalent.
+- Resolve meaning from proposition, discourse, context, and approved terminology;
+  never force an isolated dictionary equivalent.
 - Preserve semantic roles and relations: agency, possession, attribution, negation,
   modality, quantity, comparison, causality, and time.
+- Preserve relational compounds; render source dashes using Persian dashes or
+  explicit connectors.
 - Preserve source-authored multilingual expressions, titles, labels, citation atoms
   (author, year, page), and note markers as scholarly apparatus. Translate ordinary
   quoted or connective citation prose while retaining names, dates, pages, and
@@ -128,6 +130,8 @@ Instructions:
    {paragraph_count} paragraph(s), separated by double newlines (\n\n).
    If a paragraph is a short heading or title, translate it as its own short heading
    paragraph; never merge it into the following body paragraph and never omit it.
+   Preserve each contents, list, or table row as its own paragraph and keep its final
+   source page label or row identifier unchanged.
 5. Use ZWNJ (‌) correctly in compound verbs and affixed words (e.g. می‌خواهد).
 6. Proper nouns and first-occurrence originals:
    {term_notes_instruction}

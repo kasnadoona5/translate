@@ -35,8 +35,11 @@ _CATEGORY_ALIASES = {
 }
 _PERSIAN_LETTER_RE = re.compile(r"[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]")
 _PERSIAN_WORD_RE = re.compile(
-    r"[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]+"
-    r"(?:\u200c[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]+)*"
+    r"(?:[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]"
+    r"[\u064b-\u065f\u0670\u06d6-\u06ed]*)+"
+    r"(?:(?:\u200c|[-\u2010-\u2015])"
+    r"(?:[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]"
+    r"[\u064b-\u065f\u0670\u06d6-\u06ed]*)+)*"
 )
 _PERSIAN_DIACRITICS_RE = re.compile(r"[\u064b-\u065f\u0670\u06d6-\u06ed]")
 _OBSERVED_MAPPING_BOUNDARY_RE = re.compile(
@@ -349,7 +352,8 @@ def has_exact_observed_anchor(translation: str, english: str) -> bool:
         return False
     body = pattern.pattern.removeprefix(r"(?<!\w)").removesuffix(r"(?!\w)")
     return bool(re.search(
-        rf"\(\s*{body}(?:\s*,\s*[^()\n]{{1,120}})?\s*\)",
+        rf"\(\s*{body}(?:\s+(?:1[5-9]\d{{2}}|20\d{{2}})[a-z]?)?"
+        rf"(?:\s*,\s*[^()\n]{{1,120}})?\s*\)",
         unicodedata.normalize("NFKC", translation or ""),
         pattern.flags,
     ))
@@ -382,7 +386,8 @@ def observed_bilingual_target(
         r"(?<!\w)"
     ).removesuffix(r"(?!\w)")
     original = re.search(
-        rf"\(\s*{source_body}(?:\s*,\s*[^()\n]{{1,120}})?\s*\)",
+        rf"\(\s*{source_body}(?:\s+(?:1[5-9]\d{{2}}|20\d{{2}})[a-z]?)?"
+        rf"(?:\s*,\s*[^()\n]{{1,120}})?\s*\)",
         unicodedata.normalize("NFKC", translation or ""),
         source_pattern.flags,
     )
@@ -395,8 +400,20 @@ def observed_bilingual_target(
     )
     local_prefix = prefix[boundary + 1:]
     tokens = list(_PERSIAN_WORD_RE.finditer(local_prefix))
-    source_words = re.findall(r"[A-Za-z\u00c0-\u024f]+", source)
+    source_words = re.findall(
+        r"[A-Za-z\u00c0-\u024f]+(?:[-\u2010-\u2015'\u2019]"
+        r"[A-Za-z\u00c0-\u024f]+)*",
+        source,
+    )
     if not tokens or not source_words:
+        return ""
+    if (
+        re.search(r"\s+(?:and|&)\s+", source, re.IGNORECASE)
+        and _normalise_category(category)
+        not in {"organization", "institution", "legal_instrument"}
+    ):
+        # A single anchor cannot safely establish two coordinated entities.
+        # Defer it instead of storing a clipped book-wide mapping.
         return ""
     selected = tokens[-min(len(source_words), 5):]
     terminal = source_words[-1].casefold()
@@ -425,6 +442,7 @@ def observed_bilingual_target(
     if selected[-1].end() != len(local_prefix):
         return ""
     target = local_prefix[selected[0].start():selected[-1].end()].strip()
+    target = re.sub(r"^\u0648(?:[ \t\u200c]+)", "", target).strip()
     return target if is_usable_observed_mapping(source, target, category) else ""
 
 

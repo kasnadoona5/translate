@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
@@ -893,6 +894,89 @@ def repeated_persian_word_artifacts(text: str) -> list[dict[str, Any]]:
             ],
         })
     return findings
+
+
+def repair_source_grounded_language_artifacts(
+    source: str,
+    translation: str,
+) -> tuple[str, dict[str, Any]]:
+    """Apply only language edits whose full evidence is present in the source.
+
+    The repair is intentionally narrow: it removes accidental adjacent lexical
+    duplication when the source has no adjacent repetition, and parenthesizes an
+    exact source-authored non-English Latin expression already copied into Persian
+    prose. It never selects terminology or rewrites a proposition.
+    """
+    repaired = translation or ""
+    edits: list[dict[str, Any]] = []
+    source_words = re.findall(r"[A-Za-z\u00c0-\u024f]+", source or "")
+    source_has_adjacent_repeat = any(
+        left.casefold() == right.casefold()
+        for left, right in zip(source_words, source_words[1:], strict=False)
+    )
+    if not source_has_adjacent_repeat:
+        findings = repeated_persian_word_artifacts(repaired)
+        for finding in sorted(
+            findings, key=lambda item: int(item["offset"]), reverse=True
+        ):
+            start = int(finding["offset"])
+            word = str(finding["word"])
+            match = re.match(
+                rf"{re.escape(word)}"
+                rf"(?P<separator>[ \t\u200c]+|[ \t]*[-\u2010-\u2015][ \t]*)"
+                rf"{re.escape(word)}",
+                repaired[start:],
+                re.IGNORECASE,
+            )
+            if not match:
+                continue
+            before = match.group(0)
+            repaired = repaired[:start] + word + repaired[start + len(before):]
+            edits.append({
+                "type": "adjacent_duplicate",
+                "before": before,
+                "after": word,
+                "offset": start,
+            })
+
+    foreign_span_re = re.compile(
+        r"(?<![A-Za-z\u00c0-\u024f])"
+        r"(?P<phrase>[a-z\u00df-\u024f][A-Za-z\u00c0-\u024f'\u2019-]*"
+        r"(?:[ \t]+[a-z\u00df-\u024f][A-Za-z\u00c0-\u024f'\u2019-]*){1,3})"
+        r"(?![A-Za-z\u00c0-\u024f])"
+    )
+    source_folded = unicodedata.normalize("NFKC", source or "").casefold()
+    replacements: list[tuple[int, int, str]] = []
+    for match in foreign_span_re.finditer(repaired):
+        phrase = match.group("phrase")
+        if not (
+            any(ord(char) > 127 for char in phrase)
+            or "'" in phrase
+            or "\u2019" in phrase
+        ):
+            continue
+        if unicodedata.normalize("NFKC", phrase).casefold() not in source_folded:
+            continue
+        before = repaired[:match.start()].rstrip()
+        after = repaired[match.end():].lstrip()
+        if before.endswith("(") and after.startswith(")"):
+            continue
+        replacements.append((match.start(), match.end(), phrase))
+    for start, end, phrase in reversed(replacements):
+        repaired = repaired[:start] + f"({phrase})" + repaired[end:]
+        edits.append({
+            "type": "source_multilingual_parenthetical",
+            "before": phrase,
+            "after": f"({phrase})",
+            "offset": start,
+        })
+
+    edits.sort(key=lambda item: int(item["offset"]))
+    return repaired, {
+        "repair_count": len(edits),
+        "repairs": edits,
+        "policy": "exact_source_evidence_only",
+    }
 
 
 def is_bibliographic_marker(value: str) -> bool:

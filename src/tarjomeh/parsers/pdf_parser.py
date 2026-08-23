@@ -64,6 +64,19 @@ _SOFT_HYPHEN = "­"
 # running headers / page numbers and dropped.
 _EDGE_ZONE = 0.12
 _EDGE_MAX_CHARS = 100
+
+_TOC_HEADING_RE = re.compile(
+    r"^(?:table\s+of\s+)?contents$",
+    re.IGNORECASE,
+)
+_TOC_PAGE_LABEL_RE = re.compile(
+    r"^(?:[ivxlcdm]{1,12}|[0-9]{1,4})$",
+    re.IGNORECASE,
+)
+_TOC_TRAILING_PAGE_RE = re.compile(
+    r"^(?P<title>.+?)\s+(?P<page>[ivxlcdm]{1,12}|[0-9]{1,4})$",
+    re.IGNORECASE,
+)
 _PAGE_NUMBER_RE = re.compile(r"^\s*(?:\d+|[ivxlcdm]+)\s*$", re.IGNORECASE)
 _FURNITURE_NUMBER_RE = re.compile(r"\b(?:\d+|[ivxlcdm]+)\b", re.IGNORECASE)
 
@@ -538,10 +551,85 @@ def _line_group_bbox(
     )
 
 
+def _toc_page_label(value: str) -> str:
+    """Return a compact source page label from one contents line."""
+    compact = " ".join((value or "").split()).strip()
+    if _TOC_PAGE_LABEL_RE.fullmatch(compact):
+        return compact
+    match = _TOC_TRAILING_PAGE_RE.fullmatch(compact)
+    return match.group("page") if match else ""
+
+
+def _page_looks_like_contents(blocks: list[dict[str, Any]]) -> bool:
+    """Recognize a contents page from its heading and repeated page labels."""
+    lines = [
+        str(line.get("text", "")).strip()
+        for block in blocks
+        for line in block.get("lines", [])
+        if str(line.get("text", "")).strip()
+    ]
+    has_heading = any(_TOC_HEADING_RE.fullmatch(line) for line in lines)
+    row_endings = sum(bool(_toc_page_label(line)) for line in lines)
+    return has_heading and row_endings >= 4
+
+
+def _split_contents_entry_lines(
+    lines: list[dict[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    """Group visual contents lines through their source page-number cell."""
+    groups: list[list[dict[str, Any]]] = []
+    pending: list[dict[str, Any]] = []
+    for line in lines:
+        pending.append(line)
+        if _toc_page_label(str(line.get("text", ""))):
+            groups.append(pending)
+            pending = []
+    if pending:
+        groups.append(pending)
+    return groups
+
+
+def _contents_entry_metadata(
+    lines: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Describe one contents row without interpreting its translated title."""
+    texts = [" ".join(str(line.get("text", "")).split()) for line in lines]
+    texts = [value for value in texts if value]
+    if not texts:
+        return {}
+    page_label = _toc_page_label(texts[-1])
+    if not page_label:
+        return {}
+    if _TOC_PAGE_LABEL_RE.fullmatch(texts[-1]):
+        title = " ".join(texts[:-1]).strip()
+    else:
+        match = _TOC_TRAILING_PAGE_RE.fullmatch(texts[-1])
+        assert match is not None
+        title = " ".join([*texts[:-1], match.group("title")]).strip()
+    if not title:
+        return {}
+    if re.match(r"^Part\s+[IVXLCDM]+\b", title, re.IGNORECASE):
+        kind = "part"
+        level = 0
+    elif re.match(r"^[0-9]+(?:\.[0-9]+)*\s+", title):
+        kind = "numbered"
+        level = 1
+    else:
+        kind = "unnumbered"
+        level = 0
+    return {
+        "structure_role": "contents_entry",
+        "toc_page_label": page_label,
+        "toc_source_title": title,
+        "toc_entry_kind": kind,
+        "toc_level": level,
+    }
+
+
 def _prepare_document_blocks(
     doc: fitz.Document,
     *,
-    structure_version: int = 3,
+    structure_version: int = 4,
 ) -> tuple[list[list[dict[str, Any]]], dict[str, Any]]:
     """Extract all pages, remove only recurrent edge furniture, and classify blocks."""
     pages: list[list[dict[str, Any]]] = []
@@ -582,9 +670,11 @@ def _prepare_document_blocks(
     rotated_table_pages: list[int] = []
     reading_order_modes: dict[str, int] = {}
     internal_paragraph_splits: list[dict[str, Any]] = []
+    contents_entry_splits: list[dict[str, Any]] = []
     ascii_dehyphenation_evidence: list[dict[str, str]] = []
     prepared: list[list[dict[str, Any]]] = []
     for page_num, blocks in enumerate(pages):
+        contents_page = structure_version >= 4 and _page_looks_like_contents(blocks)
         rotated_count = sum(
             block.get("orientation") == "rotated" for block in blocks
         )
@@ -603,7 +693,7 @@ def _prepare_document_blocks(
                 text = str(line.get("text", "")).strip()
                 signature = _normalise_furniture(text)
                 is_edge = _edge_line(line, float(block.get("page_height", 1.0)))
-                if is_edge and (
+                if is_edge and not contents_page and (
                     signature in recurrent or _PAGE_NUMBER_RE.fullmatch(text)
                 ):
                     block_removed.append(text)
@@ -613,11 +703,14 @@ def _prepare_document_blocks(
                 rotated_table_page
                 or _looks_table_like({**block, "lines": kept_lines})
             )
-            line_groups = (
-                _split_indented_paragraph_lines(kept_lines)
-                if structure_version >= 3 and not table_like
-                else [kept_lines]
-            )
+            if contents_page:
+                line_groups = _split_contents_entry_lines(kept_lines)
+            else:
+                line_groups = (
+                    _split_indented_paragraph_lines(kept_lines)
+                    if structure_version >= 3 and not table_like
+                    else [kept_lines]
+                )
             embedded_removed_any = False
             if len(line_groups) > 1:
                 internal_paragraph_splits.append({
@@ -660,6 +753,20 @@ def _prepare_document_blocks(
                     fragment_id += f".p{part_index + 1:02d}"
                 updated["source_fragment_id"] = fragment_id
                 updated["is_table"] = table_like
+                toc_metadata = (
+                    _contents_entry_metadata(line_group)
+                    if contents_page else {}
+                )
+                if toc_metadata:
+                    updated.update(toc_metadata)
+                    updated["is_table"] = True
+                    contents_entry_splits.append({
+                        "page": page_num + 1,
+                        "source_fragment_id": fragment_id,
+                        "title": toc_metadata["toc_source_title"],
+                        "page_label": toc_metadata["toc_page_label"],
+                        "kind": toc_metadata["toc_entry_kind"],
+                    })
                 mode = str(updated.get("reading_order_mode", "source_order"))
                 reading_order_modes[mode] = reading_order_modes.get(mode, 0) + 1
                 if updated["is_table"]:
@@ -681,6 +788,8 @@ def _prepare_document_blocks(
         "reading_order_modes": reading_order_modes,
         "internal_paragraph_split_count": len(internal_paragraph_splits),
         "internal_paragraph_splits": internal_paragraph_splits,
+        "contents_entry_count": len(contents_entry_splits),
+        "contents_entries": contents_entry_splits[:300],
         "recurrence_minimum_pages": recurrence_min,
         "dehyphenation_mode": "soft_hyphen_plus_repeated_source_evidence",
         "ascii_dehyphenation_count": len(ascii_dehyphenation_evidence),
@@ -996,7 +1105,7 @@ class PyMuPDFParser(BaseParser):
     * Warning when a large fraction of pages appear scanned (image-only).
     """
 
-    def __init__(self, structure_version: int = 3) -> None:
+    def __init__(self, structure_version: int = 4) -> None:
         self.structure_version = max(1, int(structure_version))
 
     def parse(self, file_path: Path) -> Document:
@@ -1294,9 +1403,14 @@ class PyMuPDFParser(BaseParser):
                                 "bbox": tuple(blk["bbox"]),
                                 "page_height": page_h,
                                 "is_table": bool(blk.get("is_table")),
-                                "structure_role": (
-                                    "table" if blk.get("is_table") else "body"
-                                ),
+                                "structure_role": str(blk.get(
+                                    "structure_role",
+                                    "table" if blk.get("is_table") else "body",
+                                )),
+                                "toc_page_label": blk.get("toc_page_label"),
+                                "toc_source_title": blk.get("toc_source_title"),
+                                "toc_entry_kind": blk.get("toc_entry_kind"),
+                                "toc_level": blk.get("toc_level"),
                                 "has_superscript": bool(
                                     blk.get("has_superscript")
                                 ),
@@ -1387,9 +1501,14 @@ class PyMuPDFParser(BaseParser):
                     "bbox": tuple(blk["bbox"]),
                     "page_height": page_height,
                     "is_table": bool(blk.get("is_table")),
-                    "structure_role": (
-                        "table" if blk.get("is_table") else "body"
-                    ),
+                    "structure_role": str(blk.get(
+                        "structure_role",
+                        "table" if blk.get("is_table") else "body",
+                    )),
+                    "toc_page_label": blk.get("toc_page_label"),
+                    "toc_source_title": blk.get("toc_source_title"),
+                    "toc_entry_kind": blk.get("toc_entry_kind"),
+                    "toc_level": blk.get("toc_level"),
                     "has_superscript": bool(blk.get("has_superscript")),
                     "superscript_markers": list(
                         blk.get("superscript_markers", []) or []

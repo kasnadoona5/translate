@@ -85,6 +85,7 @@ from tarjomeh.quality.integrity import (
     extract_labeled_identifier_surfaces,
     repair_corruption,
     mixed_script_artifacts,
+    repair_source_grounded_language_artifacts,
     repeated_persian_word_artifacts,
     restore_source_identifiers,
     normalize_for_match,
@@ -1106,6 +1107,62 @@ def _canonicalize_chunk_inline_originals(
         "reason": "canonicalized",
     })
     return canonical, report
+
+
+def _anchor_only_repair_is_valid(
+    before: str,
+    after: str,
+    required_originals: list[str],
+    categories: dict[str, str],
+) -> bool:
+    """Accept a model anchor repair only when exact parentheticals were inserted."""
+    stripped = after or ""
+    for source in required_originals:
+        if not has_exact_observed_anchor(stripped, source):
+            return False
+        category = categories.get(source, "source_entity_candidate")
+        if not _observed_anchor_target(stripped, source, category):
+            return False
+        words = [re.escape(part) for part in source.split()]
+        body = r"\s+".join(words)
+        stripped = re.sub(
+            rf"\s*\(\s*{body}(?:\s+(?:1[5-9]\d{{2}}|20\d{{2}})[a-z]?)?"
+            rf"(?:\s*,\s*[^()\n]{{1,120}})?\s*\)",
+            "",
+            stripped,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    return normalize_for_match(stripped) == normalize_for_match(before)
+
+
+def _required_anchor_repair_prompt(
+    source: str,
+    translation: str,
+    missing: list[str],
+) -> str:
+    originals = "\n".join(f"- ({value})" for value in missing)
+    return f"""\
+The Persian translation is complete, but required first-occurrence English
+originals are missing. Insert only the exact parentheticals listed below after
+their corresponding Persian person name or named legal instrument.
+
+### English source
+{source}
+
+### Accepted Persian translation
+{translation}
+
+### Exact parentheticals to insert
+{originals}
+
+Requirements:
+1. Return the complete Persian translation only.
+2. Insert each exact parenthetical once, immediately after its Persian rendering.
+3. Do not add a parenthetical if the corresponding Persian rendering is absent.
+4. Do not change, remove, reorder, or re-punctuate any existing character.
+5. Preserve every paragraph boundary, citation, number, and source expression.
+"""
 
 
 def _research_context_for_memory(artifact: dict[str, Any] | None) -> str:
@@ -4522,7 +4579,7 @@ class TranslationPipeline:
         self,
         input_path: Path,
         chapter_positions: list[int] | None = None,
-        structure_version: int = 3,
+        structure_version: int = 4,
     ) -> tuple[Document, list[Chunk]]:
         parser = self._get_parser(input_path)
         if hasattr(parser, "structure_version"):
@@ -6613,6 +6670,99 @@ Output ONLY the corrected Persian translation.
                     source_entity_categories,
                     chunk.text,
                 ))
+        missing_required_anchors = [
+            source for source in required_entity_candidates
+            if not has_exact_observed_anchor(translation, source)
+        ]
+        anchor_repair_event: dict[str, Any] = {
+            "attempted": False,
+            "accepted": False,
+            "missing": missing_required_anchors,
+            "policy": "exact_parenthetical_insertions_only",
+        }
+        if protect_inline_english and missing_required_anchors:
+            anchor_repair_event["attempted"] = True
+            try:
+                self.llm_client.limit_next_call_attempts(2)
+                anchor_candidate = self.llm_client.complete(
+                    messages=[{
+                        "role": "user",
+                        "content": _required_anchor_repair_prompt(
+                            chunk.text,
+                            translation,
+                            missing_required_anchors,
+                        ),
+                    }],
+                    system_prompt=sys_prompt,
+                    _operation="translation_entity_anchor_repair",
+                    _recovery_source_text=chunk.text,
+                ).strip()
+                insertion_only = _anchor_only_repair_is_valid(
+                    translation,
+                    anchor_candidate,
+                    missing_required_anchors,
+                    source_entity_categories,
+                )
+                anchor_integrity = integrity_gate.evaluate(
+                    chunk.text,
+                    anchor_candidate,
+                    previous=translation,
+                    stage="entity_anchor_repair",
+                    protected_terms=protected_targets,
+                    protect_inline_english=protect_inline_english,
+                    allowed_inline_originals=allowed_inline_originals,
+                    enforce_all_terms=bool(
+                        self.config.glossary.enable_compliance_check
+                    ),
+                )
+                self.db.log_chunk_event(
+                    job_id,
+                    idx,
+                    "integrity_check_completed",
+                    anchor_integrity.to_dict(),
+                )
+                anchor_repair_event.update({
+                    "insertion_only": insertion_only,
+                    "integrity_accepted": anchor_integrity.accepted,
+                    "candidate_chars": len(anchor_candidate),
+                })
+                if insertion_only and anchor_integrity.accepted:
+                    translation = anchor_candidate
+                    last_accepted_translation = translation
+                    anchor_repair_event["accepted"] = True
+                    if lock:
+                        with lock:
+                            entity_coverage.update(
+                                _reconcile_current_entity_anchors(
+                                    memory_manager,
+                                    source_entity_candidates,
+                                    translation,
+                                    source_entity_categories,
+                                    chunk.text,
+                                )
+                            )
+                    else:
+                        entity_coverage.update(_reconcile_current_entity_anchors(
+                            memory_manager,
+                            source_entity_candidates,
+                            translation,
+                            source_entity_categories,
+                            chunk.text,
+                        ))
+            except _QUALITY_STAGE_ERRORS as exc:
+                anchor_repair_event.update({
+                    "failure_type": type(exc).__name__,
+                    "error": str(exc),
+                })
+            except Exception as exc:
+                logger.exception("Entity-anchor repair failed for chunk %s", idx)
+                anchor_repair_event.update({
+                    "failure_type": type(exc).__name__,
+                    "error": str(exc),
+                })
+        self.db.log_chunk_event(
+            job_id, idx, "entity_anchor_repair", anchor_repair_event
+        )
         inline_reconciliation = {
             "stage": "pre_memory_inline_reconciliation",
             "valid": True,
@@ -6685,6 +6835,43 @@ Output ONLY the corrected Persian translation.
                     ),
                 ),
             )
+
+        language_candidate, safe_language_repair = (
+            repair_source_grounded_language_artifacts(chunk.text, translation)
+        )
+        safe_language_repair["accepted"] = False
+        if language_candidate != translation:
+            language_integrity = integrity_gate.evaluate(
+                chunk.text,
+                language_candidate,
+                previous=translation,
+                stage="source_grounded_language_repair",
+                protected_terms=protected_targets,
+                protect_inline_english=protect_inline_english,
+                allowed_inline_originals=allowed_inline_originals,
+                enforce_all_terms=bool(
+                    self.config.glossary.enable_compliance_check
+                ),
+            )
+            self.db.log_chunk_event(
+                job_id,
+                idx,
+                "integrity_check_completed",
+                language_integrity.to_dict(),
+            )
+            safe_language_repair["integrity_accepted"] = (
+                language_integrity.accepted
+            )
+            if language_integrity.accepted:
+                translation = language_candidate
+                last_accepted_translation = translation
+                safe_language_repair["accepted"] = True
+        self.db.log_chunk_event(
+            job_id,
+            idx,
+            "source_grounded_language_repair",
+            safe_language_repair,
+        )
 
         # Audit the text that will actually continue into memory and export,
         # after every refinement, correction and integrity restoration. This is

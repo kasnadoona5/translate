@@ -26,6 +26,22 @@ _DIGIT_TO_ASCII = str.maketrans(
     "\u06f0\u06f1\u06f2\u06f3\u06f4\u06f5\u06f6\u06f7\u06f8\u06f9",
     "01234567890123456789",
 )
+_TOC_TRAILING_LABEL_RE = re.compile(
+    r"(?:^|\s)(?:[ivxlcdm]{1,12}|[0-9\u0660-\u0669\u06f0-\u06f9]{1,4})"
+    r"[\s\u060c\u061b,;]*$",
+    re.IGNORECASE,
+)
+
+
+def contents_display_title(text: str, metadata: dict) -> str:
+    """Remove only the duplicated source page label from a translated TOC row."""
+    if not str(metadata.get("toc_page_label", "")).strip():
+        return (text or "").strip()
+    match = _TOC_TRAILING_LABEL_RE.search(text or "")
+    if not match:
+        return (text or "").strip()
+    title = (text or "")[:match.start()].rstrip(" \t\u060c\u061b,;")
+    return title or (text or "").strip()
 
 
 def source_superscript_spans(
@@ -126,6 +142,7 @@ def directional_target_parts(text: str) -> list[tuple[str, bool]]:
 
 try:
     import docx
+    from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml import OxmlElement
     from docx.shared import Cm, Pt, RGBColor
@@ -290,6 +307,53 @@ class DocxExporter(BaseExporter):
             p_obj.paragraph_format.space_after = Pt(2)
             p_obj.paragraph_format.keep_together = True
 
+        def add_contents_table(entries) -> None:
+            """Emit preserved contents rows with stable RTL title/page alignment."""
+            table = doc.add_table(rows=0, cols=2)
+            table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            table.autofit = False
+            tbl_pr = table._tbl.tblPr
+            borders = OxmlElement("w:tblBorders")
+            for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+                border = OxmlElement(f"w:{edge}")
+                border.set(qn("w:val"), "nil")
+                borders.append(border)
+            tbl_pr.append(borders)
+
+            for entry in entries:
+                row = table.add_row()
+                row.height = Pt(15)
+                row_pr = row._tr.get_or_add_trPr()
+                row_pr.append(OxmlElement("w:cantSplit"))
+                page_cell, title_cell = row.cells
+                page_cell.width = Cm(2.0)
+                title_cell.width = Cm(12.5)
+                page_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+                title_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+
+                page_paragraph = page_cell.paragraphs[0]
+                page_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                page_paragraph.paragraph_format.space_after = Pt(0)
+                page_run = page_paragraph.add_run(
+                    str(entry.metadata.get("toc_page_label", ""))
+                )
+                set_run_fonts(page_run, rtl=False)
+
+                title_paragraph = title_cell.paragraphs[0]
+                make_paragraph_rtl(title_paragraph)
+                title_paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                title_paragraph.paragraph_format.first_line_indent = Cm(0)
+                title_paragraph.paragraph_format.space_after = Pt(0)
+                if int(entry.metadata.get("toc_level", 0) or 0) > 0:
+                    title_paragraph.paragraph_format.right_indent = Cm(0.45)
+                display_title = contents_display_title(
+                    entry.translated_text, entry.metadata
+                )
+                add_target_runs(title_paragraph, display_title, entry.metadata)
+                if entry.metadata.get("toc_entry_kind") == "part":
+                    for run in title_paragraph.runs:
+                        run.bold = True
+
         if bilingual_mode == "side_by_side":
             table = doc.add_table(rows=0, cols=2)
             table.autofit = False
@@ -315,7 +379,24 @@ class DocxExporter(BaseExporter):
                 apply_structural_format(p_fa, p.metadata)
                 
         else:
-            for p in document.paragraphs:
+            paragraph_index = 0
+            while paragraph_index < len(document.paragraphs):
+                p = document.paragraphs[paragraph_index]
+                if (
+                    bilingual_mode == "target_only"
+                    and p.metadata.get("structure_role") == "contents_entry"
+                ):
+                    entries = []
+                    while (
+                        paragraph_index < len(document.paragraphs)
+                        and document.paragraphs[paragraph_index].metadata.get(
+                            "structure_role"
+                        ) == "contents_entry"
+                    ):
+                        entries.append(document.paragraphs[paragraph_index])
+                        paragraph_index += 1
+                    add_contents_table(entries)
+                    continue
                 # Add Heading or Paragraph
                 if bilingual_mode == "target_only":
                     if p.heading_level is not None:
@@ -345,6 +426,8 @@ class DocxExporter(BaseExporter):
                     add_target_runs(p_fa, p.translated_text, p.metadata)
                     make_paragraph_rtl(p_fa, heading=p.heading_level is not None)
                     apply_structural_format(p_fa, p.metadata)
+
+                paragraph_index += 1
 
         notes = document_term_notes(document)
         if notes:
