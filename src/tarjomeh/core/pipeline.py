@@ -6569,7 +6569,7 @@ Output ONLY the corrected Persian translation.
                     source_entity_candidates.append(source)
                 source_entity_categories[source] = category
 
-        entity_coverage = {
+        entity_coverage: dict[str, Any] = {
             "candidate_count": len(source_entity_candidates),
             "observed_count": 0,
             "observed": [],
