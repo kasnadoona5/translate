@@ -138,6 +138,16 @@ _SOURCE_METADATA_RE = re.compile(
     r"copyright|all rights reserved)\b",
     re.IGNORECASE,
 )
+_CATALOG_NAME_LINE_RE = re.compile(
+    rf"^\s*[{_LATIN_LETTERS}][{_LATIN_LETTERS}'\u2019.-]+\s*,\s*"
+    rf"[{_LATIN_LETTERS}][{_LATIN_LETTERS}'\u2019.-]+"
+    rf"(?:\s+[{_LATIN_LETTERS}][{_LATIN_LETTERS}'\u2019.-]+){{0,5}}\.?\s*$"
+)
+_CATALOG_TITLE_LINE_RE = re.compile(
+    rf"^\s*[^/\n]{{2,220}}\s+/\s+"
+    rf"[{_LATIN_LETTERS}][{_LATIN_LETTERS}'\u2019.-]+"
+    rf"(?:\s+[{_LATIN_LETTERS}][{_LATIN_LETTERS}'\u2019.-]+){{0,5}}\.?\s*$"
+)
 _STRUCTURAL_NUMBER_LABELS = {
     "chapter": ("\u0641\u0635\u0644",),
     "part": ("\u0628\u062e\u0634", "\u0642\u0633\u0645\u062a"),
@@ -1089,6 +1099,8 @@ def unexpected_latin_prose(
         }
         or _APPARATUS_CHAPTER_RE.search(chapter_title or "")
         or _SOURCE_METADATA_RE.search(source or "")
+        or _CATALOG_NAME_LINE_RE.fullmatch(source or "")
+        or _CATALOG_TITLE_LINE_RE.fullmatch(source or "")
     )
 
     findings: list[dict[str, Any]] = []

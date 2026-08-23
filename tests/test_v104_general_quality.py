@@ -97,7 +97,7 @@ def test_named_instrument_is_one_required_source_entity() -> None:
     categories = _source_entity_categories(source, candidates)
 
     assert "USA PATRIOT Act" in candidates
-    assert categories["USA PATRIOT Act"] == "publication"
+    assert categories["USA PATRIOT Act"] == "legal_instrument"
     assert _high_confidence_instrument_candidates(candidates) == ["USA PATRIOT Act"]
 
 

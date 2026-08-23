@@ -15,6 +15,65 @@ _LATIN_PARENTHETICAL_RE = re.compile(r"\([^()\n]*[A-Za-z][^()\n]*\)")
 _PERSIAN_LETTER_RE = re.compile(
     r"[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]"
 )
+_DIGIT_EQUIVALENTS = {
+    "0": "0\u0660\u06f0", "1": "1\u0661\u06f1", "2": "2\u0662\u06f2",
+    "3": "3\u0663\u06f3", "4": "4\u0664\u06f4", "5": "5\u0665\u06f5",
+    "6": "6\u0666\u06f6", "7": "7\u0667\u06f7", "8": "8\u0668\u06f8",
+    "9": "9\u0669\u06f9",
+}
+_DIGIT_TO_ASCII = str.maketrans(
+    "\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669"
+    "\u06f0\u06f1\u06f2\u06f3\u06f4\u06f5\u06f6\u06f7\u06f8\u06f9",
+    "01234567890123456789",
+)
+
+
+def source_superscript_spans(
+    text: str,
+    metadata: dict,
+) -> list[tuple[int, int]]:
+    """Locate only source-confirmed superscript markers in translated text."""
+    records = metadata.get("superscript_markers", []) or []
+    if not isinstance(records, list):
+        return []
+    selected: list[tuple[int, int]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        raw = str(record.get("text", "")).strip()
+        normalized = raw.translate(_DIGIT_TO_ASCII)
+        if normalized.isdigit():
+            pattern = "".join(
+                f"[{_DIGIT_EQUIVALENTS[digit]}]" for digit in normalized
+            )
+            matcher = re.compile(rf"(?<!\d){pattern}(?!\d)")
+        elif raw in {"¹", "²", "³", "⁰", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹"}:
+            matcher = re.compile(re.escape(raw))
+        elif raw in {"*", "†", "‡"}:
+            matcher = re.compile(re.escape(raw))
+        else:
+            continue
+        candidates = [
+            match.span() for match in matcher.finditer(text or "")
+            if not any(
+                match.start() < end and match.end() > start
+                for start, end in selected
+            )
+        ]
+        if not candidates:
+            continue
+        try:
+            expected = float(record.get("relative_position", 0.0))
+        except (TypeError, ValueError):
+            expected = 0.0
+        chosen = min(
+            candidates,
+            key=lambda span: abs(
+                ((span[0] + span[1]) / 2) / max(1, len(text or "")) - expected
+            ),
+        )
+        selected.append(chosen)
+    return sorted(selected)
 
 
 def _mixed_direction_parts(value: str) -> list[tuple[str, bool]]:
@@ -181,11 +240,39 @@ class DocxExporter(BaseExporter):
                 fmt.widow_control = True
 
         def add_target_runs(p_obj, text: str, metadata: dict) -> None:
-            for segment, ref in paragraph_note_parts(text, metadata):
-                if segment:
-                    for part, rtl in directional_target_parts(segment):
+            source_markers = source_superscript_spans(text, metadata)
+            cursor = 0
+
+            def add_text(value: str, absolute_start: int) -> None:
+                local_cursor = 0
+                local_markers = [
+                    (start - absolute_start, end - absolute_start)
+                    for start, end in source_markers
+                    if absolute_start <= start < end <= absolute_start + len(value)
+                ]
+                for start, end in local_markers:
+                    if start > local_cursor:
+                        for part, rtl in directional_target_parts(
+                            value[local_cursor:start]
+                        ):
+                            run = p_obj.add_run(part)
+                            set_run_fonts(run, rtl=rtl)
+                    marker = p_obj.add_run(value[start:end])
+                    set_run_fonts(marker, rtl=True)
+                    marker.font.superscript = True
+                    local_cursor = end
+                if local_cursor < len(value):
+                    for part, rtl in directional_target_parts(value[local_cursor:]):
                         run = p_obj.add_run(part)
                         set_run_fonts(run, rtl=rtl)
+
+            for segment, ref in paragraph_note_parts(text, metadata):
+                if segment:
+                    absolute_start = text.find(segment, cursor)
+                    if absolute_start < 0:
+                        absolute_start = cursor
+                    add_text(segment, absolute_start)
+                    cursor = absolute_start + len(segment)
                 if ref is not None:
                     marker = p_obj.add_run(
                         str(ref.get("display_number", ref["number"]))

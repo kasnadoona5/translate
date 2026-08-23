@@ -44,10 +44,13 @@ from tarjomeh.chunking.chunker import SemanticChunker, FixedChunker, Chunk
 from tarjomeh.memory.manager import MemoryManager, MemoryContext
 from tarjomeh.memory.proper_nouns import (
     INLINE_ORIGINAL_CATEGORIES,
+    has_exact_observed_anchor,
     is_safe_automatic_entity_mapping,
     is_reusable_terminology_mapping,
     is_usable_observed_mapping,
+    looks_like_transliterated_loanword,
     source_term_pattern,
+    source_term_present,
 )
 from tarjomeh.context.web_searcher import WebContextSearcher
 from tarjomeh.glossary.manager import GlossaryManager
@@ -821,7 +824,7 @@ def _source_entity_category(source_text: str, candidate: str) -> str:
         return "source_entity_candidate"
     ending = tokens[-1].casefold()
     if re.search(rf"\b{_NAMED_INSTRUMENT_LABEL}$", candidate):
-        return "publication"
+        return "legal_instrument"
     if ending in _PLACE_ENTITY_ENDINGS:
         return "place"
     if ending in _ORGANIZATION_ENTITY_ENDINGS:
@@ -947,26 +950,26 @@ def _reconcile_current_entity_anchors(
         if not target:
             missing.append(source)
             continue
-        durable_category = category in INLINE_ORIGINAL_CATEGORIES
-        provenance = (
-            "observed_translation" if durable_category
-            else "incremental_extraction"
+        stored_category = (
+            category
+            if category in INLINE_ORIGINAL_CATEGORIES
+            else "source_grounded_entity"
         )
         if not is_safe_automatic_entity_mapping(
             source,
             target,
-            category,
+            stored_category,
             source_text or source,
             translation=translation,
-            require_observed_anchor=durable_category,
+            require_observed_anchor=True,
         ):
             missing.append(source)
             continue
         outcome = memory_manager.proper_nouns.add_noun(
             source,
             target,
-            category=category,
-            provenance=provenance,
+            category=stored_category,
+            provenance="observed_translation",
         )
         if outcome.get("action") != "ignored":
             observed.append({"source": source, "target": target, **outcome})
@@ -976,6 +979,139 @@ def _reconcile_current_entity_anchors(
         "observed": observed,
         "missing": missing,
     }
+
+
+def _accepted_grounded_inline_originals(
+    source_text: str,
+    translation: str,
+) -> dict[str, str]:
+    """Classify compact, source-grounded ``Persian (Latin)`` anchors.
+
+    This recovers accepted names and transliterated technical loanwords without
+    maintaining a vocabulary for one author or book. Citations, years, and
+    ordinary untranslated prose are deliberately excluded.
+    """
+    categories: dict[str, str] = {}
+    for match in re.finditer(r"\(([^()\n]{1,160})\)", translation or ""):
+        source = _canonical_source_entity(match.group(1))
+        words = re.findall(r"[A-Za-z\u00c0-\u024f\u1e00-\u1eff]+", source)
+        if (
+            not 1 <= len(words) <= 8
+            or any(char.isdigit() for char in source)
+            or not source_term_present(source_text, source)
+        ):
+            continue
+        category = _source_entity_category(source_text, source)
+        target = _observed_anchor_target(translation, source, category)
+        if not target:
+            continue
+        if category == "source_entity_candidate":
+            if looks_like_transliterated_loanword(source, target):
+                category = "technical_loanword"
+            elif len(words) >= 2 and all(
+                word[:1].isupper() or len(word) == 1 for word in words
+            ):
+                category = "source_grounded_entity"
+            else:
+                continue
+        categories[source] = category
+    return categories
+
+
+def _canonicalize_chunk_inline_originals(
+    memory_manager: MemoryManager,
+    chunk: Chunk,
+    translation: str,
+) -> tuple[str, dict[str, Any]]:
+    """Apply the same first-occurrence policy before memory and export.
+
+    Keeping this deterministic pass at the chunk boundary makes the database,
+    continuity memory, and later document assembly start from one canonical
+    accepted text. A paragraph mismatch is reported and left untouched.
+    """
+    source_paragraphs = split_paragraphs(chunk.text)
+    target_paragraphs = split_paragraphs(translation)
+    before_hash = hashlib.sha256(
+        normalize_for_match(translation).encode("utf-8")
+    ).hexdigest()
+    report: dict[str, Any] = {
+        "stage": "pre_memory_inline_reconciliation",
+        "source_paragraphs": len(source_paragraphs),
+        "target_paragraphs": len(target_paragraphs),
+        "before_hash": before_hash,
+        "after_hash": before_hash,
+        "changed": False,
+        "valid": len(source_paragraphs) == len(target_paragraphs),
+    }
+    if not report["valid"]:
+        report["reason"] = "paragraph_count_mismatch"
+        return translation, report
+
+    pending = memory_manager.proper_nouns.pending_inline_originals(chunk.text)
+    if not pending:
+        report["reason"] = "no_pending_originals"
+        return translation, report
+
+    state = memory_manager.proper_nouns.serialize()
+    categories = {
+        source: str(state.get("categories", {}).get(source, "proper_noun"))
+        for source in pending
+    }
+    aliases = {
+        source: list(state.get("aliases", {}).get(source, []))
+        for source in pending
+        if state.get("aliases", {}).get(source)
+    }
+    document = TranslatedDocument(
+        paragraphs=[
+            TranslatedParagraph(
+                index=index,
+                source_text=source,
+                translated_text=target,
+            )
+            for index, (source, target) in enumerate(
+                zip(source_paragraphs, target_paragraphs, strict=True)
+            )
+        ]
+    )
+    typographer = PersianTypographer(
+        memory_manager.config.to_dict().get("persian")
+    )
+    anchor_report = ensure_inline_proper_noun_originals(
+        document,
+        pending,
+        typographer,
+        categories,
+        aliases=aliases,
+        return_report=True,
+    )
+    original_report = audit_inline_english_originals(document, pending)
+    final_anchor_report = ensure_inline_proper_noun_originals(
+        document,
+        pending,
+        typographer,
+        categories,
+        aliases=aliases,
+        return_report=True,
+    )
+    canonical = "\n\n".join(
+        paragraph.translated_text.strip() for paragraph in document.paragraphs
+    )
+    after_hash = hashlib.sha256(
+        normalize_for_match(canonical).encode("utf-8")
+    ).hexdigest()
+    report.update({
+        "pending_count": len(pending),
+        "inserted_count": int(anchor_report.get("inserted_count", 0))
+        + int(final_anchor_report.get("inserted_count", 0)),
+        "removed_unauthorized_count": int(
+            original_report.get("removed_unauthorized_count", 0)
+        ),
+        "after_hash": after_hash,
+        "changed": before_hash != after_hash,
+        "reason": "canonicalized",
+    })
+    return canonical, report
 
 
 def _research_context_for_memory(artifact: dict[str, Any] | None) -> str:
@@ -1770,6 +1906,11 @@ def _chunk_style_approved(db: Any, job_id: str, chunk_index: int) -> bool:
     if not bool(latest.get("valid", True)):
         return False
     if int(latest.get("blocking_issue_count", 0) or 0):
+        return False
+    # A high average can coexist with several unresolved calques or awkward
+    # local choices. Keep that text available to continuity memory, but do not
+    # let it teach the persistent book-level voice.
+    if int(latest.get("issue_count", 0) or 0):
         return False
     scores = latest.get("scores", {}) or {}
     dimensions = ("accuracy", "fluency", "terminology", "register")
@@ -6417,6 +6558,17 @@ Output ONLY the corrected Persian translation.
             else:
                 last_accepted_translation = translation
 
+        if protect_inline_english:
+            grounded_categories = _accepted_grounded_inline_originals(
+                chunk.text, translation
+            )
+            for source, category in grounded_categories.items():
+                if source.casefold() not in {
+                    value.casefold() for value in source_entity_candidates
+                }:
+                    source_entity_candidates.append(source)
+                source_entity_categories[source] = category
+
         entity_coverage = {
             "candidate_count": len(source_entity_candidates),
             "observed_count": 0,
@@ -6442,9 +6594,47 @@ Output ONLY the corrected Persian translation.
                     source_entity_categories,
                     chunk.text,
                 ))
-            memory_manager.proper_nouns.mark_introduced_from_translation(
-                chunk.text, translation
-            )
+        inline_reconciliation = {
+            "stage": "pre_memory_inline_reconciliation",
+            "valid": True,
+            "changed": False,
+            "reason": "policy_disabled",
+        }
+        if protect_inline_english:
+            if lock:
+                with lock:
+                    translation, inline_reconciliation = (
+                        _canonicalize_chunk_inline_originals(
+                            memory_manager, chunk, translation
+                        )
+                    )
+                    memory_manager.proper_nouns.mark_introduced_from_translation(
+                        chunk.text, translation
+                    )
+            else:
+                translation, inline_reconciliation = (
+                    _canonicalize_chunk_inline_originals(
+                        memory_manager, chunk, translation
+                    )
+                )
+                memory_manager.proper_nouns.mark_introduced_from_translation(
+                    chunk.text, translation
+                )
+        self.db.log_chunk_event(
+            job_id,
+            idx,
+            "memory_export_consistency",
+            inline_reconciliation,
+        )
+        if protect_inline_english and entity_coverage.get("missing"):
+            # The deterministic reconciliation above may have supplied an
+            # established first-occurrence anchor that the model omitted. Judge
+            # coverage from the canonical text that enters memory and export.
+            entity_coverage["missing"] = [
+                source
+                for source in entity_coverage.get("missing", [])
+                if not has_exact_observed_anchor(translation, str(source))
+            ]
         entity_coverage["required_person_candidates"] = required_person_candidates
         entity_coverage["required_instrument_candidates"] = (
             required_instrument_candidates

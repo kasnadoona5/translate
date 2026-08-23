@@ -145,6 +145,43 @@ def _join_span_texts(spans: list[dict[str, Any]]) -> str:
     return output.strip()
 
 
+_SUPERSCRIPT_MARKER_RE = re.compile(
+    r"(?:[0-9\u0660-\u0669\u06f0-\u06f9]{1,3}|"
+    r"[\u00b9\u00b2\u00b3\u2070-\u2079*\u2020\u2021])"
+)
+
+
+def _line_superscript_markers(
+    spans: list[dict[str, Any]],
+    line_text: str,
+) -> list[dict[str, Any]]:
+    """Retain source-confirmed note-marker positions without inferring them."""
+    markers: list[dict[str, Any]] = []
+    cursor = 0
+    superscript_flag = int(getattr(fitz, "TEXT_FONT_SUPERSCRIPT", 1))
+    for span in spans:
+        value = str(span.get("text", "")).strip()
+        if (
+            not value
+            or not int(span.get("flags", 0)) & superscript_flag
+            or not _SUPERSCRIPT_MARKER_RE.fullmatch(value)
+        ):
+            continue
+        offset = line_text.find(value, cursor)
+        if offset < 0:
+            offset = line_text.find(value)
+        if offset < 0:
+            continue
+        cursor = offset + len(value)
+        markers.append({
+            "text": value,
+            "relative_position": round(
+                (offset + len(value) / 2) / max(1, len(line_text)), 6
+            ),
+        })
+    return markers
+
+
 def _extract_page_blocks(
     page: fitz.Page,
     *,
@@ -206,13 +243,16 @@ def _extract_page_blocks(
                         for span in spans
                         if str(span.get("text", "")).strip()
                     ),
+                    "superscript_markers": _line_superscript_markers(
+                        spans, line_text
+                    ),
                     "span_count": len([
                         span for span in spans
                         if str(span.get("text", "")).strip()
                     ]),
                     "large_gap_count": sum(
                         1
-                        for left, right in zip(spans, spans[1:])
+                        for left, right in zip(spans, spans[1:], strict=False)
                         if (
                             str(left.get("text", "")).strip()
                             and str(right.get("text", "")).strip()
@@ -228,6 +268,23 @@ def _extract_page_blocks(
 
         x0, y0, x1, y1 = block["bbox"]
         avg_size = sum(sizes) / len(sizes) if sizes else 0.0
+        raw_line_chars = sum(len(value) for value in line_texts) + max(
+            0, len(line_texts) - 1
+        )
+        superscript_markers: list[dict[str, Any]] = []
+        consumed = 0
+        for line_record in line_records:
+            line_text = str(line_record.get("text", ""))
+            for marker in line_record.get("superscript_markers", []) or []:
+                local = float(marker.get("relative_position", 0.0))
+                absolute = consumed + local * len(line_text)
+                superscript_markers.append({
+                    "text": str(marker.get("text", "")),
+                    "relative_position": round(
+                        absolute / max(1, raw_line_chars), 6
+                    ),
+                })
+            consumed += len(line_text) + 1
         blocks.append(
             {
                 "text": merged_text,
@@ -249,6 +306,7 @@ def _extract_page_blocks(
                 "has_superscript": any(
                     bool(line.get("has_superscript")) for line in line_records
                 ),
+                "superscript_markers": superscript_markers,
             }
         )
     return (
@@ -1196,6 +1254,9 @@ class PyMuPDFParser(BaseParser):
                             "bbox": tuple(blk["bbox"]),
                             "page_height": page_h,
                             "has_superscript": bool(blk.get("has_superscript")),
+                            "superscript_markers": list(
+                                blk.get("superscript_markers", []) or []
+                            ),
                             "source_fragment_ids": [
                                 str(blk.get("source_fragment_id", ""))
                             ] if blk.get("source_fragment_id") else [],
@@ -1214,6 +1275,9 @@ class PyMuPDFParser(BaseParser):
                             "bbox": tuple(blk["bbox"]),
                             "page_height": page_h,
                             "has_superscript": bool(blk.get("has_superscript")),
+                            "superscript_markers": list(
+                                blk.get("superscript_markers", []) or []
+                            ),
                             "source_fragment_ids": [
                                 str(blk.get("source_fragment_id", ""))
                             ] if blk.get("source_fragment_id") else [],
@@ -1235,6 +1299,9 @@ class PyMuPDFParser(BaseParser):
                                 ),
                                 "has_superscript": bool(
                                     blk.get("has_superscript")
+                                ),
+                                "superscript_markers": list(
+                                    blk.get("superscript_markers", []) or []
                                 ),
                                 "orientation": str(
                                     blk.get("orientation", "horizontal")
@@ -1324,6 +1391,9 @@ class PyMuPDFParser(BaseParser):
                         "table" if blk.get("is_table") else "body"
                     ),
                     "has_superscript": bool(blk.get("has_superscript")),
+                    "superscript_markers": list(
+                        blk.get("superscript_markers", []) or []
+                    ),
                     "orientation": str(blk.get("orientation", "horizontal")),
                     "reading_order": int(blk.get("reading_order", 0)),
                     "reading_order_mode": str(

@@ -99,9 +99,11 @@ _ANNOUNCEMENT_NOUNS = {
     "part", "parts", "way", "ways", "claim", "claims", "proposition", "propositions",
     "dimension", "dimensions", "category", "categories", "type", "types",
     "case", "cases", "step", "steps", "factor", "factors", "feature", "features",
+    "difference", "differences", "chapter", "chapters", "axis", "axes",
     "مسئله", "ایراد", "وظیفه", "نکته", "دلیل", "استدلال", "پرسش", "مشکل", "منظر",
     "رویکرد", "عنصر", "هدف", "مضمون", "بخش", "شیوه", "ادعا", "گزاره",
     "بعد", "دسته", "نوع", "مورد", "گام", "عامل", "ویژگی",
+    "تفاوت", "فصل", "محور", "منبع",
 }
 _DIGIT_TRANSLATION = str.maketrans(
     "۰۱۲۳۴۵۶۷۸۹"
@@ -110,6 +112,10 @@ _DIGIT_TRANSLATION = str.maketrans(
 )
 # "(1)" / "( ۲ )" style list markers, in either digit script.
 _LIST_MARKER_RE = re.compile(r"[(\[]\s*([0-9۰-۹]{1,2})\s*[)\]]")
+_CHAPTER_MARKER_RE = re.compile(
+    r"(?<!\w)(?:chapter|فصل)\s*([0-9۰-۹]{1,2})(?!\d)",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -168,7 +174,11 @@ def announced_counts(text: str) -> list[int]:
         # when an enumeration appears later in the same chunk.
         neighborhood = words[max(0, index - 2): index]
         neighborhood += words[index + 1: index + 6]
-        if any(token in _ANNOUNCEMENT_NOUNS for token in neighborhood):
+        if any(
+            token in _ANNOUNCEMENT_NOUNS
+            or (token.endswith("ی") and token[:-1] in _ANNOUNCEMENT_NOUNS)
+            for token in neighborhood
+        ):
             found.append(value)
     return found
 
@@ -180,17 +190,20 @@ def ordinal_sequence_length(text: str) -> int:
     happens to contain an ordinal, and is not treated as an enumeration.
     """
     positions = [_ORDINALS[word] for word in _words(text) if word in _ORDINALS]
-    if not positions or positions[0] != 1:
-        return 0
-    length = 1
-    for value in positions[1:]:
-        if value == length + 1:
-            length = value
-        elif value <= length:
-            continue  # a repeated or back-reference ordinal, not a new item
-        else:
-            break
-    return length
+    longest = 0
+    for start, position in enumerate(positions):
+        if position != 1:
+            continue
+        length = 1
+        for value in positions[start + 1:]:
+            if value == length + 1:
+                length = value
+            elif value <= length:
+                continue  # repeated/back-reference ordinal
+            else:
+                break
+        longest = max(longest, length)
+    return longest
 
 
 def list_marker_count(text: str) -> int:
@@ -208,9 +221,35 @@ def list_marker_count(text: str) -> int:
     return length
 
 
+def chapter_marker_count(text: str) -> int:
+    """Return the longest consecutive ``Chapter 2, 3, 4`` style run."""
+    values = [
+        int(match.group(1).translate(_DIGIT_TRANSLATION))
+        for match in _CHAPTER_MARKER_RE.finditer(text or "")
+    ]
+    longest = 0
+    for start, first in enumerate(values):
+        length = 1
+        previous = first
+        for value in values[start + 1:]:
+            if value == previous + 1:
+                length += 1
+                previous = value
+            elif value == previous:
+                continue
+            else:
+                break
+        longest = max(longest, length)
+    return longest if longest >= 2 else 0
+
+
 def enumeration_length(text: str) -> int:
     """The strongest enumeration evidence available in *text*."""
-    return max(ordinal_sequence_length(text), list_marker_count(text))
+    return max(
+        ordinal_sequence_length(text),
+        list_marker_count(text),
+        chapter_marker_count(text),
+    )
 
 
 @dataclass(frozen=True)
@@ -295,10 +334,14 @@ def audit_structure(source: str, candidate: str) -> list[StructureFinding]:
         )]
 
     findings: list[StructureFinding] = []
-    for index, source_episode in enumerate(source_episodes):
-        candidate_episode = (
-            candidate_episodes[index]
-            if index < len(candidate_episodes) else None
+    candidate_by_paragraph = {
+        episode.paragraph_index: episode for episode in candidate_episodes
+    }
+    source_paragraphs = _paragraphs(source)
+    candidate_paragraphs = _paragraphs(candidate)
+    for source_episode in source_episodes:
+        candidate_episode = candidate_by_paragraph.get(
+            source_episode.paragraph_index
         )
         candidate_announced = (
             candidate_episode.announced if candidate_episode else None
@@ -316,6 +359,15 @@ def audit_structure(source: str, candidate: str) -> list[StructureFinding]:
             ),
             "source_announcement_candidates": list(
                 source_episode.announcement_candidates
+            ),
+            "source_excerpt": source_paragraphs[
+                source_episode.paragraph_index
+            ][:360],
+            "candidate_excerpt": (
+                candidate_paragraphs[candidate_episode.paragraph_index][:360]
+                if candidate_episode
+                and candidate_episode.paragraph_index < len(candidate_paragraphs)
+                else ""
             ),
         }
         if source_episode.announced is None:

@@ -1280,6 +1280,7 @@ def _register_api(app: Flask) -> None:
         # contradicts itself is preserved and NOTED, so it must never create
         # review load, and neither may "cannot be established".
         structure_counts: dict[str, int] = {}
+        structure_findings: list[dict[str, Any]] = []
         actionable_structure = {
             "translation_structure_mismatch",
             "unauthorized_source_correction",
@@ -1288,6 +1289,11 @@ def _register_api(app: Flask) -> None:
             if event["event_type"] != "structure_audit":
                 continue
             for finding in event.get("payload", {}).get("findings", []) or []:
+                if isinstance(finding, dict):
+                    structure_findings.append({
+                        "chunk_index": event.get("chunk_index"),
+                        **finding,
+                    })
                 classification = str(finding.get("classification", "unknown"))
                 structure_counts[classification] = (
                     structure_counts.get(classification, 0) + 1
@@ -1370,6 +1376,18 @@ def _register_api(app: Flask) -> None:
                 lines.append(
                     f"  {classification}={structure_counts[classification]}"
                     + ("  (review required)" if actionable else "  (note only)")
+                )
+            for finding in structure_findings[:20]:
+                details = finding.get("details", {}) or {}
+                lines.append(
+                    "  EVIDENCE: chunk={chunk} check={check} class={classification} "
+                    "source={source!r} candidate={candidate!r}".format(
+                        chunk=finding.get("chunk_index"),
+                        check=finding.get("check_id", ""),
+                        classification=finding.get("classification", ""),
+                        source=str(details.get("source_excerpt", ""))[:240],
+                        candidate=str(details.get("candidate_excerpt", ""))[:240],
+                    )
                 )
             if corruption_repaired or corruption_deferred:
                 lines.append(

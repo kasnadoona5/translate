@@ -18,7 +18,7 @@ from typing import Any
 INLINE_ORIGINAL_CATEGORIES = frozenset({
     "proper_noun", "person", "place", "institution", "organization",
     "publication", "product", "theory", "approved_term",
-    "technical_loanword",
+    "technical_loanword", "legal_instrument", "source_grounded_entity",
 })
 _CATEGORY_ALIASES = {
     "organisation": "organization",
@@ -29,6 +29,9 @@ _CATEGORY_ALIASES = {
     "named_theory": "theory",
     "loanword": "technical_loanword",
     "transliteration": "technical_loanword",
+    "act": "legal_instrument",
+    "law": "legal_instrument",
+    "treaty": "legal_instrument",
 }
 _PERSIAN_LETTER_RE = re.compile(r"[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]")
 _PERSIAN_WORD_RE = re.compile(
@@ -36,7 +39,9 @@ _PERSIAN_WORD_RE = re.compile(
     r"(?:\u200c[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]+)*"
 )
 _PERSIAN_DIACRITICS_RE = re.compile(r"[\u064b-\u065f\u0670\u06d6-\u06ed]")
-_OBSERVED_MAPPING_BOUNDARY_RE = re.compile(r"[\n\r.!?\u061f\u061b]")
+_OBSERVED_MAPPING_BOUNDARY_RE = re.compile(
+    r"[\n\r.!?,;:\u060c\u061b\u061f]"
+)
 _UNUSABLE_TARGET_RE = re.compile(
     r"\b(?:n/?a|none|unknown|not available|no persian|no established|"
     r"not supported|insufficient evidence|untranslated)\b",
@@ -47,8 +52,15 @@ _CONTEXTUAL_TARGET_TOKEN_RE = re.compile(
     r"سایر|دیگر|خود|هستم|هستی|است|هست|هستیم|هستید|هستند|بود|بودند|"
     r"شد|شدند|می‌شود|می‌شوند)(?:\s|$)"
 )
+_LEADING_CONTEXT_RE = re.compile(
+    r"^(?:از|به|با|در|برای|توسط)\s+"
+)
 _TRAILING_CONNECTIVE_RE = re.compile(
     r"(?:^|\s)(?:از|به|با|در|برای|که|و|یا|اما|تا|را)\s*$"
+)
+_TRAILING_BOUNDARY_RE = re.compile(
+    r"(?:[\u064b-\u065f\u0670\u06d6-\u06ed\u200c]|"
+    r"(?:^|\s)(?:از|به|با|در|برای|که|و|یا|اما|تا|را))\s*$"
 )
 _PROVENANCE_AUTHORITY = {
     "auto_extraction": 10,
@@ -194,15 +206,25 @@ def is_usable_observed_mapping(
         return False
     if _OBSERVED_MAPPING_BOUNDARY_RE.search(raw_target):
         return False
+    if _LEADING_CONTEXT_RE.search(raw_target):
+        return False
+    if _TRAILING_BOUNDARY_RE.search(raw_target):
+        return False
     if re.search(r"[A-Za-z]", raw_target):
         return False
 
     source_words = re.findall(r"[A-Za-z\u00c0-\u024f]+", source)
     target_plain = _PERSIAN_DIACRITICS_RE.sub("", raw_target)
     target_words = _PERSIAN_WORD_RE.findall(target_plain)
+    normalized_category = _normalise_category(category)
     if not source_words or not target_words:
         return False
-    if len(source_words) >= 2 and len(target_words) < 2:
+    if (
+        len(source_words) >= 2
+        and len(target_words) < 2
+        and normalized_category
+        in {"person", "proper_noun", "source_entity_candidate", "source_grounded_entity"}
+    ):
         return False
     if len(target_words) > max(5, len(source_words) * 2):
         return False
@@ -210,7 +232,14 @@ def is_usable_observed_mapping(
         return False
     if _TRAILING_CONNECTIVE_RE.search(target_plain):
         return False
-    return True
+    has_unlicensed_comparative = (
+        normalized_category not in {"person", "place"}
+        and re.search(r"(?:\u200c|\s)?تر\s*$", target_plain)
+        and not re.search(
+            r"\b(?:more|less|greater|smaller|larger)\b", source, re.IGNORECASE
+        )
+    )
+    return not has_unlicensed_comparative
 
 
 def has_exact_observed_anchor(translation: str, english: str) -> bool:
@@ -446,7 +475,7 @@ class ProperNouns:
         en_key = " ".join(english.split()).strip()
         fa_val = persian.strip()
         usable = is_usable_memory_mapping(en_key, fa_val)
-        if provenance == "observed_translation":
+        if provenance in _LOW_AUTHORITY_ORIGINS:
             usable = usable and is_usable_observed_mapping(
                 en_key, fa_val, category
             )
@@ -787,7 +816,7 @@ class ProperNouns:
                 )
                 if not isinstance(record, dict):
                     record = {}
-                if record.get("origin") != "observed_translation":
+                if record.get("origin") not in _LOW_AUTHORITY_ORIGINS:
                     return True
                 category = (
                     stored_categories.get(source_text, "proper_noun")
