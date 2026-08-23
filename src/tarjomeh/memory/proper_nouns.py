@@ -102,6 +102,61 @@ _ENTITY_CONNECTORS = frozenset({
     "and", "de", "del", "der", "di", "du", "la", "le", "of", "the",
     "van", "von",
 })
+_AUTOMATIC_ENTITY_CATEGORIES = frozenset({
+    "proper_noun", "person", "place", "institution", "organization",
+    "publication", "product", "legal_instrument", "source_entity_candidate",
+    "source_grounded_entity",
+})
+_SOURCE_CONTEXT_LEADERS = frozenset({
+    "although", "because", "both", "either", "however", "neither", "nor",
+    "since", "therefore", "these", "those", "thus", "whereas", "while",
+})
+_SOURCE_TRAILING_ACTIONS = frozenset({
+    "created", "edited", "printed", "published", "reproduced", "revised",
+    "translated", "typeset",
+})
+_SOURCE_ADDRESS_MARKERS = frozenset({
+    "avenue", "boulevard", "lane", "postcode", "road", "street",
+})
+_SOURCE_ORGANIZATION_TERMINALS = frozenset({
+    "academy", "association", "bank", "committee", "company", "council",
+    "foundation", "inc", "institute", "library", "limited", "llc", "ltd",
+    "ministry", "organization", "organisation", "party", "plc", "press",
+    "society", "university",
+})
+_ORGANIZATION_TARGET_HEADS = {
+    "academy": (
+        "\u0641\u0631\u0647\u0646\u06af\u0633\u062a\u0627\u0646",
+        "\u0622\u06a9\u0627\u062f\u0645\u06cc",
+    ),
+    "association": ("\u0627\u0646\u062c\u0645\u0646", "\u0627\u062a\u062d\u0627\u062f\u06cc\u0647"),
+    "bank": ("\u0628\u0627\u0646\u06a9",),
+    "committee": ("\u06a9\u0645\u06cc\u062a\u0647",),
+    "company": ("\u0634\u0631\u06a9\u062a",),
+    "council": ("\u0634\u0648\u0631\u0627",),
+    "foundation": ("\u0628\u0646\u06cc\u0627\u062f",),
+    "inc": ("\u0634\u0631\u06a9\u062a", "\u0627\u06cc\u0646\u06a9"),
+    "institute": (
+        "\u0645\u0648\u0633\u0633\u0647",
+        "\u0645\u0624\u0633\u0633\u0647",
+        "\u0627\u0646\u0633\u062a\u06cc\u062a\u0648",
+    ),
+    "library": ("\u06a9\u062a\u0627\u0628\u062e\u0627\u0646\u0647",),
+    "limited": ("\u0634\u0631\u06a9\u062a", "\u0644\u06cc\u0645\u06cc\u062a\u062f"),
+    "llc": ("\u0634\u0631\u06a9\u062a", "\u0627\u0644\u200c\u0627\u0644\u200c\u0633\u06cc"),
+    "ltd": ("\u0634\u0631\u06a9\u062a", "\u0644\u06cc\u0645\u06cc\u062a\u062f"),
+    "ministry": ("\u0648\u0632\u0627\u0631\u062a",),
+    "organization": ("\u0633\u0627\u0632\u0645\u0627\u0646",),
+    "organisation": ("\u0633\u0627\u0632\u0645\u0627\u0646",),
+    "party": ("\u062d\u0632\u0628",),
+    "plc": ("\u0634\u0631\u06a9\u062a", "\u067e\u06cc\u200c\u0627\u0644\u200c\u0633\u06cc"),
+    "press": ("\u0627\u0646\u062a\u0634\u0627\u0631\u0627\u062a", "\u067e\u0631\u0633"),
+    "society": ("\u0627\u0646\u062c\u0645\u0646", "\u062c\u0627\u0645\u0639\u0647"),
+    "university": ("\u062f\u0627\u0646\u0634\u06af\u0627\u0647",),
+}
+_SUSPECT_PDF_WORD_BREAK_RE = re.compile(
+    r"(?<![A-Z])(?:[A-Z][a-z]{2,}|[a-z]{3,})[-\u2010-\u2015][a-z]{3,}"
+)
 _SOURCE_TERM_TOKEN_RE = re.compile(
     r"[^\W_]+(?:['\u2019][^\W_]+)?",
     re.UNICODE,
@@ -188,6 +243,44 @@ def is_usable_memory_mapping(english: str, persian: str) -> bool:
     return True
 
 
+def is_automatic_entity_category(category: str) -> bool:
+    """Return whether low-authority evidence represents a named entity."""
+    return _normalise_category(category) in _AUTOMATIC_ENTITY_CATEGORIES
+
+
+def is_safe_automatic_source_span(english: str, category: str) -> bool:
+    """Reject sentence, address, and PDF-wrap fragments before entity admission."""
+    source = " ".join((english or "").split()).strip()
+    words = re.findall(r"[A-Za-z\u00c0-\u024f]+", source)
+    folded = [word.casefold() for word in words]
+    if not words or not is_automatic_entity_category(category):
+        return bool(words)
+    if folded[0] in _SOURCE_CONTEXT_LEADERS:
+        return False
+    if folded[-1] in _SOURCE_TRAILING_ACTIONS:
+        return False
+    if any(word in _SOURCE_ADDRESS_MARKERS for word in folded):
+        return False
+    has_complete_organization_boundary = any(
+        word in _SOURCE_ORGANIZATION_TERMINALS for word in folded
+    )
+    if (
+        _SUSPECT_PDF_WORD_BREAK_RE.search(source)
+        and not has_complete_organization_boundary
+    ):
+        return False
+    for index, word in enumerate(folded[:-1]):
+        if (
+            word in _SOURCE_ORGANIZATION_TERMINALS
+            and any(
+                tail not in _SOURCE_ORGANIZATION_TERMINALS
+                for tail in folded[index + 1:]
+            )
+        ):
+            return False
+    return True
+
+
 def is_usable_observed_mapping(
     english: str,
     persian: str,
@@ -203,6 +296,10 @@ def is_usable_observed_mapping(
     source = " ".join((english or "").split()).strip()
     raw_target = (persian or "").strip()
     if not is_usable_memory_mapping(source, raw_target):
+        return False
+    if is_automatic_entity_category(category) and not is_safe_automatic_source_span(
+        source, category
+    ):
         return False
     if _OBSERVED_MAPPING_BOUNDARY_RE.search(raw_target):
         return False
@@ -258,6 +355,79 @@ def has_exact_observed_anchor(translation: str, english: str) -> bool:
     ))
 
 
+def has_exact_bilingual_anchor(
+    translation: str,
+    english: str,
+    persian: str,
+    category: str = "proper_noun",
+) -> bool:
+    """Require the proposed Persian rendering immediately before its original."""
+    observed = observed_bilingual_target(translation, english, category=category)
+    return _normalise_target(observed) == _normalise_target(persian)
+
+
+def observed_bilingual_target(
+    translation: str,
+    english: str,
+    category: str = "proper_noun",
+) -> str:
+    """Extract the bounded Persian rendering immediately before ``(English)``."""
+    source = " ".join((english or "").split()).strip()
+    if not source:
+        return ""
+    source_pattern = source_term_pattern(source)
+    if source_pattern is None:
+        return ""
+    source_body = source_pattern.pattern.removeprefix(
+        r"(?<!\w)"
+    ).removesuffix(r"(?!\w)")
+    original = re.search(
+        rf"\(\s*{source_body}(?:\s*,\s*[^()\n]{{1,120}})?\s*\)",
+        unicodedata.normalize("NFKC", translation or ""),
+        source_pattern.flags,
+    )
+    if original is None:
+        return ""
+    prefix = unicodedata.normalize("NFKC", translation or "")[:original.start()].rstrip()
+    boundary = max(
+        prefix.rfind("\n"), prefix.rfind("."), prefix.rfind("!"),
+        prefix.rfind("?"), prefix.rfind("\u061f"), prefix.rfind("\u061b"),
+    )
+    local_prefix = prefix[boundary + 1:]
+    tokens = list(_PERSIAN_WORD_RE.finditer(local_prefix))
+    source_words = re.findall(r"[A-Za-z\u00c0-\u024f]+", source)
+    if not tokens or not source_words:
+        return ""
+    selected = tokens[-min(len(source_words), 5):]
+    terminal = source_words[-1].casefold()
+    required_heads = _ORGANIZATION_TARGET_HEADS.get(terminal, ())
+    def has_required_head(items: list[re.Match[str]]) -> bool:
+        return any(
+            token.group() == head
+            or token.group() in {
+                head + "\u06cc", head + "\u0647\u0627", head + "\u200c\u0647\u0627",
+                head + "\u0647\u0627\u06cc", head + "\u200c\u0647\u0627\u06cc",
+            }
+            for token in items
+            for head in required_heads
+        )
+
+    if required_heads and not has_required_head(selected):
+        lower_bound = max(0, len(tokens) - min(12, len(source_words) * 2 + 2))
+        start = len(tokens) - len(selected)
+        while start > lower_bound:
+            start -= 1
+            selected = tokens[start:]
+            if has_required_head(selected):
+                break
+        if not has_required_head(selected):
+            return ""
+    if selected[-1].end() != len(local_prefix):
+        return ""
+    target = local_prefix[selected[0].start():selected[-1].end()].strip()
+    return target if is_usable_observed_mapping(source, target, category) else ""
+
+
 def is_safe_automatic_entity_mapping(
     english: str,
     persian: str,
@@ -278,6 +448,11 @@ def is_safe_automatic_entity_mapping(
     if not is_usable_memory_mapping(source, persian):
         return False
     if not source_term_present(source_text, source):
+        return False
+    if is_automatic_entity_category(normalized_category):
+        if not is_safe_automatic_source_span(source, normalized_category):
+            return False
+    elif not is_reusable_terminology_mapping(source, persian):
         return False
     if require_observed_anchor and not has_exact_observed_anchor(
         translation, source

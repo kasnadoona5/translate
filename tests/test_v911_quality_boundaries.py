@@ -91,7 +91,7 @@ def test_incremental_extraction_prefers_rendering_visible_in_translation() -> No
         manager.update_proper_nouns(
             llm,
             "Nicos Poulantzas developed the argument.",
-            "نیکوس پولانتزاس این استدلال را بسط داد.",
+            "نیکوس پولانتزاس (Nicos Poulantzas) این استدلال را بسط داد.",
         )
     )
     state = manager.proper_nouns.serialize()

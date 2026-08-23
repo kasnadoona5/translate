@@ -17,6 +17,8 @@ from tarjomeh.core.term_notes import effective_term_notes_mode
 from tarjomeh.chunking.chunker import Chunk
 from tarjomeh.memory.proper_nouns import (
     ProperNouns,
+    has_exact_bilingual_anchor,
+    is_automatic_entity_category,
     is_safe_automatic_entity_mapping,
     is_usable_memory_mapping,
 )
@@ -484,7 +486,21 @@ class MemoryManager:
                     category.strip().lower().replace("-", "_")
                     in inline_categories
                 )
-                observed_rendering = bool(rendered and inline_category)
+                observed_rendering = bool(
+                    rendered
+                    and inline_category
+                    and has_exact_bilingual_anchor(
+                        translation, term, persian, category
+                    )
+                )
+                if (
+                    is_automatic_entity_category(category)
+                    and not observed_rendering
+                ):
+                    # A substring in accepted prose is not proof of a complete
+                    # entity rendering. Current-chunk anchor reconciliation owns
+                    # durable Persian (English) evidence; defer anything else.
+                    continue
                 if not is_safe_automatic_entity_mapping(
                     term,
                     persian,

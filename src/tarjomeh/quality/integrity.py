@@ -122,6 +122,13 @@ _PARENTHETICAL_PERSIAN_SUFFIX_RE = re.compile(
     rf"\([^()\n]*[A-Za-z][^()\n]*\)\u200c?"
     rf"[{_PERSIAN_LETTER_CLASS}]{{1,8}}"
 )
+_PARENTHETICAL_CONTEXT_LEADERS = frozenset({
+    "although", "because", "both", "either", "however", "neither", "nor",
+    "since", "therefore", "these", "those", "thus", "whereas", "while",
+})
+_SUSPECT_PDF_WORD_BREAK_RE = re.compile(
+    r"(?<![A-Z])(?:[A-Z][a-z]{2,}|[a-z]{3,})[-\u2010-\u2015][a-z]{3,}"
+)
 _LATIN_LETTERS = "A-Za-z\u00c0-\u024f\u1e00-\u1eff"
 _LATIN_PROSE_TOKEN_RE = re.compile(
     rf"(?<![{_LATIN_LETTERS}])[{_LATIN_LETTERS}]"
@@ -628,6 +635,18 @@ def _identifier_payload(value: str) -> str:
     )
 
 
+def _identifier_label_identity(value: str) -> str:
+    """Return the exact normalized ISBN/ISSN label, without its payload."""
+    match = re.match(
+        r"^\s*(ISBN\s*(?:-\s*(?:10|13))?|ISSN)\b",
+        value or "",
+        re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    return re.sub(r"\s+", "", match.group(1)).casefold()
+
+
 def _identity_candidate_pattern(identity: str) -> re.Pattern[str]:
     """Build a source-grounded matcher for localized/respaced identifier text."""
     persian_digits = "۰۱۲۳۴۵۶۷۸۹"
@@ -786,14 +805,24 @@ def restore_source_identifiers(source: str, translation: str) -> tuple[str, dict
         ))
         if len(source_payloads) != 1:
             continue
-        source_value = candidates[0]
+        candidate_label = _identifier_label_identity(value)
+        label_matched = [
+            candidate for candidate in candidates
+            if _identifier_label_identity(candidate) == candidate_label
+        ]
+        source_value = label_matched[0] if label_matched else candidates[0]
         source_payload = source_payloads[0]
         candidate_payload = _identifier_payload(value)
         source_has_label = source_payload != source_value
         candidate_has_label = candidate_payload != value
         replacement_start = start
         replacement_before = value
-        if source_has_label:
+        if len(candidates) > 1 and not candidate_label:
+            # The same payload may be printed once as ISBN and elsewhere as
+            # ISBN-13. Without a local target label, restore only the literal
+            # payload instead of manufacturing either source label.
+            replacement = source_payload
+        elif source_has_label:
             replacement = source_value
             prefix_start = max(0, start - 80)
             prefix = (translation or "")[prefix_start:start]
@@ -841,6 +870,29 @@ def mixed_script_artifacts(text: str) -> list[str]:
     artifacts = set(_MIXED_SCRIPT_TOKEN_RE.findall(text or ""))
     artifacts.update(_PARENTHETICAL_PERSIAN_SUFFIX_RE.findall(text or ""))
     return sorted(artifacts, key=str.casefold)
+
+
+def repeated_persian_word_artifacts(text: str) -> list[dict[str, Any]]:
+    """Report adjacent repeated Persian lexical words without rewriting text."""
+    word = rf"[{_PERSIAN_LETTER_CLASS}]{{4,}}"
+    pattern = re.compile(
+        rf"(?<![{_PERSIAN_LETTER_CLASS}])(?=(?P<first>{word})"
+        rf"(?:[ \t\u200c]+|[ \t]*[-\u2010-\u2015][ \t]*)"
+        rf"(?P<second>{word})(?![{_PERSIAN_LETTER_CLASS}]))"
+    )
+    findings: list[dict[str, Any]] = []
+    for match in pattern.finditer(text or ""):
+        if match.group("first").casefold() != match.group("second").casefold():
+            continue
+        findings.append({
+            "word": match.group("first"),
+            "offset": match.start("first"),
+            "context": (text or "")[
+                max(0, match.start("first") - 60):
+                min(len(text or ""), match.end("second") + 60)
+            ],
+        })
+    return findings
 
 
 def is_bibliographic_marker(value: str) -> bool:
@@ -1019,8 +1071,13 @@ def _source_grounded_parenthetical_spans(
     source_identities = _source_latin_identity_sequence(source)
     spans: list[tuple[int, int]] = []
     for match in re.finditer(r"\(([^()\n]{1,160})\)", translation or ""):
-        tokens = list(_LATIN_PROSE_TOKEN_RE.finditer(match.group(1)))
+        content = match.group(1).strip()
+        tokens = list(_LATIN_PROSE_TOKEN_RE.finditer(content))
         if not tokens or len(tokens) > 8:
+            continue
+        if tokens[0].group().casefold() in _PARENTHETICAL_CONTEXT_LEADERS:
+            continue
+        if _SUSPECT_PDF_WORD_BREAK_RE.search(content):
             continue
         identities = [_latin_token_identity(token.group()) for token in tokens]
         if _contains_identity_sequence(source_identities, identities):
@@ -1075,10 +1132,7 @@ def unexpected_latin_prose(
     source_tokens = list(re.finditer(phrase_token, source or ""))
     for index, token_match in enumerate(source_tokens):
         token = token_match.group()
-        if not (
-            re.search(r"['\u2019]", token)
-            or re.search(r"[^\x00-\x7f]", token)
-        ):
+        if not re.search(r"['\u2019]", token):
             continue
         for start_index in range(max(0, index - 2), index + 1):
             for end_index in range(index, min(len(source_tokens), index + 3)):

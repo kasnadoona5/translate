@@ -105,6 +105,22 @@ _ANNOUNCEMENT_NOUNS = {
     "بعد", "دسته", "نوع", "مورد", "گام", "عامل", "ویژگی",
     "تفاوت", "فصل", "محور", "منبع",
 }
+_ANNOUNCEMENT_NOUNS.update({
+    "\u062c\u0647\u062a",
+    "\u062c\u0647\u0627\u062a",
+    "\u062c\u0646\u0628\u0647",
+    "\u0631\u0627\u0647",
+    "\u0631\u0648\u0634",
+})
+_PERSIAN_ANNOUNCEMENT_SUFFIXES = (
+    "\u200c\u0647\u0627\u06cc\u06cc",
+    "\u0647\u0627\u06cc\u06cc",
+    "\u200c\u0647\u0627\u06cc",
+    "\u0647\u0627\u06cc",
+    "\u200c\u0647\u0627",
+    "\u0647\u0627",
+    "\u06cc",
+)
 _DIGIT_TRANSLATION = str.maketrans(
     "۰۱۲۳۴۵۶۷۸۹"
     "٠١٢٣٤٥٦٧٨٩",
@@ -145,6 +161,16 @@ def _words(text: str) -> list[str]:
     return [word.casefold() for word in _WORD_RE.findall(text or "")]
 
 
+def _is_announcement_noun(token: str) -> bool:
+    if token in _ANNOUNCEMENT_NOUNS:
+        return True
+    return any(
+        token.endswith(suffix)
+        and token[:-len(suffix)] in _ANNOUNCEMENT_NOUNS
+        for suffix in _PERSIAN_ANNOUNCEMENT_SUFFIXES
+    )
+
+
 def announced_counts(text: str) -> list[int]:
     """Cardinals that could announce an enumeration, in order of appearance.
 
@@ -174,11 +200,7 @@ def announced_counts(text: str) -> list[int]:
         # when an enumeration appears later in the same chunk.
         neighborhood = words[max(0, index - 2): index]
         neighborhood += words[index + 1: index + 6]
-        if any(
-            token in _ANNOUNCEMENT_NOUNS
-            or (token.endswith("ی") and token[:-1] in _ANNOUNCEMENT_NOUNS)
-            for token in neighborhood
-        ):
+        if any(_is_announcement_noun(token) for token in neighborhood):
             found.append(value)
     return found
 

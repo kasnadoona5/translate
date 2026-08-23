@@ -45,11 +45,11 @@ from tarjomeh.memory.manager import MemoryManager, MemoryContext
 from tarjomeh.memory.proper_nouns import (
     INLINE_ORIGINAL_CATEGORIES,
     has_exact_observed_anchor,
+    is_safe_automatic_source_span,
     is_safe_automatic_entity_mapping,
     is_reusable_terminology_mapping,
-    is_usable_observed_mapping,
     looks_like_transliterated_loanword,
-    source_term_pattern,
+    observed_bilingual_target,
     source_term_present,
 )
 from tarjomeh.context.web_searcher import WebContextSearcher
@@ -85,6 +85,7 @@ from tarjomeh.quality.integrity import (
     extract_labeled_identifier_surfaces,
     repair_corruption,
     mixed_script_artifacts,
+    repeated_persian_word_artifacts,
     restore_source_identifiers,
     normalize_for_match,
     protected_english_originals,
@@ -254,16 +255,20 @@ def audit_translation_language(
         structural_role=structural_role,
         chapter_title=chapter_title,
     )
+    repeated = repeated_persian_word_artifacts(translation)
     return {
-        "review_required": bool(mixed or unexpected),
+        "review_required": bool(mixed or unexpected or repeated),
         "mixed_script_count": len(mixed),
         "mixed_script_artifacts": mixed,
         "unexpected_latin_count": len(unexpected),
         "unexpected_latin": unexpected,
+        "repeated_word_count": len(repeated),
+        "repeated_word_artifacts": repeated,
         "policy": (
             "Source-grounded identifiers, citations, approved originals, acronyms, "
-            "and multilingual apparatus are allowed; unexplained foreign prose is "
-            "review evidence and is never deleted automatically."
+            "and multilingual apparatus are allowed; unexplained foreign prose, "
+            "mixed-script suffixes, and adjacent lexical duplication are review "
+            "evidence and are never deleted automatically."
         ),
     }
 
@@ -698,6 +703,7 @@ def _term_notes_instruction(mode: str) -> str:
 _LATIN_ENTITY_TOKEN = (
     r"(?:[A-Z\u00c0-\u00d6\u00d8-\u00de]"
     r"[A-Za-z\u00c0-\u024f\u1e00-\u1eff'\u2019-]+|[A-Z]\.)"
+    r"(?![A-Za-z0-9])"
 )
 _LATIN_ENTITY_CONNECTOR = (
     r"(?:and|de|del|der|di|du|la|le|of|the|van|von|&)"
@@ -724,7 +730,8 @@ _ENTITY_LEADING_NOISE = frozenset({
     "a", "an", "the", "this", "that", "these", "those", "in", "on", "for",
     "from", "as", "at", "by", "while", "where", "when", "first", "second",
     "third", "fourth", "fifth", "sixth", "chapter", "part", "table", "figure",
-    "introduction", "conclusion",
+    "introduction", "conclusion", "although", "because", "both", "either",
+    "however", "neither", "nor", "therefore", "thus", "whereas",
 })
 _ENTITY_NON_NAME_TOKENS = frozenset({
     "approach", "chapter", "concept", "future", "government", "introduction",
@@ -745,25 +752,39 @@ _PLACE_ENTITY_ENDINGS = frozenset({
 _ORGANIZATION_ENTITY_ENDINGS = frozenset({
     "academy", "association", "bank", "committee", "company", "council",
     "foundation", "institute", "library", "ministry", "organization",
-    "organisation", "party", "press", "society", "university",
+    "organisation", "party", "press", "society", "university", "inc",
+    "limited", "llc", "ltd", "plc",
+})
+_ENTITY_TRAILING_ACTIONS = frozenset({
+    "created", "edited", "printed", "published", "reproduced", "revised",
+    "translated", "typeset",
 })
 _ENTITY_POSSESSIVE_RE = re.compile(r"(?:['\u2019]s)\Z", re.IGNORECASE)
 _INITIALIZED_PERSON_RE = re.compile(
     r"^(?:[A-Z]\.[ \t]+){1,5}"
     r"[A-Z\u00c0-\u00d6\u00d8-\u00de][A-Za-z\u00c0-\u024f'\u2019-]+$"
 )
-_PERSIAN_ANCHOR_TOKEN_RE = re.compile(
-    r"[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]"
-    r"(?:[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]"
-    r"|[\u064b-\u065f\u0670\u06d6-\u06ed]"
-    r"|\u200c(?=[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]))*"
-)
-
-
 def _canonical_source_entity(value: str) -> str:
     """Normalize citation possessives without changing the printed original."""
     compact = " ".join((value or "").split()).strip(" ,.;:()[]{}")
     return _ENTITY_POSSESSIVE_RE.sub("", compact).strip()
+
+
+def _bounded_source_entity(value: str) -> str:
+    """Trim a parser-joined action after a complete organization boundary."""
+    compact = _canonical_source_entity(value)
+    tokens = list(re.finditer(r"[A-Za-z\u00c0-\u024f]+", compact))
+    if not tokens:
+        return ""
+    folded = [token.group().casefold() for token in tokens]
+    if folded[-1] in _ENTITY_TRAILING_ACTIONS:
+        terminal = next((
+            index for index in range(len(tokens) - 2, -1, -1)
+            if folded[index] in _ORGANIZATION_ENTITY_ENDINGS
+        ), None)
+        if terminal is not None:
+            compact = compact[:tokens[terminal].end()].rstrip()
+    return compact
 
 
 def _source_entity_inventory(source_text: str, limit: int = 24) -> list[str]:
@@ -771,7 +792,7 @@ def _source_entity_inventory(source_text: str, limit: int = 24) -> list[str]:
     candidates: list[str] = []
     instrument_spans: list[tuple[int, int]] = []
     for match in _NAMED_INSTRUMENT_RE.finditer(source_text or ""):
-        value = _canonical_source_entity(match.group("name"))
+        value = _bounded_source_entity(match.group("name"))
         value = re.sub(r"^(?:A|An|The)\s+", "", value)
         if value.casefold() not in {item.casefold() for item in candidates}:
             candidates.append(value)
@@ -784,7 +805,7 @@ def _source_entity_inventory(source_text: str, limit: int = 24) -> list[str]:
             for start, end in instrument_spans
         ):
             continue
-        matched_value = _canonical_source_entity(match.group(1))
+        matched_value = _bounded_source_entity(match.group(1))
         values = [matched_value]
         if re.search(r"[ \t]+and[ \t]+", matched_value, re.IGNORECASE):
             parts = re.split(
@@ -798,6 +819,9 @@ def _source_entity_inventory(source_text: str, limit: int = 24) -> list[str]:
             ):
                 values = parts
         for value in values:
+            category = _source_entity_category(source_text, value)
+            if not is_safe_automatic_source_span(value, category):
+                continue
             tokens = re.findall(
                 r"[A-Za-z\u00c0-\u024f\u1e00-\u1eff]+", value
             )
@@ -897,41 +921,11 @@ def _observed_anchor_target(
     category: str = "proper_noun",
 ) -> str:
     """Read a Persian name immediately preceding an exact English original."""
-    source = _canonical_source_entity(source)
-    source_matcher = source_term_pattern(source, ignore_case=True)
-    if source_matcher is None:
-        return ""
-    source_body = source_matcher.pattern.removeprefix(
-        r"(?<!\w)"
-    ).removesuffix(r"(?!\w)")
-    original = re.search(
-        rf"\(\s*{source_body}"
-        rf"(?:\s*,?\s*(?:1[5-9]\d{{2}}|20\d{{2}})[a-z]?"
-        rf"(?:\s*[,;]\s*(?:1[5-9]\d{{2}}|20\d{{2}})[a-z]?)*)?\s*\)",
-        translation or "",
-        source_matcher.flags,
+    return observed_bilingual_target(
+        translation,
+        _canonical_source_entity(source),
+        category,
     )
-    if original is None:
-        return ""
-    prefix = (translation or "")[:original.start()].rstrip()
-    boundary = max(
-        prefix.rfind("\n"),
-        prefix.rfind("."),
-        prefix.rfind("!"),
-        prefix.rfind("?"),
-        prefix.rfind("\u061f"),
-        prefix.rfind("\u061b"),
-    )
-    local_prefix = prefix[boundary + 1:]
-    tokens = list(_PERSIAN_ANCHOR_TOKEN_RE.finditer(local_prefix))
-    source_token_count = len(re.findall(r"[A-Za-z\u00c0-\u024f]+", source))
-    if not tokens or source_token_count < 1:
-        return ""
-    selected = tokens[-min(source_token_count, 5):]
-    if selected[-1].end() != len(local_prefix):
-        return ""
-    target = local_prefix[selected[0].start():selected[-1].end()].strip()
-    return target if is_usable_observed_mapping(source, target, category) else ""
 
 
 def _reconcile_current_entity_anchors(
@@ -1907,10 +1901,16 @@ def _chunk_style_approved(db: Any, job_id: str, chunk_index: int) -> bool:
         return False
     if int(latest.get("blocking_issue_count", 0) or 0):
         return False
-    # A high average can coexist with several unresolved calques or awkward
-    # local choices. Keep that text available to continuity memory, but do not
-    # let it teach the persistent book-level voice.
-    if int(latest.get("issue_count", 0) or 0):
+    # Minor, non-blocking observations should not leave a long book without a
+    # voice anchor. Major or critical unresolved issues still disqualify the
+    # sample, while continuity memory remains available under its own trust.
+    issue_details = list(latest.get("issue_details", []) or [])
+    if any(
+        str(detail.get("severity", "")).strip().casefold()
+        in {"critical", "major"}
+        for detail in issue_details
+        if isinstance(detail, dict)
+    ):
         return False
     scores = latest.get("scores", {}) or {}
     dimensions = ("accuracy", "fluency", "terminology", "register")
@@ -4971,15 +4971,22 @@ class TranslationPipeline:
             ", ".join(f"({value})" for value in source_entity_candidates)
             or "(none)"
         )
+        required_originals_text = (
+            ", ".join(f"({value})" for value in required_entity_candidates)
+            or "(none)"
+        )
         inline_policy_context = (
             "\n\n### Deterministic English-original allowlist for this chunk\n"
             f"Established pending originals: {established_originals_text}\n"
             f"Current-source entity candidates: {candidate_originals_text}\n"
+            f"Required high-confidence people/instruments: {required_originals_text}\n"
             "For every candidate that is genuinely a person, place, institution, "
             "publication, product, or named theory in this passage, render it as "
             "Persian followed immediately by its exact English original in parentheses. "
             "A candidate is permission, not a command: reject title-cased ordinary "
             "prose that is not an entity. Only listed originals may be added. "
+            "Every required high-confidence item must appear exactly once as its "
+            "Persian rendering followed by the listed English original. "
             "Ordinary concepts and all unlisted terms must remain Persian-only. "
             "Source citations are separate and must be preserved."
         )
@@ -5921,6 +5928,9 @@ class TranslationPipeline:
                     break
                 if getattr(refinement, "attempts", 1) > 1:
                     refiner_retry_payload = {
+                        "component": "refiner",
+                        "operation": "refinement",
+                        "failure_type": "structured_response_invalid",
                         "iteration": ref_iter + 1,
                         "attempts": refinement.attempts,
                         "recovered": bool(getattr(refinement, "valid", False)),
@@ -5938,6 +5948,9 @@ class TranslationPipeline:
                     )
                 if not getattr(refinement, "valid", True):
                     invalid_payload = {
+                        "component": "refiner",
+                        "operation": "refinement",
+                        "failure_type": "structured_response_invalid",
                         "iteration": ref_iter + 1,
                         "attempts": getattr(refinement, "attempts", 1),
                         "validation_errors": list(
@@ -5954,7 +5967,7 @@ class TranslationPipeline:
                         )
                     self.db.log_chunk_event(
                         job_id, idx, "qa_unavailable",
-                        {"component": "refiner", **invalid_payload},
+                        invalid_payload,
                     )
                     break
 
@@ -6562,6 +6575,12 @@ Output ONLY the corrected Persian translation.
             grounded_categories = _accepted_grounded_inline_originals(
                 chunk.text, translation
             )
+            if _is_front_matter(chunk):
+                grounded_categories = {
+                    source: category
+                    for source, category in grounded_categories.items()
+                    if category in {"person", "publication", "legal_instrument"}
+                }
             for source, category in grounded_categories.items():
                 if source.casefold() not in {
                     value.casefold() for value in source_entity_candidates

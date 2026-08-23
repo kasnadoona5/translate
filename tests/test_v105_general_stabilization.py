@@ -194,6 +194,9 @@ def test_unresolved_critique_does_not_teach_style_but_remains_continuity_data() 
                     "valid": True,
                     "blocking_issue_count": 0,
                     "issue_count": 2,
+                    "issue_details": [
+                        {"severity": "major", "category": "accuracy"},
+                    ],
                     "scores": scores,
                 },
             },

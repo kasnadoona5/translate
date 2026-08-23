@@ -26,6 +26,24 @@ _WESTERN_TO_PERSIAN: dict[str, str] = {
 }
 
 _DIGIT_PATTERN = re.compile(r"[0-9]")
+_PERSIAN_TO_WESTERN = str.maketrans(
+    "\u06f0\u06f1\u06f2\u06f3\u06f4\u06f5\u06f6\u06f7\u06f8\u06f9"
+    "\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669",
+    "01234567890123456789",
+)
+_PERSIAN_LETTER_RE = re.compile(
+    r"[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]"
+)
+_LATIN_LETTER_RE = re.compile(r"[A-Za-z]")
+_LATIN_CATALOG_LINE_RE = re.compile(
+    r"^\s*(?:[0-9\u06f0-\u06f9]+\.\s+)?[A-Z][^\n]*"
+    r"(?:\bI\.\s+Title\.?|/\s*[A-Z][^\n]*)\s*$"
+)
+_PERSIAN_PROSE_REFERENCE_RE = re.compile(
+    r"(?P<label>\u0641\u0635\u0644|\u062c\u062f\u0648\u0644|\u0634\u06a9\u0644|"
+    r"\u0628\u062e\u0634|\u062c\u0644\u062f|\u067e\u06cc\u0648\u0633\u062a)"
+    r"(?P<space>[ \t]+)(?P<number>[0-9]{1,3})(?![A-Za-z0-9])"
+)
 
 # ── Latin → Persian punctuation mapping ──────────────────────────────
 _PUNCT_MAP: dict[str, str] = {
@@ -140,6 +158,20 @@ class PersianTypographer:
         if not text:
             return text
 
+        if (
+            _LATIN_LETTER_RE.search(text)
+            and not _PERSIAN_LETTER_RE.search(text)
+            and _LATIN_CATALOG_LINE_RE.fullmatch(text)
+        ):
+            # A Latin-only catalogue or metadata line must not receive Persian
+            # punctuation. This also repairs already-normalized resumed text.
+            return (
+                text.translate(_PERSIAN_TO_WESTERN)
+                .replace("\u060c", ",")
+                .replace("\u061b", ";")
+                .replace("\u061f", "?")
+            )
+
         # Shield scholarly apparatus BEFORE any transformation (hazm itself
         # may also touch digits), restore afterwards.
         protected_spans: list[str] = []
@@ -160,6 +192,19 @@ class PersianTypographer:
         # Hazm deliberately avoids some lexical compounds. Finish with a very
         # small boundary-aware rule set whose edits are always orthographic.
         text, _ = apply_safe_persian_orthography(text)
+
+        if self._convert_numerals:
+            text = _PERSIAN_PROSE_REFERENCE_RE.sub(
+                lambda match: (
+                    match.group("label")
+                    + match.group("space")
+                    + "".join(
+                        _WESTERN_TO_PERSIAN[character]
+                        for character in match.group("number")
+                    )
+                ),
+                text,
+            )
 
         return text
 

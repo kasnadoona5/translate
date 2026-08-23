@@ -40,7 +40,7 @@ def test_entity_inventory_stays_on_line_and_requires_person_evidence() -> None:
     assert "Economic and Social Science Research Council" in candidates
     assert categories["G. W. F. Hegel"] == "person"
     assert categories["Jupp Esser"] == "person"
-    assert categories["Bridge Street Cambridge CB"] == "source_entity_candidate"
+    assert "Bridge Street Cambridge CB" not in candidates
     assert _high_confidence_person_candidates(candidates, source) == [
         "G. W. F. Hegel",
         "Jupp Esser",
