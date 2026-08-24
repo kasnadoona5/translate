@@ -93,14 +93,22 @@ def _target_spans(text: str, target: str) -> list[tuple[int, int, str]]:
         return []
     text_tokens = list(_PERSIAN_TARGET_TOKEN_RE.finditer(text or ""))
     matches: list[tuple[int, int, str]] = []
+
+    def token_matches(rendered: str, expected: str) -> bool:
+        return rendered == expected or rendered == f"{expected}\u06cc"
+
     for start_index, token in enumerate(text_tokens):
-        if token.group().replace("\u200c", "") != target_tokens[0]:
+        if not token_matches(
+            token.group().replace("\u200c", ""), target_tokens[0]
+        ):
             continue
         cursor = start_index
         for expected in target_tokens[1:]:
             next_index = next((
                 index for index in range(cursor + 1, min(cursor + 4, len(text_tokens)))
-                if text_tokens[index].group().replace("\u200c", "") == expected
+                if token_matches(
+                    text_tokens[index].group().replace("\u200c", ""), expected
+                )
             ), None)
             if next_index is None:
                 break

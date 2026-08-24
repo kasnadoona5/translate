@@ -76,7 +76,9 @@ and avoid any colloquialisms, slang, or overly simplified vocabulary. Prefer est
 Persian academic equivalents to opaque calques or phonetic borrowing. Transliterate a specialist \
 label only when that borrowing is established in Persian scholarship or no precise Persian equivalent \
 exists, and then apply the configured first-occurrence original policy. The tone must reflect that of \
-a publication by a reputable university press (نثر فاخر و دانشگاهی).\
+a publication by a reputable university press (نثر فاخر و دانشگاهی). Make every finite \
+clause complete, keep referents and modifier attachments explicit, and preserve conceptual \
+series with parallel Persian phrasing and equally visible distinctions.\
 """
 
 # Curated gold exemplars of publication-grade academic Persian. Injected into

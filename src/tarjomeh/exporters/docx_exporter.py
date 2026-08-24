@@ -313,6 +313,9 @@ class DocxExporter(BaseExporter):
             table.alignment = WD_TABLE_ALIGNMENT.CENTER
             table.autofit = False
             tbl_pr = table._tbl.tblPr
+            bidi_visual = OxmlElement("w:bidiVisual")
+            bidi_visual.set(qn("w:val"), "1")
+            tbl_pr.insert(0, bidi_visual)
             borders = OxmlElement("w:tblBorders")
             for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
                 border = OxmlElement(f"w:{edge}")
@@ -325,9 +328,9 @@ class DocxExporter(BaseExporter):
                 row.height = Pt(15)
                 row_pr = row._tr.get_or_add_trPr()
                 row_pr.append(OxmlElement("w:cantSplit"))
-                page_cell, title_cell = row.cells
-                page_cell.width = Cm(2.0)
+                title_cell, page_cell = row.cells
                 title_cell.width = Cm(12.5)
+                page_cell.width = Cm(2.0)
                 page_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
                 title_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
 

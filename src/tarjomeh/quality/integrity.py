@@ -131,7 +131,20 @@ _MARKDOWN_EMPHASIS_RE = re.compile(
     r"(?<!\*)\*{1,2}\s*(?P<content>[^*\n]{1,240}?)\s*\*{1,2}(?!\*)"
 )
 _DETACHED_EZAFE_RE = re.compile(
-    r"\)\s+[\u06cc\u064a](?=\s|[\u060c\u061b،؛:,.!?\u061f]|$)"
+    r"\)\s+[\u06cc\u064a](?=\s|[\u060c\u061b:,.!?\u061f]|$)"
+)
+_TATWEEL_SEPARATOR_RE = re.compile(r"(?:(?<=\s)|^)\u0640{2,}(?=\s|$)")
+_PERSIAN_SUFFIX_AFTER_ORIGINAL_RE = re.compile(
+    rf"(?P<anchor>[{_PERSIAN_LETTER_CLASS}]+"
+    rf"(?:\u200c[{_PERSIAN_LETTER_CLASS}]+)*)\s+"
+    rf"(?P<original>\((?=[^()\n]*[A-Za-z])[^()\n]{{1,200}}\))"
+    rf"(?P<join>\u200c?)(?P<suffix>\u0627\u06cc|\u06cc|\u0647\u0627|\u0627\u0646|\u0627\u062a|"
+    rf"\u062a\u0631(?:\u06cc\u0646)?|\u0627\u0645|\u0627\u0634|\u0645\u0627\u0646|\u062a\u0627\u0646|\u0634\u0627\u0646)"
+    rf"(?![{_PERSIAN_LETTER_CLASS}])"
+)
+_NESTED_INLINE_ORIGINAL_RE = re.compile(
+    rf"\((?P<persian>[^()\n]*[{_PERSIAN_LETTER_CLASS}][^()\n]*?)\s+"
+    rf"(?P<original>\((?=[^()\n]*[A-Za-z])[^()\n]{{1,200}}\))\)"
 )
 _FOREIGN_SCRIPT_PATTERNS = {
     "cyrillic": re.compile(r"[\u0400-\u052f]+"),
@@ -1043,6 +1056,19 @@ def detached_ezafe_artifacts(text: str) -> list[dict[str, Any]]:
     ]
 
 
+def tatweel_separator_artifacts(text: str) -> list[dict[str, Any]]:
+    """Report elongation glyph runs used as punctuation in Persian prose."""
+    target = text or ""
+    return [
+        {
+            "text": match.group(),
+            "offset": match.start(),
+            "context": target[max(0, match.start() - 60):match.end() + 60],
+        }
+        for match in _TATWEEL_SEPARATOR_RE.finditer(target)
+    ]
+
+
 def repair_source_grounded_language_artifacts(
     source: str,
     translation: str,
@@ -1056,6 +1082,61 @@ def repair_source_grounded_language_artifacts(
     """
     repaired = translation or ""
     edits: list[dict[str, Any]] = []
+
+    for match in reversed(list(_TATWEEL_SEPARATOR_RE.finditer(repaired))):
+        repaired = repaired[:match.start()] + "\u2014" + repaired[match.end():]
+        edits.append({
+            "type": "tatweel_separator",
+            "before": match.group(),
+            "after": "\u2014",
+            "offset": match.start(),
+        })
+
+    for match in reversed(list(_DETACHED_EZAFE_RE.finditer(repaired))):
+        before = match.group()
+        suffix = before[-1]
+        after = f"){suffix}"
+        repaired = repaired[:match.start()] + after + repaired[match.end():]
+        edits.append({
+            "type": "detached_ezafe",
+            "before": before,
+            "after": after,
+            "offset": match.start(),
+        })
+
+    source_folded = unicodedata.normalize("NFKC", source or "").casefold()
+    for match in reversed(list(_PERSIAN_SUFFIX_AFTER_ORIGINAL_RE.finditer(repaired))):
+        original = match.group("original")
+        original_text = original[1:-1].strip()
+        if unicodedata.normalize("NFKC", original_text).casefold() not in source_folded:
+            continue
+        joiner = match.group("join") or "\u200c"
+        after = (
+            f"{match.group('anchor')}{joiner}{match.group('suffix')} "
+            f"{original}"
+        )
+        repaired = repaired[:match.start()] + after + repaired[match.end():]
+        edits.append({
+            "type": "parenthetical_persian_suffix",
+            "before": match.group(),
+            "after": after,
+            "offset": match.start(),
+        })
+
+    for match in reversed(list(_NESTED_INLINE_ORIGINAL_RE.finditer(repaired))):
+        original = match.group("original")
+        original_text = original[1:-1].strip()
+        if unicodedata.normalize("NFKC", original_text).casefold() not in source_folded:
+            continue
+        after = f"({match.group('persian').strip()}) {original}"
+        repaired = repaired[:match.start()] + after + repaired[match.end():]
+        edits.append({
+            "type": "nested_inline_original",
+            "before": match.group(),
+            "after": after,
+            "offset": match.start(),
+        })
+
     source_paragraphs = _paragraph_text_spans(source)
     target_paragraphs = _paragraph_text_spans(repaired)
     if len(source_paragraphs) == len(target_paragraphs):
@@ -1127,7 +1208,6 @@ def repair_source_grounded_language_artifacts(
         r"(?:[ \t]+[a-z\u00df-\u024f][A-Za-z\u00c0-\u024f'\u2019-]*){1,3})"
         r"(?![A-Za-z\u00c0-\u024f])"
     )
-    source_folded = unicodedata.normalize("NFKC", source or "").casefold()
     replacements: list[tuple[int, int, str]] = []
     for match in foreign_span_re.finditer(repaired):
         phrase = match.group("phrase")

@@ -89,6 +89,7 @@ from tarjomeh.quality.integrity import (
     repair_source_grounded_language_artifacts,
     source_unjustified_repeated_word_artifacts,
     detached_ezafe_artifacts,
+    tatweel_separator_artifacts,
     foreign_script_artifacts,
     markup_wrapper_artifacts,
     parenthesis_artifacts,
@@ -244,6 +245,74 @@ def restore_document_source_identifiers(
     }
 
 
+def repair_document_source_grounded_language_artifacts(
+    document: TranslatedDocument,
+    *,
+    allowed_originals: list[str] | tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Repair final-render artifacts without changing propositions or memory."""
+    accepted: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for paragraph in document.paragraphs:
+        before = paragraph.translated_text
+        candidate, report = repair_source_grounded_language_artifacts(
+            paragraph.source_text, before
+        )
+        if candidate == before:
+            continue
+        identifiers_unchanged = (
+            extract_identifiers(candidate) == extract_identifiers(before)
+            and extract_labeled_identifier_surfaces(candidate)
+            == extract_labeled_identifier_surfaces(before)
+        )
+        role = str(paragraph.metadata.get("structure_role", "body"))
+        before_quality = audit_translation_language(
+            paragraph.source_text,
+            before,
+            allowed_originals=allowed_originals,
+            structural_role=role,
+            chapter_title=str(paragraph.metadata.get("chapter_title", "")),
+        )
+        after_quality = audit_translation_language(
+            paragraph.source_text,
+            candidate,
+            allowed_originals=allowed_originals,
+            structural_role=role,
+            chapter_title=str(paragraph.metadata.get("chapter_title", "")),
+        )
+        if not identifiers_unchanged or not _language_quality_strictly_improves(
+            before_quality, after_quality
+        ):
+            rejected.append({
+                "paragraph_index": paragraph.index,
+                "reason": (
+                    "identifier_change" if not identifiers_unchanged
+                    else "no_monotonic_language_improvement"
+                ),
+                "repairs": report.get("repairs", []),
+            })
+            continue
+        paragraph.translated_text = candidate
+        accepted.append({
+            "paragraph_index": paragraph.index,
+            "before_hash": hashlib.sha256(before.encode("utf-8")).hexdigest()[:12],
+            "after_hash": hashlib.sha256(candidate.encode("utf-8")).hexdigest()[:12],
+            "repairs": report.get("repairs", []),
+        })
+    return {
+        "accepted_paragraph_count": len(accepted),
+        "accepted_repair_count": sum(len(item["repairs"]) for item in accepted),
+        "rejected_paragraph_count": len(rejected),
+        "accepted": accepted,
+        "rejected": rejected,
+        "policy": (
+            "deterministic source-grounded final-render repair; identifiers and "
+            "memory are unchanged and every accepted edit must monotonically "
+            "reduce objective language artifacts"
+        ),
+    }
+
+
 def audit_translation_language(
     source: str,
     translation: str,
@@ -266,6 +335,7 @@ def audit_translation_language(
     markup = markup_wrapper_artifacts(source, translation)
     parentheses = parenthesis_artifacts(source, translation)
     detached_ezafe = detached_ezafe_artifacts(translation)
+    tatweel_separators = tatweel_separator_artifacts(translation)
     return {
         "review_required": bool(
             mixed
@@ -275,6 +345,7 @@ def audit_translation_language(
             or markup
             or parentheses
             or detached_ezafe
+            or tatweel_separators
         ),
         "mixed_script_count": len(mixed),
         "mixed_script_artifacts": mixed,
@@ -290,11 +361,14 @@ def audit_translation_language(
         "parenthesis_artifacts": parentheses,
         "detached_ezafe_count": len(detached_ezafe),
         "detached_ezafe_artifacts": detached_ezafe,
+        "tatweel_separator_count": len(tatweel_separators),
+        "tatweel_separator_artifacts": tatweel_separators,
         "policy": (
             "Source-grounded identifiers, citations, approved originals, acronyms, "
             "and multilingual apparatus are allowed; unexplained foreign prose or "
             "scripts, mixed-script suffixes, malformed parentheses, detached ezafe, "
-            "markup wrappers, and adjacent lexical duplication are review evidence."
+            "tatweel punctuation, markup wrappers, and adjacent lexical duplication "
+            "are review evidence."
         ),
     }
 
@@ -917,6 +991,7 @@ _LANGUAGE_QUALITY_COUNT_FIELDS = (
     "markup_wrapper_count",
     "parenthesis_artifact_count",
     "detached_ezafe_count",
+    "tatweel_separator_count",
 )
 
 
@@ -965,6 +1040,7 @@ def _targeted_language_repair_prompt(
             "markup_wrapper_artifacts",
             "parenthesis_artifacts",
             "detached_ezafe_artifacts",
+            "tatweel_separator_artifacts",
         )
         if findings.get(key)
     }
@@ -989,7 +1065,8 @@ Requirements:
 2. Preserve every proposition, qualification, relation, citation, number, name,
    required English parenthetical, and list or table label.
 3. Change only what is necessary to remove the listed foreign-script, untranslated
-   ordinary prose, markup, parenthesis, or detached-ezafe artifact.
+   ordinary prose, duplicate, tatweel-punctuation, markup, parenthesis, or
+   detached-ezafe artifact.
 4. Do not choose new terminology, summarize, add commentary, or alter source facts.
 5. Use fluent formal Iranian Persian. For a contents/title row, preserve the title's
    meaning and page label while repairing Persian syntax.
@@ -4236,6 +4313,23 @@ class TranslationPipeline:
             self.warnings.append(warning)
             self.db.log_event(job_id, "WARNING", warning)
 
+        rendered_language_repair = (
+            repair_document_source_grounded_language_artifacts(
+                trans_doc,
+                allowed_originals=tuple(proper_nouns),
+            )
+        )
+        self.db.save_job_artifact(
+            job_id, "final_rendered_language_repair", rendered_language_repair
+        )
+        if rendered_language_repair["accepted_repair_count"]:
+            self.db.log_event(
+                job_id,
+                "INFO",
+                "Normalized source-grounded final-render language artifacts: "
+                f"{rendered_language_repair['accepted_repair_count']} repair(s).",
+            )
+
         identifier_audit = restore_document_source_identifiers(trans_doc)
         self.db.save_job_artifact(
             job_id, "final_identifier_reconciliation", identifier_audit
@@ -4464,6 +4558,15 @@ class TranslationPipeline:
                 extra_terms=persisted_terms,
                 aliases=noun_aliases,
             )
+        rendered_language_repair = (
+            repair_document_source_grounded_language_artifacts(
+                trans_doc,
+                allowed_originals=tuple(proper_nouns),
+            )
+        )
+        self.db.save_job_artifact(
+            job_id, "final_rendered_language_repair", rendered_language_repair
+        )
         identifier_audit = restore_document_source_identifiers(trans_doc)
         self.db.save_job_artifact(
             job_id, "final_identifier_reconciliation", identifier_audit
@@ -7045,10 +7148,12 @@ Output ONLY the corrected Persian translation.
             for key in (
                 "mixed_script_count",
                 "unexpected_latin_count",
+                "repeated_word_count",
                 "foreign_script_count",
                 "markup_wrapper_count",
                 "parenthesis_artifact_count",
                 "detached_ezafe_count",
+                "tatweel_separator_count",
             )
         )
         targeted_language_repair: dict[str, Any] = {
@@ -7084,10 +7189,12 @@ Output ONLY the corrected Persian translation.
                         for key in (
                             "mixed_script_count",
                             "unexpected_latin_count",
+                            "repeated_word_count",
                             "foreign_script_count",
                             "markup_wrapper_count",
                             "parenthesis_artifact_count",
                             "detached_ezafe_count",
+                            "tatweel_separator_count",
                         )
                     )
                     if not paragraph_repairable:

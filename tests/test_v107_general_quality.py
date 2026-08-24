@@ -103,10 +103,10 @@ def test_docx_contents_export_uses_borderless_aligned_rows(tmp_path: Path) -> No
     exported = Document(output)
     assert len(exported.tables) == 1
     assert len(exported.tables[0].rows) == 2
-    assert exported.tables[0].cell(0, 0).text == "viii"
-    assert exported.tables[0].cell(0, 1).text == "\u067e\u06cc\u0634\u06af\u0641\u062a\u0627\u0631"
-    assert exported.tables[0].cell(1, 0).text == "1"
-    assert exported.tables[0].cell(1, 1).text == "\u06f1 \u0645\u0642\u062f\u0645\u0647"
+    assert exported.tables[0].cell(0, 0).text == "\u067e\u06cc\u0634\u06af\u0641\u062a\u0627\u0631"
+    assert exported.tables[0].cell(0, 1).text == "viii"
+    assert exported.tables[0].cell(1, 0).text == "\u06f1 \u0645\u0642\u062f\u0645\u0647"
+    assert exported.tables[0].cell(1, 1).text == "1"
 
 
 def test_contents_display_title_does_not_strip_non_page_content() -> None:
