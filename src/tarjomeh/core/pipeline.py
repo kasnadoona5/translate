@@ -7,6 +7,7 @@ web search, translation, critique/refinement, and final output exporting.
 from __future__ import annotations
 
 import hashlib
+import difflib
 import logging
 import re
 import time
@@ -86,7 +87,11 @@ from tarjomeh.quality.integrity import (
     repair_corruption,
     mixed_script_artifacts,
     repair_source_grounded_language_artifacts,
-    repeated_persian_word_artifacts,
+    source_unjustified_repeated_word_artifacts,
+    detached_ezafe_artifacts,
+    foreign_script_artifacts,
+    markup_wrapper_artifacts,
+    parenthesis_artifacts,
     restore_source_identifiers,
     normalize_for_match,
     protected_english_originals,
@@ -256,20 +261,40 @@ def audit_translation_language(
         structural_role=structural_role,
         chapter_title=chapter_title,
     )
-    repeated = repeated_persian_word_artifacts(translation)
+    repeated = source_unjustified_repeated_word_artifacts(source, translation)
+    foreign_scripts = foreign_script_artifacts(source, translation)
+    markup = markup_wrapper_artifacts(source, translation)
+    parentheses = parenthesis_artifacts(source, translation)
+    detached_ezafe = detached_ezafe_artifacts(translation)
     return {
-        "review_required": bool(mixed or unexpected or repeated),
+        "review_required": bool(
+            mixed
+            or unexpected
+            or repeated
+            or foreign_scripts
+            or markup
+            or parentheses
+            or detached_ezafe
+        ),
         "mixed_script_count": len(mixed),
         "mixed_script_artifacts": mixed,
         "unexpected_latin_count": len(unexpected),
         "unexpected_latin": unexpected,
         "repeated_word_count": len(repeated),
         "repeated_word_artifacts": repeated,
+        "foreign_script_count": len(foreign_scripts),
+        "foreign_script_artifacts": foreign_scripts,
+        "markup_wrapper_count": len(markup),
+        "markup_wrapper_artifacts": markup,
+        "parenthesis_artifact_count": len(parentheses),
+        "parenthesis_artifacts": parentheses,
+        "detached_ezafe_count": len(detached_ezafe),
+        "detached_ezafe_artifacts": detached_ezafe,
         "policy": (
             "Source-grounded identifiers, citations, approved originals, acronyms, "
-            "and multilingual apparatus are allowed; unexplained foreign prose, "
-            "mixed-script suffixes, and adjacent lexical duplication are review "
-            "evidence and are never deleted automatically."
+            "and multilingual apparatus are allowed; unexplained foreign prose or "
+            "scripts, mixed-script suffixes, malformed parentheses, detached ezafe, "
+            "markup wrappers, and adjacent lexical duplication are review evidence."
         ),
     }
 
@@ -882,6 +907,93 @@ def _source_entity_categories(
         candidate: _source_entity_category(source_text, candidate)
         for candidate in candidates
     }
+
+
+_LANGUAGE_QUALITY_COUNT_FIELDS = (
+    "mixed_script_count",
+    "unexpected_latin_count",
+    "repeated_word_count",
+    "foreign_script_count",
+    "markup_wrapper_count",
+    "parenthesis_artifact_count",
+    "detached_ezafe_count",
+)
+
+
+def _language_quality_strictly_improves(
+    before: dict[str, Any],
+    after: dict[str, Any],
+) -> bool:
+    """Accept a local repair only when no deterministic category regresses."""
+    before_counts = tuple(int(before.get(key, 0) or 0) for key in _LANGUAGE_QUALITY_COUNT_FIELDS)
+    after_counts = tuple(int(after.get(key, 0) or 0) for key in _LANGUAGE_QUALITY_COUNT_FIELDS)
+    return all(new <= old for old, new in zip(before_counts, after_counts, strict=True)) and any(
+        new < old for old, new in zip(before_counts, after_counts, strict=True)
+    )
+
+
+def _language_repair_is_local(
+    before: str,
+    after: str,
+    *,
+    structural_role: str,
+) -> bool:
+    """Reject broad rewrites from the final objective-artifact repair pass."""
+    if not before or not after:
+        return False
+    similarity = difflib.SequenceMatcher(None, before, after, autojunk=False).ratio()
+    role = str(structural_role or "body").casefold()
+    minimum = 0.55 if role in {"contents_entry", "heading", "title"} else 0.82
+    length_ratio = len(after) / max(1, len(before))
+    return similarity >= minimum and 0.75 <= length_ratio <= 1.25
+
+
+def _targeted_language_repair_prompt(
+    source: str,
+    translation: str,
+    findings: dict[str, Any],
+    *,
+    structural_role: str,
+) -> str:
+    """Build one paragraph-local repair request from deterministic evidence."""
+    evidence = {
+        key: findings.get(key, [])
+        for key in (
+            "mixed_script_artifacts",
+            "unexpected_latin",
+            "foreign_script_artifacts",
+            "markup_wrapper_artifacts",
+            "parenthesis_artifacts",
+            "detached_ezafe_artifacts",
+        )
+        if findings.get(key)
+    }
+    return f"""\
+The accepted Persian paragraph below has objective surface-language artifacts.
+Correct only the evidenced artifacts while preserving its full meaning.
+
+### Structural role
+{structural_role}
+
+### English source paragraph
+{source}
+
+### Accepted Persian paragraph
+{translation}
+
+### Deterministic findings
+{json.dumps(evidence, ensure_ascii=False, indent=2)}
+
+Requirements:
+1. Return exactly one complete Persian paragraph and nothing else.
+2. Preserve every proposition, qualification, relation, citation, number, name,
+   required English parenthetical, and list or table label.
+3. Change only what is necessary to remove the listed foreign-script, untranslated
+   ordinary prose, markup, parenthesis, or detached-ezafe artifact.
+4. Do not choose new terminology, summarize, add commentary, or alter source facts.
+5. Use fluent formal Iranian Persian. For a contents/title row, preserve the title's
+   meaning and page label while repairing Persian syntax.
+"""
 
 
 def _high_confidence_person_candidates(
@@ -1645,9 +1757,10 @@ _HIGH_CONFIDENCE_MINOR_THRESHOLD = 0.85
 _STRUCTURAL_FLUENCY_MINOR_THRESHOLD = 0.70
 _OBJECTIVE_FLUENCY_MINOR_THRESHOLD = 0.75
 _OBJECTIVE_FLUENCY_RATIONALE_RE = re.compile(
-    r"\b(?:agreement|ambig(?:uity|uous)|attachment|broken grammar|calque|fragment|"
+    r"\b(?:agreement|ambig(?:uity|uous)|attachment|broken grammar|calque|dependency|"
+    r"fragment|modifier stack|nominali[sz]ation|parallelism|participle|referent|"
     r"incomplete (?:clause|coordination|sentence)|missing (?:predicate|verb)|"
-    r"malformed|orthograph(?:y|ic)|punctuation|redundan(?:cy|t)|spacing|syntax|"
+    r"malformed|orthograph(?:y|ic)|punctuation|redundan(?:cy|t)|source order|spacing|syntax|"
     r"typograph(?:y|ic)|ungrammatical|word order|zwnj)\b",
     re.IGNORECASE,
 )
@@ -2314,7 +2427,7 @@ def _chunk_review_reason_payload(
         "qa_unavailable": "qa_unavailable",
         "integrity_edit_rejected": "automatic_edit_rejected",
         "integrity_final_failed": "final_integrity_failed",
-        "language_quality_review": "foreign_text_quality_risk",
+        "language_quality_review": "final_language_quality_risk",
         "back_translation_flagged": "back_translation_risk",
         "glossary_needs_review": "glossary_noncompliance",
     }
@@ -6645,6 +6758,37 @@ Output ONLY the corrected Persian translation.
                     source_entity_candidates.append(source)
                 source_entity_categories[source] = category
 
+        # Canonicalize the accepted text before measuring required-anchor
+        # coverage. This pass may remove an unauthorized parenthetical, so an
+        # earlier coverage result would describe text that never reaches memory
+        # or export.
+        inline_reconciliation = {
+            "stage": "pre_memory_inline_reconciliation",
+            "valid": True,
+            "changed": False,
+            "reason": "policy_disabled",
+        }
+        if protect_inline_english:
+            if lock:
+                with lock:
+                    translation, inline_reconciliation = (
+                        _canonicalize_chunk_inline_originals(
+                            memory_manager, chunk, translation
+                        )
+                    )
+            else:
+                translation, inline_reconciliation = (
+                    _canonicalize_chunk_inline_originals(
+                        memory_manager, chunk, translation
+                    )
+                )
+        self.db.log_chunk_event(
+            job_id,
+            idx,
+            "memory_export_consistency",
+            inline_reconciliation,
+        )
+
         entity_coverage: dict[str, Any] = {
             "candidate_count": len(source_entity_candidates),
             "observed_count": 0,
@@ -6763,38 +6907,16 @@ Output ONLY the corrected Persian translation.
         self.db.log_chunk_event(
             job_id, idx, "entity_anchor_repair", anchor_repair_event
         )
-        inline_reconciliation = {
-            "stage": "pre_memory_inline_reconciliation",
-            "valid": True,
-            "changed": False,
-            "reason": "policy_disabled",
-        }
         if protect_inline_english:
             if lock:
                 with lock:
-                    translation, inline_reconciliation = (
-                        _canonicalize_chunk_inline_originals(
-                            memory_manager, chunk, translation
-                        )
-                    )
                     memory_manager.proper_nouns.mark_introduced_from_translation(
                         chunk.text, translation
                     )
             else:
-                translation, inline_reconciliation = (
-                    _canonicalize_chunk_inline_originals(
-                        memory_manager, chunk, translation
-                    )
-                )
                 memory_manager.proper_nouns.mark_introduced_from_translation(
                     chunk.text, translation
                 )
-        self.db.log_chunk_event(
-            job_id,
-            idx,
-            "memory_export_consistency",
-            inline_reconciliation,
-        )
         if protect_inline_english and entity_coverage.get("missing"):
             # The deterministic reconciliation above may have supplied an
             # established first-occurrence anchor that the model omitted. Judge
@@ -6906,16 +7028,174 @@ Output ONLY the corrected Persian translation.
             if len(structural_roles) == 1 and "body" not in structural_roles
             else "body"
         )
+        allowed_language_originals = tuple(
+            set(memory_manager.proper_nouns.inline_eligible_nouns()).union(
+                source_entity_candidates
+            )
+        )
         language_quality = audit_translation_language(
             chunk.text,
             translation,
-            allowed_originals=tuple(
-                set(memory_manager.proper_nouns.inline_eligible_nouns()).union(
-                    source_entity_candidates
-                )
-            ),
+            allowed_originals=allowed_language_originals,
             structural_role=language_role,
             chapter_title=chunk.chapter_title,
+        )
+        repairable_language_finding = any(
+            int(language_quality.get(key, 0) or 0)
+            for key in (
+                "mixed_script_count",
+                "unexpected_latin_count",
+                "foreign_script_count",
+                "markup_wrapper_count",
+                "parenthesis_artifact_count",
+                "detached_ezafe_count",
+            )
+        )
+        targeted_language_repair: dict[str, Any] = {
+            "attempted": False,
+            "accepted_count": 0,
+            "paragraphs": [],
+            "policy": (
+                "one bounded paragraph-local target-only repair; unaffected "
+                "paragraphs remain byte-identical and deterministic integrity "
+                "must pass"
+            ),
+        }
+        if repairable_language_finding:
+            source_parts = split_paragraphs(chunk.text)
+            target_parts = split_paragraphs(translation)
+            targeted_language_repair["attempted"] = True
+            targeted_language_repair["source_paragraphs"] = len(source_parts)
+            targeted_language_repair["target_paragraphs"] = len(target_parts)
+            if len(source_parts) == len(target_parts):
+                repaired_parts = list(target_parts)
+                for paragraph_index, (source_part, target_part) in enumerate(
+                    zip(source_parts, target_parts, strict=True)
+                ):
+                    paragraph_quality = audit_translation_language(
+                        source_part,
+                        target_part,
+                        allowed_originals=allowed_language_originals,
+                        structural_role=language_role,
+                        chapter_title=chunk.chapter_title,
+                    )
+                    paragraph_repairable = any(
+                        int(paragraph_quality.get(key, 0) or 0)
+                        for key in (
+                            "mixed_script_count",
+                            "unexpected_latin_count",
+                            "foreign_script_count",
+                            "markup_wrapper_count",
+                            "parenthesis_artifact_count",
+                            "detached_ezafe_count",
+                        )
+                    )
+                    if not paragraph_repairable:
+                        continue
+                    paragraph_event: dict[str, Any] = {
+                        "paragraph_index": paragraph_index,
+                        "accepted": False,
+                    }
+                    try:
+                        self.llm_client.limit_next_call_attempts(1)
+                        candidate_part = self.llm_client.complete(
+                            messages=[{
+                                "role": "user",
+                                "content": _targeted_language_repair_prompt(
+                                    source_part,
+                                    target_part,
+                                    paragraph_quality,
+                                    structural_role=language_role,
+                                ),
+                            }],
+                            system_prompt=sys_prompt,
+                            _operation="translation_language_repair",
+                            _recovery_source_text=source_part,
+                        ).strip()
+                        candidate_quality = audit_translation_language(
+                            source_part,
+                            candidate_part,
+                            allowed_originals=allowed_language_originals,
+                            structural_role=language_role,
+                            chapter_title=chunk.chapter_title,
+                        )
+                        candidate_parts = list(repaired_parts)
+                        candidate_parts[paragraph_index] = candidate_part
+                        candidate_translation = "\n\n".join(candidate_parts)
+                        candidate_integrity = integrity_gate.evaluate(
+                            chunk.text,
+                            candidate_translation,
+                            previous="\n\n".join(repaired_parts),
+                            stage="targeted_language_repair",
+                            protected_terms=protected_targets,
+                            protect_inline_english=protect_inline_english,
+                            allowed_inline_originals=allowed_inline_originals,
+                            enforce_all_terms=bool(
+                                self.config.glossary.enable_compliance_check
+                            ),
+                        )
+                        self.db.log_chunk_event(
+                            job_id,
+                            idx,
+                            "integrity_check_completed",
+                            candidate_integrity.to_dict(),
+                        )
+                        improved = _language_quality_strictly_improves(
+                            paragraph_quality, candidate_quality
+                        )
+                        paragraph_event.update({
+                            "candidate_chars": len(candidate_part),
+                            "integrity_accepted": candidate_integrity.accepted,
+                            "strictly_improved": improved,
+                            "local_edit": _language_repair_is_local(
+                                target_part,
+                                candidate_part,
+                                structural_role=language_role,
+                            ),
+                        })
+                        if (
+                            candidate_part
+                            and len(split_paragraphs(candidate_part)) == 1
+                            and candidate_integrity.accepted
+                            and improved
+                            and paragraph_event["local_edit"]
+                        ):
+                            repaired_parts[paragraph_index] = candidate_part
+                            paragraph_event["accepted"] = True
+                            targeted_language_repair["accepted_count"] += 1
+                    except _QUALITY_STAGE_ERRORS as exc:
+                        paragraph_event.update({
+                            "failure_type": type(exc).__name__,
+                            "error": str(exc),
+                        })
+                    except Exception as exc:
+                        logger.exception(
+                            "Targeted language repair failed for chunk %s paragraph %s",
+                            idx,
+                            paragraph_index,
+                        )
+                        paragraph_event.update({
+                            "failure_type": type(exc).__name__,
+                            "error": str(exc),
+                        })
+                    targeted_language_repair["paragraphs"].append(paragraph_event)
+                if targeted_language_repair["accepted_count"]:
+                    translation = "\n\n".join(repaired_parts)
+                    last_accepted_translation = translation
+                    language_quality = audit_translation_language(
+                        chunk.text,
+                        translation,
+                        allowed_originals=allowed_language_originals,
+                        structural_role=language_role,
+                        chapter_title=chunk.chapter_title,
+                    )
+            else:
+                targeted_language_repair["reason"] = "paragraph_count_mismatch"
+        self.db.log_chunk_event(
+            job_id,
+            idx,
+            "targeted_language_repair",
+            targeted_language_repair,
         )
         self.db.log_chunk_event(
             job_id, idx, "language_quality_checked", language_quality
@@ -6927,11 +7207,11 @@ Output ONLY the corrected Persian translation.
                 "language_quality_review",
                 {
                     **language_quality,
-                    "review_reason": "unexplained_foreign_or_mixed_script_text",
+                    "review_reason": "objective_final_language_artifact",
                     "message": (
-                        "Unexplained foreign-script prose remained in the final "
-                        "translation. The text was retained for review and was not "
-                        "admitted to trusted retrieval or style memory."
+                        "Objective language artifacts remained after deterministic "
+                        "and bounded local repair. The text was retained for review "
+                        "and was not admitted to trusted retrieval or style memory."
                     ),
                 },
             )

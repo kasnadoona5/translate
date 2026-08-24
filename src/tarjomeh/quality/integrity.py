@@ -127,6 +127,20 @@ _PARENTHETICAL_CONTEXT_LEADERS = frozenset({
     "although", "because", "both", "either", "however", "neither", "nor",
     "since", "therefore", "these", "those", "thus", "whereas", "while",
 })
+_MARKDOWN_EMPHASIS_RE = re.compile(
+    r"(?<!\*)\*{1,2}\s*(?P<content>[^*\n]{1,240}?)\s*\*{1,2}(?!\*)"
+)
+_DETACHED_EZAFE_RE = re.compile(
+    r"\)\s+[\u06cc\u064a](?=\s|[\u060c\u061b،؛:,.!?\u061f]|$)"
+)
+_FOREIGN_SCRIPT_PATTERNS = {
+    "cyrillic": re.compile(r"[\u0400-\u052f]+"),
+    "greek": re.compile(r"[\u0370-\u03ff]+"),
+    "hebrew": re.compile(r"[\u0590-\u05ff]+"),
+    "han": re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+"),
+    "hangul": re.compile(r"[\uac00-\ud7af]+"),
+    "kana": re.compile(r"[\u3040-\u30ff]+"),
+}
 _SUSPECT_PDF_WORD_BREAK_RE = re.compile(
     r"(?<![A-Z])(?:[A-Z][a-z]{2,}|[a-z]{3,})[-\u2010-\u2015][a-z]{3,}"
 )
@@ -896,6 +910,139 @@ def repeated_persian_word_artifacts(text: str) -> list[dict[str, Any]]:
     return findings
 
 
+def _paragraph_text_spans(text: str) -> list[tuple[int, int, str]]:
+    """Return non-empty paragraph spans while preserving exact document offsets."""
+    value = text or ""
+    spans: list[tuple[int, int, str]] = []
+    cursor = 0
+    for separator in re.finditer(r"\n[ \t]*\n", value):
+        raw = value[cursor:separator.start()]
+        if raw.strip():
+            leading = len(raw) - len(raw.lstrip())
+            trailing = len(raw) - len(raw.rstrip())
+            start = cursor + leading
+            end = separator.start() - trailing
+            spans.append((start, end, value[start:end]))
+        cursor = separator.end()
+    raw = value[cursor:]
+    if raw.strip():
+        leading = len(raw) - len(raw.lstrip())
+        trailing = len(raw) - len(raw.rstrip())
+        start = cursor + leading
+        end = len(value) - trailing
+        spans.append((start, end, value[start:end]))
+    return spans
+
+
+def source_unjustified_repeated_word_artifacts(
+    source: str,
+    translation: str,
+) -> list[dict[str, Any]]:
+    """Report target repetition only where its aligned source paragraph lacks it."""
+    source_paragraphs = _paragraph_text_spans(source)
+    target_paragraphs = _paragraph_text_spans(translation)
+    if len(source_paragraphs) != len(target_paragraphs):
+        return repeated_persian_word_artifacts(translation)
+    findings: list[dict[str, Any]] = []
+    for source_record, target_record in zip(
+        source_paragraphs, target_paragraphs, strict=True
+    ):
+        source_paragraph = source_record[2]
+        target_start, _target_end, target_paragraph = target_record
+        source_words = re.findall(r"[A-Za-z\u00c0-\u024f]+", source_paragraph)
+        source_repeats = any(
+            left.casefold() == right.casefold()
+            for left, right in zip(source_words, source_words[1:], strict=False)
+        )
+        if not source_repeats:
+            for finding in repeated_persian_word_artifacts(target_paragraph):
+                findings.append({
+                    **finding,
+                    "offset": target_start + int(finding["offset"]),
+                })
+    return findings
+
+
+def foreign_script_artifacts(source: str, translation: str) -> list[dict[str, Any]]:
+    """Report non-Latin foreign scripts introduced without source evidence."""
+    source_text = source or ""
+    target = translation or ""
+    findings: list[dict[str, Any]] = []
+    for script, pattern in _FOREIGN_SCRIPT_PATTERNS.items():
+        source_values = set(pattern.findall(source_text))
+        for match in pattern.finditer(target):
+            value = match.group()
+            if value in source_values:
+                continue
+            findings.append({
+                "script": script,
+                "text": value,
+                "offset": match.start(),
+                "context": target[max(0, match.start() - 60):match.end() + 60],
+            })
+    return findings
+
+
+def markup_wrapper_artifacts(source: str, translation: str) -> list[dict[str, Any]]:
+    """Report Markdown emphasis wrappers that were not authored in the source."""
+    if "*" in (source or ""):
+        return []
+    target = translation or ""
+    return [
+        {
+            "text": match.group(),
+            "content": match.group("content").strip(),
+            "offset": match.start(),
+            "context": target[max(0, match.start() - 60):match.end() + 60],
+        }
+        for match in _MARKDOWN_EMPHASIS_RE.finditer(target)
+    ]
+
+
+def parenthesis_artifacts(source: str, translation: str) -> list[dict[str, Any]]:
+    """Report unbalanced or newly nested ASCII parentheses in the target."""
+    def scan(value: str) -> tuple[list[dict[str, Any]], int]:
+        stack: list[int] = []
+        findings: list[dict[str, Any]] = []
+        maximum = 0
+        for offset, char in enumerate(value or ""):
+            if char == "(":
+                stack.append(offset)
+                maximum = max(maximum, len(stack))
+            elif char == ")":
+                if stack:
+                    stack.pop()
+                else:
+                    findings.append({"type": "unmatched_close", "offset": offset})
+        findings.extend(
+            {"type": "unmatched_open", "offset": offset} for offset in stack
+        )
+        return findings, maximum
+
+    findings, target_depth = scan(translation or "")
+    _source_findings, source_depth = scan(source or "")
+    if target_depth > max(1, source_depth):
+        findings.append({
+            "type": "new_nested_parentheses",
+            "target_depth": target_depth,
+            "source_depth": source_depth,
+        })
+    return findings
+
+
+def detached_ezafe_artifacts(text: str) -> list[dict[str, Any]]:
+    """Report a detached Persian ezafe suffix after a closing parenthesis."""
+    target = text or ""
+    return [
+        {
+            "text": match.group(),
+            "offset": match.start(),
+            "context": target[max(0, match.start() - 60):match.end() + 60],
+        }
+        for match in _DETACHED_EZAFE_RE.finditer(target)
+    ]
+
+
 def repair_source_grounded_language_artifacts(
     source: str,
     translation: str,
@@ -909,34 +1056,69 @@ def repair_source_grounded_language_artifacts(
     """
     repaired = translation or ""
     edits: list[dict[str, Any]] = []
-    source_words = re.findall(r"[A-Za-z\u00c0-\u024f]+", source or "")
-    source_has_adjacent_repeat = any(
-        left.casefold() == right.casefold()
-        for left, right in zip(source_words, source_words[1:], strict=False)
-    )
-    if not source_has_adjacent_repeat:
-        findings = repeated_persian_word_artifacts(repaired)
-        for finding in sorted(
-            findings, key=lambda item: int(item["offset"]), reverse=True
+    source_paragraphs = _paragraph_text_spans(source)
+    target_paragraphs = _paragraph_text_spans(repaired)
+    if len(source_paragraphs) == len(target_paragraphs):
+        duplicate_replacements: list[tuple[int, int, str, str]] = []
+        for source_record, target_record in zip(
+            source_paragraphs, target_paragraphs, strict=True
         ):
-            start = int(finding["offset"])
-            word = str(finding["word"])
-            match = re.match(
-                rf"{re.escape(word)}"
-                rf"(?P<separator>[ \t\u200c]+|[ \t]*[-\u2010-\u2015][ \t]*)"
-                rf"{re.escape(word)}",
-                repaired[start:],
-                re.IGNORECASE,
+            source_paragraph = source_record[2]
+            target_start, _target_end, target_paragraph = target_record
+            source_words = re.findall(
+                r"[A-Za-z\u00c0-\u024f]+", source_paragraph
             )
-            if not match:
-                continue
-            before = match.group(0)
-            repaired = repaired[:start] + word + repaired[start + len(before):]
+            source_repeats = any(
+                left.casefold() == right.casefold()
+                for left, right in zip(source_words, source_words[1:], strict=False)
+            )
+            if not source_repeats:
+                for finding in sorted(
+                    repeated_persian_word_artifacts(target_paragraph),
+                    key=lambda item: int(item["offset"]),
+                    reverse=True,
+                ):
+                    start = int(finding["offset"])
+                    word = str(finding["word"])
+                    match = re.match(
+                        rf"{re.escape(word)}"
+                        rf"(?P<separator>[ \t\u200c]+|"
+                        rf"[ \t]*[-\u2010-\u2015][ \t]*)"
+                        rf"{re.escape(word)}",
+                        target_paragraph[start:],
+                        re.IGNORECASE,
+                    )
+                    if not match:
+                        continue
+                    before = match.group(0)
+                    absolute_start = target_start + start
+                    duplicate_replacements.append((
+                        absolute_start,
+                        absolute_start + len(before),
+                        before,
+                        word,
+                    ))
+        for start, end, before, after in sorted(
+            duplicate_replacements, key=lambda item: item[0], reverse=True
+        ):
+            repaired = repaired[:start] + after + repaired[end:]
             edits.append({
                 "type": "adjacent_duplicate",
                 "before": before,
-                "after": word,
+                "after": after,
                 "offset": start,
+            })
+
+    if "*" not in (source or ""):
+        for match in reversed(list(_MARKDOWN_EMPHASIS_RE.finditer(repaired))):
+            content = match.group("content").strip()
+            before = match.group()
+            repaired = repaired[:match.start()] + content + repaired[match.end():]
+            edits.append({
+                "type": "markdown_emphasis_wrapper",
+                "before": before,
+                "after": content,
+                "offset": match.start(),
             })
 
     foreign_span_re = re.compile(

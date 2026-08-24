@@ -1177,7 +1177,12 @@ def _register_api(app: Flask) -> None:
                 lines.append(
                     f"  REVIEW: paragraph={finding.get('paragraph_index')} "
                     f"unexpected_latin={tokens} "
-                    f"mixed={finding.get('mixed_script_artifacts', [])}"
+                    f"mixed={finding.get('mixed_script_artifacts', [])} "
+                    f"repeated={finding.get('repeated_word_artifacts', [])} "
+                    f"foreign_scripts={finding.get('foreign_script_artifacts', [])} "
+                    f"markup={finding.get('markup_wrapper_artifacts', [])} "
+                    f"parentheses={finding.get('parenthesis_artifacts', [])} "
+                    f"detached_ezafe={finding.get('detached_ezafe_artifacts', [])}"
                 )
             for finding in final_text_audit.get("unresolved_identifiers", []) or []:
                 lines.append(
@@ -1264,7 +1269,7 @@ def _register_api(app: Flask) -> None:
             "qa_unavailable": "qa_unavailable",
             "glossary_needs_review": "glossary_needs_review",
             "integrity_final_failed": "integrity_final_failed",
-            "language_quality_review": "foreign_text_quality_risk",
+            "language_quality_review": "final_language_quality_risk",
             "chunk_review_required": "explicit_chunk_review_reason",
             "paragraph_identity_degraded": "paragraph_alignment_reconstructed",
         }
@@ -1689,8 +1694,8 @@ def _register_api(app: Flask) -> None:
                             )
                 elif event["event_type"] == "language_quality_review":
                     lines.append(
-                        "  LANGUAGE REVIEW: unexplained foreign or mixed-script "
-                        "text retained for human review"
+                        "  LANGUAGE REVIEW: objective final-language artifacts "
+                        "retained for human review"
                     )
                     for finding in payload.get("unexpected_latin", []) or []:
                         lines.append(
@@ -1699,6 +1704,16 @@ def _register_api(app: Flask) -> None:
                         )
                     for finding in payload.get("mixed_script_artifacts", []) or []:
                         lines.append(f"    mixed_script={finding!r}")
+                    for finding in payload.get("repeated_word_artifacts", []) or []:
+                        lines.append(f"    repeated_word={finding!r}")
+                    for finding in payload.get("foreign_script_artifacts", []) or []:
+                        lines.append(f"    foreign_script={finding!r}")
+                    for finding in payload.get("markup_wrapper_artifacts", []) or []:
+                        lines.append(f"    markup_wrapper={finding!r}")
+                    for finding in payload.get("parenthesis_artifacts", []) or []:
+                        lines.append(f"    parenthesis={finding!r}")
+                    for finding in payload.get("detached_ezafe_artifacts", []) or []:
+                        lines.append(f"    detached_ezafe={finding!r}")
                 elif event["event_type"] == "chunk_review_required":
                     reason_codes = list(payload.get("reason_codes", []) or [])
                     if not reason_codes and payload.get("reason"):

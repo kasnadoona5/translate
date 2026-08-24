@@ -69,8 +69,9 @@ Core directives:
 """ + "\n" + GENERAL_EDITORIAL_CONTRACT
 
 ACADEMIC_REGISTER_MODIFIER: str = """\
-Use a highly formal, precise, and scholarly academic register. \
-Employ complex sentence structures where appropriate, utilize established scholarly terminology, \
+Use a highly formal, precise, fluent, and scholarly academic register. \
+Use complex sentence structures only where their dependencies remain clear in Persian; \
+otherwise reorganize or split sentences within the same source paragraph. Employ established scholarly terminology, \
 and avoid any colloquialisms, slang, or overly simplified vocabulary. Prefer established, transparent \
 Persian academic equivalents to opaque calques or phonetic borrowing. Transliterate a specialist \
 label only when that borrowing is established in Persian scholarship or no precise Persian equivalent \
@@ -130,8 +131,11 @@ Instructions:
    {paragraph_count} paragraph(s), separated by double newlines (\n\n).
    If a paragraph is a short heading or title, translate it as its own short heading
    paragraph; never merge it into the following body paragraph and never omit it.
-   Preserve each contents, list, or table row as its own paragraph and keep its final
-   source page label or row identifier unchanged.
+    Preserve each contents, list, or table row as its own paragraph and keep its final
+    source page label or row identifier unchanged.
+   You may reorganize or split sentences inside a paragraph when needed for natural
+   Persian, but you must preserve every proposition, qualification, contrast, and
+   logical relation and must not change the paragraph count.
 5. Use ZWNJ (‌) correctly in compound verbs and affixed words (e.g. می‌خواهد).
 6. Proper nouns and first-occurrence originals:
    {term_notes_instruction}
@@ -216,6 +220,11 @@ MQM rules:
 - Every source_segment_id must identify the sentence containing source_quote.
 - For semantic issues, the rationale must identify the affected relation or
   proposition in context, not merely offer a different dictionary synonym.
+- Treat source-order calques, opaque modifier stacks, unclear attachment or referents,
+  excessive nominalization, malformed participles, and coordinated conceptual series
+  whose distinctions or parallelism were lost as objective fluency issues.
+- A sentence may be formally worded yet still be unpublishable if a Persian reader
+  must reconstruct its English syntax to understand it. Report that defect precisely.
 - A ZWNJ/spacing-only difference is not a terminology error. Use typography only
   when the current Persian itself violates standard orthography.
 - Do not praise, repeat the full source, repeat the full translation, or provide
@@ -255,7 +264,9 @@ Instructions:
    correct rendering merely because the critic suggested an alternative.
    Accept a minor fluency or style issue only when it identifies an objective defect
    such as ambiguity, broken grammar/agreement, an unnatural calque, or invalid
-   orthography. Reject synonym swaps and stylistic preferences without such evidence.
+   orthography. Opaque modifier stacking, unclear dependency or reference, malformed
+   participles, and lost parallelism in a coordinated conceptual series are objective
+   defects. Reject synonym swaps and stylistic preferences without such evidence.
 4. Preserve every part of the translation that has no validated issue.
 5. Apply entries marked mandatory using their prescribed lexical rendering, with
    standard Persian orthography. Treat advisory candidates as optional context and
@@ -268,7 +279,9 @@ Instructions:
    labels in the Persian translation.
 8. Include the complete Persian translation exactly once. Do not repeat it in
    issue decisions or rationales.
-   Every resulting_span must be copied verbatim from that returned translation.
+    Every resulting_span must be copied verbatim from that returned translation.
+   You may reorder or split sentences within the same paragraph to repair an objective
+   fluency defect, but preserve every proposition and keep paragraph boundaries fixed.
 9. Return ONLY valid JSON with this schema:
 {{
   "translation": "<the final Persian translation only>",

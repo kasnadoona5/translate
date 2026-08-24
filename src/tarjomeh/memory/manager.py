@@ -25,7 +25,13 @@ from tarjomeh.memory.proper_nouns import (
 from tarjomeh.memory.bilingual_summary import BilingualSummary
 from tarjomeh.memory.long_term import LongTermMemory
 from tarjomeh.memory.short_term import ShortTermMemory
-from tarjomeh.quality.integrity import mixed_script_artifacts
+from tarjomeh.quality.integrity import (
+    detached_ezafe_artifacts,
+    foreign_script_artifacts,
+    markup_wrapper_artifacts,
+    mixed_script_artifacts,
+    parenthesis_artifacts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +71,13 @@ def _clean_style_sample(text: str) -> str:
     if _UNTRANSLATED_CITATION_PROSE_RE.search(sample):
         return ""
     if mixed_script_artifacts(sample):
+        return ""
+    if (
+        foreign_script_artifacts("", sample)
+        or markup_wrapper_artifacts("", sample)
+        or parenthesis_artifacts("", sample)
+        or detached_ezafe_artifacts(sample)
+    ):
         return ""
     persian_chars = len(re.findall(r"[\u0600-\u06ff]", sample))
     latin_words = len(re.findall(r"\b[A-Za-z]{3,}\b", sample))
