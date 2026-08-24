@@ -125,9 +125,19 @@ Translate the following English academic text into Persian (فارسی).
 
 Instructions:
 1. Translate the entire source text faithfully into academic Persian.
+   Before emitting the answer, ensure that every source proposition and
+   qualification is represented, every finite Persian clause has an identifiable
+   predicate, pronoun referents and modifier attachments are clear, and no English
+   modifier stack or nominal chain has been copied mechanically into Persian.
+   Prefer natural Persian clause order. Split or reorganize sentences inside the
+   same paragraph when that improves comprehension without merging claims,
+   deleting qualifications, adding interpretation, or changing logical relations.
 2. Apply every entry marked mandatory using its prescribed lexical rendering and
    standard Persian orthography. Treat entries marked advisory as non-binding context.
 3. Ensure stylistic and terminological continuity with the preceding translation.
+   Continuity is evidence, not authority: do not imitate an awkward construction
+   merely because it appears in advisory memory. Preserve parallel distinctions in
+   coordinated conceptual series with equally clear Persian phrasing.
 4. Maintain paragraph structure; do not merge or split paragraphs. The source text contains
    exactly {paragraph_count} paragraph(s) — your translation MUST also contain exactly
    {paragraph_count} paragraph(s), separated by double newlines (\n\n).

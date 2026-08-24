@@ -18,7 +18,7 @@ import httpx
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from tarjomeh.core.config import TarjomehConfig
 from tarjomeh.core.structured_output import (
@@ -48,6 +48,7 @@ from tarjomeh.memory.proper_nouns import (
     has_exact_observed_anchor,
     is_safe_automatic_source_span,
     is_safe_automatic_entity_mapping,
+    is_safe_low_authority_mapping,
     is_reusable_terminology_mapping,
     looks_like_transliterated_loanword,
     observed_bilingual_target,
@@ -87,6 +88,7 @@ from tarjomeh.quality.integrity import (
     repair_corruption,
     mixed_script_artifacts,
     repair_source_grounded_language_artifacts,
+    source_unjustified_repeated_clause_artifacts,
     source_unjustified_repeated_word_artifacts,
     detached_ezafe_artifacts,
     tatweel_separator_artifacts,
@@ -331,6 +333,9 @@ def audit_translation_language(
         chapter_title=chapter_title,
     )
     repeated = source_unjustified_repeated_word_artifacts(source, translation)
+    repeated_clauses = source_unjustified_repeated_clause_artifacts(
+        source, translation
+    )
     foreign_scripts = foreign_script_artifacts(source, translation)
     markup = markup_wrapper_artifacts(source, translation)
     parentheses = parenthesis_artifacts(source, translation)
@@ -341,6 +346,7 @@ def audit_translation_language(
             mixed
             or unexpected
             or repeated
+            or repeated_clauses
             or foreign_scripts
             or markup
             or parentheses
@@ -353,6 +359,8 @@ def audit_translation_language(
         "unexpected_latin": unexpected,
         "repeated_word_count": len(repeated),
         "repeated_word_artifacts": repeated,
+        "repeated_clause_count": len(repeated_clauses),
+        "repeated_clause_artifacts": repeated_clauses,
         "foreign_script_count": len(foreign_scripts),
         "foreign_script_artifacts": foreign_scripts,
         "markup_wrapper_count": len(markup),
@@ -367,7 +375,8 @@ def audit_translation_language(
             "Source-grounded identifiers, citations, approved originals, acronyms, "
             "and multilingual apparatus are allowed; unexplained foreign prose or "
             "scripts, mixed-script suffixes, malformed parentheses, detached ezafe, "
-            "tatweel punctuation, markup wrappers, and adjacent lexical duplication "
+            "tatweel punctuation, markup wrappers, adjacent lexical duplication, "
+            "and exact duplicated clauses "
             "are review evidence."
         ),
     }
@@ -987,6 +996,7 @@ _LANGUAGE_QUALITY_COUNT_FIELDS = (
     "mixed_script_count",
     "unexpected_latin_count",
     "repeated_word_count",
+    "repeated_clause_count",
     "foreign_script_count",
     "markup_wrapper_count",
     "parenthesis_artifact_count",
@@ -1039,6 +1049,8 @@ def _targeted_language_repair_prompt(
             "foreign_script_artifacts",
             "markup_wrapper_artifacts",
             "parenthesis_artifacts",
+            "repeated_word_artifacts",
+            "repeated_clause_artifacts",
             "detached_ezafe_artifacts",
             "tatweel_separator_artifacts",
         )
@@ -1832,12 +1844,13 @@ _HIGH_CONFIDENCE_MINOR_CATEGORIES = frozenset({
 })
 _HIGH_CONFIDENCE_MINOR_THRESHOLD = 0.85
 _STRUCTURAL_FLUENCY_MINOR_THRESHOLD = 0.70
-_OBJECTIVE_FLUENCY_MINOR_THRESHOLD = 0.75
+_OBJECTIVE_FLUENCY_MINOR_THRESHOLD = 0.60
 _OBJECTIVE_FLUENCY_RATIONALE_RE = re.compile(
     r"\b(?:agreement|ambig(?:uity|uous)|attachment|broken grammar|calque|dependency|"
     r"fragment|modifier stack|nominali[sz]ation|parallelism|participle|referent|"
     r"incomplete (?:clause|coordination|sentence)|missing (?:predicate|verb)|"
-    r"malformed|orthograph(?:y|ic)|punctuation|redundan(?:cy|t)|source order|spacing|syntax|"
+    r"duplicate|malformed|orthograph(?:y|ic)|predicate|punctuation|"
+    r"repetiti(?:on|ve)|redundan(?:cy|t)|source order|spacing|syntax|"
     r"typograph(?:y|ic)|ungrammatical|word order|zwnj)\b",
     re.IGNORECASE,
 )
@@ -1910,16 +1923,19 @@ def _high_confidence_structural_fluency_minor_issues(
             and len(suggested_words) >= 8
             and 0.75 <= ratio <= 1.5
         )
-        objective_local_defect = bool(
+        grounded_objective_defect = bool(
             confidence >= _OBJECTIVE_FLUENCY_MINOR_THRESHOLD
             and source_quote
             and current
             and suggested
-            and 0.5 <= ratio <= 1.8
+            and len(re.findall(r"[A-Za-z][A-Za-z'\u2019-]*", source_quote)) >= 3
+            and len(re.findall(r"[\u0600-\u06ff]+", current)) >= 2
+            and len(re.findall(r"[\u0600-\u06ff]+", suggested)) >= 2
+            and 0.65 <= ratio <= 1.6
             and _OBJECTIVE_FLUENCY_RATIONALE_RE.search(evidence)
         )
         if (
-            (long_structural_defect or objective_local_defect)
+            (long_structural_defect or grounded_objective_defect)
             and normalize_for_match(current) != normalize_for_match(suggested)
         ):
             routed.append(detail)
@@ -2174,6 +2190,7 @@ def _chunk_memory_admission(
     db: Any,
     job_id: str,
     chunk_index: int,
+    critique_threshold: float = 9.0,
 ) -> dict[str, Any]:
     """Separate continuity context from durable wording/style authority."""
     events = db.get_chunk_events(job_id, chunk_index)
@@ -2211,10 +2228,16 @@ def _chunk_memory_admission(
             terminology = float(scores.get("terminology", 0) or 0)
         except (TypeError, ValueError):
             average = accuracy = terminology = 0.0
-        if average < 8.5:
-            reasons.append("final_critique_below_memory_floor")
+        if average < float(critique_threshold):
+            reasons.append("final_critique_below_configured_threshold")
         if accuracy < 8.0 or terminology < 8.0:
             reasons.append("semantic_dimension_below_memory_floor")
+
+    if any(
+        event.get("event_type") == "language_quality_review"
+        for event in current_events
+    ):
+        reasons.append("objective_final_language_artifact")
 
     reasons = list(dict.fromkeys(reasons))
     durable_reliable = not reasons
@@ -3339,12 +3362,16 @@ class TranslationPipeline:
                     extracted_terms = ner_data.get("terms", []) or ner_data.get("extracted_terms", []) or []
                 else:
                     extracted_terms = []
-                auto_terms: dict[str, dict[str, str]] = {}
+                auto_terms: dict[str, str | dict[str, Any]] = {}
                 for item in extracted_terms:
                     term = item.get("term")
                     persian = item.get("suggested_persian")
                     if term and persian:
                         category = str(item.get("category", "term"))
+                        if not is_safe_low_authority_mapping(
+                            str(term), str(persian), category
+                        ):
+                            continue
                         auto_terms[term] = {
                             "target": persian,
                             "context": item.get("context", ""),
@@ -3484,7 +3511,10 @@ class TranslationPipeline:
                     with lock:
                         translations[idx] = translation
                         memory_admission = _chunk_memory_admission(
-                            self.db, job_id, idx
+                            self.db,
+                            job_id,
+                            idx,
+                            self.config.translation.critique_threshold,
                         )
                         memory_policy = memory_manager.update_after_translation(
                             chunk,
@@ -3722,7 +3752,10 @@ class TranslationPipeline:
                         consecutive_errors = 0
 
                         memory_admission = _chunk_memory_admission(
-                            self.db, job_id, idx
+                            self.db,
+                            job_id,
+                            idx,
+                            self.config.translation.critique_threshold,
                         )
                         memory_policy = memory_manager.update_after_translation(
                             chunk,
@@ -4286,6 +4319,52 @@ class TranslationPipeline:
             self.db.save_job_artifact(
                 job_id, "citation_format_audit", citation_audit
             )
+            post_fragment_anchor_audit = cast(
+                dict[str, Any],
+                ensure_inline_proper_noun_originals(
+                    trans_doc,
+                    proper_nouns,
+                    typographer,
+                    noun_categories,
+                    aliases=noun_aliases,
+                    return_report=True,
+                ),
+            )
+            post_fragment_citation_audit = normalize_adjacent_original_citations(
+                trans_doc, proper_nouns
+            )
+            anchor_audit.update({
+                "post_fragment_inserted_count": int(
+                    post_fragment_anchor_audit.get("inserted_count", 0)
+                ),
+                "post_fragment_missing_target_count": int(
+                    post_fragment_anchor_audit.get("missing_target_count", 0)
+                ),
+                "final_reconciliation_stage": "after_fragment_cleanup",
+            })
+            self.db.save_job_artifact(
+                job_id, "english_original_anchor_audit", anchor_audit
+            )
+            citation_audit = {
+                "normalized_count": int(citation_audit.get("normalized_count", 0))
+                + int(post_fragment_citation_audit.get("normalized_count", 0)),
+                "changes": list(citation_audit.get("changes", []) or [])
+                + list(post_fragment_citation_audit.get("changes", []) or []),
+                "final_anchor_reconciliation": True,
+                "final_reconciliation_stage": "after_fragment_cleanup",
+            }
+            self.db.save_job_artifact(
+                job_id, "citation_format_audit", citation_audit
+            )
+            original_audit = audit_inline_english_originals(
+                trans_doc, proper_nouns
+            )
+            original_audit["final_reconciliation_stage"] = (
+                "after_fragment_cleanup"
+            )
+            self.db.save_job_artifact(
+                job_id, "english_original_audit", original_audit
+            )
         if note_mode != "inline" and self.config.output.format in note_formats:
             notes = apply_term_notes(
                 trans_doc,
@@ -4481,13 +4560,16 @@ class TranslationPipeline:
             job_id, "english_original_audit", original_audit
         )
         if note_mode in {"inline", "both"}:
-            anchor_audit = ensure_inline_proper_noun_originals(
-                trans_doc,
-                dict(proper_nouns),
-                typographer,
-                noun_categories,
-                aliases=noun_aliases,
-                return_report=True,
+            anchor_audit = cast(
+                dict[str, Any],
+                ensure_inline_proper_noun_originals(
+                    trans_doc,
+                    dict(proper_nouns),
+                    typographer,
+                    noun_categories,
+                    aliases=noun_aliases,
+                    return_report=True,
+                ),
             )
             anchor_audit.update({
                 "initial_inserted_count": int(
@@ -4526,6 +4608,52 @@ class TranslationPipeline:
             }
             self.db.save_job_artifact(
                 job_id, "citation_format_audit", citation_audit
+            )
+            post_fragment_anchor_audit = cast(
+                dict[str, Any],
+                ensure_inline_proper_noun_originals(
+                    trans_doc,
+                    dict(proper_nouns),
+                    typographer,
+                    noun_categories,
+                    aliases=noun_aliases,
+                    return_report=True,
+                ),
+            )
+            post_fragment_citation_audit = normalize_adjacent_original_citations(
+                trans_doc, dict(proper_nouns)
+            )
+            anchor_audit.update({
+                "post_fragment_inserted_count": int(
+                    post_fragment_anchor_audit.get("inserted_count", 0)
+                ),
+                "post_fragment_missing_target_count": int(
+                    post_fragment_anchor_audit.get("missing_target_count", 0)
+                ),
+                "final_reconciliation_stage": "after_fragment_cleanup",
+            })
+            self.db.save_job_artifact(
+                job_id, "english_original_anchor_audit", anchor_audit
+            )
+            citation_audit = {
+                "normalized_count": int(citation_audit.get("normalized_count", 0))
+                + int(post_fragment_citation_audit.get("normalized_count", 0)),
+                "changes": list(citation_audit.get("changes", []) or [])
+                + list(post_fragment_citation_audit.get("changes", []) or []),
+                "final_anchor_reconciliation": True,
+                "final_reconciliation_stage": "after_fragment_cleanup",
+            }
+            self.db.save_job_artifact(
+                job_id, "citation_format_audit", citation_audit
+            )
+            original_audit = audit_inline_english_originals(
+                trans_doc, dict(proper_nouns)
+            )
+            original_audit["final_reconciliation_stage"] = (
+                "after_fragment_cleanup"
+            )
+            self.db.save_job_artifact(
+                job_id, "english_original_audit", original_audit
             )
         if note_mode != "inline" and fmt in {"docx", "epub", "markdown"}:
             glossary_manager = GlossaryManager()
@@ -4732,7 +4860,10 @@ class TranslationPipeline:
         )
         self.db.update_chunk(job_id, chunk_index, final_status, translation)
         memory_admission = _chunk_memory_admission(
-            self.db, job_id, chunk_index
+            self.db,
+            job_id,
+            chunk_index,
+            self.config.translation.critique_threshold,
         )
         memory_policy = memory_manager.update_after_translation(
             chunks[chunk_index],
@@ -7149,6 +7280,7 @@ Output ONLY the corrected Persian translation.
                 "mixed_script_count",
                 "unexpected_latin_count",
                 "repeated_word_count",
+                "repeated_clause_count",
                 "foreign_script_count",
                 "markup_wrapper_count",
                 "parenthesis_artifact_count",
@@ -7190,6 +7322,7 @@ Output ONLY the corrected Persian translation.
                             "mixed_script_count",
                             "unexpected_latin_count",
                             "repeated_word_count",
+                            "repeated_clause_count",
                             "foreign_script_count",
                             "markup_wrapper_count",
                             "parenthesis_artifact_count",

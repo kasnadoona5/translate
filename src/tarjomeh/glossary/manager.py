@@ -19,7 +19,9 @@ import csv
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
+
+from tarjomeh.memory.proper_nouns import is_safe_low_authority_mapping
 
 
 # BabelDOC-compatible base columns. Optional columns are additive so old CSVs
@@ -242,7 +244,10 @@ class GlossaryManager:
         )
         self._add_entry(entry)
 
-    def merge_auto_extracted(self, extracted_terms: dict[str, str | dict[str, Any]]) -> None:
+    def merge_auto_extracted(
+        self,
+        extracted_terms: Mapping[str, str | Mapping[str, Any]],
+    ) -> None:
         """Merge LLM-extracted terms into the glossary.
 
         Existing (user-supplied) terms take priority and are never
@@ -251,7 +256,9 @@ class GlossaryManager:
         Args:
             extracted_terms: ``{english_term: persian_translation}``, or a
                 dict payload containing ``target``, ``context``, ``domain``,
-                ``sense``, and ``author``.
+                ``sense``, ``author``, and an optional semantic ``category``.
+                Persisted automatic entries are revalidated here so resume does
+                not restore sentence fragments as global terminology.
         """
         curated_sources = {e.source.lower() for e in self._entries if not e.is_auto}
         for source, payload in extracted_terms.items():
@@ -259,20 +266,24 @@ class GlossaryManager:
             if not source_clean or source_clean.lower() in curated_sources:
                 continue
 
-            if isinstance(payload, dict):
+            if isinstance(payload, Mapping):
                 target = str(payload.get("target", "")).strip()
                 context = str(payload.get("context", "")).strip()
                 domain = str(payload.get("domain", "")).strip()
                 sense = str(payload.get("sense", "")).strip()
                 author = str(payload.get("author", "")).strip()
+                category = str(payload.get("category", "term")).strip()
             else:
                 target = str(payload).strip()
                 context = ""
                 domain = ""
                 sense = ""
                 author = ""
+                category = "term"
 
-            if target:
+            if target and is_safe_low_authority_mapping(
+                source_clean, target, category
+            ):
                 self.add_term(
                     source=source_clean,
                     target=target,

@@ -310,12 +310,42 @@ class DocxExporter(BaseExporter):
         def add_contents_table(entries) -> None:
             """Emit preserved contents rows with stable RTL title/page alignment."""
             table = doc.add_table(rows=0, cols=2)
-            table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            section = doc.sections[-1]
+            usable_width = int(section.page_width or 0) - int(
+                section.left_margin or 0
+            ) - int(section.right_margin or 0)
+            total_twips = max(7200, int(usable_width / 635))
+            page_twips = max(1100, int(total_twips * 0.14))
+            title_twips = total_twips - page_twips
+
+            table.alignment = WD_TABLE_ALIGNMENT.RIGHT
             table.autofit = False
             tbl_pr = table._tbl.tblPr
+            for tag in ("w:bidiVisual", "w:tblW", "w:tblInd", "w:tblLayout"):
+                for element in list(tbl_pr.findall(qn(tag))):
+                    tbl_pr.remove(element)
             bidi_visual = OxmlElement("w:bidiVisual")
             bidi_visual.set(qn("w:val"), "1")
             tbl_pr.insert(0, bidi_visual)
+            table_width = OxmlElement("w:tblW")
+            table_width.set(qn("w:type"), "dxa")
+            table_width.set(qn("w:w"), str(total_twips))
+            tbl_pr.append(table_width)
+            table_indent = OxmlElement("w:tblInd")
+            table_indent.set(qn("w:type"), "dxa")
+            table_indent.set(qn("w:w"), "0")
+            tbl_pr.append(table_indent)
+            fixed_layout = OxmlElement("w:tblLayout")
+            fixed_layout.set(qn("w:type"), "fixed")
+            tbl_pr.append(fixed_layout)
+
+            grid = table._tbl.tblGrid
+            for child in list(grid):
+                grid.remove(child)
+            for width in (title_twips, page_twips):
+                grid_column = OxmlElement("w:gridCol")
+                grid_column.set(qn("w:w"), str(width))
+                grid.append(grid_column)
             borders = OxmlElement("w:tblBorders")
             for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
                 border = OxmlElement(f"w:{edge}")
@@ -329,12 +359,29 @@ class DocxExporter(BaseExporter):
                 row_pr = row._tr.get_or_add_trPr()
                 row_pr.append(OxmlElement("w:cantSplit"))
                 title_cell, page_cell = row.cells
-                title_cell.width = Cm(12.5)
-                page_cell.width = Cm(2.0)
+                for cell, width in (
+                    (title_cell, title_twips),
+                    (page_cell, page_twips),
+                ):
+                    tc_pr = cell._tc.get_or_add_tcPr()
+                    tc_width = tc_pr.find(qn("w:tcW"))
+                    if tc_width is None:
+                        tc_width = OxmlElement("w:tcW")
+                        tc_pr.append(tc_width)
+                    tc_width.set(qn("w:type"), "dxa")
+                    tc_width.set(qn("w:w"), str(width))
+                    cell_margin = OxmlElement("w:tcMar")
+                    for edge in ("top", "start", "bottom", "end"):
+                        margin = OxmlElement(f"w:{edge}")
+                        margin.set(qn("w:type"), "dxa")
+                        margin.set(qn("w:w"), "35" if edge in {"start", "end"} else "0")
+                        cell_margin.append(margin)
+                    tc_pr.append(cell_margin)
                 page_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
                 title_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
 
                 page_paragraph = page_cell.paragraphs[0]
+                set_on_off(page_paragraph._p.get_or_add_pPr(), "w:bidi", False)
                 page_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 page_paragraph.paragraph_format.space_after = Pt(0)
                 page_run = page_paragraph.add_run(

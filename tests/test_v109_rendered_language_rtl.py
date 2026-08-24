@@ -48,8 +48,8 @@ def test_source_grounded_render_repairs_cover_general_persian_artifacts() -> Non
         "(methodological individualism)"
     ) in repaired
     assert (
-        "(\u0627\u0631\u0648\u067e\u0627\u0645\u062d\u0648\u0631\u06cc) "
-        "(Eurocentric theory)"
+        "(\u0627\u0631\u0648\u067e\u0627\u0645\u062d\u0648\u0631\u06cc "
+        "[Eurocentric theory])"
     ) in repaired
     assert "\u062a\u0627\u0631\u06cc\u062e \u062a\u0627\u0631\u06cc\u062e" not in repaired
     assert "\u0640\u0640" not in repaired

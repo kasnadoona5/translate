@@ -81,6 +81,24 @@ _PAGE_NUMBER_RE = re.compile(r"^\s*(?:\d+|[ivxlcdm]+)\s*$", re.IGNORECASE)
 _FURNITURE_NUMBER_RE = re.compile(r"\b(?:\d+|[ivxlcdm]+)\b", re.IGNORECASE)
 
 
+def _source_word_family_observed(word: str, known_words: set[str]) -> bool:
+    """Use document-local morphology as conservative dehyphenation evidence."""
+    folded = (word or "").casefold()
+    if folded in known_words:
+        return True
+    candidates: set[str] = set()
+    for suffix in (
+        "ments", "ities", "ingly", "orial", "ation", "ions", "ment",
+        "ness", "ical", "ity", "ing", "ial", "ies", "ed", "es", "ly", "s",
+    ):
+        if folded.endswith(suffix) and len(folded) - len(suffix) >= 5:
+            stem = folded[:-len(suffix)]
+            candidates.add(stem)
+            if suffix == "ies":
+                candidates.add(stem + "y")
+    return any(candidate in known_words for candidate in candidates)
+
+
 def _join_block_lines(
     lines: list[str],
     *,
@@ -110,18 +128,24 @@ def _join_block_lines(
         elif out.endswith("-"):
             left = re.search(r"([A-Za-z]{2,})-$", out)
             right = re.match(r"([a-z]{2,})", line.lstrip())
-            joined = (
-                left.group(1) + right.group(1)
-                if left is not None and right is not None else ""
-            )
-            if joined and known_words and joined.casefold() in known_words:
+            joined = ""
+            if left is not None and right is not None:
+                joined = left.group(1) + right.group(1)
+            if joined and known_words and _source_word_family_observed(
+                joined, known_words
+            ):
                 before = f"{left.group(1)}-{right.group(1)}"
                 out = out[:-1] + line.lstrip()
                 if dehyphenation_evidence is not None:
+                    reason = (
+                        "unhyphenated_form_observed_elsewhere_in_source"
+                        if joined.casefold() in known_words
+                        else "morphological_family_observed_elsewhere_in_source"
+                    )
                     dehyphenation_evidence.append({
                         "before": before,
                         "joined": joined,
-                        "reason": "unhyphenated_form_observed_elsewhere_in_source",
+                        "reason": reason,
                     })
             else:
                 out = out + line.lstrip()

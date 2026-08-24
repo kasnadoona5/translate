@@ -143,8 +143,9 @@ _PERSIAN_SUFFIX_AFTER_ORIGINAL_RE = re.compile(
     rf"(?![{_PERSIAN_LETTER_CLASS}])"
 )
 _NESTED_INLINE_ORIGINAL_RE = re.compile(
-    rf"\((?P<persian>[^()\n]*[{_PERSIAN_LETTER_CLASS}][^()\n]*?)\s+"
-    rf"(?P<original>\((?=[^()\n]*[A-Za-z])[^()\n]{{1,200}}\))\)"
+    rf"\((?P<before>[^()\n]*[{_PERSIAN_LETTER_CLASS}][^()\n]*?)"
+    rf"(?P<original>\((?=[^()\n]*[A-Za-z])[^()\n]{{1,200}}\))"
+    rf"(?P<after>[^()\n]*)\)"
 )
 _FOREIGN_SCRIPT_PATTERNS = {
     "cyrillic": re.compile(r"[\u0400-\u052f]+"),
@@ -923,6 +924,89 @@ def repeated_persian_word_artifacts(text: str) -> list[dict[str, Any]]:
     return findings
 
 
+_PERSIAN_LEXICAL_TOKEN_RE = re.compile(
+    rf"[{_PERSIAN_LETTER_CLASS}]+(?:\u200c[{_PERSIAN_LETTER_CLASS}]+)*"
+)
+_PERSIAN_COORDINATORS = frozenset({"و", "یا"})
+
+
+def repeated_persian_clause_artifacts(text: str) -> list[dict[str, Any]]:
+    """Report exact multiword clauses duplicated around a coordinator.
+
+    This is deliberately narrower than semantic repetition detection: both
+    lexical spans must be byte-equivalent after case folding, contain at least
+    two words, and sit immediately on either side of ``و`` or ``یا``.  The
+    function reports evidence only; it never removes prose automatically.
+    """
+    value = text or ""
+    tokens = list(_PERSIAN_LEXICAL_TOKEN_RE.finditer(value))
+    findings: list[dict[str, Any]] = []
+    seen: set[tuple[int, int]] = set()
+    for connector_index, connector in enumerate(tokens):
+        if connector.group().casefold() not in _PERSIAN_COORDINATORS:
+            continue
+        for width in range(6, 1, -1):
+            left_start = connector_index - width
+            right_end = connector_index + 1 + width
+            if left_start < 0 or right_end > len(tokens):
+                continue
+            left = tokens[left_start:connector_index]
+            right = tokens[connector_index + 1:right_end]
+            if [item.group().casefold() for item in left] != [
+                item.group().casefold() for item in right
+            ]:
+                continue
+            left_gap = value[left[-1].end():connector.start()]
+            right_gap = value[connector.end():right[0].start()]
+            if left_gap.strip(" \t\u200c،؛,:-‐‑‒–—"):
+                continue
+            if right_gap.strip(" \t\u200c،؛,:-‐‑‒–—"):
+                continue
+            span = (left[0].start(), right[-1].end())
+            if span in seen:
+                continue
+            seen.add(span)
+            phrase = value[left[0].start():left[-1].end()]
+            findings.append({
+                "phrase": phrase,
+                "offset": span[0],
+                "context": value[max(0, span[0] - 60):min(len(value), span[1] + 60)],
+            })
+            break
+    return findings
+
+
+def source_unjustified_repeated_clause_artifacts(
+    source: str,
+    translation: str,
+) -> list[dict[str, Any]]:
+    """Return target clause duplication unless the aligned source repeats too."""
+    source_paragraphs = _paragraph_text_spans(source)
+    target_paragraphs = _paragraph_text_spans(translation)
+    if len(source_paragraphs) != len(target_paragraphs):
+        return repeated_persian_clause_artifacts(translation)
+    findings: list[dict[str, Any]] = []
+    source_repeat_re = re.compile(
+        r"\b(?P<phrase>[A-Za-z][A-Za-z'\u2019-]*(?:\s+"
+        r"[A-Za-z][A-Za-z'\u2019-]*){1,5})\s+(?:and|or)\s+"
+        r"(?P=phrase)\b",
+        re.IGNORECASE,
+    )
+    for source_record, target_record in zip(
+        source_paragraphs, target_paragraphs, strict=True
+    ):
+        source_paragraph = source_record[2]
+        target_start, _target_end, target_paragraph = target_record
+        if source_repeat_re.search(source_paragraph):
+            continue
+        for finding in repeated_persian_clause_artifacts(target_paragraph):
+            findings.append({
+                **finding,
+                "offset": target_start + int(finding["offset"]),
+            })
+    return findings
+
+
 def _paragraph_text_spans(text: str) -> list[tuple[int, int, str]]:
     """Return non-empty paragraph spans while preserving exact document offsets."""
     value = text or ""
@@ -1128,7 +1212,7 @@ def repair_source_grounded_language_artifacts(
         original_text = original[1:-1].strip()
         if unicodedata.normalize("NFKC", original_text).casefold() not in source_folded:
             continue
-        after = f"({match.group('persian').strip()}) {original}"
+        after = match.group().replace(original, f"[{original_text}]", 1)
         repaired = repaired[:match.start()] + after + repaired[match.end():]
         edits.append({
             "type": "nested_inline_original",

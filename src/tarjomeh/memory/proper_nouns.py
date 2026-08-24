@@ -52,7 +52,7 @@ _UNUSABLE_TARGET_RE = re.compile(
 )
 _CONTEXTUAL_TARGET_TOKEN_RE = re.compile(
     r"(?:^|\s)(?:من|ما|تو|شما|او|ایشان|آنها|آن‌ها|این|آن|همین|همان|"
-    r"سایر|دیگر|خود|هستم|هستی|است|هست|هستیم|هستید|هستند|بود|بودند|"
+    r"سایر|دیگر|خود|کدام|چگونه|چرا|آیا|هستم|هستی|است|هست|هستیم|هستید|هستند|بود|بودند|"
     r"شد|شدند|می‌شود|می‌شوند)(?:\s|$)"
 )
 _LEADING_CONTEXT_RE = re.compile(
@@ -113,6 +113,10 @@ _AUTOMATIC_ENTITY_CATEGORIES = frozenset({
 _SOURCE_CONTEXT_LEADERS = frozenset({
     "although", "because", "both", "either", "however", "neither", "nor",
     "since", "therefore", "these", "those", "thus", "whereas", "while",
+})
+_SOURCE_NONTERM_LEADERS = _SOURCE_CONTEXT_LEADERS.union({
+    "how", "if", "not", "what", "when", "where", "whether", "which",
+    "who", "whom", "whose", "why",
 })
 _SOURCE_TRAILING_ACTIONS = frozenset({
     "created", "edited", "printed", "published", "reproduced", "revised",
@@ -565,15 +569,52 @@ def is_reusable_terminology_mapping(english: str, persian: str) -> bool:
     target_words = re.findall(rf"[{_PERSIAN_LETTER_RE.pattern[1:-1]}]+", target)
     if not 1 <= len(source_words) <= 6 or not target_words:
         return False
+    if source_words[0].casefold() in _SOURCE_NONTERM_LEADERS:
+        return False
     if len(source_words) == 1 and len(target_words) > 3:
         return False
-    if len(target_words) > max(5, len(source_words) * 2 + 1):
+    if len(target_words) > max(4, len(source_words) * 2):
         return False
     if _CONTEXTUAL_TARGET_TOKEN_RE.search(target):
         return False
     if _TRAILING_CONNECTIVE_RE.search(target):
         return False
     return True
+
+
+def low_authority_mapping_category(
+    english: str,
+    persian: str,
+    category: str,
+) -> str:
+    """Downgrade translated concepts mislabeled as phonetic loanwords."""
+    normalized = _normalise_category(category)
+    if (
+        normalized == "technical_loanword"
+        and not looks_like_transliterated_loanword(english, persian)
+    ):
+        return "term"
+    return normalized
+
+
+def is_safe_low_authority_mapping(
+    english: str,
+    persian: str,
+    category: str,
+) -> bool:
+    """Validate automatic memory without requiring book-specific vocabulary."""
+    normalized = low_authority_mapping_category(english, persian, category)
+    if is_automatic_entity_category(normalized):
+        return bool(
+            is_safe_automatic_source_span(english, normalized)
+            and is_usable_observed_mapping(english, persian, normalized)
+        )
+    if normalized == "technical_loanword":
+        return bool(
+            looks_like_transliterated_loanword(english, persian)
+            and is_usable_observed_mapping(english, persian, normalized)
+        )
+    return is_reusable_terminology_mapping(english, persian)
 
 
 def _source_term_present(source_text: str, term: str) -> bool:
@@ -667,11 +708,17 @@ class ProperNouns:
         """
         en_key = " ".join(english.split()).strip()
         fa_val = persian.strip()
-        usable = is_usable_memory_mapping(en_key, fa_val)
-        if provenance in _LOW_AUTHORITY_ORIGINS:
-            usable = usable and is_usable_observed_mapping(
-                en_key, fa_val, category
+        origin = provenance if provenance in _PROVENANCE_AUTHORITY else "legacy"
+        new_category = _normalise_category(category)
+        if origin in _LOW_AUTHORITY_ORIGINS:
+            new_category = low_authority_mapping_category(
+                en_key, fa_val, new_category
             )
+            usable = is_safe_low_authority_mapping(
+                en_key, fa_val, new_category
+            )
+        else:
+            usable = is_usable_memory_mapping(en_key, fa_val)
         if not usable:
             return {
                 "action": "ignored",
@@ -679,7 +726,6 @@ class ProperNouns:
                 "reason": "unusable_memory_mapping",
             }
 
-        origin = provenance if provenance in _PROVENANCE_AUTHORITY else "legacy"
         authority = _PROVENANCE_AUTHORITY[origin]
         stored_key = self._stored_key(en_key)
         previous = self._nouns.get(stored_key or "", "")
@@ -721,7 +767,6 @@ class ProperNouns:
             prior["observations"] = observations
             self._provenance[stored_key] = prior
 
-        new_category = _normalise_category(category)
         current_category = self._categories.get(stored_key)
         if (
             current_category is None
@@ -1015,9 +1060,14 @@ class ProperNouns:
                     stored_categories.get(source_text, "proper_noun")
                     if isinstance(stored_categories, dict) else "proper_noun"
                 )
-                return is_usable_observed_mapping(
+                normalized = low_authority_mapping_category(
                     source_text, target_text, str(category)
                 )
+                if is_automatic_entity_category(normalized):
+                    return is_safe_low_authority_mapping(
+                        source_text, target_text, normalized
+                    )
+                return True
 
             self._nouns = {
                 str(source): str(target)
@@ -1040,6 +1090,23 @@ class ProperNouns:
                     "observations": 1,
                     "superseded": [],
                 })
+                record = self._provenance[source]
+                if record.get("origin") in _LOW_AUTHORITY_ORIGINS:
+                    category = low_authority_mapping_category(
+                        source,
+                        self._nouns[source],
+                        self._categories.get(source, "proper_noun"),
+                    )
+                    self._categories[source] = category
+                    if not is_safe_low_authority_mapping(
+                        source, self._nouns[source], category
+                    ):
+                        record.update({
+                            "context_deferred": True,
+                            "context_deferred_reason": (
+                                "noncanonical_automatic_mapping"
+                            ),
+                        })
             stored_aliases = data.get("aliases", {})
             self._aliases = {
                 source: [

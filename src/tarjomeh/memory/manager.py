@@ -31,6 +31,7 @@ from tarjomeh.quality.integrity import (
     markup_wrapper_artifacts,
     mixed_script_artifacts,
     parenthesis_artifacts,
+    repeated_persian_clause_artifacts,
     repeated_persian_word_artifacts,
     tatweel_separator_artifacts,
 )
@@ -79,6 +80,7 @@ def _clean_style_sample(text: str) -> str:
         or markup_wrapper_artifacts("", sample)
         or parenthesis_artifacts("", sample)
         or detached_ezafe_artifacts(sample)
+        or repeated_persian_clause_artifacts(sample)
         or repeated_persian_word_artifacts(sample)
         or tatweel_separator_artifacts(sample)
     ):
