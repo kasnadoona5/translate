@@ -332,7 +332,14 @@ def is_usable_observed_mapping(
         return False
     if len(target_words) > max(5, len(source_words) * 2):
         return False
-    if _CONTEXTUAL_TARGET_TOKEN_RE.search(target_plain):
+    if (
+        _CONTEXTUAL_TARGET_TOKEN_RE.search(target_plain)
+        and not (
+            normalized_category == "person"
+            and len(source_words) >= 2
+            and len(target_words) >= 2
+        )
+    ):
         return False
     if _TRAILING_CONNECTIVE_RE.search(target_plain):
         return False
@@ -419,7 +426,14 @@ def observed_bilingual_target(
         # A single anchor cannot safely establish two coordinated entities.
         # Defer it instead of storing a clipped book-wide mapping.
         return ""
-    selected = tokens[-min(len(source_words), 5):]
+    # A hyphenated given name normally occupies more than one Persian token
+    # (for example, X-Y Surname). Count its lexical components so the bounded
+    # anchor does not retain only the tail of a compound name.
+    source_components = sum(
+        max(1, len(re.findall(r"[A-Za-z\u00c0-\u024f]+", word)))
+        for word in source_words
+    )
+    selected = tokens[-min(source_components, 7):]
     terminal = source_words[-1].casefold()
     required_heads = _ORGANIZATION_TARGET_HEADS.get(terminal, ())
     def has_required_head(items: list[re.Match[str]]) -> bool:
@@ -571,14 +585,77 @@ def is_reusable_terminology_mapping(english: str, persian: str) -> bool:
         return False
     if source_words[0].casefold() in _SOURCE_NONTERM_LEADERS:
         return False
+    return not automatic_terminology_risk_reasons(source, target)
+
+
+def automatic_terminology_risk_reasons(
+    english: str,
+    persian: str,
+) -> list[str]:
+    """Return general reasons an automatic term is unsafe book-wide.
+
+    Automatic extraction is advisory evidence, not a semantic authority. A
+    compact phrase can still be unsafe when it includes surrounding context or
+    stores an inflected clause instead of a reusable lexical rendering. These
+    checks intentionally apply only to low-authority terminology; curated and
+    accepted-review entries keep their existing authority path.
+    """
+    source = " ".join((english or "").split()).strip()
+    target = " ".join((persian or "").split()).strip()
+    source_words = re.findall(r"[A-Za-z][A-Za-z'\-]*", source)
+    target_words = _PERSIAN_WORD_RE.findall(target)
+    reasons: list[str] = []
+    if not source_words or not target_words:
+        return ["missing_lexical_span"]
     if len(source_words) == 1 and len(target_words) > 3:
-        return False
-    if len(target_words) > max(4, len(source_words) * 2):
-        return False
+        reasons.append("target_scope_wider_than_source")
+    # Persian lexical equivalents are often shorter than English compounds.
+    # Requiring an automatic target to remain within one extra lexical token is
+    # conservative but still admits ordinary ezafe and light-noun renderings.
+    if len(target_words) > len(source_words) + 1:
+        reasons.append("target_scope_wider_than_source")
     if _CONTEXTUAL_TARGET_TOKEN_RE.search(target):
-        return False
+        reasons.append("context_bound_target")
     if _TRAILING_CONNECTIVE_RE.search(target):
+        reasons.append("incomplete_target_span")
+    if re.search(r"[.!?\u061f\u061b\u060c:]", target):
+        reasons.append("target_is_not_lexical_phrase")
+    if re.search(
+        r"(?:^|\s)(?:\u0646?\u0645\u06cc(?:\u200c|\s+)\S+|"
+        r"\u0627\u0633\u062a|\u0647\u0633\u062a|\u0628\u0648\u062f|\u0628\u0627\u0634\u062f|"
+        r"\u0634\u062f|\u0634\u062f\u0646\u062f|\u06a9\u0631\u062f|\u06a9\u0631\u062f\u0646\u062f)"
+        r"(?:\s|$)",
+        target,
+    ):
+        reasons.append("inflected_or_clausal_target")
+    return list(dict.fromkeys(reasons))
+
+
+def has_minimal_automatic_term_evidence(
+    item: dict[str, Any],
+    *,
+    translation: str = "",
+) -> bool:
+    """Validate the extractor's source/target span evidence for an auto term."""
+    term = " ".join(str(item.get("term", "")).split()).strip()
+    target = " ".join(str(item.get("suggested_persian", "")).split()).strip()
+    source_span = " ".join(str(item.get("exact_source_span", "")).split()).strip()
+    target_span = " ".join(str(item.get("exact_target_span", "")).split()).strip()
+    if item.get("context_independent") is not True:
         return False
+    if source_span.casefold() != term.casefold():
+        return False
+    if automatic_terminology_risk_reasons(term, target):
+        return False
+    if translation.strip():
+        if not target_span or _normalise_target(target_span) != _normalise_target(target):
+            return False
+        normalized_translation = " ".join(translation.split())
+        if not re.search(
+            rf"(?<!\w){re.escape(target_span)}(?!\w)",
+            normalized_translation,
+        ):
+            return False
     return True
 
 

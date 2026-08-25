@@ -18,9 +18,11 @@ from tarjomeh.chunking.chunker import Chunk
 from tarjomeh.memory.proper_nouns import (
     ProperNouns,
     has_exact_bilingual_anchor,
+    has_minimal_automatic_term_evidence,
     is_automatic_entity_category,
     is_safe_automatic_entity_mapping,
     is_usable_memory_mapping,
+    low_authority_mapping_category,
 )
 from tarjomeh.memory.bilingual_summary import BilingualSummary
 from tarjomeh.memory.long_term import LongTermMemory
@@ -282,6 +284,7 @@ class MemoryManager:
         long_term_reliable: bool | None = None,
         short_term_trust: str | None = None,
         reliability_reasons: list[str] | None = None,
+        style_excluded_paragraphs: list[int] | None = None,
     ) -> dict[str, Any]:
         """Update synchronous memory layers with a new source-translation pair."""
         body_indices = list(
@@ -336,10 +339,15 @@ class MemoryManager:
             if paragraph.strip()
         ]
         style_translation = translation
+        excluded_style_indices = {
+            int(index) for index in (style_excluded_paragraphs or [])
+            if isinstance(index, int) or str(index).isdigit()
+        }
         if has_body_policy:
             if body_indices and max(body_indices) < len(translation_paragraphs):
                 style_translation = "\n\n".join(
                     translation_paragraphs[index] for index in body_indices
+                    if index not in excluded_style_indices
                 )
             elif not chunk.metadata.get("style_eligible", False):
                 style_translation = ""
@@ -384,17 +392,22 @@ class MemoryManager:
             "structure_eligible": structure_eligible,
             "quality_approved": bool(quality_approved),
             "style_approved": style_quality_approved,
+            "style_excluded_paragraphs": sorted(excluded_style_indices),
             "structural_roles": structural_roles,
         }
 
     def _update_style_profile(self, translation: str) -> None:
         """Maintain a compact book-level style guide from early translations."""
-        text = _clean_style_sample(translation)
-        if not text:
-            return
-
-        if len(self.style_samples) < 5:
-            self.style_samples.append(text)
+        # Select one complete, clean paragraph per chunk. A clean later paragraph
+        # may still provide style evidence when another paragraph in the same
+        # finalized chunk was excluded by grounded QA.
+        for paragraph in re.split(r"\n\s*\n", translation or ""):
+            text = _clean_style_sample(paragraph)
+            if not text:
+                continue
+            if len(self.style_samples) < 5:
+                self.style_samples.append(text)
+            break
 
         self.style_profile = self._render_style_profile()
 
@@ -479,6 +492,7 @@ class MemoryManager:
             accepted = 0
             observed = 0
             aliases_added = 0
+            rejected_details: list[dict[str, str]] = []
             inline_categories = {
                 "proper_noun", "person", "place", "institution",
                 "organization", "organisation", "publication", "product",
@@ -495,6 +509,25 @@ class MemoryManager:
                 persian = str(item.get("suggested_persian", "")).strip()
                 category = str(item.get("category", "term"))
                 if not is_usable_memory_mapping(term, persian):
+                    rejected_details.append({
+                        "source": term,
+                        "reason": "unusable_memory_mapping",
+                    })
+                    continue
+                effective_category = low_authority_mapping_category(
+                    term, persian, category
+                )
+                if (
+                    effective_category == "term"
+                    and not has_minimal_automatic_term_evidence(
+                        item,
+                        translation=translation,
+                    )
+                ):
+                    rejected_details.append({
+                        "source": term,
+                        "reason": "insufficient_minimal_lexical_evidence",
+                    })
                     continue
                 rendered = bool(
                     normalized_translation
@@ -519,6 +552,10 @@ class MemoryManager:
                     # A substring in accepted prose is not proof of a complete
                     # entity rendering. Current-chunk anchor reconciliation owns
                     # durable Persian (English) evidence; defer anything else.
+                    rejected_details.append({
+                        "source": term,
+                        "reason": "missing_exact_bilingual_anchor",
+                    })
                     continue
                 if not is_safe_automatic_entity_mapping(
                     term,
@@ -527,6 +564,10 @@ class MemoryManager:
                     text,
                     translation=translation,
                 ):
+                    rejected_details.append({
+                        "source": term,
+                        "reason": "unsafe_automatic_mapping",
+                    })
                     continue
                 provenance = (
                     "observed_translation" if observed_rendering
@@ -559,6 +600,7 @@ class MemoryManager:
                 "observed_translation_count": observed,
                 "alias_count": aliases_added,
                 "rejected_count": max(0, len(candidates) - accepted),
+                "rejected_details": rejected_details[:50],
             }
         except Exception as exc:
             logger.warning("Failed to extract proper nouns incrementally: %s", exc)

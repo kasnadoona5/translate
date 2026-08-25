@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+cd /opt/translate
+
+TAG="v10.11.0"
+CONTAINER="translate_tarjomeh_1"
+SERVICE="tarjomeh"
+STAMP="$(date +%Y%m%d-%H%M%S)"
+BACKUP_ROOT="/root/tarjomeh-backups"
+BACKUP="$BACKUP_ROOT/v1011-$STAMP"
+ROLLBACK="translate_tarjomeh:rollback-v1011-$STAMP"
+
+if docker compose version >/dev/null 2>&1; then
+    COMPOSE=(docker compose)
+else
+    COMPOSE=(docker-compose)
+fi
+
+echo "========== PRECHECK =========="
+git rev-parse HEAD
+git status --short
+df -h /
+docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
+
+OTHER_TRACKED="$(
+    git status --porcelain --untracked-files=no |
+    grep -v '^ M glossary/academic_political_theory.csv$' || true
+)"
+if [ -n "$OTHER_TRACKED" ]; then
+    echo "STOPPED: tracked files other than the local glossary are modified."
+    printf '%s\n' "$OTHER_TRACKED"
+    exit 1
+fi
+
+ACTIVE_JOBS="$(
+    docker exec -i "$CONTAINER" python - <<'PY' 2>/dev/null || true
+import sqlite3
+db = sqlite3.connect("/app/jobs/jobs.db")
+rows = db.execute(
+    "SELECT id,status FROM jobs WHERE status IN ('processing','pausing')"
+).fetchall()
+for job_id, status in rows:
+    print(job_id, status)
+PY
+)"
+if [ -n "$ACTIVE_JOBS" ]; then
+    echo "STOPPED: an active job must finish or pause before deployment."
+    printf '%s\n' "$ACTIVE_JOBS"
+    exit 1
+fi
+
+NINE_IMAGE="$(docker inspect -f '{{.Image}}' 9router)"
+NINE_STARTED="$(docker inspect -f '{{.State.StartedAt}}' 9router)"
+OLD_IMAGE="$(docker inspect -f '{{.Image}}' "$CONTAINER")"
+docker image tag "$OLD_IMAGE" "$ROLLBACK"
+
+mkdir -p "$BACKUP"
+gzip -c jobs/jobs.db > "$BACKUP/jobs.db.gz"
+cp -a .env config.toml "$BACKUP/"
+GLOSSARY_COPY=""
+if ! git diff --quiet -- glossary/academic_political_theory.csv; then
+    GLOSSARY_COPY="/tmp/tarjomeh-glossary-$STAMP.csv"
+    cp -a glossary/academic_political_theory.csv "$GLOSSARY_COPY"
+fi
+
+echo "========== UPDATE SOURCE =========="
+git fetch origin main --tags
+git checkout main
+git merge --ff-only origin/main
+[ "$(git rev-parse HEAD)" = "$(git rev-list -n 1 "$TAG")" ] || {
+    echo "STOPPED: origin/main is not $TAG"
+    exit 1
+}
+if [ -n "$GLOSSARY_COPY" ]; then
+    cp -a "$GLOSSARY_COPY" glossary/academic_political_theory.csv
+    rm -f -- "$GLOSSARY_COPY"
+    echo "Local glossary restored byte-for-byte."
+fi
+
+echo "========== SAFE SPACE CLEANUP =========="
+apt-get clean
+journalctl --vacuum-time=3d || true
+docker builder prune -af
+docker container prune -f --filter "label=com.docker.compose.project=translate"
+
+# Keep the two newest release backups. Only validated children of BACKUP_ROOT
+# are removed; the running 9router container and image are never targeted.
+mapfile -t OLD_BACKUPS < <(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 \
+    -type d -printf '%T@ %p\n' | sort -rn | tail -n +3 | cut -d' ' -f2-)
+for old in "${OLD_BACKUPS[@]}"; do
+    case "$old" in
+        "$BACKUP_ROOT"/*) rm -rf -- "$old" ;;
+        *) echo "Refusing unexpected backup path: $old"; exit 1 ;;
+    esac
+done
+
+for image in $(docker images --filter dangling=true -q | sort -u); do
+    [ "$image" = "$NINE_IMAGE" ] && continue
+    [ "$image" = "$OLD_IMAGE" ] && continue
+    docker image rm "$image" >/dev/null 2>&1 || true
+done
+
+AVAILABLE_KB="$(df -Pk / | awk 'NR==2 {print $4}')"
+df -h /
+if [ "$AVAILABLE_KB" -lt 1750000 ]; then
+    echo "STOPPED: less than 1.75 GB is available after safe cleanup."
+    echo "Source and backup are ready; no container was replaced."
+    exit 1
+fi
+
+echo "========== BUILD TARJOMEH =========="
+"${COMPOSE[@]}" build --no-cache "$SERVICE"
+
+echo "========== VERIFY IMAGE =========="
+docker run --rm --entrypoint python translate_tarjomeh:latest -c '
+from pathlib import Path
+import tarjomeh
+r = Path(tarjomeh.__file__).resolve().parent
+sources = {
+    "pipeline": (r / "core" / "pipeline.py").read_text(encoding="utf-8"),
+    "prompts": (r / "core" / "prompts.py").read_text(encoding="utf-8"),
+    "manager": (r / "memory" / "manager.py").read_text(encoding="utf-8"),
+    "proper": (r / "memory" / "proper_nouns.py").read_text(encoding="utf-8"),
+    "summary": (r / "memory" / "bilingual_summary.py").read_text(encoding="utf-8"),
+}
+checks = {
+    "minimal_term_evidence": "has_minimal_automatic_term_evidence" in sources["proper"],
+    "term_risk_reasons": "automatic_terminology_risk_reasons" in sources["proper"],
+    "style_paragraph_policy": "_chunk_style_policy" in sources["pipeline"],
+    "style_exclusions": "style_excluded_paragraphs" in sources["manager"],
+    "directional_filter": "_DIRECTIONAL_CONTROL_RE" in sources["summary"],
+    "accuracy_before_fluency": "Accuracy and completeness outrank fluency" in sources["prompts"],
+}
+print(checks)
+assert all(checks.values()), checks
+print("IMAGE_V1011_CONFIRMED")
+'
+
+echo "========== RECREATE TARJOMEH ONLY =========="
+docker rm -f "$CONTAINER"
+"${COMPOSE[@]}" up -d --no-deps "$SERVICE"
+
+echo "========== WAIT FOR HEALTH =========="
+for attempt in $(seq 1 30); do
+    status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$CONTAINER")"
+    echo "Attempt $attempt: $status"
+    [ "$status" = "healthy" ] && break
+    sleep 5
+done
+[ "$(docker inspect -f '{{.State.Health.Status}}' "$CONTAINER")" = "healthy" ]
+
+echo "========== VERIFY RUNNING V10.11 =========="
+docker exec -i "$CONTAINER" python -c '
+from pathlib import Path
+import tarjomeh
+r = Path(tarjomeh.__file__).resolve().parent
+p = (r / "core" / "pipeline.py").read_text(encoding="utf-8")
+m = (r / "memory" / "manager.py").read_text(encoding="utf-8")
+n = (r / "memory" / "proper_nouns.py").read_text(encoding="utf-8")
+s = (r / "memory" / "bilingual_summary.py").read_text(encoding="utf-8")
+checks = {
+    "minimal_term_evidence": "has_minimal_automatic_term_evidence" in n,
+    "style_paragraph_policy": "_chunk_style_policy" in p,
+    "style_exclusions": "style_excluded_paragraphs" in m,
+    "directional_filter": "_DIRECTIONAL_CONTROL_RE" in s,
+}
+print(checks)
+assert all(checks.values()), checks
+print("RUNNING_V1011_CONFIRMED")
+'
+
+echo "========== VERIFY 9ROUTER UNCHANGED =========="
+[ "$(docker inspect -f '{{.Image}}' 9router)" = "$NINE_IMAGE" ]
+[ "$(docker inspect -f '{{.State.StartedAt}}' 9router)" = "$NINE_STARTED" ]
+
+echo "========== TARJOMEH-ONLY FINAL CLEANUP =========="
+docker image rm "$ROLLBACK" >/dev/null 2>&1 || true
+docker builder prune -af
+
+echo "========== FINAL STATE =========="
+git rev-parse HEAD
+git tag --points-at HEAD
+docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
+df -h /
+docker system df
+echo "Deployment $TAG completed. Running 9router was unchanged."

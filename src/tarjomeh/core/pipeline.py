@@ -45,11 +45,14 @@ from tarjomeh.chunking.chunker import SemanticChunker, FixedChunker, Chunk
 from tarjomeh.memory.manager import MemoryManager, MemoryContext
 from tarjomeh.memory.proper_nouns import (
     INLINE_ORIGINAL_CATEGORIES,
+    automatic_terminology_risk_reasons,
     has_exact_observed_anchor,
+    has_minimal_automatic_term_evidence,
     is_safe_automatic_source_span,
     is_safe_automatic_entity_mapping,
     is_safe_low_authority_mapping,
     is_reusable_terminology_mapping,
+    low_authority_mapping_category,
     looks_like_transliterated_loanword,
     observed_bilingual_target,
     source_term_present,
@@ -2143,10 +2146,18 @@ def _chunk_needs_review(db: Any, job_id: str, chunk_index: int) -> bool:
     )
 
 
-def _chunk_style_approved(db: Any, job_id: str, chunk_index: int) -> bool:
-    """Admit only clean, high-quality prose into the persistent style guide."""
+def _chunk_style_policy(
+    db: Any,
+    job_id: str,
+    chunk_index: int,
+) -> dict[str, Any]:
+    """Select clean paragraph-level style evidence from finalized prose."""
     if _chunk_needs_review(db, job_id, chunk_index):
-        return False
+        return {
+            "approved": False,
+            "excluded_paragraphs": [],
+            "reason": "chunk_needs_review",
+        }
     events = db.get_chunk_events(job_id, chunk_index)
     last_start = 0
     for index, event in enumerate(events):
@@ -2158,12 +2169,24 @@ def _chunk_style_approved(db: Any, job_id: str, chunk_index: int) -> bool:
         if event.get("event_type") == "critique_completed"
     ]
     if not critiques:
-        return True
+        return {
+            "approved": True,
+            "excluded_paragraphs": [],
+            "reason": "no_critique_required",
+        }
     latest = critiques[-1]
     if not bool(latest.get("valid", True)):
-        return False
+        return {
+            "approved": False,
+            "excluded_paragraphs": [],
+            "reason": "invalid_final_critique",
+        }
     if int(latest.get("blocking_issue_count", 0) or 0):
-        return False
+        return {
+            "approved": False,
+            "excluded_paragraphs": [],
+            "reason": "blocking_final_critique",
+        }
     # Minor, non-blocking observations should not leave a long book without a
     # voice anchor. Major or critical unresolved issues still disqualify the
     # sample, while continuity memory remains available under its own trust.
@@ -2174,16 +2197,41 @@ def _chunk_style_approved(db: Any, job_id: str, chunk_index: int) -> bool:
         for detail in issue_details
         if isinstance(detail, dict)
     ):
-        return False
+        return {
+            "approved": False,
+            "excluded_paragraphs": [],
+            "reason": "major_or_critical_final_issue",
+        }
+    excluded: set[int] = set()
+    for detail in issue_details:
+        if not isinstance(detail, dict):
+            continue
+        match = re.fullmatch(
+            r"p(?P<paragraph>\d+):s\d+",
+            str(detail.get("source_segment_id", "")).strip(),
+            re.IGNORECASE,
+        )
+        if match:
+            excluded.add(max(0, int(match.group("paragraph")) - 1))
     scores = latest.get("scores", {}) or {}
     dimensions = ("accuracy", "fluency", "terminology", "register")
     try:
-        return (
+        approved = (
             all(float(scores.get(name, 0)) >= 8.0 for name in dimensions)
             and float(scores.get("average", 0)) >= 9.0
         )
     except (TypeError, ValueError):
-        return False
+        approved = False
+    return {
+        "approved": approved,
+        "excluded_paragraphs": sorted(excluded),
+        "reason": "clean_final_critique" if approved else "style_score_below_floor",
+    }
+
+
+def _chunk_style_approved(db: Any, job_id: str, chunk_index: int) -> bool:
+    """Backward-compatible boolean view of paragraph-level style admission."""
+    return bool(_chunk_style_policy(db, job_id, chunk_index)["approved"])
 
 
 def _chunk_memory_admission(
@@ -2225,13 +2273,17 @@ def _chunk_memory_admission(
         try:
             average = float(scores.get("average", 0) or 0)
             accuracy = float(scores.get("accuracy", 0) or 0)
+            fluency = float(scores.get("fluency", 0) or 0)
             terminology = float(scores.get("terminology", 0) or 0)
+            register = float(scores.get("register", 0) or 0)
         except (TypeError, ValueError):
-            average = accuracy = terminology = 0.0
+            average = accuracy = fluency = terminology = register = 0.0
         if average < float(critique_threshold):
             reasons.append("final_critique_below_configured_threshold")
         if accuracy < 8.0 or terminology < 8.0:
             reasons.append("semantic_dimension_below_memory_floor")
+        if fluency < 8.0 or register < 8.0:
+            reasons.append("persian_prose_dimension_below_memory_floor")
 
     if any(
         event.get("event_type") == "language_quality_review"
@@ -3362,15 +3414,35 @@ class TranslationPipeline:
                     extracted_terms = ner_data.get("terms", []) or ner_data.get("extracted_terms", []) or []
                 else:
                     extracted_terms = []
-                auto_terms: dict[str, str | dict[str, Any]] = {}
+                auto_terms: dict[str, dict[str, Any]] = {}
+                rejected_auto_terms: list[dict[str, str]] = []
                 for item in extracted_terms:
                     term = item.get("term")
                     persian = item.get("suggested_persian")
                     if term and persian:
                         category = str(item.get("category", "term"))
+                        effective_category = low_authority_mapping_category(
+                            str(term), str(persian), category
+                        )
+                        if (
+                            effective_category == "term"
+                            and not has_minimal_automatic_term_evidence(item)
+                        ):
+                            rejected_auto_terms.append({
+                                "source": str(term),
+                                "reason": "insufficient_minimal_lexical_evidence",
+                            })
+                            continue
                         if not is_safe_low_authority_mapping(
                             str(term), str(persian), category
                         ):
+                            reasons = automatic_terminology_risk_reasons(
+                                str(term), str(persian)
+                            )
+                            rejected_auto_terms.append({
+                                "source": str(term),
+                                "reason": reasons[0] if reasons else "unsafe_automatic_mapping",
+                            })
                             continue
                         auto_terms[term] = {
                             "target": persian,
@@ -3379,6 +3451,7 @@ class TranslationPipeline:
                             "sense": item.get("sense", ""),
                             "author": item.get("author", ""),
                             "category": category,
+                            "evidence_status": "minimal_context_independent",
                         }
                         memory_manager.proper_nouns.add_noun(
                             term,
@@ -3396,6 +3469,8 @@ class TranslationPipeline:
                     job_id, 0, "auto_extraction_completed", {
                         "model_candidates": len(extracted_terms),
                         "accepted_terms": len(auto_terms),
+                        "rejected_terms": len(rejected_auto_terms),
+                        "rejected_details": rejected_auto_terms[:50],
                         "terms": [
                             {
                                 "source": source,
@@ -3516,17 +3591,22 @@ class TranslationPipeline:
                             idx,
                             self.config.translation.critique_threshold,
                         )
+                        style_policy = _chunk_style_policy(
+                            self.db, job_id, idx
+                        )
                         memory_policy = memory_manager.update_after_translation(
                             chunk,
                             translation,
                             quality_approved=memory_admission["quality_approved"],
-                            style_approved=_chunk_style_approved(
-                                self.db, job_id, idx
-                            ),
+                            style_approved=style_policy["approved"],
                             long_term_reliable=memory_admission["long_term_reliable"],
                             short_term_trust=memory_admission["short_term_trust"],
                             reliability_reasons=memory_admission["reliability_reasons"],
+                            style_excluded_paragraphs=style_policy[
+                                "excluded_paragraphs"
+                            ],
                         )
+                        memory_policy["style_policy_reason"] = style_policy["reason"]
                         self.db.log_chunk_event(
                             job_id, idx, "memory_update_policy", memory_policy
                         )
@@ -3757,17 +3837,22 @@ class TranslationPipeline:
                             idx,
                             self.config.translation.critique_threshold,
                         )
+                        style_policy = _chunk_style_policy(
+                            self.db, job_id, idx
+                        )
                         memory_policy = memory_manager.update_after_translation(
                             chunk,
                             translation,
                             quality_approved=memory_admission["quality_approved"],
-                            style_approved=_chunk_style_approved(
-                                self.db, job_id, idx
-                            ),
+                            style_approved=style_policy["approved"],
                             long_term_reliable=memory_admission["long_term_reliable"],
                             short_term_trust=memory_admission["short_term_trust"],
                             reliability_reasons=memory_admission["reliability_reasons"],
+                            style_excluded_paragraphs=style_policy[
+                                "excluded_paragraphs"
+                            ],
                         )
+                        memory_policy["style_policy_reason"] = style_policy["reason"]
                         self.db.log_chunk_event(
                             job_id, idx, "memory_update_policy", memory_policy
                         )
@@ -4865,17 +4950,18 @@ class TranslationPipeline:
             chunk_index,
             self.config.translation.critique_threshold,
         )
+        style_policy = _chunk_style_policy(self.db, job_id, chunk_index)
         memory_policy = memory_manager.update_after_translation(
             chunks[chunk_index],
             translation,
             quality_approved=memory_admission["quality_approved"],
-            style_approved=_chunk_style_approved(
-                self.db, job_id, chunk_index
-            ),
+            style_approved=style_policy["approved"],
             long_term_reliable=memory_admission["long_term_reliable"],
             short_term_trust=memory_admission["short_term_trust"],
             reliability_reasons=memory_admission["reliability_reasons"],
+            style_excluded_paragraphs=style_policy["excluded_paragraphs"],
         )
+        memory_policy["style_policy_reason"] = style_policy["reason"]
         self.db.log_chunk_event(
             job_id, chunk_index, "memory_update_policy", memory_policy
         )

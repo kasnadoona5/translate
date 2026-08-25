@@ -45,6 +45,8 @@ Target dialect / country: {country}
 
 Core directives:
 • Maintain the precise meaning and nuance of the source English text.
+• Accuracy and completeness outrank fluency. Natural Persian must never simplify,
+  omit, generalize, reinterpret, or weaken the source.
 • Use formal academic Persian appropriate for scholarly publication in {country}.
 • Follow established Persian academic conventions for transliteration of proper nouns.
   - For transliteration, use the accepted Iranian academic standard.
@@ -125,6 +127,8 @@ Translate the following English academic text into Persian (فارسی).
 
 Instructions:
 1. Translate the entire source text faithfully into academic Persian.
+   Accuracy and completeness outrank fluency: fluent Persian must never simplify,
+   omit, generalize, reinterpret, or weaken the source.
    Before emitting the answer, ensure that every source proposition and
    qualification is represented, every finite Persian clause has an identifiable
    predicate, pronoun referents and modifier attachments are clear, and no English
@@ -132,6 +136,8 @@ Instructions:
    Prefer natural Persian clause order. Split or reorganize sentences inside the
    same paragraph when that improves comprehension without merging claims,
    deleting qualifications, adding interpretation, or changing logical relations.
+   Do not improve readability by simplifying the author's theory, replacing a
+   precise relation with a looser paraphrase, or suppressing deliberate complexity.
 2. Apply every entry marked mandatory using its prescribed lexical rendering and
    standard Persian orthography. Treat entries marked advisory as non-binding context.
 3. Ensure stylistic and terminological continuity with the preceding translation.
@@ -235,6 +241,11 @@ MQM rules:
 - Treat source-order calques, opaque modifier stacks, unclear attachment or referents,
   excessive nominalization, malformed participles, and coordinated conceptual series
   whose distinctions or parallelism were lost as objective fluency issues.
+- Compare every source sentence with its Persian counterpart before scoring. Check
+  predicate completeness, semantic roles and valency, scope and modifier attachment,
+  coordinated parallel terms, and accidental duplication of one meaning in two
+  Persian predicates. A fluent alternative is acceptable only if all source content
+  and technical precision remain unchanged.
 - A sentence may be formally worded yet still be unpublishable if a Persian reader
   must reconstruct its English syntax to understand it. Report that defect precisely.
 - A ZWNJ/spacing-only difference is not a terminology error. Use typography only
@@ -344,6 +355,9 @@ IMPORTANT — Identification method:
 • Use category "technical_loanword" only when Persian scholarly prose normally
   transliterates the source label rather than replacing it with an established
   Persian lexical equivalent. Do not use it for ordinary translated concepts.
+• For category "term", return only a minimal, reusable lexical equivalent. Never
+  absorb a nearby subject, object, author, field, time, or other contextual modifier.
+  Set context_independent to false when no context-neutral equivalent is evidenced.
 
 ### Text
 {text}
@@ -354,7 +368,10 @@ Return a JSON array where each element has this schema:
     "term": "<English term as it appears in text>",
     "category": "person" | "place" | "institution" | "organization" | "publication" | "product" | "theory" | "technical_loanword" | "term",
     "context": "<short phrase showing how the term is used>",
-    "suggested_persian": "<suggested Persian transliteration or translation, or null>"
+    "suggested_persian": "<minimal Persian transliteration or lexical equivalent, or null>",
+    "exact_source_span": "<the exact source term only>",
+    "exact_target_span": "<exact Persian span if accepted text is supplied, otherwise empty>",
+    "context_independent": <true only when suggested_persian adds no surrounding context>
   }}
 ]
 
@@ -375,6 +392,10 @@ IMPORTANT — Identification method:
   named theories/doctrines, and domain-specific academic terms. Classify a
   specialist label as "technical_loanword" only when its Persian rendering is
   a transliteration rather than an established lexical translation.
+• For category "term", return only a minimal, reusable lexical equivalent. Never
+  include a nearby subject, object, author, field, time, or contextual modifier.
+  Set context_independent to false if the accepted Persian supplies only a
+  context-bound rendering.
 
 ### Already-known entities (do NOT repeat these)
 {known_entities}
@@ -389,7 +410,10 @@ Each element must have this schema:
     "term": "<English term>",
     "category": "person" | "place" | "institution" | "organization" | "publication" | "product" | "theory" | "technical_loanword" | "term",
     "context": "<short phrase showing how the term is used>",
-    "suggested_persian": "<suggested Persian transliteration or translation, or null>"
+    "suggested_persian": "<minimal Persian transliteration or lexical equivalent, or null>",
+    "exact_source_span": "<the exact source term only>",
+    "exact_target_span": "<exact Persian span copied from accepted text, or empty>",
+    "context_independent": <true only when suggested_persian adds no surrounding context>
   }}
 ]
 

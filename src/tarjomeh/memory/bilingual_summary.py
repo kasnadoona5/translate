@@ -11,6 +11,9 @@ import re
 
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
+_DIRECTIONAL_CONTROL_RE = re.compile(
+    r"[\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]"
+)
 _PROVENANCE_LINE_RE = re.compile(
     r"^(?:provenance\s*:\s*translated content only\.?|"
     r"\u0645\u0646\u0634[\u0623\u0627]\s*:\s*\u0641\u0642\u0637\s+"
@@ -22,7 +25,8 @@ _PROVENANCE_LINE_RE = re.compile(
 
 def _clean_summary_line(value: str) -> str:
     clean = html.unescape(_HTML_TAG_RE.sub("", value or ""))
-    return " ".join(clean.replace("\u200e", "").replace("\u200f", "").split())
+    clean = _DIRECTIONAL_CONTROL_RE.sub("", clean)
+    return " ".join(clean.split())
 
 
 def _deduplicate_summary_lines(lines: list[str]) -> list[str]:

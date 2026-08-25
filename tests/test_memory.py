@@ -175,7 +175,12 @@ class TestMemoryManager(unittest.IsolatedAsyncioTestCase):
         mock_llm.chat = AsyncMock()
         
         # 1. Test update_proper_nouns
-        mock_llm.chat.return_value = '[{"term": "Hegemony", "suggested_persian": "هژمونی"}]'
+        mock_llm.chat.return_value = (
+            '[{"term": "Hegemony", "category": "term", '
+            '"suggested_persian": "هژمونی", '
+            '"exact_source_span": "Hegemony", '
+            '"exact_target_span": "", "context_independent": true}]'
+        )
         await self.manager.update_proper_nouns(mock_llm, "English text discussing Hegemony")
         mock_llm.set_operation.assert_called_with("proper_noun_initial")
         self.assertEqual(
