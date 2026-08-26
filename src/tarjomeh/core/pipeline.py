@@ -1320,6 +1320,10 @@ def _anchor_only_repair_is_valid(
     categories: dict[str, str],
 ) -> bool:
     """Accept a model anchor repair only when exact parentheticals were inserted."""
+    before_paragraphs = split_paragraphs(before)
+    after_paragraphs = split_paragraphs(after)
+    if len(before_paragraphs) != len(after_paragraphs):
+        return False
     stripped = after or ""
     for source in required_originals:
         if not has_exact_observed_anchor(stripped, source):
@@ -1337,7 +1341,34 @@ def _anchor_only_repair_is_valid(
             count=1,
             flags=re.IGNORECASE,
         )
-    return normalize_for_match(stripped) == normalize_for_match(before)
+    if normalize_for_match(stripped) != normalize_for_match(before):
+        return False
+
+    # Validate each structural paragraph independently. This keeps first-use
+    # anchors in their heading, list row, table cell, or prose paragraph and
+    # prevents whitespace normalization from hiding a cross-boundary move.
+    stripped_paragraphs = list(after_paragraphs)
+    for index, paragraph in enumerate(stripped_paragraphs):
+        cleaned = paragraph
+        for source in required_originals:
+            words = [re.escape(part) for part in source.split()]
+            body = r"\s+".join(words)
+            cleaned = re.sub(
+                rf"\s*\(\s*{body}"
+                rf"(?:\s+(?:1[5-9]\d{{2}}|20\d{{2}})[a-z]?)?"
+                rf"(?:\s*,\s*[^()\n]{{1,120}})?\s*\)",
+                "",
+                cleaned,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+        stripped_paragraphs[index] = cleaned
+    return all(
+        normalize_for_match(cleaned) == normalize_for_match(original)
+        for original, cleaned in zip(
+            before_paragraphs, stripped_paragraphs, strict=True
+        )
+    )
 
 
 def _required_anchor_repair_prompt(
@@ -1735,18 +1766,19 @@ def _salvage_local_refinement_edits(
 
         return sorted(repeats(after) - repeats(before))
 
-    for raw in issue_decisions:
+    prepared: list[dict[str, Any]] = []
+    paragraph_groups: dict[int, list[dict[str, Any]]] = {}
+    for order, raw in enumerate(issue_decisions):
         decision = dict(raw)
         issue_id = str(decision.get("issue_id", "")).strip()
         choice = str(decision.get("decision", "")).strip().lower()
         current_span = str(
             issues.get(issue_id, {}).get("current_persian_quote", "")
         ).strip()
-        resulting_span = str(decision.get("resulting_span", "")).strip()
-        resulting_span = apply_safe_persian_orthography(resulting_span)[0]
+        resulting_span = apply_safe_persian_orthography(
+            str(decision.get("resulting_span", "")).strip()
+        )[0]
         reason = ""
-        integrity_payload: dict[str, Any] | None = None
-
         if choice not in {"accepted", "partially_applied"}:
             reason = "refiner_rejected"
         elif not current_span or not resulting_span:
@@ -1755,7 +1787,7 @@ def _salvage_local_refinement_edits(
             reason = "no_textual_change"
         elif issue_id in overlapping_ids:
             reason = "overlapping_local_span"
-        elif current.count(current_span) != 1:
+        elif previous.count(current_span) != 1:
             reason = "current_span_not_unique"
         elif resulting_span not in proposed:
             reason = "resulting_span_not_in_candidate"
@@ -1765,11 +1797,43 @@ def _salvage_local_refinement_edits(
             reason = "edit_not_local"
         elif not 0.5 <= len(resulting_span) / max(1, len(current_span)) <= 2.0:
             reason = "local_size_ratio_out_of_bounds"
-        else:
-            candidate = current.replace(current_span, resulting_span, 1)
+        item = {
+            "order": order,
+            "decision": decision,
+            "issue_id": issue_id,
+            "choice": choice,
+            "current_span": current_span,
+            "resulting_span": resulting_span,
+            "reason": reason,
+            "integrity": None,
+            "committed": False,
+        }
+        prepared.append(item)
+        if not reason:
+            start = previous.find(current_span)
+            paragraph = previous.count("\n\n", 0, start)
+            paragraph_groups.setdefault(paragraph, []).append(item)
+
+    # All accepted edits touching one paragraph are admitted or rejected as a
+    # coherent unit. This prevents individually valid substitutions from
+    # producing a broken dependency when combined.
+    for paragraph in sorted(paragraph_groups):
+        group = paragraph_groups[paragraph]
+        candidate = current
+        failed_reason = ""
+        for item in sorted(group, key=lambda value: int(value["order"])):
+            current_span = str(item["current_span"])
+            if candidate.count(current_span) != 1:
+                failed_reason = "group_span_not_unique"
+                break
+            candidate = candidate.replace(
+                current_span, str(item["resulting_span"]), 1
+            )
+        integrity_payload: dict[str, Any] | None = None
+        if not failed_reason:
             repeated_words = newly_repeated_adjacent_words(current, candidate)
             if repeated_words:
-                reason = "new_adjacent_word_repetition"
+                failed_reason = "new_adjacent_word_repetition"
                 integrity_payload = {"repeated_words": repeated_words}
             else:
                 integrity = integrity_gate.evaluate(
@@ -1782,16 +1846,25 @@ def _salvage_local_refinement_edits(
                     allowed_inline_originals=allowed_inline_originals,
                 )
                 integrity_payload = integrity.to_dict()
-                if integrity.accepted:
-                    current = candidate
-                    committed += 1
-                    reason = "local_edit_committed"
-                else:
-                    reason = "local_integrity_rejected"
+                if not integrity.accepted:
+                    failed_reason = "local_integrity_rejected"
+        for item in group:
+            item["integrity"] = integrity_payload
+            item["reason"] = failed_reason or "local_edit_committed"
+            item["committed"] = not failed_reason
+        if not failed_reason:
+            current = candidate
+            committed += len(group)
 
-        was_committed = reason == "local_edit_committed"
+    for item in sorted(prepared, key=lambda value: int(value["order"])):
+        decision = dict(cast(dict[str, Any], item["decision"]))
+        was_committed = bool(item["committed"])
+        integrity_payload = cast(
+            dict[str, Any] | None, item["integrity"]
+        )
+        reason = str(item["reason"])
         decision.update({
-            "resulting_span": resulting_span,
+            "resulting_span": item["resulting_span"],
             "commit_status": "committed_local" if was_committed else "not_committed",
             "integrity_status": (
                 "accepted" if was_committed
@@ -1802,12 +1875,14 @@ def _salvage_local_refinement_edits(
         })
         enriched.append(decision)
         attempts.append({
-            "issue_id": issue_id,
-            "decision": choice,
+            "issue_id": item["issue_id"],
+            "decision": item["choice"],
             "committed": was_committed,
             "reason": reason,
-            "before_chars": len(current_span),
-            "after_chars": len(resulting_span),
+            "current_span": item["current_span"],
+            "resulting_span": item["resulting_span"],
+            "before_chars": len(str(item["current_span"])),
+            "after_chars": len(str(item["resulting_span"])),
             "integrity": integrity_payload,
         })
 
@@ -2016,6 +2091,7 @@ def _critique_for_event(critique: Any, threshold: float, iteration: int) -> dict
                     "suggested_correction", "rationale", "risk_flags",
                     "suggestion_orthography_normalized",
                     "source_segment_id_corrected",
+                    "readability_advisory",
                 )
             }
             for detail in list(getattr(critique, "issue_details", []) or [])
@@ -2144,6 +2220,113 @@ def _chunk_needs_review(db: Any, job_id: str, chunk_index: int) -> bool:
         )
         for event in current_events
     )
+
+
+_READABILITY_EXCLUDED_ROLES = frozenset({
+    "bibliography", "contents_entry", "front_matter", "heading", "index",
+    "list", "reference", "table", "title",
+})
+
+
+def _readability_review_eligible(
+    chunk: Any,
+    critique: Any,
+    threshold: float,
+    iteration: int,
+) -> bool:
+    """Use one target-only pass only when source-aware review found a need."""
+    if iteration != 0 or _is_front_matter(chunk):
+        return False
+    metadata = getattr(chunk, "metadata", None) or {}
+    roles = {
+        str(role).strip().casefold()
+        for role in list(metadata.get("structural_roles", []) or [])
+    }
+    if roles.intersection(_READABILITY_EXCLUDED_ROLES):
+        return False
+    details = list(getattr(critique, "issue_details", []) or [])
+    has_grounded_fluency_issue = any(
+        str(detail.get("category", "")).casefold() in {"fluency", "register"}
+        for detail in details
+    )
+    return bool(
+        getattr(critique, "valid", True)
+        and (
+            float(getattr(critique, "fluency", 10.0)) < threshold
+            or has_grounded_fluency_issue
+        )
+    )
+
+
+def _merge_readability_evidence(
+    critique: Any,
+    readability_issues: list[dict[str, Any]],
+) -> tuple[int, list[dict[str, Any]]]:
+    """Attach target-only evidence only to an already source-grounded issue."""
+    matched = 0
+    unmatched: list[dict[str, Any]] = []
+    details = list(getattr(critique, "issue_details", []) or [])
+    for readability in readability_issues:
+        quote = str(readability.get("current_persian_quote", "")).strip()
+        quote_key = normalize_for_match(quote)
+        destination = next((
+            detail for detail in details
+            if str(detail.get("category", "")).casefold() in {"fluency", "register"}
+            and quote_key
+            and (
+                quote_key in normalize_for_match(
+                    str(detail.get("current_persian_quote", ""))
+                )
+                or normalize_for_match(
+                    str(detail.get("current_persian_quote", ""))
+                ) in quote_key
+            )
+        ), None)
+        if destination is None:
+            unmatched.append(readability)
+            continue
+        destination["readability_advisory"] = {
+            "severity": readability.get("severity"),
+            "current_persian_quote": quote,
+            "suggested_correction": readability.get("suggested_correction"),
+            "rationale": readability.get("rationale"),
+            "authority": "target_only_advisory",
+        }
+        matched += 1
+    return matched, unmatched
+
+
+def _salvage_regression_details(
+    critique: Any,
+    salvage: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Find high-confidence new defects touching locally salvaged wording."""
+    changed_spans = [
+        normalize_for_match(str(attempt.get("resulting_span", "")))
+        for attempt in list(salvage.get("attempts", []) or [])
+        if attempt.get("committed") and attempt.get("resulting_span")
+    ]
+    regressions: list[dict[str, Any]] = []
+    for detail in list(getattr(critique, "issue_details", []) or []):
+        severity = str(detail.get("severity", "")).casefold()
+        category = str(detail.get("category", "")).casefold()
+        confidence = float(detail.get("confidence", 0.5) or 0.5)
+        current = normalize_for_match(
+            str(detail.get("current_persian_quote", ""))
+        )
+        serious = severity == "critical" or (
+            severity == "major"
+            and category in {
+                "accuracy", "addition", "fluency", "name", "number",
+                "omission", "register", "terminology",
+            }
+        )
+        if serious and confidence >= 0.8 and any(
+            span and (span in current or current in span)
+            for span in changed_spans
+        ):
+            regressions.append(detail)
+    return regressions
 
 
 def _chunk_style_policy(
@@ -6161,6 +6344,8 @@ class TranslationPipeline:
             current_integrity_accepted = baseline_integrity_accepted
             accepted_versions = [translation] if current_integrity_accepted else []
             evaluated_versions: list[tuple[str, Any]] = []
+            pending_salvage: dict[str, Any] | None = None
+            pending_salvage_baseline = ""
             for ref_iter in range(self.config.translation.max_refine_iterations + 1):
                 try:
                     critique_rep = self._run_async(
@@ -6265,6 +6450,53 @@ class TranslationPipeline:
                             ),
                         }
                     )
+                if (
+                    hasattr(critique_tool, "review_persian_readability")
+                    and _readability_review_eligible(
+                        chunk, critique_rep, threshold, ref_iter
+                    )
+                ):
+                    readability_payload: dict[str, Any] = {
+                        "iteration": ref_iter,
+                        "attempted": True,
+                        "authority": "target_only_advisory",
+                    }
+                    try:
+                        readability = self._run_async(
+                            critique_tool.review_persian_readability(translation)
+                        )
+                        readability_issues = list(
+                            getattr(readability, "issues", []) or []
+                        )
+                        if getattr(readability, "valid", True):
+                            matched, unmatched = _merge_readability_evidence(
+                                critique_rep, readability_issues
+                            )
+                        else:
+                            matched, unmatched = 0, readability_issues
+                        readability_payload.update({
+                            "valid": bool(getattr(readability, "valid", True)),
+                            "validation_errors": list(
+                                getattr(readability, "validation_errors", []) or []
+                            ),
+                            "issue_count": len(readability_issues),
+                            "matched_source_grounded_count": matched,
+                            "unmatched_advisory_count": len(unmatched),
+                            "unmatched_advisories": unmatched,
+                        })
+                    except _QUALITY_STAGE_ERRORS as exc:
+                        readability_payload.update({
+                            "valid": False,
+                            "failure_type": type(exc).__name__,
+                            "error": str(exc),
+                            "non_blocking": True,
+                        })
+                    self.db.log_chunk_event(
+                        job_id,
+                        idx,
+                        "persian_readability_review",
+                        readability_payload,
+                    )
                 concept_risks = _high_risk_concepts(critique_rep)
                 if concept_risks:
                     self.db.log_chunk_event(
@@ -6292,6 +6524,52 @@ class TranslationPipeline:
                     "critique_completed",
                     _critique_for_event(critique_rep, threshold, ref_iter),
                 )
+                if pending_salvage is not None:
+                    salvage_regressions = _salvage_regression_details(
+                        critique_rep, pending_salvage
+                    )
+                    if salvage_regressions and pending_salvage_baseline:
+                        rejected_translation = translation
+                        translation = pending_salvage_baseline
+                        last_accepted_translation = translation
+                        current_integrity_accepted = True
+                        self.db.update_chunk(
+                            job_id, idx, ChunkStatus.REFINED, translation
+                        )
+                        self.db.log_chunk_event(
+                            job_id,
+                            idx,
+                            "refinement_salvage_rolled_back",
+                            {
+                                "iteration": ref_iter,
+                                "rejected_chars": len(rejected_translation),
+                                "restored_chars": len(translation),
+                                "regression_count": len(salvage_regressions),
+                                "regressions": salvage_regressions,
+                                "message": (
+                                    "Source-aware review found a new serious "
+                                    "defect in locally salvaged wording; the "
+                                    "previous integrity-valid translation was retained."
+                                ),
+                            },
+                        )
+                        self.db.log_chunk_event(
+                            job_id,
+                            idx,
+                            "critique_needs_review",
+                            _explicit_chunk_review_payload(
+                                "refinement_salvage_regression",
+                                detail="refinement_salvage_rolled_back",
+                                message=(
+                                    "A local refinement could not improve the "
+                                    "translation monotonically; prior valid text "
+                                    "was retained for human review."
+                                ),
+                            ),
+                        )
+                        break
+                    pending_salvage = None
+                    pending_salvage_baseline = ""
                 if (
                     getattr(critique_rep, "issue_details", None)
                     and not critique_rep.passes_threshold(threshold)
@@ -6497,6 +6775,20 @@ class TranslationPipeline:
                 proposed_translation, orthography_edits = (
                     apply_safe_persian_orthography(proposed_translation)
                 )
+                proposed_translation, refinement_identifier_repairs = (
+                    restore_source_identifiers(chunk.text, proposed_translation)
+                )
+                if refinement_identifier_repairs["repair_count"]:
+                    self.db.log_chunk_event(
+                        job_id,
+                        idx,
+                        "source_identifiers_restored",
+                        {
+                            "stage": "refinement_candidate",
+                            "iteration": ref_iter + 1,
+                            **refinement_identifier_repairs,
+                        },
+                    )
                 if orthography_edits:
                     self.db.log_chunk_event(
                         job_id, idx, "persian_orthography_normalized", {
@@ -6582,6 +6874,12 @@ class TranslationPipeline:
                     if (local_salvage or {}).get("committed_count")
                     else before_translation
                 )
+                if (local_salvage or {}).get("committed_count"):
+                    pending_salvage = local_salvage
+                    pending_salvage_baseline = before_translation
+                else:
+                    pending_salvage = None
+                    pending_salvage_baseline = ""
                 baseline_was_quarantined = not current_integrity_accepted
                 if edit_accepted or (local_salvage or {}).get("committed_count"):
                     current_integrity_accepted = True

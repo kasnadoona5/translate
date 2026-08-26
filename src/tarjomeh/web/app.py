@@ -1619,6 +1619,26 @@ def _register_api(app: Flask) -> None:
                     )
                     if payload.get("message"):
                         lines.append(f"    {payload.get('message')}")
+                elif event["event_type"] == "persian_readability_review":
+                    lines.append(
+                        "  Persian readability review: "
+                        f"valid={payload.get('valid')} "
+                        f"issues={payload.get('issue_count', 0)} "
+                        "source_grounded_matches="
+                        f"{payload.get('matched_source_grounded_count', 0)} "
+                        "authority=target-only advisory"
+                    )
+                    if payload.get("failure_type"):
+                        lines.append(
+                            "    Non-blocking reviewer failure: "
+                            f"{payload.get('failure_type')}"
+                        )
+                elif event["event_type"] == "refinement_salvage_rolled_back":
+                    lines.append(
+                        "  Refinement salvage rolled back: "
+                        f"regressions={payload.get('regression_count', 0)}; "
+                        "previous integrity-valid translation retained"
+                    )
                 elif event["event_type"] == "glossary_compliance_final":
                     lines.append(
                         f"  Glossary: compliant={payload.get('compliant')} "
@@ -1646,7 +1666,11 @@ def _register_api(app: Flask) -> None:
                     lines.append(
                         f"  Back-translation: score={payload.get('similarity_score')} "
                         f"flagged={payload.get('flagged')} "
-                        f"risks={diagnostics.get('risk_flags', [])}"
+                        f"risks={diagnostics.get('risk_flags', [])} "
+                        f"below_similarity_threshold="
+                        f"{diagnostics.get('below_similarity_threshold')} "
+                        f"threshold={diagnostics.get('similarity_threshold')} "
+                        f"policy={diagnostics.get('similarity_policy', 'advisory_only')}"
                     )
                     if diagnostics.get("missing_entities"):
                         lines.append(

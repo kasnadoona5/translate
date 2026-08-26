@@ -17,7 +17,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from tarjomeh.core.prompts import CRITIQUE_PROMPT
+from tarjomeh.core.prompts import (
+    CRITIQUE_PROMPT,
+    PERSIAN_READABILITY_REVIEW_PROMPT,
+)
 from tarjomeh.core.structured_output import parse_structured_output
 from tarjomeh.persian.orthography import apply_safe_persian_orthography
 from tarjomeh.quality.grounding import (
@@ -113,6 +116,16 @@ class CritiqueResult:
         )
 
 
+@dataclass
+class ReadabilityReviewResult:
+    """Bounded target-only evidence; never an independent edit authority."""
+
+    issues: list[dict[str, Any]] = field(default_factory=list)
+    raw_response: str = ""
+    valid: bool = True
+    validation_errors: list[str] = field(default_factory=list)
+
+
 class TranslationCritique:
     """Evaluates translation quality via an LLM.
 
@@ -193,6 +206,81 @@ class TranslationCritique:
         if result.attempts > 1:
             result.validation_errors = list(dict.fromkeys(all_errors))
         return result
+
+    async def review_persian_readability(
+        self,
+        translation: str,
+    ) -> ReadabilityReviewResult:
+        """Collect exact-span Persian readability evidence without editing."""
+        prompt = PERSIAN_READABILITY_REVIEW_PROMPT.format(
+            translation=translation,
+        )
+        if hasattr(self._llm, "set_operation"):
+            self._llm.set_operation("persian_readability_review")
+        raw = await self._llm.chat(prompt)
+        return self._parse_readability_response(raw, translation)
+
+    @staticmethod
+    def _parse_readability_response(
+        raw: str,
+        translation: str,
+    ) -> ReadabilityReviewResult:
+        try:
+            data = parse_structured_output(raw.strip(), expected=dict)
+        except (json.JSONDecodeError, ValueError) as exc:
+            return ReadabilityReviewResult(
+                raw_response=raw,
+                valid=False,
+                validation_errors=[f"invalid_json: {exc}"],
+            )
+        raw_issues = data.get("issues", []) if isinstance(data, dict) else []
+        if not isinstance(raw_issues, list):
+            return ReadabilityReviewResult(
+                raw_response=raw,
+                valid=False,
+                validation_errors=["issues_must_be_array"],
+            )
+        issues: list[dict[str, Any]] = []
+        errors: list[str] = []
+        seen: set[str] = set()
+        for index, item in enumerate(raw_issues[:4]):
+            if not isinstance(item, dict):
+                errors.append(f"issue_{index}_must_be_object")
+                continue
+            severity = str(item.get("severity", "")).strip().lower()
+            current = str(item.get("current_persian_quote", "")).strip()
+            suggested = str(item.get("suggested_correction", "")).strip()
+            rationale = str(item.get("rationale", "")).strip()
+            item_errors: list[str] = []
+            if severity not in {"major", "minor"}:
+                item_errors.append("severity_invalid")
+            if not current or len(current) > _MAX_QUOTE_CHARS:
+                item_errors.append("current_quote_invalid")
+            elif not _span_is_grounded(current, translation):
+                item_errors.append("current_quote_not_found")
+            if not suggested or len(suggested) > _MAX_FIX_CHARS:
+                item_errors.append("suggestion_invalid")
+            if not rationale or len(rationale) > _MAX_RATIONALE_CHARS:
+                item_errors.append("rationale_invalid")
+            key = _normalize_span(current)
+            if key in seen:
+                item_errors.append("duplicate_issue")
+            if item_errors:
+                errors.extend(f"issue_{index}_{error}" for error in item_errors)
+                continue
+            seen.add(key)
+            issues.append({
+                "severity": severity,
+                "current_persian_quote": current,
+                "suggested_correction": suggested,
+                "rationale": rationale,
+            })
+        return ReadabilityReviewResult(
+            issues=issues,
+            raw_response=raw,
+            valid=not errors,
+            validation_errors=errors,
+        )
 
     @staticmethod
     def _repair_prompt(
@@ -332,7 +420,7 @@ markdown fences, or commentary."""
                 explanation = str(
                     issue.get("rationale", issue.get("explanation", ""))
                 ).strip()
-                preliminary_detail = {
+                preliminary_detail: dict[str, Any] = {
                     "issue_id": _stable_issue_id(category, segment),
                     "category": category,
                     "severity": severity,

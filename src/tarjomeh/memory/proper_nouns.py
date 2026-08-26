@@ -65,6 +65,14 @@ _TRAILING_BOUNDARY_RE = re.compile(
     r"(?:[\u064b-\u065f\u0670\u06d6-\u06ed\u200c]|"
     r"(?:^|\s)(?:از|به|با|در|برای|که|و|یا|اما|تا|را))\s*$"
 )
+_PERSIAN_CONTEXT_LEADERS = frozenset({
+    "\u0627\u0632", "\u0628\u0647", "\u0628\u0627", "\u062f\u0631", "\u0628\u0631", "\u0628\u0631\u0627\u06cc",
+    "\u062a\u0648\u0633\u0637", "\u062f\u0631\u0628\u0627\u0631\u0647", "\u067e\u06cc\u0631\u0627\u0645\u0648\u0646", "\u062a\u0627",
+})
+_PERSIAN_CONTEXT_TRAILERS = frozenset({
+    "\u0627\u0632", "\u0628\u0647", "\u0628\u0627", "\u062f\u0631", "\u0628\u0631", "\u0628\u0631\u0627\u06cc", "\u06a9\u0647", "\u0648", "\u06cc\u0627",
+    "\u0627\u0645\u0627", "\u062a\u0627", "\u0631\u0627", "\u0627\u0633\u062a", "\u0628\u0648\u062f", "\u0634\u062f", "\u0645\u06cc\u200c\u0634\u0648\u062f",
+})
 _PROVENANCE_AUTHORITY = {
     "auto_extraction": 10,
     "incremental_extraction": 10,
@@ -315,6 +323,8 @@ def is_usable_observed_mapping(
     if _TRAILING_BOUNDARY_RE.search(raw_target):
         return False
     if re.search(r"[A-Za-z]", raw_target):
+        return False
+    if _context_bound_persian_target(raw_target):
         return False
 
     source_words = re.findall(r"[A-Za-z\u00c0-\u024f]+", source)
@@ -585,7 +595,29 @@ def is_reusable_terminology_mapping(english: str, persian: str) -> bool:
         return False
     if source_words[0].casefold() in _SOURCE_NONTERM_LEADERS:
         return False
+    if _context_bound_persian_target(target):
+        return False
     return not automatic_terminology_risk_reasons(source, target)
+
+
+def _context_bound_persian_target(value: str) -> bool:
+    """Reject surrounding Persian syntax from low-authority lexical memory."""
+    normalized = unicodedata.normalize("NFKC", value or "")
+    normalized = _PERSIAN_DIACRITICS_RE.sub("", normalized)
+    normalized = re.sub(r"[\u200c\u200d]+", " ", normalized)
+    tokens = _PERSIAN_WORD_RE.findall(normalized)
+    if not tokens:
+        return True
+    first = tokens[0]
+    last = tokens[-1]
+    if first in _PERSIAN_CONTEXT_LEADERS or last in _PERSIAN_CONTEXT_TRAILERS:
+        return True
+    # A light-verb or copular clause is passage wording, not a reusable term.
+    return bool(re.search(
+        r"(?:^|\s)(?:\u0645\u06cc\s*)?(?:\u06a9\u0646\u062f|\u06a9\u0631\u062f|\u0634\u0648\u062f|\u06af\u0631\u062f\u062f|"
+        r"\u0627\u0633\u062a|\u0628\u0648\u062f|\u0634\u062f)\s*$",
+        normalized,
+    ))
 
 
 def automatic_terminology_risk_reasons(

@@ -256,6 +256,37 @@ MQM rules:
 Return ONLY valid JSON — no markdown fences, no commentary outside the JSON.
 """
 
+PERSIAN_READABILITY_REVIEW_PROMPT: str = """\
+You are a conservative Persian copy editor. Review only the Persian paragraph
+below for objective readability defects. You do not have the English source and
+must not infer, simplify, add, remove, reinterpret, or weaken meaning.
+
+Report only defects visible in Persian itself: a missing finite predicate, broken
+agreement or dependency, an unresolved or dangling referent, malformed punctuation
+or parentheses, accidental repetition, an opaque source-order calque, or a modifier
+stack whose attachment is grammatically unclear. Formal complexity, uncommon
+technical vocabulary, and a merely preferable synonym are not defects.
+
+Persian paragraph:
+{translation}
+
+Return ONLY this JSON object with at most 4 issues:
+{{
+  "issues": [
+    {{
+      "severity": "major" | "minor",
+      "current_persian_quote": "<exact short span copied from the paragraph>",
+      "suggested_correction": "<compact Persian replacement span>",
+      "rationale": "<brief objective Persian-grammar reason in English>"
+    }}
+  ]
+}}
+
+Every current_persian_quote must occur verbatim. A suggestion is advisory: the
+source-aware refiner will independently accept or reject it. Return an empty list
+when the Persian is coherent. No markdown and no commentary.
+"""
+
 # ---------------------------------------------------------------------------
 # 4. Refinement prompt (applies critique feedback)
 # ---------------------------------------------------------------------------
@@ -290,6 +321,9 @@ Instructions:
    orthography. Opaque modifier stacking, unclear dependency or reference, malformed
    participles, and lost parallelism in a coordinated conceptual series are objective
    defects. Reject synonym swaps and stylistic preferences without such evidence.
+   A target-only readability advisory, when present inside an issue, is secondary
+   evidence only. Accept it only after checking the English source; reject it if it
+   changes scope, emphasis, modality, terminology, or any proposition.
 4. Preserve every part of the translation that has no validated issue.
 5. Apply entries marked mandatory using their prescribed lexical rendering, with
    standard Persian orthography. Treat advisory candidates as optional context and

@@ -69,9 +69,23 @@ _SCHOLARLY_PROTECTED_RE = re.compile(
     r"|\([^)؀-ۿ]*[0-9][^)؀-ۿ]*\)"
     r"|\[[^\]]*?[0-9][^\]]*?\]"
     r"|\b(?:pp?|vols?|nos?|chs?|fols?)\.\s*[0-9]+(?:\s*[-–—,]\s*[0-9]+)*"
+    r"|\b(?:[A-Z]\.\s*){1,5}[A-Z][A-Za-z'\u2019-]+"
+    r"(?:\s+(?:1[5-9][0-9]{2}|20[0-9]{2})[a-z]?)?"
+    r"|(?<![\u0600-\u06ff])(?:\u0631\.\s*\u06a9\.|\u0646\u06a9\.)(?![\u0600-\u06ff])"
     r"|\b(?:1[5-9][0-9]{2}|20[0-9]{2})[a-z]?\b",
     re.IGNORECASE,
 )
+
+# Preserve only marks already authored by the model. Hazm's default normalizer
+# removes them, which otherwise creates silent drift between reviewed memory and
+# the exported document. This protection never adds a mark.
+_PERSIAN_COMBINING_MARK_RE = re.compile(r"[\u064b-\u065f\u0670\u06d6-\u06ed]+")
+_HAZM_FALSE_MI_RE = re.compile(
+    r"(?<![\u0600-\u06ff])(?P<prefix>\u0646?\u0645\u06cc)\u200c"
+    r"(?P<stem>[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]"
+    r"(?:[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff\u200c-])*)"
+)
+_NON_VERB_HAZM_TAGS = frozenset({"N", "AJ", "NUM", "ADV"})
 
 # Digit-free Private-Use-Area sentinels: survive hazm normalisation and are
 # untouched by numeral/punctuation conversion.
@@ -177,9 +191,13 @@ class PersianTypographer:
         protected_spans: list[str] = []
         if self._scholarly_mode:
             text = self._protect_scholarly(text, protected_spans)
+        text = self._protect_pattern(
+            text, protected_spans, _PERSIAN_COMBINING_MARK_RE
+        )
 
         if self._normalize_zwnj:
             text = self.normalize_zwnj(text)
+            text = self._repair_false_mi_splits(text)
             text = _SPACED_DECIMAL_RE.sub("\\1\u066b\\2", text)
         if self._convert_numerals:
             text = self.convert_numerals(text)
@@ -227,11 +245,23 @@ class PersianTypographer:
     def _protect_scholarly(text: str, spans: list[str]) -> str:
         """Replace scholarly-apparatus spans with digit-free PUA sentinels."""
 
+        return PersianTypographer._protect_pattern(
+            text, spans, _SCHOLARLY_PROTECTED_RE
+        )
+
+    @staticmethod
+    def _protect_pattern(
+        text: str,
+        spans: list[str],
+        pattern: re.Pattern[str],
+    ) -> str:
+        """Stash regex matches in one shared, collision-free sentinel table."""
+
         def _stash(match: re.Match[str]) -> str:
             spans.append(match.group(0))
             return f"{_SENTINEL_OPEN}{chr(_SENTINEL_BASE + len(spans) - 1)}{_SENTINEL_CLOSE}"
 
-        return _SCHOLARLY_PROTECTED_RE.sub(_stash, text)
+        return pattern.sub(_stash, text)
 
     @staticmethod
     def _restore_scholarly(text: str, spans: list[str]) -> str:
@@ -265,6 +295,34 @@ class PersianTypographer:
         """
         normalizer = self._get_hazm_normalizer()
         return normalizer.normalize(text)
+
+    def _repair_false_mi_splits(self, text: str) -> str:
+        """Undo Hazm ``mi`` splits only for lexicon-backed non-verbs."""
+        normalizer = self._get_hazm_normalizer()
+        lexicon = getattr(normalizer, "words", {})
+        if not isinstance(lexicon, dict):
+            return text
+
+        def _join(match: re.Match[str]) -> str:
+            joined = match.group("prefix") + match.group("stem")
+            record = lexicon.get(joined)
+            if not isinstance(record, (tuple, list)) or len(record) < 2:
+                return match.group(0)
+            try:
+                frequency = int(record[0])
+            except (TypeError, ValueError):
+                return match.group(0)
+            raw_tags = record[1]
+            tags = (
+                {str(tag) for tag in raw_tags}
+                if isinstance(raw_tags, (tuple, list, set, frozenset))
+                else {str(raw_tags)}
+            )
+            if frequency > 0 and tags.intersection(_NON_VERB_HAZM_TAGS):
+                return joined
+            return match.group(0)
+
+        return _HAZM_FALSE_MI_RE.sub(_join, text)
 
     @staticmethod
     def tokenize(text: str) -> list[str]:

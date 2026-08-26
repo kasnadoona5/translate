@@ -136,7 +136,7 @@ class TranslationRefiner:
                 for key in (
                     "issue_id", "category", "severity", "confidence",
                     "source_segment_id", "source_quote", "current_persian_quote",
-                    "suggested_correction", "rationale",
+                    "suggested_correction", "rationale", "readability_advisory",
                 )
             }
             for detail in critique.issue_details
