@@ -318,6 +318,39 @@ def repair_document_source_grounded_language_artifacts(
     }
 
 
+_SPACED_EXPLANATORY_DASH_RE = re.compile(r"(?<=\S)[ \t]+[-\u2013\u2014][ \t]+(?=\S)")
+
+
+def _unbalanced_explanatory_dash_artifacts(
+    source: str,
+    translation: str,
+    *,
+    structural_role: str,
+) -> list[dict[str, Any]]:
+    """Find a lost mate only when the source itself has a paired aside."""
+    if str(structural_role or "body").casefold() != "body":
+        return []
+    source_parts = split_paragraphs(source)
+    target_parts = split_paragraphs(translation)
+    if len(source_parts) != len(target_parts):
+        return []
+    findings: list[dict[str, Any]] = []
+    for index, (source_part, target_part) in enumerate(
+        zip(source_parts, target_parts, strict=True)
+    ):
+        source_count = len(_SPACED_EXPLANATORY_DASH_RE.findall(source_part))
+        target_count = len(_SPACED_EXPLANATORY_DASH_RE.findall(target_part))
+        if source_count >= 2 and source_count % 2 == 0 and target_count % 2 == 1:
+            findings.append({
+                "paragraph_index": index,
+                "source_dash_count": source_count,
+                "target_dash_count": target_count,
+                "target_preview": target_part[:500],
+                "reason": "source_paired_explanatory_dash_became_unbalanced",
+            })
+    return findings
+
+
 def audit_translation_language(
     source: str,
     translation: str,
@@ -344,6 +377,11 @@ def audit_translation_language(
     parentheses = parenthesis_artifacts(source, translation)
     detached_ezafe = detached_ezafe_artifacts(translation)
     tatweel_separators = tatweel_separator_artifacts(translation)
+    explanatory_dashes = _unbalanced_explanatory_dash_artifacts(
+        source,
+        translation,
+        structural_role=structural_role,
+    )
     return {
         "review_required": bool(
             mixed
@@ -355,6 +393,7 @@ def audit_translation_language(
             or parentheses
             or detached_ezafe
             or tatweel_separators
+            or explanatory_dashes
         ),
         "mixed_script_count": len(mixed),
         "mixed_script_artifacts": mixed,
@@ -374,11 +413,14 @@ def audit_translation_language(
         "detached_ezafe_artifacts": detached_ezafe,
         "tatweel_separator_count": len(tatweel_separators),
         "tatweel_separator_artifacts": tatweel_separators,
+        "unbalanced_explanatory_dash_count": len(explanatory_dashes),
+        "unbalanced_explanatory_dash_artifacts": explanatory_dashes,
         "policy": (
             "Source-grounded identifiers, citations, approved originals, acronyms, "
             "and multilingual apparatus are allowed; unexplained foreign prose or "
             "scripts, mixed-script suffixes, malformed parentheses, detached ezafe, "
-            "tatweel punctuation, markup wrappers, adjacent lexical duplication, "
+            "tatweel punctuation, source-paired explanatory dashes, markup "
+            "wrappers, adjacent lexical duplication, "
             "and exact duplicated clauses "
             "are review evidence."
         ),
@@ -1005,6 +1047,7 @@ _LANGUAGE_QUALITY_COUNT_FIELDS = (
     "parenthesis_artifact_count",
     "detached_ezafe_count",
     "tatweel_separator_count",
+    "unbalanced_explanatory_dash_count",
 )
 
 
@@ -1056,6 +1099,7 @@ def _targeted_language_repair_prompt(
             "repeated_clause_artifacts",
             "detached_ezafe_artifacts",
             "tatweel_separator_artifacts",
+            "unbalanced_explanatory_dash_artifacts",
         )
         if findings.get(key)
     }
@@ -1080,8 +1124,8 @@ Requirements:
 2. Preserve every proposition, qualification, relation, citation, number, name,
    required English parenthetical, and list or table label.
 3. Change only what is necessary to remove the listed foreign-script, untranslated
-   ordinary prose, duplicate, tatweel-punctuation, markup, parenthesis, or
-   detached-ezafe artifact.
+   ordinary prose, duplicate, semantic-dash, tatweel-punctuation, markup,
+   parenthesis, or detached-ezafe artifact.
 4. Do not choose new terminology, summarize, add commentary, or alter source facts.
 5. Use fluent formal Iranian Persian. For a contents/title row, preserve the title's
    meaning and page label while repairing Persian syntax.
@@ -2232,10 +2276,12 @@ def _readability_review_eligible(
     chunk: Any,
     critique: Any,
     threshold: float,
-    iteration: int,
+    *,
+    candidate_changed: bool = False,
+    final_candidate: bool = False,
 ) -> bool:
-    """Use one target-only pass only when source-aware review found a need."""
-    if iteration != 0 or _is_front_matter(chunk):
+    """Use one advisory target-only pass on the latest meaningful candidate."""
+    if _is_front_matter(chunk):
         return False
     metadata = getattr(chunk, "metadata", None) or {}
     roles = {
@@ -2252,8 +2298,12 @@ def _readability_review_eligible(
     return bool(
         getattr(critique, "valid", True)
         and (
+            candidate_changed
+            or final_candidate
+            and (
             float(getattr(critique, "fluency", 10.0)) < threshold
             or has_grounded_fluency_issue
+            )
         )
     )
 
@@ -2329,6 +2379,114 @@ def _salvage_regression_details(
     return regressions
 
 
+def _changed_candidate_spans(previous: str, candidate: str) -> list[str]:
+    """Return bounded candidate-side spans changed by a complete refinement."""
+    spans: list[str] = []
+    matcher = difflib.SequenceMatcher(None, previous or "", candidate or "")
+    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        start = max(0, j1 - 80)
+        end = min(len(candidate), max(j2, j1 + 1) + 80)
+        span = normalize_for_match(candidate[start:end])
+        if span:
+            spans.append(span)
+    unique = list(dict.fromkeys(spans))
+    if len(unique) > 20:
+        # A broad rewrite must not hide a late regression behind an arbitrary
+        # span limit. The complete candidate remains bounded by the chunk size.
+        complete = normalize_for_match(candidate)
+        return [complete] if complete else []
+    return unique
+
+
+def _candidate_regression_details(
+    critique: Any,
+    baseline_critique: Any,
+    changed_spans: list[str],
+) -> list[dict[str, Any]]:
+    """Find new, grounded defects introduced by a complete refiner candidate."""
+    baseline_keys = {
+        (
+            str(detail.get("category", "")).casefold(),
+            normalize_for_match(str(detail.get("current_persian_quote", ""))),
+        )
+        for detail in list(getattr(baseline_critique, "issue_details", []) or [])
+        if isinstance(detail, dict)
+    }
+    routed_minor_ids = {
+        str(detail.get("issue_id", ""))
+        for detail in _high_confidence_minor_issues(critique)
+    }
+    regressions: list[dict[str, Any]] = []
+    for detail in list(getattr(critique, "issue_details", []) or []):
+        if not isinstance(detail, dict):
+            continue
+        category = str(detail.get("category", "")).casefold()
+        severity = str(detail.get("severity", "")).casefold()
+        current = normalize_for_match(
+            str(detail.get("current_persian_quote", ""))
+        )
+        if not current or (category, current) in baseline_keys:
+            continue
+        overlaps_change = any(
+            span and (span in current or current in span)
+            for span in changed_spans
+        )
+        if not overlaps_change:
+            continue
+        evidence = " ".join(
+            str(detail.get(field, ""))
+            for field in ("issue_id", "rationale", "explanation", "error_type")
+        )
+        try:
+            confidence = float(detail.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        serious = bool(
+            severity == "critical"
+            or severity == "major" and confidence >= 0.70
+            or (
+                severity == "minor"
+                and str(detail.get("issue_id", "")) in routed_minor_ids
+                and (
+                    category != "fluency"
+                    or _OBJECTIVE_FLUENCY_RATIONALE_RE.search(evidence)
+                )
+            )
+        )
+        if serious:
+            regressions.append(detail)
+    return regressions
+
+
+def _objective_unmatched_readability_issues(
+    issues: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep target-only grammar evidence advisory but visible for human review."""
+    findings: list[dict[str, Any]] = []
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        severity = str(issue.get("severity", "")).casefold()
+        current = normalize_for_match(
+            str(issue.get("current_persian_quote", ""))
+        )
+        suggested = normalize_for_match(
+            str(issue.get("suggested_correction", ""))
+        )
+        rationale = str(issue.get("rationale", ""))
+        if (
+            severity in {"critical", "major"}
+            and current
+            and suggested
+            and current != suggested
+            and _OBJECTIVE_FLUENCY_RATIONALE_RE.search(rationale)
+        ):
+            findings.append(issue)
+    return findings
+
+
 def _chunk_style_policy(
     db: Any,
     job_id: str,
@@ -2385,9 +2543,24 @@ def _chunk_style_policy(
             "excluded_paragraphs": [],
             "reason": "major_or_critical_final_issue",
         }
+    has_routed_issue_policy = (
+        "high_confidence_minor_refinement_issue_ids" in latest
+    )
+    routed_issue_ids = {
+        str(value)
+        for value in list(
+            latest.get("high_confidence_minor_refinement_issue_ids", []) or []
+        )
+        if value
+    }
     excluded: set[int] = set()
     for detail in issue_details:
         if not isinstance(detail, dict):
+            continue
+        if (
+            has_routed_issue_policy
+            and str(detail.get("issue_id", "")) not in routed_issue_ids
+        ):
             continue
         match = re.fullmatch(
             r"p(?P<paragraph>\d+):s\d+",
@@ -3764,6 +3937,9 @@ class TranslationPipeline:
                         lock=lock,
                         adjacent_source_context=_adjacent_source_context(chunks, idx),
                     )
+                    translation = self._canonicalize_final_translation(
+                        job_id, idx, chunk, translation
+                    )
 
                     # Update shared memory and database safely under lock
                     with lock:
@@ -4008,6 +4184,9 @@ class TranslationPipeline:
                             translations=translations,
                             job_id=job_id,
                             adjacent_source_context=_adjacent_source_context(chunks, idx),
+                        )
+                        translation = self._canonicalize_final_translation(
+                            job_id, idx, chunk, translation
                         )
 
                         # Successful translation updates
@@ -5120,6 +5299,9 @@ class TranslationPipeline:
                     manual_result.to_dict(),
                 )
                 translation = previous_translation
+        translation = self._canonicalize_final_translation(
+            job_id, chunk_index, chunks[chunk_index], translation
+        )
         _ensure_chunk_review_reason(self.db, job_id, chunk_index)
         final_status = (
             ChunkStatus.NEEDS_REVIEW
@@ -5151,6 +5333,82 @@ class TranslationPipeline:
         self.db.save_memory_state(job_id, memory_manager.to_dict())
         self.db.log_event(job_id, "INFO", f"Retranslated chunk {chunk_index}.")
         return translation
+
+    def _canonicalize_final_translation(
+        self,
+        job_id: str,
+        chunk_index: int,
+        chunk: Chunk,
+        translation: str,
+    ) -> str:
+        """Store the same source-safe final text later used by every exporter."""
+        canonical = PersianTypographer(
+            self.config.to_dict().get("persian")
+        ).process(translation)
+        typography_changed = canonical != translation
+        repair_candidate, repair_report = (
+            repair_source_grounded_language_artifacts(
+                chunk.text, canonical
+            )
+        )
+        repair_proposed = repair_candidate != canonical
+        repair_accepted = False
+        if repair_proposed:
+            identifiers_unchanged = (
+                extract_identifiers(repair_candidate)
+                == extract_identifiers(canonical)
+                and extract_labeled_identifier_surfaces(repair_candidate)
+                == extract_labeled_identifier_surfaces(canonical)
+            )
+            role = str(chunk.metadata.get("structure_role", "body"))
+            chapter_title = str(chunk.metadata.get("chapter_title", ""))
+            allowed_originals = protected_english_originals(
+                chunk.text, canonical
+            )
+            before_quality = audit_translation_language(
+                chunk.text,
+                canonical,
+                allowed_originals=allowed_originals,
+                structural_role=role,
+                chapter_title=chapter_title,
+            )
+            after_quality = audit_translation_language(
+                chunk.text,
+                repair_candidate,
+                allowed_originals=allowed_originals,
+                structural_role=role,
+                chapter_title=chapter_title,
+            )
+            repair_accepted = bool(
+                identifiers_unchanged
+                and _language_quality_strictly_improves(
+                    before_quality, after_quality
+                )
+            )
+            if repair_accepted:
+                canonical = repair_candidate
+        self.db.log_chunk_event(
+            job_id,
+            chunk_index,
+            "final_candidate_typography",
+            {
+                "stage": "pre_memory_final_typography",
+                "changed": canonical != translation,
+                "typography_changed": typography_changed,
+                "accepted": True,
+                "before_chars": len(translation),
+                "after_chars": len(canonical),
+                "source_grounded_repair_proposed": repair_proposed,
+                "source_grounded_repair_accepted": repair_accepted,
+                "source_grounded_repairs": repair_report.get("repairs", []),
+                "policy": (
+                    "The exact idempotent exporter typography and only "
+                    "identifier-preserving, monotonically improving deterministic "
+                    "repairs are stored in DB continuity and all four memory layers."
+                ),
+            },
+        )
+        return canonical
 
     @staticmethod
     def _chunk_chapter_position(chunk: Chunk) -> int:
@@ -6346,6 +6604,8 @@ class TranslationPipeline:
             evaluated_versions: list[tuple[str, Any]] = []
             pending_salvage: dict[str, Any] | None = None
             pending_salvage_baseline = ""
+            pending_candidate: dict[str, Any] | None = None
+            readability_reviewed = False
             for ref_iter in range(self.config.translation.max_refine_iterations + 1):
                 try:
                     critique_rep = self._run_async(
@@ -6450,12 +6710,31 @@ class TranslationPipeline:
                             ),
                         }
                     )
+                candidate_changed = bool(pending_candidate or pending_salvage)
+                candidate_regressions: list[dict[str, Any]] = []
+                if pending_candidate is not None:
+                    candidate_regressions = _candidate_regression_details(
+                        critique_rep,
+                        pending_candidate["baseline_critique"],
+                        list(pending_candidate.get("changed_spans", []) or []),
+                    )
+                will_refine = bool(
+                    ref_iter < self.config.translation.max_refine_iterations
+                    and _critique_requires_refinement(critique_rep, threshold)
+                )
                 if (
-                    hasattr(critique_tool, "review_persian_readability")
+                    not readability_reviewed
+                    and not candidate_regressions
+                    and hasattr(critique_tool, "review_persian_readability")
                     and _readability_review_eligible(
-                        chunk, critique_rep, threshold, ref_iter
+                        chunk,
+                        critique_rep,
+                        threshold,
+                        candidate_changed=candidate_changed,
+                        final_candidate=not will_refine,
                     )
                 ):
+                    readability_reviewed = True
                     readability_payload: dict[str, Any] = {
                         "iteration": ref_iter,
                         "attempted": True,
@@ -6484,6 +6763,32 @@ class TranslationPipeline:
                             "unmatched_advisory_count": len(unmatched),
                             "unmatched_advisories": unmatched,
                         })
+                        objective_unmatched = (
+                            _objective_unmatched_readability_issues(unmatched)
+                        )
+                        if objective_unmatched:
+                            self.db.log_chunk_event(
+                                job_id,
+                                idx,
+                                "language_quality_review",
+                                {
+                                    "stage": "persian_readability_review",
+                                    "iteration": ref_iter,
+                                    "review_reason": (
+                                        "unconfirmed_objective_persian_fluency"
+                                    ),
+                                    "authority": "target_only_advisory",
+                                    "automatic_edit": False,
+                                    "finding_count": len(objective_unmatched),
+                                    "findings": objective_unmatched,
+                                    "message": (
+                                        "A bounded Persian-only review found an "
+                                        "objective grammar risk that the source-aware "
+                                        "critic did not confirm. No text was changed; "
+                                        "the final candidate requires human review."
+                                    ),
+                                },
+                            )
                     except _QUALITY_STAGE_ERRORS as exc:
                         readability_payload.update({
                             "valid": False,
@@ -6524,6 +6829,50 @@ class TranslationPipeline:
                     "critique_completed",
                     _critique_for_event(critique_rep, threshold, ref_iter),
                 )
+                if pending_candidate is not None:
+                    if candidate_regressions:
+                        rejected_translation = translation
+                        translation = str(pending_candidate["baseline"])
+                        last_accepted_translation = translation
+                        current_integrity_accepted = True
+                        self.db.update_chunk(
+                            job_id, idx, ChunkStatus.REFINED, translation
+                        )
+                        self.db.log_chunk_event(
+                            job_id,
+                            idx,
+                            "refinement_candidate_rolled_back",
+                            {
+                                "iteration": ref_iter,
+                                "commit_mode": "full_candidate",
+                                "rejected_chars": len(rejected_translation),
+                                "restored_chars": len(translation),
+                                "regression_count": len(candidate_regressions),
+                                "regressions": candidate_regressions,
+                                "message": (
+                                    "The next source-aware review found a new "
+                                    "grounded defect in wording changed by the full "
+                                    "refiner candidate; the prior integrity-valid "
+                                    "translation was retained."
+                                ),
+                            },
+                        )
+                        self.db.log_chunk_event(
+                            job_id,
+                            idx,
+                            "critique_needs_review",
+                            _explicit_chunk_review_payload(
+                                "refinement_candidate_regression",
+                                detail="full_candidate_rolled_back",
+                                message=(
+                                    "A complete refinement did not improve the "
+                                    "translation monotonically; prior valid text "
+                                    "was retained for human review."
+                                ),
+                            ),
+                        )
+                        break
+                    pending_candidate = None
                 if pending_salvage is not None:
                     salvage_regressions = _salvage_regression_details(
                         critique_rep, pending_salvage
@@ -6909,6 +7258,23 @@ class TranslationPipeline:
                         convergence_reason = "refinement_no_change"
                     elif proposed_key in prior_keys[:-1]:
                         convergence_reason = "refinement_oscillation"
+
+                if (
+                    edit_accepted
+                    and translation_changed
+                    and not baseline_was_quarantined
+                    and not convergence_reason
+                ):
+                    pending_candidate = {
+                        "baseline": before_translation,
+                        "baseline_critique": critique_rep,
+                        "changed_spans": _changed_candidate_spans(
+                            before_translation, translation
+                        ),
+                        "iteration": ref_iter + 1,
+                    }
+                elif not (local_salvage or {}).get("committed_count"):
+                    pending_candidate = None
 
                 self.db.save_issue_decisions(
                     job_id,
@@ -7670,6 +8036,7 @@ Output ONLY the corrected Persian translation.
                 "parenthesis_artifact_count",
                 "detached_ezafe_count",
                 "tatweel_separator_count",
+                "unbalanced_explanatory_dash_count",
             )
         )
         targeted_language_repair: dict[str, Any] = {
@@ -7712,6 +8079,7 @@ Output ONLY the corrected Persian translation.
                             "parenthesis_artifact_count",
                             "detached_ezafe_count",
                             "tatweel_separator_count",
+                            "unbalanced_explanatory_dash_count",
                         )
                     )
                     if not paragraph_repairable:

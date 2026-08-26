@@ -126,6 +126,15 @@ _SOURCE_NONTERM_LEADERS = _SOURCE_CONTEXT_LEADERS.union({
     "how", "if", "not", "what", "when", "where", "whether", "which",
     "who", "whom", "whose", "why",
 })
+_SOURCE_NONTERM_TRAILERS = frozenset({
+    "about", "against", "among", "and", "as", "at", "between", "by",
+    "for", "from", "in", "into", "of", "on", "or", "over", "through",
+    "to", "under", "with", "without",
+})
+_SOURCE_CLAUSAL_PREDICATE_RE = re.compile(
+    r"\b(?:am|are|be|been|being|do|does|did|has|have|had|is|was|were)\b",
+    re.IGNORECASE,
+)
 _SOURCE_TRAILING_ACTIONS = frozenset({
     "created", "edited", "printed", "published", "reproduced", "revised",
     "translated", "typeset",
@@ -594,6 +603,10 @@ def is_reusable_terminology_mapping(english: str, persian: str) -> bool:
     if not 1 <= len(source_words) <= 6 or not target_words:
         return False
     if source_words[0].casefold() in _SOURCE_NONTERM_LEADERS:
+        return False
+    if source_words[-1].casefold() in _SOURCE_NONTERM_TRAILERS:
+        return False
+    if _SOURCE_CLAUSAL_PREDICATE_RE.search(source):
         return False
     if _context_bound_persian_target(target):
         return False

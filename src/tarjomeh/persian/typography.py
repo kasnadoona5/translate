@@ -63,6 +63,18 @@ _PUNCT_MAP: dict[str, str] = {
 #   2. Bracketed markers: "[12]", "[see 3-5]"
 #   3. Page/volume references: "p. 45", "pp. 12–34", "vol. 3", "no. 7"
 #   4. Standalone Gregorian years 1500–2099 (incl. "1973a" style)
+_AUTHOR_YEAR_CITATION_RE = re.compile(
+    r"(?<![A-Za-z])"
+    r"(?:[A-Z]\.\s*){0,5}[A-Z][A-Za-z'\u2019-]+"
+    r"(?:\s+(?:(?:and|de|del|der|di|du|la|le|van|von|&)\s+)?"
+    r"(?:[A-Z]\.\s*){0,4}[A-Z][A-Za-z'\u2019-]+){0,4}"
+    r"\s+(?:1[5-9][0-9]{2}|20[0-9]{2})[a-z]?"
+    r"(?:\s*(?:"
+    r",\s*(?:(?:1[5-9][0-9]{2}|20[0-9]{2})[a-z]?|[0-9]{1,4})"
+    r"(?:[-\u2010-\u2015][0-9]{1,4})?"
+    r"|:\s*[0-9]{1,4}(?:[-\u2010-\u2015][0-9]{1,4})?"
+    r"))*"
+)
 _SCHOLARLY_PROTECTED_RE = re.compile(
     r"\b(?:ISBN(?:-1[03])?|ISSN)\s*:?\s*"
     r"[0-9Xx](?:[0-9Xx \t\-‐-―]{6,30})[0-9Xx]\b"
@@ -86,6 +98,10 @@ _HAZM_FALSE_MI_RE = re.compile(
     r"(?:[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff\u200c-])*)"
 )
 _NON_VERB_HAZM_TAGS = frozenset({"N", "AJ", "NUM", "ADV"})
+_SEMANTIC_TATWEEL_SEPARATOR_RE = re.compile(
+    r"(?<=[\u0600-\u06ff\u00bb\u201d])\s+\u0640+\s+"
+    r"(?=[\u0600-\u06ff\u00ab\u201c])"
+)
 
 # Digit-free Private-Use-Area sentinels: survive hazm normalisation and are
 # untouched by numeral/punctuation conversion.
@@ -172,6 +188,11 @@ class PersianTypographer:
         if not text:
             return text
 
+        # A spaced tatweel is sometimes model-authored as a semantic dash.
+        # Hazm removes it, silently joining the two concepts. Canonicalize only
+        # the separator form; decorative kashida inside a word is untouched.
+        text = _SEMANTIC_TATWEEL_SEPARATOR_RE.sub(" – ", text)
+
         if (
             _LATIN_LETTER_RE.search(text)
             and not _PERSIAN_LETTER_RE.search(text)
@@ -244,7 +265,9 @@ class PersianTypographer:
     @staticmethod
     def _protect_scholarly(text: str, spans: list[str]) -> str:
         """Replace scholarly-apparatus spans with digit-free PUA sentinels."""
-
+        text = PersianTypographer._protect_pattern(
+            text, spans, _AUTHOR_YEAR_CITATION_RE
+        )
         return PersianTypographer._protect_pattern(
             text, spans, _SCHOLARLY_PROTECTED_RE
         )
