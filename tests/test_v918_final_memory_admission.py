@@ -89,7 +89,7 @@ def test_memory_trust_separates_continuity_from_authority() -> None:
     assert "needs review" in context.short_term
 
 
-def test_low_scoring_or_deferred_chunk_is_advisory_without_becoming_missing() -> None:
+def test_clean_below_threshold_chunk_remains_reliable_with_advisory_reasons() -> None:
     db = _EventDB({
         0: [
             {"event_type": "chunk_started", "payload": {}},
@@ -107,9 +107,10 @@ def test_low_scoring_or_deferred_chunk_is_advisory_without_becoming_missing() ->
 
     assert advisory["quality_approved"] is True
     assert advisory["continuity_retained"] is True
-    assert advisory["long_term_reliable"] is False
-    assert advisory["short_term_trust"] == "advisory_review"
+    assert advisory["long_term_reliable"] is True
+    assert advisory["short_term_trust"] == "trusted"
     assert "deferred_mqm_advice" in advisory["reliability_reasons"]
+    assert advisory["disqualifying_reliability_reasons"] == []
     assert trusted["long_term_reliable"] is True
     assert trusted["short_term_trust"] == "trusted"
 

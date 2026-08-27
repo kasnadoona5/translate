@@ -1407,7 +1407,9 @@ def _register_api(app: Flask) -> None:
 
         for chunk in all_chunks:
             idx = int(chunk["chunk_index"])
-            chunk_events = events_by_chunk.get(idx, [])
+            # A resumed chunk can have obsolete generations. The verdict already
+            # uses the latest generation; render the same slice in its details.
+            chunk_events = current_events_by_chunk.get(idx, [])
             lines.append(f"Chunk {idx} [{chunk['status']}]")
             for event in chunk_events:
                 payload = event["payload"]

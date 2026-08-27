@@ -19,7 +19,11 @@ from pathlib import Path
 from typing import Any
 
 from tarjomeh.jobs.database import JobDatabase
-from tarjomeh.quality.integrity import extract_note_markers, extract_numbers
+from tarjomeh.quality.integrity import (
+    available_note_markers,
+    extract_note_markers,
+    extract_numbers,
+)
 
 
 _SPACE_RE = re.compile(r"\s+")
@@ -103,8 +107,9 @@ def inspect_chunk(
     ))
 
     source_notes = extract_note_markers(source)
-    target_notes = extract_note_markers(translation)
-    missing_notes = list((Counter(source_notes) - Counter(target_notes)).elements())
+    required_notes = Counter(source_notes)
+    target_notes = available_note_markers(translation, required_notes)
+    missing_notes = list((required_notes - target_notes).elements())
     checks.append(_check(
         "note_markers_preserved", not missing_notes, "blocking",
         "Footnote/endnote markers are preserved."

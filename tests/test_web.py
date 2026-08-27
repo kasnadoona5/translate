@@ -360,6 +360,52 @@ class TestWebUI(unittest.TestCase):
         self.assertIn("Citation preserved (not terminology): Caceres", report)
 
     @patch("tarjomeh.jobs.database.JobDatabase")
+    def test_qa_report_hides_obsolete_chunk_generation_details(
+        self, mock_db_cls: MagicMock
+    ) -> None:
+        mock_db = mock_db_cls.return_value
+        mock_db.get_job.return_value = {
+            "id": "job-resumed",
+            "input_path": "book.pdf",
+            "status": "completed",
+            "config": {},
+        }
+        mock_db.get_job_artifact.return_value = None
+        mock_db.get_chunks.return_value = [{
+            "chunk_index": 0,
+            "status": "completed",
+            "translation": "ترجمهٔ نهایی",
+        }]
+        mock_db.get_chunk_events.return_value = [
+            {"chunk_index": 0, "event_type": "chunk_started", "payload": {}},
+            {
+                "chunk_index": 0,
+                "event_type": "integrity_final_failed",
+                "payload": {"blocking_count": 1, "findings": []},
+            },
+            {"chunk_index": 0, "event_type": "chunk_started", "payload": {}},
+            {
+                "chunk_index": 0,
+                "event_type": "critique_completed",
+                "payload": {
+                    "valid": True,
+                    "scores": {"average": 10},
+                    "issue_details": [],
+                },
+            },
+        ]
+
+        response = self.client.get(
+            "/api/jobs/job-resumed/qa-report",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        report = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("INTEGRITY FINAL:", report)
+        self.assertIn("Critique: valid=True", report)
+
+    @patch("tarjomeh.jobs.database.JobDatabase")
     def test_qa_report_lists_missing_original_targets_as_review_signals(
         self, mock_db_cls: MagicMock
     ) -> None:

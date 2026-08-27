@@ -19,6 +19,20 @@ _DIGIT_MAP = str.maketrans(
 _SUPERSCRIPT_MAP = str.maketrans("\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079\u2070", "1234567890")
 _NUMBER_RE = re.compile(r"(?<!\w)[+-]?\d+(?:[.,\u066b\u066c]\d+)*(?:\s*[%\u066a])?")
 _NOTE_RE = re.compile(r"\[(\d+)\]|([\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079\u2070]+)")
+_PLAIN_NOTE_DIGITS = "0-9\u0660-\u0669\u06f0-\u06f9"
+_PLAIN_ATTACHED_NOTE_RE = re.compile(
+    rf"(?<![{_PLAIN_NOTE_DIGITS}])"
+    rf"(?P<leader>[)\],.;:!?\u060c\u061b\u061f])"
+    rf"(?P<marker>[{_PLAIN_NOTE_DIGITS}]{{1,3}})"
+    rf"(?=\s*(?:[-\u2010-\u2015]|[A-Za-z\u0600-\u06ff]|$))"
+)
+_PLAIN_SPACED_NOTE_RE = re.compile(
+    rf"(?<![{_PLAIN_NOTE_DIGITS}])"
+    rf"(?P<leader>[)\],.;:!?\u060c\u061b\u061f])\s*"
+    rf"(?P<marker>[{_PLAIN_NOTE_DIGITS}]{{1,3}})"
+    rf"(?=\s*(?:[-\u2010-\u2015\u060c\u061b\u061f,;.!?]|"
+    rf"[A-Za-z\u0600-\u06ff]|$))"
+)
 _PERSIAN_RE = re.compile(r"[\u0600-\u06ff]")
 _ASCII_WORD_RE = re.compile(r"[A-Za-z]{2,}")
 _JSON_LEAK_RE = re.compile(r'(^\s*\{|"(?:translation|decision|rationale)"\s*:)', re.IGNORECASE)
@@ -235,6 +249,9 @@ def extract_numbers(text: str) -> Counter[str]:
     # Notes have their own representation-aware check, so [12] and superscript
     # 12 are not incorrectly compared as ordinary prose numbers.
     normalized = _NOTE_RE.sub("", normalized)
+    normalized = _PLAIN_ATTACHED_NOTE_RE.sub(
+        lambda match: match.group("leader"), normalized
+    )
     normalized = re.sub(
         r"(?<=\d)\s*(?:percent|per\s+cent|\u062f\u0631\u0635\u062f)\b",
         "%",
@@ -276,6 +293,9 @@ def _numeric_text(text: str) -> str:
         r"(?<=\d)\s*([.\u066b\u066c])\s*(?=\d)", r"\1", normalized
     )
     normalized = _NOTE_RE.sub("", normalized)
+    normalized = _PLAIN_ATTACHED_NOTE_RE.sub(
+        lambda match: match.group("leader"), normalized
+    )
     return re.sub(
         r"(?<=\d)\s*(?:percent|per\s+cent|\u062f\u0631\u0635\u062f)\b",
         "%",
@@ -607,11 +627,30 @@ def classify_numbers(text: str) -> dict[str, Counter[str]]:
     return roles
 
 
-def extract_note_markers(text: str) -> list[str]:
+def extract_note_markers(text: str, *, allow_spaced: bool = False) -> list[str]:
+    """Extract note markers, including PDF-flattened source superscripts.
+
+    PyMuPDF can preserve superscript evidence in paragraph metadata while its
+    plain text surface contains forms such as ``Rousseau)1`` or ``follows,3``.
+    Attached punctuation is conservative source evidence. Spaced forms are
+    accepted only when comparing a target against source-confirmed markers.
+    """
     markers = []
     for bracketed, superscript in _NOTE_RE.findall(text or ""):
         markers.append(bracketed or superscript.translate(_SUPERSCRIPT_MAP))
+    matcher = _PLAIN_SPACED_NOTE_RE if allow_spaced else _PLAIN_ATTACHED_NOTE_RE
+    for match in matcher.finditer((text or "").translate(_DIGIT_MAP)):
+        markers.append(match.group("marker"))
     return markers
+
+
+def available_note_markers(text: str, required: Counter[str]) -> Counter[str]:
+    """Return target note evidence without treating arbitrary numbers as notes."""
+    strict = Counter(extract_note_markers(text))
+    if not required:
+        return strict
+    spaced = Counter(extract_note_markers(text, allow_spaced=True))
+    return strict | Counter({value: spaced[value] for value in required if spaced[value]})
 
 
 def extract_identifiers(text: str) -> Counter[str]:
@@ -1166,6 +1205,38 @@ def repair_source_grounded_language_artifacts(
     """
     repaired = translation or ""
     edits: list[dict[str, Any]] = []
+
+    # PDF superscripts often surface as an ordinary digit immediately after a
+    # closing parenthesis. If the translator keeps that marker but also keeps a
+    # now-orphaned source parenthesis, remove only the deterministically
+    # unmatched close. Balanced author/citation parentheses remain untouched.
+    required_note_markers = Counter(extract_note_markers(source))
+    if required_note_markers:
+        unmatched_closes = {
+            int(item["offset"])
+            for item in parenthesis_artifacts(source, repaired)
+            if item.get("type") == "unmatched_close"
+        }
+        note_parenthesis_repairs: list[tuple[int, str]] = []
+        for match in _PLAIN_SPACED_NOTE_RE.finditer(repaired.translate(_DIGIT_MAP)):
+            marker = match.group("marker")
+            close_offset = match.start("leader")
+            if (
+                match.group("leader") == ")"
+                and required_note_markers[marker] > 0
+                and close_offset in unmatched_closes
+            ):
+                note_parenthesis_repairs.append((close_offset, marker))
+                required_note_markers[marker] -= 1
+        for close_offset, marker in reversed(note_parenthesis_repairs):
+            repaired = repaired[:close_offset] + repaired[close_offset + 1:]
+            edits.append({
+                "type": "orphaned_note_parenthesis",
+                "before": ")",
+                "after": "",
+                "offset": close_offset,
+                "note_marker": marker,
+            })
 
     for match in reversed(list(_TATWEEL_SEPARATOR_RE.finditer(repaired))):
         repaired = repaired[:match.start()] + "\u2014" + repaired[match.end():]
@@ -2094,9 +2165,11 @@ class PostEditIntegrityGate:
         required_notes = Counter(extract_note_markers(source))
         if previous:
             required_notes |= Counter(extract_note_markers(previous))
-        missing_note_counts = required_notes - Counter(extract_note_markers(candidate))
+        missing_note_counts = required_notes - available_note_markers(
+            candidate, required_notes
+        )
         previous_missing_note_counts = (
-            required_notes - Counter(extract_note_markers(previous))
+            required_notes - available_note_markers(previous, required_notes)
             if previous else Counter()
         )
         newly_missing_note_counts = (

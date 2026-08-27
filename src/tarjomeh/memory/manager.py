@@ -356,7 +356,7 @@ class MemoryManager:
             if style_approved is None else bool(style_approved)
         )
         style_eligible = bool(
-            resolved_long_term_reliable
+            structure_eligible
             and style_quality_approved
             and (
                 not has_structure_policy

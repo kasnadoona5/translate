@@ -735,6 +735,28 @@ def _target_paragraphs_for_alignment(
     return paragraphs, "paragraph_boundaries"
 
 
+def _table_recovery_groups(
+    paragraphs: list[str],
+    *,
+    table_like: bool,
+    max_rows: int = 12,
+) -> list[list[str]]:
+    """Bound table recovery without changing ordinary prose recovery.
+
+    Large extracted tables can contain dozens of short row fragments. Recovering
+    each fragment with a separate model call is both expensive and deprived of
+    column context. Marked groups retain exact row identity while preserving the
+    existing per-row path as a fallback for any group the model cannot validate.
+    """
+    if not table_like or len(paragraphs) <= 1:
+        return [[paragraph] for paragraph in paragraphs]
+    group_size = max(2, int(max_rows))
+    return [
+        paragraphs[start:start + group_size]
+        for start in range(0, len(paragraphs), group_size)
+    ]
+
+
 def _translated_paragraph_metadata(
     source_metadata: dict[str, Any],
     *,
@@ -2020,6 +2042,18 @@ _OBJECTIVE_FLUENCY_RATIONALE_RE = re.compile(
     r"typograph(?:y|ic)|ungrammatical|word order|zwnj)\b",
     re.IGNORECASE,
 )
+_DISQUALIFYING_RELIABILITY_REASONS = frozenset({
+    "unresolved_qa_review",
+    "invalid_final_critique",
+    "blocking_critique_issue",
+    "semantic_dimension_below_memory_floor",
+    "persian_prose_dimension_below_memory_floor",
+    "objective_final_language_artifact",
+})
+_ADVISORY_RELIABILITY_REASONS = frozenset({
+    "final_critique_below_configured_threshold",
+    "deferred_mqm_advice",
+})
 
 
 def _high_confidence_semantic_minor_issues(critique: Any) -> list[dict[str, Any]]:
@@ -2130,12 +2164,21 @@ def _critique_requires_refinement(critique: Any, threshold: float) -> bool:
         return bool(getattr(critique, "issues", []) or []) and not critique.passes_threshold(
             threshold
         )
+    has_promoted_readability_issue = any(
+        str(detail.get("category", "")).strip().casefold() == "readability"
+        and str(
+            (detail.get("readability_advisory", {}) or {}).get("authority", "")
+        ).strip().casefold() == "target_only_advisory"
+        for detail in details
+        if isinstance(detail, dict)
+    )
     has_substantive_nonblocking = any(
         str(detail.get("severity", "")).strip().lower() in {"critical", "major"}
         for detail in details
     )
     return bool(
-        _high_confidence_minor_issues(critique)
+        has_promoted_readability_issue
+        or _high_confidence_minor_issues(critique)
         or (
             has_substantive_nonblocking
             and not critique.passes_threshold(threshold)
@@ -2561,6 +2604,123 @@ def _objective_unmatched_readability_issues(
     return findings
 
 
+def _promote_objective_readability_issues(
+    critique: Any,
+    issues: list[dict[str, Any]],
+    translation: str,
+) -> list[dict[str, Any]]:
+    """Route major target-only grammar evidence through the source-aware refiner.
+
+    The Persian-only reviewer has no authority over source meaning. Promotion
+    therefore creates a non-blocking advisory issue with no source quote. The
+    existing refiner must decide whether the proposed repair is source-faithful,
+    and all accepted wording still passes integrity and final source review.
+    """
+    details = list(getattr(critique, "issue_details", []) or [])
+    issue_lines = list(getattr(critique, "issues", []) or [])
+    existing_ids = {
+        str(detail.get("issue_id", "")).strip()
+        for detail in details
+        if isinstance(detail, dict)
+    }
+    promoted: list[dict[str, Any]] = []
+    normalized_translation = normalize_for_match(translation)
+    for issue in _objective_unmatched_readability_issues(issues):
+        if str(issue.get("severity", "")).strip().casefold() != "major":
+            continue
+        quote = str(issue.get("current_persian_quote", "")).strip()
+        suggested = str(issue.get("suggested_correction", "")).strip()
+        rationale = str(issue.get("rationale", "")).strip()
+        if not quote or normalize_for_match(quote) not in normalized_translation:
+            continue
+        material = f"readability\0{normalize_for_match(quote)}".encode()
+        issue_id = "readability-" + hashlib.sha256(material).hexdigest()[:12]
+        if issue_id in existing_ids:
+            continue
+        advisory = {
+            "severity": "major",
+            "current_persian_quote": quote,
+            "suggested_correction": suggested,
+            "rationale": rationale,
+            "authority": "target_only_advisory",
+        }
+        detail = {
+            "issue_id": issue_id,
+            "category": "readability",
+            "severity": "major",
+            "confidence": None,
+            "current_persian_quote": quote,
+            "suggested_correction": suggested,
+            "rationale": rationale,
+            "risk_flags": [],
+            "readability_advisory": advisory,
+        }
+        details.append(detail)
+        issue_lines.append(
+            f"[MAJOR/readability] {quote}: {rationale} Suggested: {suggested}"
+        )
+        existing_ids.add(issue_id)
+        promoted.append(detail)
+    critique.issue_details = details
+    critique.issues = issue_lines
+    return promoted
+
+
+def _readability_advisory_decision_summary(
+    issue_details: list[dict[str, Any]],
+    issue_decisions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Summarize source-aware decisions for promoted target-only evidence."""
+    promoted_ids = {
+        str(detail.get("issue_id", "")).strip()
+        for detail in issue_details
+        if isinstance(detail, dict)
+        and str(detail.get("category", "")).strip().casefold() == "readability"
+        and str(
+            (detail.get("readability_advisory", {}) or {}).get("authority", "")
+        ).strip().casefold() == "target_only_advisory"
+    }
+    promoted_ids.discard("")
+    decisions_by_id = {
+        str(decision.get("issue_id", "")).strip(): decision
+        for decision in issue_decisions
+        if isinstance(decision, dict)
+    }
+    records: list[dict[str, Any]] = []
+    for issue_id in sorted(promoted_ids):
+        decision = decisions_by_id.get(issue_id, {})
+        disposition = str(decision.get("decision", "")).strip().casefold()
+        commit_status = str(decision.get("commit_status", "")).strip()
+        if disposition == "rejected":
+            resolution = "rejected_by_source_aware_refiner"
+            resolved = True
+        elif (
+            disposition in {"accepted", "partially_applied"}
+            and commit_status.startswith("committed")
+        ):
+            resolution = "source_aware_edit_committed"
+            resolved = True
+        else:
+            resolution = "source_aware_edit_not_committed"
+            resolved = False
+        records.append({
+            "issue_id": issue_id,
+            "decision": disposition or "missing",
+            "commit_status": commit_status or None,
+            "resolution": resolution,
+            "resolved": resolved,
+            "rationale": _truncate_for_event(
+                str(decision.get("rationale", "")), 500
+            ),
+        })
+    return {
+        "promoted_count": len(promoted_ids),
+        "resolved_count": sum(bool(record["resolved"]) for record in records),
+        "unresolved_count": sum(not bool(record["resolved"]) for record in records),
+        "decisions": records,
+    }
+
+
 def _chunk_style_policy(
     db: Any,
     job_id: str,
@@ -2722,7 +2882,23 @@ def _chunk_memory_admission(
         reasons.append("objective_final_language_artifact")
 
     reasons = list(dict.fromkeys(reasons))
-    durable_reliable = not reasons
+    hard_reasons = [
+        reason for reason in reasons
+        if reason in _DISQUALIFYING_RELIABILITY_REASONS
+    ]
+    advisory_reasons = [
+        reason for reason in reasons
+        if reason in _ADVISORY_RELIABILITY_REASONS
+    ]
+    unknown_reasons = [
+        reason for reason in reasons
+        if reason not in _DISQUALIFYING_RELIABILITY_REASONS
+        and reason not in _ADVISORY_RELIABILITY_REASONS
+    ]
+    # New or misspelled policy reasons fail closed until explicitly classified.
+    hard_reasons.extend(unknown_reasons)
+    hard_reasons = list(dict.fromkeys(hard_reasons))
+    durable_reliable = not hard_reasons
     return {
         "quality_approved": not needs_review,
         "long_term_reliable": durable_reliable,
@@ -2730,6 +2906,8 @@ def _chunk_memory_admission(
             "trusted" if durable_reliable else "advisory_review"
         ),
         "reliability_reasons": reasons,
+        "disqualifying_reliability_reasons": hard_reasons,
+        "advisory_reliability_reasons": advisory_reasons,
         "continuity_retained": True,
     }
 
@@ -4040,6 +4218,12 @@ class TranslationPipeline:
                             ],
                         )
                         memory_policy["style_policy_reason"] = style_policy["reason"]
+                        memory_policy["disqualifying_reliability_reasons"] = (
+                            memory_admission["disqualifying_reliability_reasons"]
+                        )
+                        memory_policy["advisory_reliability_reasons"] = (
+                            memory_admission["advisory_reliability_reasons"]
+                        )
                         self.db.log_chunk_event(
                             job_id, idx, "memory_update_policy", memory_policy
                         )
@@ -4289,6 +4473,12 @@ class TranslationPipeline:
                             ],
                         )
                         memory_policy["style_policy_reason"] = style_policy["reason"]
+                        memory_policy["disqualifying_reliability_reasons"] = (
+                            memory_admission["disqualifying_reliability_reasons"]
+                        )
+                        memory_policy["advisory_reliability_reasons"] = (
+                            memory_admission["advisory_reliability_reasons"]
+                        )
                         self.db.log_chunk_event(
                             job_id, idx, "memory_update_policy", memory_policy
                         )
@@ -5460,6 +5650,12 @@ class TranslationPipeline:
             style_excluded_paragraphs=style_policy["excluded_paragraphs"],
         )
         memory_policy["style_policy_reason"] = style_policy["reason"]
+        memory_policy["disqualifying_reliability_reasons"] = (
+            memory_admission["disqualifying_reliability_reasons"]
+        )
+        memory_policy["advisory_reliability_reasons"] = (
+            memory_admission["advisory_reliability_reasons"]
+        )
         self.db.log_chunk_event(
             job_id, chunk_index, "memory_update_policy", memory_policy
         )
@@ -6114,6 +6310,17 @@ class TranslationPipeline:
             len(paragraph_markers) > 1
             and int(chunk.metadata.get("paragraph_protocol_version", 0)) >= 1
         )
+        structural_roles = {
+            str(role).strip().casefold()
+            for role in list(chunk.metadata.get("structural_roles", []) or [])
+            if str(role).strip()
+        }
+        table_like_recovery = bool(structural_roles) and structural_roles <= {"table"}
+        recovery_structural_role = (
+            next(iter(structural_roles))
+            if len(structural_roles) == 1
+            else "body"
+        )
 
         def build_translation_prompt(
             source_text: str,
@@ -6293,9 +6500,7 @@ class TranslationPipeline:
                         candidate,
                         previous_target=previous,
                         source_context=effective_context,
-                        structural_role=str(
-                            chunk.metadata.get("structural_role", "body")
-                        ),
+                        structural_role=recovery_structural_role,
                     )
                     errors = list(envelope.get("errors", []))
                     errors.extend(content_check.get("errors", []))
@@ -6373,7 +6578,96 @@ class TranslationPipeline:
             def recover_all_parts(strict_target_only: bool = False) -> str:
                 recovered_parts: list[str] = []
                 continuity = prev_trans
-                for part_index, source_paragraph in enumerate(recovery_paragraphs):
+                recovery_groups = _table_recovery_groups(
+                    recovery_paragraphs,
+                    table_like=table_like_recovery,
+                )
+                source_offset = 0
+                for group_index, source_group in enumerate(recovery_groups):
+                    if len(source_group) > 1:
+                        group_source = "\n\n".join(source_group)
+                        encoded_group, group_markers = encode_paragraphs(group_source)
+                        group_previous = "" if strict_target_only else continuity
+                        group_prompt = build_translation_prompt(
+                            encoded_group, group_previous
+                        ) + protocol_instruction(group_markers)
+                        group_diagnostics: dict[str, Any] = {
+                            "group_index": group_index,
+                            "source_start": source_offset,
+                            "row_count": len(source_group),
+                            "strict_target_only": strict_target_only,
+                        }
+                        try:
+                            raw_group = self.llm_client.complete(
+                                messages=[{"role": "user", "content": group_prompt}],
+                                system_prompt=sys_prompt,
+                                _operation="translation_split_recovery",
+                                _recovery_source_text=group_source,
+                            )
+                            decoded_group = decode_paragraphs(
+                                raw_group, group_markers
+                            )
+                            group_diagnostics.update({
+                                "valid": decoded_group.valid,
+                                "errors": decoded_group.errors,
+                                "fallback_to_rows": not decoded_group.valid,
+                            })
+                            if not decoded_group.valid:
+                                raise TruncatedCompletionError(
+                                    "Grouped table recovery changed row identity."
+                                )
+                            recovered_group = decoded_group.paragraphs
+                            row_checks = [
+                                _validate_recovery_part(
+                                    source_row,
+                                    target_row,
+                                    structural_role="table",
+                                )
+                                for source_row, target_row in zip(
+                                    source_group, recovered_group, strict=True
+                                )
+                            ]
+                            group_diagnostics["row_checks"] = row_checks
+                            if not all(check["valid"] for check in row_checks):
+                                raise ValueError(
+                                    "Grouped table recovery failed row validation."
+                                )
+                        except (
+                            TruncatedCompletionError,
+                            EmptyCompletionError,
+                            IncompleteCompletionError,
+                            ValueError,
+                        ) as exc:
+                            group_diagnostics.update({
+                                "valid": False,
+                                "failure_type": type(exc).__name__,
+                                "error": str(exc),
+                                "fallback_to_rows": True,
+                            })
+                            recovered_group = []
+                            row_continuity = group_previous
+                            for row_offset, source_paragraph in enumerate(source_group):
+                                part_index = source_offset + row_offset
+                                recovered = request_recovery_part(
+                                    source_paragraph,
+                                    "" if strict_target_only else row_continuity,
+                                    f"c{idx}.p{part_index}",
+                                )
+                                recovered_group.append(recovered)
+                                row_continuity = recovered
+                        self.db.log_chunk_event(
+                            job_id,
+                            idx,
+                            "translation_table_group_recovery",
+                            group_diagnostics,
+                        )
+                        recovered_parts.extend(recovered_group)
+                        continuity = recovered_group[-1]
+                        source_offset += len(source_group)
+                        continue
+
+                    part_index = source_offset
+                    source_paragraph = source_group[0]
                     part_previous = "" if strict_target_only else continuity
                     if len(recovery_paragraphs) == 1:
                         groups = _split_source_recovery_groups(source_paragraph)
@@ -6404,6 +6698,7 @@ class TranslationPipeline:
                         )
                     recovered_parts.append(recovered)
                     continuity = recovered
+                    source_offset += 1
                 assembled = "\n\n".join(recovered_parts)
                 if _paragraph_count(assembled) != len(recovery_paragraphs):
                     raise ValueError(
@@ -6903,12 +7198,26 @@ class TranslationPipeline:
                         readability_issues = list(
                             getattr(readability, "issues", []) or []
                         )
+                        promoted_readability: list[dict[str, Any]] = []
                         if getattr(readability, "valid", True):
                             matched, unmatched = _merge_readability_evidence(
                                 critique_rep, readability_issues
                             )
+                            promoted_readability = (
+                                _promote_objective_readability_issues(
+                                    critique_rep,
+                                    unmatched,
+                                    translation,
+                                )
+                            )
                         else:
                             matched, unmatched = 0, readability_issues
+                        promoted_quotes = {
+                            normalize_for_match(
+                                str(item.get("current_persian_quote", ""))
+                            )
+                            for item in promoted_readability
+                        }
                         readability_payload.update({
                             "valid": bool(getattr(readability, "valid", True)),
                             "validation_errors": list(
@@ -6916,13 +7225,27 @@ class TranslationPipeline:
                             ),
                             "issue_count": len(readability_issues),
                             "matched_source_grounded_count": matched,
+                            "promoted_major_count": len(promoted_readability),
+                            "promoted_issue_ids": [
+                                item.get("issue_id")
+                                for item in promoted_readability
+                            ],
                             "unmatched_advisory_count": len(unmatched),
                             "unmatched_advisories": unmatched,
                         })
                         objective_unmatched = (
                             _objective_unmatched_readability_issues(unmatched)
                         )
-                        if objective_unmatched:
+                        unrouted_objective = [
+                            issue for issue in objective_unmatched
+                            if normalize_for_match(
+                                str(issue.get("current_persian_quote", ""))
+                            ) not in promoted_quotes
+                        ]
+                        readability_payload["unrouted_objective_count"] = len(
+                            unrouted_objective
+                        )
+                        if unrouted_objective:
                             self.db.log_chunk_event(
                                 job_id,
                                 idx,
@@ -6935,13 +7258,14 @@ class TranslationPipeline:
                                     ),
                                     "authority": "target_only_advisory",
                                     "automatic_edit": False,
-                                    "finding_count": len(objective_unmatched),
-                                    "findings": objective_unmatched,
+                                    "finding_count": len(unrouted_objective),
+                                    "findings": unrouted_objective,
                                     "message": (
                                         "A bounded Persian-only review found an "
                                         "objective grammar risk that the source-aware "
-                                        "critic did not confirm. No text was changed; "
-                                        "the final candidate requires human review."
+                                        "critic did not confirm and that could not be "
+                                        "safely routed. No text was changed; the final "
+                                        "candidate requires human review."
                                     ),
                                 },
                             )
@@ -7568,6 +7892,21 @@ class TranslationPipeline:
                     if (local_salvage or {}).get("committed_count")
                     else before_translation
                 )
+                readability_decisions = _readability_advisory_decision_summary(
+                    issue_details,
+                    issue_decisions,
+                )
+                if readability_decisions["promoted_count"]:
+                    self.db.log_chunk_event(
+                        job_id,
+                        idx,
+                        "readability_advisory_decisions",
+                        {
+                            "iteration": ref_iter + 1,
+                            "authority": "source_aware_refiner",
+                            **readability_decisions,
+                        },
+                    )
                 if (local_salvage or {}).get("committed_count"):
                     pending_salvage = local_salvage
                     pending_salvage_baseline = before_translation

@@ -119,10 +119,14 @@ def test_memory_uses_configured_threshold_but_retains_continuity() -> None:
         _MemoryAdmissionDB(), "job", 0, critique_threshold=9.0
     )
 
-    assert not policy["long_term_reliable"]
-    assert policy["short_term_trust"] == "advisory_review"
+    assert policy["long_term_reliable"]
+    assert policy["short_term_trust"] == "trusted"
     assert policy["continuity_retained"]
     assert "final_critique_below_configured_threshold" in policy["reliability_reasons"]
+    assert policy["disqualifying_reliability_reasons"] == []
+    assert policy["advisory_reliability_reasons"] == [
+        "final_critique_below_configured_threshold"
+    ]
 
 
 def test_contextual_auto_terms_are_deferred_and_loanwords_are_reclassified() -> None:

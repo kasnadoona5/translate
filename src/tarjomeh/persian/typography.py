@@ -320,29 +320,42 @@ class PersianTypographer:
         return normalizer.normalize(text)
 
     def _repair_false_mi_splits(self, text: str) -> str:
-        """Undo Hazm ``mi`` splits only for lexicon-backed non-verbs."""
+        """Undo Hazm ``mi`` splits only for lexicon-backed non-verbs.
+
+        Derived nominal/adjectival forms may append ZWNJ-delimited suffixes that
+        are absent from Hazm's lexicon even though their base is present. In that
+        case shorter derived prefixes are checked; genuine verb prefixes remain
+        split because their joined forms have no qualifying non-verb base.
+        """
         normalizer = self._get_hazm_normalizer()
         lexicon = getattr(normalizer, "words", {})
         if not isinstance(lexicon, dict):
             return text
 
-        def _join(match: re.Match[str]) -> str:
-            joined = match.group("prefix") + match.group("stem")
-            record = lexicon.get(joined)
+        def _is_lexical_nonverb(candidate: str) -> bool:
+            record = lexicon.get(candidate)
             if not isinstance(record, (tuple, list)) or len(record) < 2:
-                return match.group(0)
+                return False
             try:
                 frequency = int(record[0])
             except (TypeError, ValueError):
-                return match.group(0)
+                return False
             raw_tags = record[1]
             tags = (
                 {str(tag) for tag in raw_tags}
                 if isinstance(raw_tags, (tuple, list, set, frozenset))
                 else {str(raw_tags)}
             )
-            if frequency > 0 and tags.intersection(_NON_VERB_HAZM_TAGS):
+            return frequency > 0 and bool(tags.intersection(_NON_VERB_HAZM_TAGS))
+
+        def _join(match: re.Match[str]) -> str:
+            joined = match.group("prefix") + match.group("stem")
+            if _is_lexical_nonverb(joined):
                 return joined
+            segments = joined.split("\u200c")
+            for end in range(len(segments) - 1, 0, -1):
+                if _is_lexical_nonverb("\u200c".join(segments[:end])):
+                    return joined
             return match.group(0)
 
         return _HAZM_FALSE_MI_RE.sub(_join, text)
