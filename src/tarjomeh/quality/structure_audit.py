@@ -330,6 +330,56 @@ def _structural_episodes(
     return episodes
 
 
+def _direct_announcement_mismatches(
+    source: str,
+    candidate: str,
+    *,
+    covered_source_paragraphs: set[int],
+) -> list[StructureFinding]:
+    """Compare one explicit count announcement per aligned paragraph.
+
+    This fills the page/chunk-boundary gap where a source says "two issues" but
+    the enumeration appears later. Multiple announcements are deliberately left
+    unverifiable to avoid pairing unrelated quantities by position.
+    """
+    findings: list[StructureFinding] = []
+    source_paragraphs = _paragraphs(source)
+    candidate_paragraphs = _paragraphs(candidate)
+    for index, source_paragraph in enumerate(source_paragraphs):
+        if index in covered_source_paragraphs or index >= len(candidate_paragraphs):
+            continue
+        source_counts = announced_counts(source_paragraph)
+        candidate_counts = announced_counts(candidate_paragraphs[index])
+        mismatched_pairs = (
+            [
+                (source_value, candidate_value)
+                for source_value, candidate_value in zip(
+                    source_counts, candidate_counts, strict=True
+                )
+                if source_value != candidate_value
+            ]
+            if source_counts and len(source_counts) == len(candidate_counts)
+            else []
+        )
+        if mismatched_pairs:
+            findings.append(StructureFinding(
+                "announced_count_lexical_mismatch",
+                TRANSLATION_STRUCTURE_MISMATCH,
+                "The translation changes an explicit source announcement count.",
+                {
+                    "source_announced": mismatched_pairs[0][0],
+                    "candidate_announced": mismatched_pairs[0][1],
+                    "source_announcements": source_counts,
+                    "candidate_announcements": candidate_counts,
+                    "source_paragraph": index,
+                    "candidate_paragraph": index,
+                    "source_excerpt": source_paragraph[:360],
+                    "candidate_excerpt": candidate_paragraphs[index][:360],
+                },
+            ))
+    return findings
+
+
 def audit_structure(source: str, candidate: str) -> list[StructureFinding]:
     """Compare announced structure in *source* against *candidate*.
 
@@ -338,6 +388,13 @@ def audit_structure(source: str, candidate: str) -> list[StructureFinding]:
     source_episodes = _structural_episodes(source)
     candidate_episodes = _structural_episodes(candidate, minimum_items=1)
     if not source_episodes:
+        direct = _direct_announcement_mismatches(
+            source,
+            candidate,
+            covered_source_paragraphs=set(),
+        )
+        if direct:
+            return direct
         if not candidate_episodes:
             return []
         episode = candidate_episodes[0]
@@ -440,6 +497,13 @@ def audit_structure(source: str, candidate: str) -> list[StructureFinding]:
                 "of items; the translation does not match it.",
                 details,
             ))
+    findings.extend(_direct_announcement_mismatches(
+        source,
+        candidate,
+        covered_source_paragraphs={
+            episode.paragraph_index for episode in source_episodes
+        },
+    ))
     return findings
 
 

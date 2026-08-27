@@ -434,6 +434,13 @@ class DocxExporter(BaseExporter):
                 p = document.paragraphs[paragraph_index]
                 if (
                     bilingual_mode == "target_only"
+                    and p.metadata.get("suppress_empty_target_export")
+                    and not p.translated_text.strip()
+                ):
+                    paragraph_index += 1
+                    continue
+                if (
+                    bilingual_mode == "target_only"
                     and p.metadata.get("structure_role") == "contents_entry"
                 ):
                     entries = []

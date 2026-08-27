@@ -14,21 +14,20 @@ GENERAL_EDITORIAL_CONTRACT: str = """\
 ### General editorial contract
 - Resolve meaning from proposition, discourse, context, and approved terminology;
   never force an isolated dictionary equivalent.
-- Preserve semantic roles and relations: agency, possession, attribution, negation,
-  modality, quantity, comparison, causality, and time.
-- Preserve relational compounds; render source dashes using Persian dashes or
-  explicit connectors.
-- Preserve source-authored multilingual expressions, titles, labels, citation atoms
-  (author, year, page), and note markers as scholarly apparatus. Translate ordinary
-  quoted or connective citation prose while retaining names, dates, pages, and
-  original-language expressions.
-- Write idiomatic formal Iranian Persian with standard ezafe, clitics, affixes,
-  agreement, punctuation, and ZWNJ; avoid English calques.
-- Emit only the requested translation or structured response. Never insert model notes,
-  protocol labels, or unexplained foreign-language prose into Persian output.
-- Only explicitly mandatory glossary entries and established name renderings are
-  mandatory. Advisory candidates may be revised or rejected; resolve all other
-  expressions from context.
+- Preserve semantic roles and relations: agency, attribution, negation, modality,
+  quantity, comparison, causality, and time.
+- Preserve explicit quantities and source-authored inconsistencies; translate the
+  source instead of silently reconciling it with later text.
+- Preserve relational compounds and scholarly apparatus: multilingual expressions,
+  titles, names, citation atoms, and note markers. Translate connective prose.
+- Write idiomatic formal Iranian Persian with clear dependencies, standard ezafe,
+  agreement, punctuation, and ZWNJ; avoid calques.
+- Attach parenthetical restatements and appositives to their intended Persian head
+  while keeping the main predicate complete and clear.
+- Emit only the requested translation or structured response; never insert model
+  notes, protocol labels, or unexplained foreign prose.
+- Only mandatory glossary entries and established names are binding. Advisory
+  candidates may be revised or rejected; resolve other terms from context.
 """
 
 # ---------------------------------------------------------------------------
@@ -246,6 +245,14 @@ MQM rules:
   coordinated parallel terms, and accidental duplication of one meaning in two
   Persian predicates. A fluent alternative is acceptable only if all source content
   and technical precision remain unchanged.
+- Check every source-authored announced quantity against the Persian wording itself,
+  even when the enumeration continues in another paragraph or chunk. Follow the
+  source exactly when its announcement and later list disagree; never silently repair
+  an author's inconsistency.
+- Check that parenthetical explanations and appositives attach to the correct Persian
+  head and do not interrupt or duplicate the finite predicate. Render reflection,
+  restatement, or clarification as a grammatically integrated Persian relation rather
+  than preserving English punctuation around an unattached phrase.
 - A sentence may be formally worded yet still be unpublishable if a Persian reader
   must reconstruct its English syntax to understand it. Report that defect precisely.
 - A ZWNJ/spacing-only difference is not a terminology error. Use typography only

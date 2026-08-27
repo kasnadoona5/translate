@@ -709,6 +709,50 @@ def _paragraph_count(text: str) -> int:
     return len([p for p in (text or "").split("\n\n") if p.strip()])
 
 
+def _target_paragraphs_for_alignment(
+    translation: str,
+    *,
+    expected_count: int,
+    table_like: bool,
+) -> tuple[list[str], str]:
+    """Recover exact table-row identity from safe line boundaries when possible.
+
+    Ordinary prose continues to use blank-line paragraph boundaries exclusively.
+    Table/list models sometimes preserve every row but separate rows with a single
+    newline; accepting that representation only when its count is exact avoids the
+    generic sentence distributor creating one populated row and many empty rows.
+    """
+    paragraphs = [
+        part.strip()
+        for part in (translation or "").split("\n\n")
+        if part.strip()
+    ]
+    if not table_like or expected_count <= 1 or len(paragraphs) == expected_count:
+        return paragraphs, "paragraph_boundaries"
+    lines = [line.strip() for line in (translation or "").splitlines() if line.strip()]
+    if len(lines) == expected_count:
+        return lines, "table_line_boundaries"
+    return paragraphs, "paragraph_boundaries"
+
+
+def _translated_paragraph_metadata(
+    source_metadata: dict[str, Any],
+    *,
+    translated_text: str,
+    degraded_alignment: bool,
+) -> dict[str, Any]:
+    """Copy metadata and mark only empty table-alignment placeholders for export."""
+    metadata = dict(source_metadata or {})
+    if (
+        degraded_alignment
+        and bool(metadata.get("is_table"))
+        and not (translated_text or "").strip()
+    ):
+        metadata["alignment_placeholder"] = True
+        metadata["suppress_empty_target_export"] = True
+    return metadata
+
+
 def _recovery_segment_instruction(segment_id: str) -> str:
     return (
         "\n\n### Recovery output contract\n"
@@ -2458,6 +2502,36 @@ def _candidate_regression_details(
         if serious:
             regressions.append(detail)
     return regressions
+
+
+def _decisions_without_regressed_edits(
+    issue_decisions: list[dict[str, Any]],
+    regressions: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Exclude only refiner decisions implicated by a later grounded regression."""
+    regression_spans = [
+        normalize_for_match(str(detail.get("current_persian_quote", "")))
+        for detail in regressions
+        if isinstance(detail, dict)
+        and str(detail.get("current_persian_quote", "")).strip()
+    ]
+    retained: list[dict[str, Any]] = []
+    excluded: list[str] = []
+    for raw in issue_decisions:
+        decision = dict(raw)
+        resulting = normalize_for_match(str(decision.get("resulting_span", "")))
+        implicated = bool(
+            resulting
+            and any(
+                span and (resulting in span or span in resulting)
+                for span in regression_spans
+            )
+        )
+        if implicated:
+            excluded.append(str(decision.get("issue_id", "")).strip())
+        else:
+            retained.append(decision)
+    return retained, [issue_id for issue_id in excluded if issue_id]
 
 
 def _objective_unmatched_readability_issues(
@@ -4476,7 +4550,6 @@ class TranslationPipeline:
         for idx in range(total_chunks):
             chunk = chunks[idx]
             chunk_translation = translations.get(idx, "")
-            tgt_paras = [p.strip() for p in chunk_translation.split("\n\n") if p.strip()]
             # chunk.metadata is dict[str, object], so narrow once here rather
             # than leaving every downstream len()/index/call site untyped.
             _raw_indices = chunk.metadata.get("paragraph_indices")
@@ -4484,6 +4557,36 @@ class TranslationPipeline:
                 [int(value) for value in _raw_indices]
                 if isinstance(_raw_indices, list) else []
             )
+            table_like = bool(
+                para_indices
+                and all(
+                    pid < len(original_paragraphs)
+                    and bool(original_paragraphs[pid].metadata.get("is_table"))
+                    for pid in para_indices
+                )
+            )
+            tgt_paras, alignment_boundary = _target_paragraphs_for_alignment(
+                chunk_translation,
+                expected_count=len(para_indices),
+                table_like=table_like,
+            )
+            degraded_alignment = bool(
+                para_indices and len(para_indices) != len(tgt_paras)
+            )
+            if alignment_boundary == "table_line_boundaries":
+                self.db.log_chunk_event(
+                    job_id,
+                    idx,
+                    "table_row_identity_recovered",
+                    {
+                        "row_count": len(tgt_paras),
+                        "boundary": alignment_boundary,
+                        "message": (
+                            "Exact table-row identity was recovered from model-"
+                            "preserved line boundaries without changing text."
+                        ),
+                    },
+                )
 
             if para_indices:
                 try:
@@ -4528,6 +4631,28 @@ class TranslationPipeline:
                         "redistributed proportionally across source paragraphs.",
                         idx, len(tgt_paras), len(para_indices),
                     )
+                empty_table_placeholders = sum(
+                    1
+                    for pid, value in aligned
+                    if not value.strip()
+                    and pid < len(original_paragraphs)
+                    and bool(original_paragraphs[pid].metadata.get("is_table"))
+                )
+                if degraded_alignment and empty_table_placeholders:
+                    self.db.log_chunk_event(
+                        job_id,
+                        idx,
+                        "table_alignment_placeholders_suppressed",
+                        {
+                            "placeholder_count": empty_table_placeholders,
+                            "target_only_export": True,
+                            "source_rows_preserved_in_bilingual_export": True,
+                            "message": (
+                                "Empty rows created only by degraded table alignment "
+                                "will not become blank target-only DOCX paragraphs."
+                            ),
+                        },
+                    )
 
                 for pid, t in aligned:
                     if pid < len(original_paragraphs):
@@ -4539,7 +4664,11 @@ class TranslationPipeline:
                                 source_text=orig_para.text,
                                 translated_text=t,
                                 heading_level=orig_para.heading_level,
-                                metadata=orig_para.metadata,
+                                metadata=_translated_paragraph_metadata(
+                                    orig_para.metadata,
+                                    translated_text=t,
+                                    degraded_alignment=degraded_alignment,
+                                ),
                             )
                         elif t:
                             # Same paragraph index seen again (e.g. FixedChunker
@@ -4572,7 +4701,11 @@ class TranslationPipeline:
                             source_text=s,
                             translated_text=t,
                             heading_level=orig_para.heading_level,
-                            metadata=orig_para.metadata,
+                            metadata=_translated_paragraph_metadata(
+                                orig_para.metadata,
+                                translated_text=t,
+                                degraded_alignment=degraded_alignment,
+                            ),
                         )
                         fallback_idx += 1
 
@@ -5495,13 +5628,28 @@ class TranslationPipeline:
 
         for idx, chunk in enumerate(chunks):
             chunk_translation = translations.get(idx, "")
-            tgt_paras = [p.strip() for p in chunk_translation.split("\n\n") if p.strip()]
             # chunk.metadata is dict[str, object], so narrow once here rather
             # than leaving every downstream len()/index/call site untyped.
             _raw_indices = chunk.metadata.get("paragraph_indices")
             para_indices: list[int] = (
                 [int(value) for value in _raw_indices]
                 if isinstance(_raw_indices, list) else []
+            )
+            table_like = bool(
+                para_indices
+                and all(
+                    pid < len(original_paragraphs)
+                    and bool(original_paragraphs[pid].metadata.get("is_table"))
+                    for pid in para_indices
+                )
+            )
+            tgt_paras, _alignment_boundary = _target_paragraphs_for_alignment(
+                chunk_translation,
+                expected_count=len(para_indices),
+                table_like=table_like,
+            )
+            degraded_alignment = bool(
+                para_indices and len(para_indices) != len(tgt_paras)
             )
 
             if para_indices:
@@ -5537,7 +5685,11 @@ class TranslationPipeline:
                                 source_text=orig_para.text,
                                 translated_text=t,
                                 heading_level=orig_para.heading_level,
-                                metadata=orig_para.metadata,
+                                metadata=_translated_paragraph_metadata(
+                                    orig_para.metadata,
+                                    translated_text=t,
+                                    degraded_alignment=degraded_alignment,
+                                ),
                             )
                         elif t:
                             existing.translated_text = (
@@ -5562,7 +5714,11 @@ class TranslationPipeline:
                             source_text=s,
                             translated_text=t,
                             heading_level=orig_para.heading_level,
-                            metadata=orig_para.metadata,
+                            metadata=_translated_paragraph_metadata(
+                                orig_para.metadata,
+                                translated_text=t,
+                                degraded_alignment=degraded_alignment,
+                            ),
                         )
                         fallback_idx += 1
 
@@ -6832,7 +6988,42 @@ class TranslationPipeline:
                 if pending_candidate is not None:
                     if candidate_regressions:
                         rejected_translation = translation
-                        translation = str(pending_candidate["baseline"])
+                        baseline_translation = str(pending_candidate["baseline"])
+                        safe_decisions, excluded_issue_ids = (
+                            _decisions_without_regressed_edits(
+                                list(pending_candidate.get("issue_decisions", []) or []),
+                                candidate_regressions,
+                            )
+                        )
+                        atomic_recovery: dict[str, Any] = {
+                            "attempted_count": 0,
+                            "committed_count": 0,
+                            "attempts": [],
+                        }
+                        recovered_translation = baseline_translation
+                        if safe_decisions:
+                            (
+                                recovered_translation,
+                                _recovered_decisions,
+                                atomic_recovery,
+                            ) = _salvage_local_refinement_edits(
+                                source=chunk.text,
+                                previous=baseline_translation,
+                                proposed=str(
+                                    pending_candidate.get(
+                                        "proposed", rejected_translation
+                                    )
+                                ),
+                                issue_details=list(
+                                    pending_candidate.get("issue_details", []) or []
+                                ),
+                                issue_decisions=safe_decisions,
+                                integrity_gate=integrity_gate,
+                                protected_terms=protected_targets,
+                                protect_inline_english=protect_inline_english,
+                                allowed_inline_originals=allowed_inline_originals,
+                            )
+                        translation = recovered_translation
                         last_accepted_translation = translation
                         current_integrity_accepted = True
                         self.db.update_chunk(
@@ -6849,28 +7040,182 @@ class TranslationPipeline:
                                 "restored_chars": len(translation),
                                 "regression_count": len(candidate_regressions),
                                 "regressions": candidate_regressions,
+                                "excluded_regressed_issue_ids": excluded_issue_ids,
+                                "atomic_recovery": atomic_recovery,
                                 "message": (
                                     "The next source-aware review found a new "
                                     "grounded defect in wording changed by the full "
-                                    "refiner candidate; the prior integrity-valid "
-                                    "translation was retained."
+                                    "refiner candidate. Only unrelated, independently "
+                                    "integrity-valid issue edits were recovered; the "
+                                    "regressed edit itself was rejected."
                                 ),
                             },
                         )
+                        post_review_required = False
+                        post_review_details: list[str] = []
+                        post_validation: dict[str, Any] = {
+                            "iteration": ref_iter,
+                            "translation_chars": len(translation),
+                            "atomic_edits_committed": int(
+                                atomic_recovery.get("committed_count", 0) or 0
+                            ),
+                            "source_review_attempted": True,
+                            "readability_review_attempted": False,
+                        }
+                        post_critique: Any | None = None
+                        try:
+                            post_critique = self._run_async(
+                                critique_tool.critique(
+                                    chunk.text,
+                                    translation,
+                                    terminology=terminology_ctx,
+                                    review_context=qa_context,
+                                )
+                            )
+                            if getattr(post_critique, "valid", True):
+                                _filter_critique_policy_conflicts(
+                                    post_critique,
+                                    chunk.text,
+                                    allowed_inline_originals,
+                                )
+                                _filter_critique_glossary_conflicts(
+                                    post_critique,
+                                    enforced_entries,
+                                    include_auto=enforce_auto_terms,
+                                )
+                            post_critique_event = _critique_for_event(
+                                post_critique, threshold, ref_iter
+                            )
+                            post_critique_event["stage"] = (
+                                "post_rollback_final_validation"
+                            )
+                            post_validation["source_review"] = post_critique_event
+                            self.db.log_chunk_event(
+                                job_id,
+                                idx,
+                                "critique_completed",
+                                post_critique_event,
+                            )
+                            critique_rep = post_critique
+                            if (
+                                not getattr(post_critique, "valid", True)
+                                or _critique_requires_refinement(
+                                    post_critique, threshold
+                                )
+                            ):
+                                post_review_required = True
+                                post_review_details.append(
+                                    "post_rollback_source_review"
+                                )
+                        except _QUALITY_STAGE_ERRORS as exc:
+                            failure = _qa_provider_failure_payload(
+                                "critic",
+                                "post_rollback_source_validation",
+                                critic_client,
+                                exc,
+                            )
+                            post_validation["source_review_failure"] = failure
+                            self.db.log_chunk_event(
+                                job_id, idx, "qa_unavailable", failure
+                            )
+                            post_review_required = True
+                            post_review_details.append(
+                                "post_rollback_source_review_unavailable"
+                            )
+
+                        if (
+                            hasattr(critique_tool, "review_persian_readability")
+                            and _readability_review_eligible(
+                                chunk,
+                                post_critique or critique_rep,
+                                threshold,
+                                candidate_changed=True,
+                                final_candidate=True,
+                            )
+                        ):
+                            post_validation["readability_review_attempted"] = True
+                            try:
+                                post_readability = self._run_async(
+                                    critique_tool.review_persian_readability(
+                                        translation
+                                    )
+                                )
+                                readability_issues = list(
+                                    getattr(post_readability, "issues", []) or []
+                                )
+                                matched_readability = 0
+                                unmatched_readability = readability_issues
+                                if (
+                                    getattr(post_readability, "valid", True)
+                                    and post_critique is not None
+                                    and getattr(post_critique, "valid", True)
+                                ):
+                                    (
+                                        matched_readability,
+                                        unmatched_readability,
+                                    ) = _merge_readability_evidence(
+                                        post_critique, readability_issues
+                                    )
+                                objective_readability = (
+                                    _objective_unmatched_readability_issues(
+                                        unmatched_readability
+                                    )
+                                    if getattr(post_readability, "valid", True)
+                                    else []
+                                )
+                                post_validation["readability_review"] = {
+                                    "valid": bool(
+                                        getattr(post_readability, "valid", True)
+                                    ),
+                                    "issue_count": len(readability_issues),
+                                    "matched_source_grounded_count": (
+                                        matched_readability
+                                    ),
+                                    "unmatched_advisory_count": len(
+                                        unmatched_readability
+                                    ),
+                                    "objective_issue_count": len(
+                                        objective_readability
+                                    ),
+                                    "issues": readability_issues,
+                                }
+                                if objective_readability:
+                                    post_review_required = True
+                                    post_review_details.append(
+                                        "post_rollback_readability"
+                                    )
+                            except _QUALITY_STAGE_ERRORS as exc:
+                                post_validation["readability_review_failure"] = {
+                                    "failure_type": type(exc).__name__,
+                                    "error": str(exc),
+                                }
+                                post_review_required = True
+                                post_review_details.append(
+                                    "post_rollback_readability_unavailable"
+                                )
+                        post_validation["review_required"] = post_review_required
+                        post_validation["review_details"] = post_review_details
                         self.db.log_chunk_event(
                             job_id,
                             idx,
-                            "critique_needs_review",
-                            _explicit_chunk_review_payload(
-                                "refinement_candidate_regression",
-                                detail="full_candidate_rolled_back",
-                                message=(
-                                    "A complete refinement did not improve the "
-                                    "translation monotonically; prior valid text "
-                                    "was retained for human review."
-                                ),
-                            ),
+                            "post_rollback_final_validation",
+                            post_validation,
                         )
+                        if post_review_required:
+                            self.db.log_chunk_event(
+                                job_id,
+                                idx,
+                                "critique_needs_review",
+                                _explicit_chunk_review_payload(
+                                    "refinement_candidate_regression",
+                                    detail=",".join(post_review_details),
+                                    message=(
+                                        "The regressed candidate edit was rejected; "
+                                        "the exact retained text still has grounded "
+                                        "source or Persian-readability concerns."
+                                    ),
+                                ),
+                            )
                         break
                     pending_candidate = None
                 if pending_salvage is not None:
@@ -7268,6 +7613,9 @@ class TranslationPipeline:
                     pending_candidate = {
                         "baseline": before_translation,
                         "baseline_critique": critique_rep,
+                        "proposed": translation,
+                        "issue_details": issue_details,
+                        "issue_decisions": issue_decisions,
                         "changed_spans": _changed_candidate_spans(
                             before_translation, translation
                         ),
