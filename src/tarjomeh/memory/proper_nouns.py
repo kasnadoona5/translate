@@ -786,6 +786,43 @@ def _normalise_target(value: str) -> str:
     return re.sub(r"[\s\u200c]+", " ", (value or "").strip()).casefold()
 
 
+def _mapping_authority_class(
+    english: str,
+    persian: str,
+    category: str,
+    origin: str,
+    evidence_keys: list[str],
+    context_independent: bool,
+) -> str:
+    """Separate useful continuity evidence from book-wide lexical authority."""
+    normalized_category = _normalise_category(category)
+    independent_evidence = len(set(evidence_keys))
+    if origin in {"curated_glossary", "approved_research"}:
+        return "canonical_curated"
+    if origin == "accepted_correction":
+        if (
+            context_independent
+            and independent_evidence >= 2
+            and is_reusable_terminology_mapping(english, persian)
+        ):
+            return "canonical_reviewed"
+        return "reviewed_advisory"
+    if (
+        origin == "observed_translation"
+        and normalized_category in INLINE_ORIGINAL_CATEGORIES
+    ):
+        return "source_observed_entity"
+    if origin in _LOW_AUTHORITY_ORIGINS:
+        if (
+            context_independent
+            and independent_evidence >= 2
+            and is_reusable_terminology_mapping(english, persian)
+        ):
+            return "recurring_advisory"
+        return "contextual_advisory"
+    return "legacy_advisory"
+
+
 class ProperNouns:
     """Proper noun translation memory layer.
 
@@ -818,6 +855,8 @@ class ProperNouns:
         category: str = "proper_noun",
         *,
         provenance: str = "legacy",
+        evidence_key: str = "",
+        context_independent: bool | None = None,
     ) -> dict[str, Any]:
         """Add or reconcile a proper noun mapping by source authority.
 
@@ -879,11 +918,40 @@ class ProperNouns:
                     "target": previous,
                     "origin": str(prior.get("origin", "legacy")),
                 })
+            if action in {"added", "replaced_lower_authority"}:
+                evidence_keys: list[str] = []
+                independent = bool(context_independent)
+            else:
+                evidence_keys = [
+                    str(value) for value in list(prior.get("evidence_keys", []) or [])
+                    if str(value)
+                ]
+                independent = bool(
+                    prior.get("context_independent", False)
+                    and context_independent is not False
+                )
+            if evidence_key and evidence_key not in evidence_keys:
+                evidence_keys.append(evidence_key)
+            if context_independent is True and action in {
+                "added", "replaced_lower_authority"
+            }:
+                independent = True
+            authority_class = _mapping_authority_class(
+                stored_key,
+                self._nouns[stored_key],
+                new_category,
+                origin,
+                evidence_keys,
+                independent,
+            )
             self._provenance[stored_key] = {
                 "origin": origin,
                 "authority": authority,
                 "observations": observations,
                 "superseded": history[-3:],
+                "evidence_keys": evidence_keys[-12:],
+                "context_independent": independent,
+                "authority_class": authority_class,
             }
         elif prior:
             prior["observations"] = observations
@@ -906,6 +974,9 @@ class ProperNouns:
             "previous_target": previous,
             "target": self._nouns[stored_key],
             "origin": self._provenance.get(stored_key, {}).get("origin", origin),
+            "authority_class": self._provenance.get(stored_key, {}).get(
+                "authority_class", "legacy_advisory"
+            ),
         }
 
     def add_alias(self, english: str, persian: str) -> bool:
@@ -1001,6 +1072,25 @@ class ProperNouns:
         """Return a copy of the mapping's reconciliation provenance."""
         key = self._stored_key(english) or english.strip()
         return dict(self._provenance.get(key, {}))
+
+    def authority_class_for(self, english: str) -> str:
+        """Return the mapping's prompt authority without discarding evidence."""
+        key = self._stored_key(english) or english.strip()
+        record = self._provenance.get(key, {})
+        stored = str(record.get("authority_class", "")).strip()
+        if stored:
+            return stored
+        return _mapping_authority_class(
+            key,
+            self._nouns.get(key, ""),
+            self.category_for(key),
+            str(record.get("origin", "legacy")),
+            [
+                str(value) for value in list(record.get("evidence_keys", []) or [])
+                if str(value)
+            ],
+            bool(record.get("context_independent", False)),
+        )
 
     def all_nouns(self) -> dict[str, str]:
         """Return a copy of every proper-noun and terminology mapping."""
@@ -1115,11 +1205,22 @@ class ProperNouns:
             if source_text and not self.applies_to_source(en, source_text):
                 continue
             category = self.category_for(en)
+            authority_class = self.authority_class_for(en)
             if not self.is_inline_eligible(en):
-                marker = (
-                    f"[advisory terminology only; category={category}; never add "
-                    "an English parenthetical; glossary and source context override it]"
-                )
+                if authority_class in {
+                    "canonical_curated", "canonical_reviewed", "recurring_advisory"
+                }:
+                    marker = (
+                        f"[reusable terminology evidence; authority={authority_class}; "
+                        f"category={category}; curated glossary and source context override it]"
+                    )
+                else:
+                    marker = (
+                        f"[advisory terminology only; contextual evidence; "
+                        f"authority={authority_class}; "
+                        f"category={category}; do not force this wording in another sense; "
+                        "never add an English parenthetical]"
+                    )
             elif en in self._introduced:
                 marker = "[introduced]"
             elif not include_inline_originals:
@@ -1213,6 +1314,23 @@ class ProperNouns:
                     "superseded": [],
                 })
                 record = self._provenance[source]
+                record.setdefault("evidence_keys", [])
+                record.setdefault("context_independent", False)
+                record.setdefault(
+                    "authority_class",
+                    _mapping_authority_class(
+                        source,
+                        self._nouns[source],
+                        self._categories.get(source, "proper_noun"),
+                        str(record.get("origin", "legacy")),
+                        [
+                            str(value)
+                            for value in list(record.get("evidence_keys", []) or [])
+                            if str(value)
+                        ],
+                        bool(record.get("context_independent", False)),
+                    ),
+                )
                 if record.get("origin") in _LOW_AUTHORITY_ORIGINS:
                     category = low_authority_mapping_category(
                         source,
@@ -1256,6 +1374,9 @@ class ProperNouns:
                     "authority": _PROVENANCE_AUTHORITY["legacy"],
                     "observations": 1,
                     "superseded": [],
+                    "evidence_keys": [],
+                    "context_independent": False,
+                    "authority_class": "legacy_advisory",
                 }
                 for source in self._nouns
             }

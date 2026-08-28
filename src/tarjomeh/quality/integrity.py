@@ -983,6 +983,13 @@ _PERSIAN_LEXICAL_TOKEN_RE = re.compile(
     rf"[{_PERSIAN_LETTER_CLASS}]+(?:\u200c[{_PERSIAN_LETTER_CLASS}]+)*"
 )
 _PERSIAN_COORDINATORS = frozenset({"و", "یا"})
+_PERSIAN_GOVERNORS = frozenset({
+    "از", "با", "بر", "برای", "به", "بدون", "پیرامون", "درباره", "در", "میان",
+})
+_SOURCE_GOVERNORS = frozenset({
+    "about", "among", "around", "between", "by", "concerning", "for", "from",
+    "in", "into", "of", "on", "regarding", "through", "to", "with", "without",
+})
 _SOURCE_LEXICAL_TOKEN_RE = re.compile(
     r"[A-Za-z\u00c0-\u024f]+(?:['\u2019-][A-Za-z\u00c0-\u024f]+)*"
 )
@@ -1066,6 +1073,122 @@ def newly_repeated_adjacent_spans(
     ) - before
     introduced: list[dict[str, Any]] = []
     for item in repeated_persian_adjacent_span_artifacts(candidate):
+        key = (int(item["word_count"]), str(item["normalized_phrase"]))
+        if excess[key] <= 0:
+            continue
+        introduced.append(item)
+        excess[key] -= 1
+    return introduced
+
+
+def _repeated_governed_spans(
+    text: str,
+    token_re: re.Pattern[str],
+    governors: frozenset[str],
+) -> list[dict[str, Any]]:
+    """Find a short governed phrase repeated across one uninterrupted clause.
+
+    This targets replacement-boundary damage such as ``about X ... about X``
+    when a predicate has been spliced between the two copies. It deliberately
+    ignores sentence and strong-clause boundaries and requires at least one
+    intervening lexical token, so ordinary adjacent repetition remains owned
+    by the existing adjacent-span detector.
+    """
+    value = text or ""
+    tokens = list(token_re.finditer(value))
+    normalized = [normalize_for_match(token.group()) for token in tokens]
+    findings: list[dict[str, Any]] = []
+    seen: set[tuple[int, int]] = set()
+    for left_index, governor in enumerate(normalized):
+        if governor not in governors:
+            continue
+        for width in range(3, 1, -1):
+            left_end = left_index + width
+            if left_end >= len(tokens):
+                continue
+            phrase = normalized[left_index:left_end]
+            maximum_right = min(len(tokens) - width + 1, left_end + 10)
+            for right_index in range(left_end + 1, maximum_right):
+                if normalized[right_index:right_index + width] != phrase:
+                    continue
+                separator = value[tokens[left_end - 1].end():tokens[right_index].start()]
+                if re.search(r"[.!?\u061f\u061b;:\n]", separator):
+                    continue
+                span = (tokens[left_index].start(), tokens[right_index + width - 1].end())
+                if span in seen:
+                    continue
+                seen.add(span)
+                phrase_text = value[
+                    tokens[left_index].start():tokens[left_end - 1].end()
+                ]
+                findings.append({
+                    "phrase": phrase_text,
+                    "normalized_phrase": " ".join(phrase),
+                    "word_count": width,
+                    "offset": span[0],
+                    "end_offset": span[1],
+                    "intervening_text": separator.strip(),
+                    "context": value[max(0, span[0] - 60):min(len(value), span[1] + 60)],
+                })
+                break
+            else:
+                continue
+            break
+    return findings
+
+
+def source_unjustified_repeated_governed_span_artifacts(
+    source: str,
+    translation: str,
+) -> list[dict[str, Any]]:
+    """Report repeated Persian complement frames beyond source allowance."""
+    source_paragraphs = _paragraph_text_spans(source)
+    target_paragraphs = _paragraph_text_spans(translation)
+    if len(source_paragraphs) != len(target_paragraphs):
+        source_paragraphs = [(0, len(source or ""), source or "")]
+        target_paragraphs = [(0, len(translation or ""), translation or "")]
+    findings: list[dict[str, Any]] = []
+    for source_record, target_record in zip(
+        source_paragraphs, target_paragraphs, strict=True
+    ):
+        allowance = len(_repeated_governed_spans(
+            source_record[2], _SOURCE_LEXICAL_TOKEN_RE, _SOURCE_GOVERNORS
+        ))
+        target_start, _target_end, target_paragraph = target_record
+        target_findings = _repeated_governed_spans(
+            target_paragraph, _PERSIAN_LEXICAL_TOKEN_RE, _PERSIAN_GOVERNORS
+        )
+        for finding in target_findings[allowance:]:
+            findings.append({
+                **finding,
+                "offset": target_start + int(finding["offset"]),
+                "end_offset": target_start + int(finding["end_offset"]),
+            })
+    return findings
+
+
+def newly_source_unjustified_repeated_governed_spans(
+    source: str,
+    previous: str,
+    candidate: str,
+) -> list[dict[str, Any]]:
+    """Return only newly introduced unsupported governed-phrase repetition."""
+    before = Counter(
+        (int(item["word_count"]), str(item["normalized_phrase"]))
+        for item in source_unjustified_repeated_governed_span_artifacts(
+            source, previous
+        )
+    )
+    excess = Counter(
+        (int(item["word_count"]), str(item["normalized_phrase"]))
+        for item in source_unjustified_repeated_governed_span_artifacts(
+            source, candidate
+        )
+    ) - before
+    introduced: list[dict[str, Any]] = []
+    for item in source_unjustified_repeated_governed_span_artifacts(
+        source, candidate
+    ):
         key = (int(item["word_count"]), str(item["normalized_phrase"]))
         if excess[key] <= 0:
             continue
@@ -2543,6 +2666,24 @@ class PostEditIntegrityGate:
                 span_count=len(blocking_adjacent),
                 samples=[
                     str(item["phrase"]) for item in blocking_adjacent[:3]
+                ],
+            )
+
+        blocking_governed = newly_source_unjustified_repeated_governed_spans(
+            source, previous, candidate
+        )
+        if blocking_governed:
+            add(
+                "governed_span_repetition_introduced", "blocking",
+                "The edit duplicates a governed phrase inside one clause even "
+                "though the aligned source provides no comparable repetition.",
+                span_count=len(blocking_governed),
+                samples=[
+                    {
+                        "phrase": str(item["phrase"]),
+                        "intervening_text": str(item["intervening_text"]),
+                    }
+                    for item in blocking_governed[:3]
                 ],
             )
 

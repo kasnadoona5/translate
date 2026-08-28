@@ -7,6 +7,7 @@ long-term memory, and short-term memory for cohesive book-length translation.
 from __future__ import annotations
 
 import logging
+import hashlib
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -92,6 +93,57 @@ def _clean_style_sample(text: str) -> str:
     if persian_chars < 8 or latin_words > max(12, persian_chars // 18):
         return ""
     return sample
+
+
+def _style_sample_quality(text: str) -> dict[str, Any]:
+    """Score fluent-academic style evidence without choosing terminology.
+
+    The thresholds reject paragraphs that are technically clean but too dense
+    to serve as a reusable voice anchor. They do not reject complexity in the
+    translation itself; this function controls style-memory admission only.
+    """
+    sample = _clean_style_sample(text)
+    if not sample:
+        return {"approved": False, "score": 0.0, "reasons": ["surface_artifact"]}
+    sentences = [
+        value.strip() for value in re.split(r"(?<=[.!?\u061f])\s+", sample)
+        if value.strip()
+    ] or [sample]
+    word_counts = [
+        len(re.findall(r"[\u0600-\u06ffA-Za-z0-9]+", sentence))
+        for sentence in sentences
+    ]
+    maximum_words = max(word_counts, default=0)
+    punctuation = len(re.findall(r"[,،;؛:]", sample))
+    punctuation_per_sentence = punctuation / max(1, len(sentences))
+    parenthetical_chars = sum(
+        len(match.group()) for match in re.finditer(r"\([^()]*\)", sample)
+    )
+    parenthetical_ratio = parenthetical_chars / max(1, len(sample))
+    reasons: list[str] = []
+    if maximum_words > 65:
+        reasons.append("sentence_too_dense_for_style_anchor")
+    if punctuation_per_sentence > 8:
+        reasons.append("punctuation_stack_too_dense")
+    if parenthetical_ratio > 0.24:
+        reasons.append("parenthetical_content_dominates_sample")
+    score = max(
+        0.0,
+        100.0
+        - max(0, maximum_words - 34) * 1.15
+        - max(0.0, punctuation_per_sentence - 3.0) * 4.0
+        - parenthetical_ratio * 45.0,
+    )
+    return {
+        "approved": not reasons,
+        "score": round(score, 2),
+        "reasons": reasons,
+        "sentence_count": len(sentences),
+        "maximum_sentence_words": maximum_words,
+        "punctuation_per_sentence": round(punctuation_per_sentence, 2),
+        "parenthetical_ratio": round(parenthetical_ratio, 4),
+        "sample": sample,
+    }
 
 
 def _complete_style_sample(text: str, preferred_limit: int = 900) -> str:
@@ -367,8 +419,13 @@ class MemoryManager:
             )
         )
         style_count_before = len(self.style_samples)
+        style_sample_policy: dict[str, Any] = {
+            "candidate_count": 0,
+            "accepted": False,
+            "reason": "style_not_eligible",
+        }
         if style_eligible:
-            self._update_style_profile(style_translation)
+            style_sample_policy = self._update_style_profile(style_translation)
         # Any known proper noun occurring in this chunk has now had its first
         # appearance — later chunks must not repeat the English parenthetical.
         self.proper_nouns.mark_introduced_from_translation(
@@ -389,6 +446,7 @@ class MemoryManager:
                 if str(reason).strip()
             )),
             "style_sample_added": len(self.style_samples) > style_count_before,
+            "style_sample_policy": style_sample_policy,
             "structure_eligible": structure_eligible,
             "quality_approved": bool(quality_approved),
             "style_approved": style_quality_approved,
@@ -396,20 +454,78 @@ class MemoryManager:
             "structural_roles": structural_roles,
         }
 
-    def _update_style_profile(self, translation: str) -> None:
+    def _update_style_profile(self, translation: str) -> dict[str, Any]:
         """Maintain a compact book-level style guide from early translations."""
-        # Select one complete, clean paragraph per chunk. A clean later paragraph
-        # may still provide style evidence when another paragraph in the same
-        # finalized chunk was excluded by grounded QA.
+        candidates: list[dict[str, Any]] = []
+        rejections: list[dict[str, Any]] = []
         for paragraph in re.split(r"\n\s*\n", translation or ""):
-            text = _clean_style_sample(paragraph)
-            if not text:
+            if not paragraph.strip():
                 continue
-            if len(self.style_samples) < 5:
+            quality = _style_sample_quality(paragraph)
+            if quality.get("approved"):
+                candidates.append(quality)
+            else:
+                rejections.append(quality)
+
+        report: dict[str, Any] = {
+            "candidate_count": len(candidates),
+            "accepted": False,
+            "reason": "no_fluent_complete_paragraph",
+            "rejections": rejections[:5],
+        }
+        if candidates:
+            selected = max(candidates, key=lambda item: float(item["score"]))
+            text = str(selected["sample"])
+            duplicate = any(
+                text == existing
+                or (
+                    len(text) >= 80
+                    and len(existing) >= 80
+                    and text[:80] == existing[:80]
+                )
+                for existing in self.style_samples
+            )
+            if duplicate:
+                report.update({
+                    "reason": "duplicate_style_evidence",
+                    "selected": selected,
+                })
+            elif len(self.style_samples) < 5:
                 self.style_samples.append(text)
-            break
+                report.update({
+                    "accepted": True,
+                    "reason": "quality_approved_sample_added",
+                    "selected": selected,
+                })
+            else:
+                existing_quality = [
+                    _style_sample_quality(sample) for sample in self.style_samples
+                ]
+                weakest_index = min(
+                    range(len(existing_quality)),
+                    key=lambda index: float(existing_quality[index].get("score", 0.0)),
+                )
+                weakest_score = float(
+                    existing_quality[weakest_index].get("score", 0.0)
+                )
+                if float(selected["score"]) >= weakest_score + 8.0:
+                    self.style_samples[weakest_index] = text
+                    report.update({
+                        "accepted": True,
+                        "reason": "weaker_style_sample_replaced",
+                        "replaced_index": weakest_index,
+                        "previous_score": weakest_score,
+                        "selected": selected,
+                    })
+                else:
+                    report.update({
+                        "reason": "existing_style_set_is_not_weaker",
+                        "selected": selected,
+                        "weakest_existing_score": weakest_score,
+                    })
 
         self.style_profile = self._render_style_profile()
+        return report
 
     def _render_style_profile(self) -> str:
         """Build a prompt-safe style guide from trusted prose samples."""
@@ -578,6 +694,11 @@ class MemoryManager:
                     persian,
                     category=category,
                     provenance=provenance,
+                    evidence_key=(
+                        "chunk:"
+                        + hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+                    ),
+                    context_independent=bool(item.get("context_independent")),
                 )
                 if outcome.get("action") == "ignored":
                     continue

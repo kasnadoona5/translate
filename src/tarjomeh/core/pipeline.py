@@ -92,8 +92,10 @@ from tarjomeh.quality.integrity import (
     mixed_script_artifacts,
     repair_source_grounded_language_artifacts,
     newly_source_unjustified_repeated_adjacent_spans,
+    newly_source_unjustified_repeated_governed_spans,
     source_unjustified_repeated_adjacent_span_artifacts,
     source_unjustified_repeated_clause_artifacts,
+    source_unjustified_repeated_governed_span_artifacts,
     source_unjustified_repeated_word_artifacts,
     detached_ezafe_artifacts,
     tatweel_separator_artifacts,
@@ -374,6 +376,9 @@ def audit_translation_language(
     repeated_adjacent_spans = (
         source_unjustified_repeated_adjacent_span_artifacts(source, translation)
     )
+    repeated_governed_spans = (
+        source_unjustified_repeated_governed_span_artifacts(source, translation)
+    )
     repeated_clauses = source_unjustified_repeated_clause_artifacts(
         source, translation
     )
@@ -393,6 +398,7 @@ def audit_translation_language(
             or unexpected
             or repeated
             or repeated_adjacent_spans
+            or repeated_governed_spans
             or repeated_clauses
             or foreign_scripts
             or markup
@@ -409,6 +415,8 @@ def audit_translation_language(
         "repeated_word_artifacts": repeated,
         "repeated_adjacent_span_count": len(repeated_adjacent_spans),
         "repeated_adjacent_span_artifacts": repeated_adjacent_spans,
+        "repeated_governed_span_count": len(repeated_governed_spans),
+        "repeated_governed_span_artifacts": repeated_governed_spans,
         "repeated_clause_count": len(repeated_clauses),
         "repeated_clause_artifacts": repeated_clauses,
         "foreign_script_count": len(foreign_scripts),
@@ -428,7 +436,8 @@ def audit_translation_language(
             "and multilingual apparatus are allowed; unexplained foreign prose or "
             "scripts, mixed-script suffixes, malformed parentheses, detached ezafe, "
             "tatweel punctuation, source-paired explanatory dashes, markup "
-            "wrappers, adjacent lexical duplication, "
+            "wrappers, adjacent lexical duplication, duplicated governed "
+            "phrases within one clause, "
             "and exact duplicated clauses "
             "are review evidence."
         ),
@@ -1116,6 +1125,7 @@ _LANGUAGE_QUALITY_COUNT_FIELDS = (
     "unexpected_latin_count",
     "repeated_word_count",
     "repeated_adjacent_span_count",
+    "repeated_governed_span_count",
     "repeated_clause_count",
     "foreign_script_count",
     "markup_wrapper_count",
@@ -1172,6 +1182,7 @@ def _targeted_language_repair_prompt(
             "parenthesis_artifacts",
             "repeated_word_artifacts",
             "repeated_adjacent_span_artifacts",
+            "repeated_governed_span_artifacts",
             "repeated_clause_artifacts",
             "detached_ezafe_artifacts",
             "tatweel_separator_artifacts",
@@ -1289,6 +1300,13 @@ def _reconcile_current_entity_anchors(
             target,
             category=stored_category,
             provenance="observed_translation",
+            evidence_key=(
+                "anchor:"
+                + hashlib.sha256(
+                    (source_text or source).encode("utf-8")
+                ).hexdigest()[:16]
+            ),
+            context_independent=True,
         )
         if outcome.get("action") != "ignored":
             observed.append({"source": source, "target": target, **outcome})
@@ -1537,14 +1555,21 @@ def _research_context_for_memory(artifact: dict[str, Any] | None) -> str:
         if source and target:
             confidence = str(item.get("confidence", "unknown"))
             evidence = str(item.get("evidence_type", "unspecified"))
+            identity = "supported" if item.get("identity_supported") else "unverified"
+            intended_use = str(
+                item.get("intended_use", "unapproved_terminology_proposal")
+            )
             suggestions.append(
                 f"- {source} -> {target} "
-                f"[confidence={confidence}; evidence={evidence}; unapproved]"
+                f"[confidence={confidence}; evidence={evidence}; "
+                f"book_identity={identity}; use={intended_use}; unapproved]"
             )
     if suggestions:
         parts.extend([
             "Unapproved research suggestions follow. They are contextual hints, "
-            "not mandatory terminology. Never override the curated glossary with them.",
+            "not mandatory terminology. They may disambiguate a concept, but must "
+            "never override the current source, a curated glossary entry, or an "
+            "accepted reviewed correction.",
             chr(10).join(suggestions),
         ])
     return (chr(10) * 2).join(part for part in parts if part)
@@ -1842,6 +1867,11 @@ _FINITE_PREDICATE_EVIDENCE_RE = re.compile(
     r"بود(?:م|ی|یم|ید|ند)?|"
     r"شد(?:م|ی|یم|ید|ند)?|"
     r"کرد(?:م|ی|یم|ید|ند)?|"
+    r"کن(?:م|ی|د|یم|ید|ند)|"
+    r"شو(?:م|ی|د|یم|ید|ند)|"
+    r"رو(?:م|ی|د|یم|ید|ند)|"
+    r"آی(?:م|ی|د|یم|ید|ند)|"
+    r"خواه(?:م|ی|د|یم|ید|ند)|"
     r"دار(?:م|ی|د|یم|ید|ند)|"
     r"داشت(?:م|ی|یم|ید|ند)?"
     rf")(?![{_PERSIAN_VERB_LETTERS}])"
@@ -1906,6 +1936,9 @@ def _salvage_local_refinement_edits(
         current_span = str(
             issues.get(issue_id, {}).get("current_persian_quote", "")
         ).strip()
+        source_quote = str(
+            issues.get(issue_id, {}).get("source_quote", "")
+        ).strip()
         resulting_span = apply_safe_persian_orthography(
             str(decision.get("resulting_span", "")).strip()
         )[0]
@@ -1934,6 +1967,7 @@ def _salvage_local_refinement_edits(
             "issue_id": issue_id,
             "choice": choice,
             "current_span": current_span,
+            "source_quote": source_quote,
             "resulting_span": resulting_span,
             "reason": reason,
             "integrity": None,
@@ -1979,6 +2013,15 @@ def _salvage_local_refinement_edits(
                 integrity_payload = {
                     "repeated_spans": repeated_spans,
                 }
+            elif repeated_governed := (
+                newly_source_unjustified_repeated_governed_spans(
+                    source, current, candidate
+                )
+            ):
+                failed_reason = "new_governed_phrase_repetition"
+                integrity_payload = {
+                    "repeated_governed_spans": repeated_governed,
+                }
             elif sentence_terminal_count(candidate) < sentence_terminal_count(current):
                 # Local salvage is a conservative fallback after a complete
                 # candidate failed. It may add a clarifying boundary, but it
@@ -1989,19 +2032,32 @@ def _salvage_local_refinement_edits(
                     "before_sentence_terminals": sentence_terminal_count(current),
                     "after_sentence_terminals": sentence_terminal_count(candidate),
                 }
-            elif _finite_predicate_evidence_count(candidate) < (
-                _finite_predicate_evidence_count(current)
-            ):
-                failed_reason = "finite_predicate_removed"
-                integrity_payload = {
-                    "before_finite_predicates": _finite_predicate_evidence_count(
-                        current
-                    ),
-                    "after_finite_predicates": _finite_predicate_evidence_count(
-                        candidate
-                    ),
-                }
             else:
+                predicate_regressions = [
+                    {
+                        "issue_id": str(item["issue_id"]),
+                        "source_quote": str(item["source_quote"]),
+                        "before": _finite_predicate_evidence_count(
+                            str(item["current_span"])
+                        ),
+                        "after": _finite_predicate_evidence_count(
+                            str(item["resulting_span"])
+                        ),
+                    }
+                    for item in group
+                    if _finite_predicate_evidence_count(
+                        str(item["current_span"])
+                    ) > 0
+                    and _finite_predicate_evidence_count(
+                        str(item["resulting_span"])
+                    ) == 0
+                ]
+                if predicate_regressions:
+                    failed_reason = "local_predicate_evidence_removed"
+                    integrity_payload = {
+                        "predicate_regressions": predicate_regressions,
+                    }
+            if not failed_reason:
                 integrity = integrity_gate.evaluate(
                     source,
                     candidate,
@@ -3219,6 +3275,11 @@ def _reconcile_committed_terminology(
                 else memory_manager.proper_nouns.category_for(source)
             ),
             provenance="accepted_correction",
+            evidence_key=(
+                "review:"
+                + hashlib.sha256(source_text.encode("utf-8")).hexdigest()[:16]
+            ),
+            context_independent=True,
         )
         if outcome.get("action") in {"replaced_lower_authority", "confirmed"}:
             report["reconciled"].append({"issue_id": issue_id, **outcome})
@@ -4191,6 +4252,15 @@ class TranslationPipeline:
                             persian,
                             category=category,
                             provenance="auto_extraction",
+                            evidence_key=(
+                                "auto:"
+                                + hashlib.sha256(
+                                    first_text.encode("utf-8")
+                                ).hexdigest()[:16]
+                            ),
+                            context_independent=bool(
+                                item.get("context_independent")
+                            ),
                         )
                 glossary_manager.merge_auto_extracted(auto_terms)
                 self.db.save_job_artifact(

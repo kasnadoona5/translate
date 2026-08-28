@@ -22,7 +22,7 @@ class BookResearchResult:
 
     book_context: str = ""
     terms: list[dict[str, Any]] = field(default_factory=list)
-    sources: list[dict[str, str]] = field(default_factory=list)
+    sources: list[dict[str, Any]] = field(default_factory=list)
     queries: list[str] = field(default_factory=list)
     search_diagnostics: list[dict[str, Any]] = field(default_factory=list)
     providers_used: list[str] = field(default_factory=list)
@@ -41,6 +41,12 @@ class BookResearchResult:
             "status": self.status,
             "error": self.error,
             "evidence_warnings": self.evidence_warnings,
+            "authority": "advisory_context_only",
+            "evidence_policy": {
+                "source_identity_required": True,
+                "terminology_is_non_authoritative": True,
+                "current_source_and_curated_glossary_override": True,
+            },
         }
 
 
@@ -68,7 +74,7 @@ class BookResearcher:
             f'"{title}" {author} Persian scholarship ترجمه فارسی'.strip(),
         ]
 
-        sources: list[dict[str, str]] = []
+        sources: list[dict[str, Any]] = []
         try:
             excerpt = self._book_excerpt(document)
             identifiers = self._book_identifiers(excerpt)
@@ -159,7 +165,7 @@ class BookResearcher:
         title: str,
         author: str,
         excerpt: str,
-        sources: list[dict[str, str]],
+        sources: list[dict[str, Any]],
         *,
         allow_follow_ups: bool,
     ) -> tuple[dict[str, Any], bool, str]:
@@ -265,7 +271,7 @@ class BookResearcher:
     async def _search_queries(
         self,
         queries: list[str],
-        sources: list[dict[str, str]],
+        sources: list[dict[str, Any]],
         *,
         title: str = "",
         author: str = "",
@@ -303,16 +309,33 @@ class BookResearcher:
                     "rejected_count": len(results) - len(ranked),
                     "results": relevance,
                 })
+            relevance_by_url = {
+                str(item.get("url", "")): item
+                for item in relevance
+                if isinstance(item, dict) and item.get("accepted")
+            }
             for result in ranked[:self.config.web_search.max_results]:
                 if not result.url or result.url in known_urls:
                     continue
                 known_urls.add(result.url)
+                identity_evidence = dict(
+                    relevance_by_url.get(result.url, {})
+                )
                 sources.append({
                     "query": query,
                     "title": result.title[:300],
                     "url": result.url[:1000],
                     "snippet": result.snippet[:700],
                     "source_authority": self._source_authority(result.url),
+                    "identity_evidence": {
+                        key: identity_evidence.get(key)
+                        for key in (
+                            "score", "identity_coverage", "title_coverage",
+                            "author_coverage", "strong_title_match",
+                            "author_support", "identifier_support",
+                        )
+                    },
+                    "intended_use": "book_context_and_disambiguation_only",
                 })
 
     @staticmethod
@@ -332,7 +355,7 @@ class BookResearcher:
         return tuple(dict.fromkeys(" ".join(value.split()) for value in values))
 
     @staticmethod
-    def _evidence_text(sources: list[dict[str, str]]) -> str:
+    def _evidence_text(sources: list[dict[str, Any]]) -> str:
         return chr(10).join(
             f"- [authority={item.get('source_authority', 'general')}] "
             f"{item['title']}: {item['snippet']} ({item['url']})"
@@ -387,7 +410,7 @@ class BookResearcher:
     def _normalise_terms(
         self,
         raw_terms: Any,
-        sources: list[dict[str, str]],
+        sources: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         if not isinstance(raw_terms, list):
             return []
@@ -416,10 +439,48 @@ class BookResearcher:
                 str(url) for url in item.get("source_urls", [])
                 if str(url) in known_urls
             ][:5]
+            cited_sources = [
+                source_item for source_item in sources
+                if source_item.get("url") in cited
+            ]
             cited_authorities = {
-                item.get("source_authority", "general")
-                for item in sources if item.get("url") in cited
+                source_item.get("source_authority", "general")
+                for source_item in cited_sources
             }
+            identity_supported = bool(cited_sources) and all(
+                bool(
+                    (source_item.get("identity_evidence") or {}).get(
+                        "identifier_support"
+                    )
+                    or (source_item.get("identity_evidence") or {}).get(
+                        "strong_title_match"
+                    )
+                    or (source_item.get("identity_evidence") or {}).get(
+                        "author_support"
+                    )
+                    or float(
+                        (source_item.get("identity_evidence") or {}).get(
+                            "identity_coverage"
+                        )
+                        or 0.0
+                    ) >= 0.6
+                )
+                for source_item in cited_sources
+            )
+            supporting_excerpts = [
+                {
+                    "url": str(source_item.get("url", ""))[:1000],
+                    "title": str(source_item.get("title", ""))[:300],
+                    "snippet": str(source_item.get("snippet", ""))[:500],
+                    "source_authority": source_item.get(
+                        "source_authority", "general"
+                    ),
+                    "identity_evidence": source_item.get(
+                        "identity_evidence", {}
+                    ),
+                }
+                for source_item in cited_sources[:3]
+            ]
             terms.append({
                 "source": source,
                 "target": target,
@@ -431,11 +492,20 @@ class BookResearcher:
                 "reason": str(item.get("reason", "")).strip()[:1200],
                 "confidence": str(item.get("confidence", "low")).strip().lower(),
                 "source_urls": cited,
+                "supporting_excerpts": supporting_excerpts,
+                "identity_supported": identity_supported,
                 "evidence_type": (
                     "source_supported"
-                    if cited_authorities & {"primary", "scholarly", "catalogue"}
+                    if identity_supported
+                    and cited_authorities & {"primary", "scholarly", "catalogue"}
                     else "weak_source_supported"
                     if cited else "book_excerpt_inference"
+                ),
+                "authority": "advisory_context_only",
+                "intended_use": (
+                    "concept_disambiguation_only"
+                    if context_only
+                    else "unapproved_terminology_proposal"
                 ),
                 "is_auto": True,
                 "status": "context_only" if context_only else "suggested",
@@ -474,7 +544,7 @@ class BookResearcher:
     def _guard_research_context(
         cls,
         context: str,
-        sources: list[dict[str, str]],
+        sources: list[dict[str, Any]],
     ) -> tuple[str, list[str]]:
         """Remove unsupported prior-translation/publication claims from memory."""
         if not context:

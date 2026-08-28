@@ -132,6 +132,9 @@ Instructions:
    qualification is represented, every finite Persian clause has an identifiable
    predicate, pronoun referents and modifier attachments are clear, and no English
    modifier stack or nominal chain has been copied mechanically into Persian.
+   Treat coordinated source members separately: preserve every verb, complement,
+   contrast, and qualification in pairs such as "extended and qualified" rather
+   than allowing one fluent Persian phrase to swallow the other member.
    Prefer natural Persian clause order. Split or reorganize sentences inside the
    same paragraph when that improves comprehension without merging claims,
    deleting qualifications, adding interpretation, or changing logical relations.
@@ -245,6 +248,11 @@ MQM rules:
   coordinated parallel terms, and accidental duplication of one meaning in two
   Persian predicates. A fluent alternative is acceptable only if all source content
   and technical precision remain unchanged.
+- Build a compact proposition checklist for each source sentence before assigning
+  scores: matrix action, coordinated actions, participants, negation/modality,
+  explicit quantities, contrasts, and qualifications. Report an omission whenever
+  one checklist member has no Persian equivalent, even if the remaining sentence is
+  grammatical and stylistically polished.
 - Check every source-authored announced quantity against the Persian wording itself,
   even when the enumeration continues in another paragraph or chunk. Follow the
   source exactly when its announcement and later list disagree; never silently repair
@@ -273,6 +281,11 @@ agreement or dependency, an unresolved or dangling referent, malformed punctuati
 or parentheses, accidental repetition, an opaque source-order calque, or a modifier
 stack whose attachment is grammatically unclear. Formal complexity, uncommon
 technical vocabulary, and a merely preferable synonym are not defects.
+
+Also report a governed phrase or complement that is accidentally stated twice in
+one clause with competing predicates between its two occurrences. Do not report
+deliberate rhetorical repetition when both occurrences have independent grammatical
+roles.
 
 For predicate completeness, identify the matrix predicate of each independent
 clause. A finite verb inside a relative clause introduced by words such as «که»
@@ -351,6 +364,11 @@ Instructions:
     Every resulting_span must be copied verbatim from that returned translation.
    You may reorder or split sentences within the same paragraph to repair an objective
    fluency defect, but preserve every proposition and keep paragraph boundaries fixed.
+   Before returning the candidate, verify every coordinated source member separately
+   and identify a natural Persian matrix predicate for each independent clause. A
+   reduction in surface verb count is allowed when Persian grammar expresses the same
+   relations more naturally; loss of a source action, contrast, modifier, or scope is
+   never allowed.
 9. Return ONLY valid JSON with this schema:
 {{
   "translation": "<the final Persian translation only>",

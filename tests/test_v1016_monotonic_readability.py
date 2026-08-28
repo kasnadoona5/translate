@@ -143,7 +143,7 @@ def test_local_salvage_cannot_remove_a_finite_predicate() -> None:
 
     assert final == previous
     assert report["committed_count"] == 0
-    assert decisions[0]["commit_reason"] == "finite_predicate_removed"
+    assert decisions[0]["commit_reason"] == "local_predicate_evidence_removed"
 
 
 def test_relative_repetition_guard_detects_only_new_damage() -> None:
