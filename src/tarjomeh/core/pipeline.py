@@ -91,6 +91,8 @@ from tarjomeh.quality.integrity import (
     repair_corruption,
     mixed_script_artifacts,
     repair_source_grounded_language_artifacts,
+    newly_source_unjustified_repeated_adjacent_spans,
+    source_unjustified_repeated_adjacent_span_artifacts,
     source_unjustified_repeated_clause_artifacts,
     source_unjustified_repeated_word_artifacts,
     detached_ezafe_artifacts,
@@ -369,6 +371,9 @@ def audit_translation_language(
         chapter_title=chapter_title,
     )
     repeated = source_unjustified_repeated_word_artifacts(source, translation)
+    repeated_adjacent_spans = (
+        source_unjustified_repeated_adjacent_span_artifacts(source, translation)
+    )
     repeated_clauses = source_unjustified_repeated_clause_artifacts(
         source, translation
     )
@@ -387,6 +392,7 @@ def audit_translation_language(
             mixed
             or unexpected
             or repeated
+            or repeated_adjacent_spans
             or repeated_clauses
             or foreign_scripts
             or markup
@@ -401,6 +407,8 @@ def audit_translation_language(
         "unexpected_latin": unexpected,
         "repeated_word_count": len(repeated),
         "repeated_word_artifacts": repeated,
+        "repeated_adjacent_span_count": len(repeated_adjacent_spans),
+        "repeated_adjacent_span_artifacts": repeated_adjacent_spans,
         "repeated_clause_count": len(repeated_clauses),
         "repeated_clause_artifacts": repeated_clauses,
         "foreign_script_count": len(foreign_scripts),
@@ -1107,6 +1115,7 @@ _LANGUAGE_QUALITY_COUNT_FIELDS = (
     "mixed_script_count",
     "unexpected_latin_count",
     "repeated_word_count",
+    "repeated_adjacent_span_count",
     "repeated_clause_count",
     "foreign_script_count",
     "markup_wrapper_count",
@@ -1162,6 +1171,7 @@ def _targeted_language_repair_prompt(
             "markup_wrapper_artifacts",
             "parenthesis_artifacts",
             "repeated_word_artifacts",
+            "repeated_adjacent_span_artifacts",
             "repeated_clause_artifacts",
             "detached_ezafe_artifacts",
             "tatweel_separator_artifacts",
@@ -1822,6 +1832,27 @@ def _refinement_decisions_with_commit_state(
     return enriched
 
 
+_PERSIAN_VERB_LETTERS = (
+    "\u0621-\u063a\u0641-\u064a\u067e\u0686\u0698\u06a9\u06cc"
+)
+_FINITE_PREDICATE_EVIDENCE_RE = re.compile(
+    rf"(?<![{_PERSIAN_VERB_LETTERS}])(?:"
+    rf"ن?می\u200c[{_PERSIAN_VERB_LETTERS}]+|"
+    r"است|هست|نیست|"
+    r"بود(?:م|ی|یم|ید|ند)?|"
+    r"شد(?:م|ی|یم|ید|ند)?|"
+    r"کرد(?:م|ی|یم|ید|ند)?|"
+    r"دار(?:م|ی|د|یم|ید|ند)|"
+    r"داشت(?:م|ی|یم|ید|ند)?"
+    rf")(?![{_PERSIAN_VERB_LETTERS}])"
+)
+
+
+def _finite_predicate_evidence_count(text: str) -> int:
+    """Count conservative Persian finite-predicate surfaces for edit monotonicity."""
+    return len(_FINITE_PREDICATE_EVIDENCE_RE.findall(text or ""))
+
+
 def _salvage_local_refinement_edits(
     *,
     source: str,
@@ -1863,18 +1894,8 @@ def _salvage_local_refinement_edits(
             if start < other_end and other_start < end:
                 overlapping_ids.update({issue_id, other_id})
 
-    def newly_repeated_adjacent_words(before: str, after: str) -> list[str]:
-        token_re = re.compile(r"[\w\u0600-\u06ff]+", re.UNICODE)
-
-        def repeats(value: str) -> set[str]:
-            words = [word.casefold() for word in token_re.findall(value)]
-            return {
-                words[index]
-                for index in range(1, len(words))
-                if words[index] == words[index - 1]
-            }
-
-        return sorted(repeats(after) - repeats(before))
+    def sentence_terminal_count(value: str) -> int:
+        return len(re.findall(r"[.!?\u061f\u2026]", value or ""))
 
     prepared: list[dict[str, Any]] = []
     paragraph_groups: dict[int, list[dict[str, Any]]] = {}
@@ -1941,10 +1962,45 @@ def _salvage_local_refinement_edits(
             )
         integrity_payload: dict[str, Any] | None = None
         if not failed_reason:
-            repeated_words = newly_repeated_adjacent_words(current, candidate)
-            if repeated_words:
-                failed_reason = "new_adjacent_word_repetition"
-                integrity_payload = {"repeated_words": repeated_words}
+            repeated_spans = newly_source_unjustified_repeated_adjacent_spans(
+                source, current, candidate
+            )
+            if repeated_spans:
+                simple_words_only = all(
+                    int(item.get("word_count", 0)) == 1
+                    and "\u200c" not in str(item.get("phrase", ""))
+                    for item in repeated_spans
+                )
+                failed_reason = (
+                    "new_adjacent_word_repetition"
+                    if simple_words_only
+                    else "new_adjacent_phrase_repetition"
+                )
+                integrity_payload = {
+                    "repeated_spans": repeated_spans,
+                }
+            elif sentence_terminal_count(candidate) < sentence_terminal_count(current):
+                # Local salvage is a conservative fallback after a complete
+                # candidate failed. It may add a clarifying boundary, but it
+                # must not merge source-aligned sentences behind the rejected
+                # candidate's broader rewrite.
+                failed_reason = "sentence_boundary_removed"
+                integrity_payload = {
+                    "before_sentence_terminals": sentence_terminal_count(current),
+                    "after_sentence_terminals": sentence_terminal_count(candidate),
+                }
+            elif _finite_predicate_evidence_count(candidate) < (
+                _finite_predicate_evidence_count(current)
+            ):
+                failed_reason = "finite_predicate_removed"
+                integrity_payload = {
+                    "before_finite_predicates": _finite_predicate_evidence_count(
+                        current
+                    ),
+                    "after_finite_predicates": _finite_predicate_evidence_count(
+                        candidate
+                    ),
+                }
             else:
                 integrity = integrity_gate.evaluate(
                     source,
@@ -2604,10 +2660,57 @@ def _objective_unmatched_readability_issues(
     return findings
 
 
+_ACTIONABLE_STRUCTURE_CLASSIFICATIONS = frozenset({
+    "translation_structure_mismatch",
+    "unauthorized_source_correction",
+})
+
+
+def _introduced_structure_conflicts(
+    source: str,
+    before: str,
+    after: str,
+) -> list[dict[str, Any]]:
+    """Return source-structure risks introduced by one target-only suggestion."""
+    if not (source or "").strip() or before == after:
+        return []
+
+    def signatures(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        values: dict[str, dict[str, Any]] = {}
+        for finding in list(payload.get("findings", []) or []):
+            if not isinstance(finding, dict):
+                continue
+            classification = str(finding.get("classification", ""))
+            if classification not in _ACTIONABLE_STRUCTURE_CLASSIFICATIONS:
+                continue
+            details = finding.get("details", {}) or {}
+            signature = json.dumps(
+                {
+                    "check_id": finding.get("check_id"),
+                    "classification": classification,
+                    "source_announced": details.get("source_announced"),
+                    "candidate_announced": details.get("candidate_announced"),
+                    "source_items": details.get("source_items"),
+                    "candidate_items": details.get("candidate_items"),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            values[signature] = finding
+        return values
+
+    previous = signatures(audit_payload(source, before))
+    candidate = signatures(audit_payload(source, after))
+    return [candidate[key] for key in candidate.keys() - previous.keys()]
+
+
 def _promote_objective_readability_issues(
     critique: Any,
     issues: list[dict[str, Any]],
     translation: str,
+    *,
+    source_text: str = "",
+    suppressed: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Route major target-only grammar evidence through the source-aware refiner.
 
@@ -2633,6 +2736,28 @@ def _promote_objective_readability_issues(
         rationale = str(issue.get("rationale", "")).strip()
         if not quote or normalize_for_match(quote) not in normalized_translation:
             continue
+        if source_text and quote in translation:
+            suggested_candidate = translation.replace(quote, suggested, 1)
+            conflicts = _introduced_structure_conflicts(
+                source_text,
+                translation,
+                suggested_candidate,
+            )
+            if conflicts:
+                if suppressed is not None:
+                    suppressed.append({
+                        "current_persian_quote": quote,
+                        "suggested_correction": suggested,
+                        "rationale": rationale,
+                        "reason": "source_structure_conflict",
+                        "classifications": sorted({
+                            str(item.get("classification", ""))
+                            for item in conflicts
+                            if str(item.get("classification", ""))
+                        }),
+                        "findings": conflicts,
+                    })
+                continue
         material = f"readability\0{normalize_for_match(quote)}".encode()
         issue_id = "readability-" + hashlib.sha256(material).hexdigest()[:12]
         if issue_id in existing_ids:
@@ -2644,7 +2769,7 @@ def _promote_objective_readability_issues(
             "rationale": rationale,
             "authority": "target_only_advisory",
         }
-        detail = {
+        detail: dict[str, Any] = {
             "issue_id": issue_id,
             "category": "readability",
             "severity": "major",
@@ -7199,6 +7324,7 @@ class TranslationPipeline:
                             getattr(readability, "issues", []) or []
                         )
                         promoted_readability: list[dict[str, Any]] = []
+                        suppressed_readability: list[dict[str, Any]] = []
                         if getattr(readability, "valid", True):
                             matched, unmatched = _merge_readability_evidence(
                                 critique_rep, readability_issues
@@ -7208,6 +7334,8 @@ class TranslationPipeline:
                                     critique_rep,
                                     unmatched,
                                     translation,
+                                    source_text=chunk.text,
+                                    suppressed=suppressed_readability,
                                 )
                             )
                         else:
@@ -7217,6 +7345,12 @@ class TranslationPipeline:
                                 str(item.get("current_persian_quote", ""))
                             )
                             for item in promoted_readability
+                        }
+                        suppressed_quotes = {
+                            normalize_for_match(
+                                str(item.get("current_persian_quote", ""))
+                            )
+                            for item in suppressed_readability
                         }
                         readability_payload.update({
                             "valid": bool(getattr(readability, "valid", True)),
@@ -7230,6 +7364,10 @@ class TranslationPipeline:
                                 item.get("issue_id")
                                 for item in promoted_readability
                             ],
+                            "source_conflict_suppressed_count": len(
+                                suppressed_readability
+                            ),
+                            "source_conflict_suppressed": suppressed_readability,
                             "unmatched_advisory_count": len(unmatched),
                             "unmatched_advisories": unmatched,
                         })
@@ -7240,7 +7378,7 @@ class TranslationPipeline:
                             issue for issue in objective_unmatched
                             if normalize_for_match(
                                 str(issue.get("current_persian_quote", ""))
-                            ) not in promoted_quotes
+                            ) not in promoted_quotes.union(suppressed_quotes)
                         ]
                         readability_payload["unrouted_objective_count"] = len(
                             unrouted_objective
@@ -7266,6 +7404,24 @@ class TranslationPipeline:
                                         "critic did not confirm and that could not be "
                                         "safely routed. No text was changed; the final "
                                         "candidate requires human review."
+                                    ),
+                                },
+                            )
+                        if suppressed_readability:
+                            self.db.log_chunk_event(
+                                job_id,
+                                idx,
+                                "readability_advisory_suppressed_source_conflict",
+                                {
+                                    "iteration": ref_iter,
+                                    "authority": "source_structure_audit",
+                                    "finding_count": len(suppressed_readability),
+                                    "findings": suppressed_readability,
+                                    "message": (
+                                        "Target-only advice conflicted with explicit "
+                                        "source structure and was not sent to the "
+                                        "source-aware refiner. The accepted wording "
+                                        "was preserved."
                                     ),
                                 },
                             )
@@ -8717,6 +8873,7 @@ Output ONLY the corrected Persian translation.
                 "mixed_script_count",
                 "unexpected_latin_count",
                 "repeated_word_count",
+                "repeated_adjacent_span_count",
                 "repeated_clause_count",
                 "foreign_script_count",
                 "markup_wrapper_count",
@@ -8760,6 +8917,7 @@ Output ONLY the corrected Persian translation.
                             "mixed_script_count",
                             "unexpected_latin_count",
                             "repeated_word_count",
+                            "repeated_adjacent_span_count",
                             "repeated_clause_count",
                             "foreign_script_count",
                             "markup_wrapper_count",

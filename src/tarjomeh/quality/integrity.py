@@ -83,6 +83,22 @@ _PROSE_FOOTNOTE_SUFFIX_RE = re.compile(
 )
 _ENGLISH_PAREN_RE = re.compile(r"\(([A-Za-z][A-Za-z0-9 .,&':;\u2019\-]{1,80})\)")
 _SOURCE_PAREN_RE = re.compile(r"\(([^()\n]{2,240})\)")
+_SOURCE_STRUCTURAL_REFERENCE_RE = re.compile(
+    r"\b(?P<see>see\s+)?"
+    r"(?P<label>chapter|section|table|figure|part)\s+"
+    r"(?P<number>[0-9]{1,3})\b",
+    re.IGNORECASE,
+)
+_PERSIAN_STRUCTURAL_LABELS = {
+    "chapter": "فصل",
+    "section": "بخش",
+    "table": "جدول",
+    "figure": "شکل",
+    "part": "بخش",
+}
+_ASCII_TO_PERSIAN_DIGITS = str.maketrans(
+    "0123456789", "۰۱۲۳۴۵۶۷۸۹"
+)
 _SOURCE_QUOTE_RE = re.compile(
     r'(?:[\u201c\u201e"]([^\u201c\u201d\u201e"\n]{2,240})[\u201d"]'
     r"|\u2018([^\u2018\u2019\n]{2,240})\u2019)"
@@ -967,6 +983,150 @@ _PERSIAN_LEXICAL_TOKEN_RE = re.compile(
     rf"[{_PERSIAN_LETTER_CLASS}]+(?:\u200c[{_PERSIAN_LETTER_CLASS}]+)*"
 )
 _PERSIAN_COORDINATORS = frozenset({"و", "یا"})
+_SOURCE_LEXICAL_TOKEN_RE = re.compile(
+    r"[A-Za-z\u00c0-\u024f]+(?:['\u2019-][A-Za-z\u00c0-\u024f]+)*"
+)
+_ADJACENT_REPEAT_SEPARATOR_RE = re.compile(
+    r"^[ \t\u200c]+$"
+)
+
+
+def _adjacent_repeated_spans(
+    text: str,
+    token_re: re.Pattern[str],
+    *,
+    max_words: int = 6,
+) -> list[dict[str, Any]]:
+    """Return immediately repeated lexical spans without changing the text.
+
+    Comparing token sequences rather than raw substrings catches both ordinary
+    phrases (``A B A B``) and ZWNJ compounds. Sentence terminators are not
+    accepted as separators, and neither is punctuation. This keeps legitimate
+    punctuated lexical reuse outside the corruption signature while still
+    catching replacement-boundary duplication.
+    """
+    value = text or ""
+    tokens = list(token_re.finditer(value))
+    findings: list[dict[str, Any]] = []
+    index = 0
+    while index < len(tokens) - 1:
+        matched_width = 0
+        maximum = min(max_words, (len(tokens) - index) // 2)
+        for width in range(maximum, 0, -1):
+            left = tokens[index:index + width]
+            right = tokens[index + width:index + (2 * width)]
+            if [item.group().casefold() for item in left] != [
+                item.group().casefold() for item in right
+            ]:
+                continue
+            if width == 1:
+                lexical_length = sum(character.isalpha() for character in left[0].group())
+                if lexical_length < 4:
+                    continue
+            separator = value[left[-1].end():right[0].start()]
+            if not _ADJACENT_REPEAT_SEPARATOR_RE.fullmatch(separator):
+                continue
+            phrase = value[left[0].start():left[-1].end()]
+            findings.append({
+                "phrase": phrase,
+                "normalized_phrase": normalize_for_match(phrase),
+                "word_count": width,
+                "offset": left[0].start(),
+                "end_offset": right[-1].end(),
+                "context": value[
+                    max(0, left[0].start() - 60):
+                    min(len(value), right[-1].end() + 60)
+                ],
+            })
+            matched_width = width
+            break
+        index += max(1, matched_width * 2)
+    return findings
+
+
+def repeated_persian_adjacent_span_artifacts(text: str) -> list[dict[str, Any]]:
+    """Report adjacent repeated Persian compounds or phrases of 1-6 words."""
+    return _adjacent_repeated_spans(text, _PERSIAN_LEXICAL_TOKEN_RE)
+
+
+def newly_repeated_adjacent_spans(
+    previous: str,
+    candidate: str,
+) -> list[dict[str, Any]]:
+    """Return adjacent phrase repetitions introduced by the current edit."""
+    if not (previous or "").strip():
+        return []
+    before = Counter(
+        (int(item["word_count"]), str(item["normalized_phrase"]))
+        for item in repeated_persian_adjacent_span_artifacts(previous)
+    )
+    excess = Counter(
+        (int(item["word_count"]), str(item["normalized_phrase"]))
+        for item in repeated_persian_adjacent_span_artifacts(candidate)
+    ) - before
+    introduced: list[dict[str, Any]] = []
+    for item in repeated_persian_adjacent_span_artifacts(candidate):
+        key = (int(item["word_count"]), str(item["normalized_phrase"]))
+        if excess[key] <= 0:
+            continue
+        introduced.append(item)
+        excess[key] -= 1
+    return introduced
+
+
+def source_unjustified_repeated_adjacent_span_artifacts(
+    source: str,
+    translation: str,
+) -> list[dict[str, Any]]:
+    """Report adjacent target repetition not mirrored in its source paragraph."""
+    source_paragraphs = _paragraph_text_spans(source)
+    target_paragraphs = _paragraph_text_spans(translation)
+    if len(source_paragraphs) != len(target_paragraphs):
+        return repeated_persian_adjacent_span_artifacts(translation)
+    findings: list[dict[str, Any]] = []
+    for source_record, target_record in zip(
+        source_paragraphs, target_paragraphs, strict=True
+    ):
+        source_allowance = Counter(
+            int(item["word_count"])
+            for item in _adjacent_repeated_spans(
+                source_record[2], _SOURCE_LEXICAL_TOKEN_RE
+            )
+        )
+        target_start, _target_end, target_paragraph = target_record
+        for finding in repeated_persian_adjacent_span_artifacts(target_paragraph):
+            width = int(finding["word_count"])
+            if source_allowance[width] > 0:
+                source_allowance[width] -= 1
+                continue
+            findings.append({
+                **finding,
+                "offset": target_start + int(finding["offset"]),
+                "end_offset": target_start + int(finding["end_offset"]),
+            })
+    return findings
+
+
+def newly_source_unjustified_repeated_adjacent_spans(
+    source: str,
+    previous: str,
+    candidate: str,
+) -> list[dict[str, Any]]:
+    """Return only newly introduced adjacent repetition unsupported by source."""
+    unjustified = Counter(
+        (int(item["word_count"]), str(item["normalized_phrase"]))
+        for item in source_unjustified_repeated_adjacent_span_artifacts(
+            source, candidate
+        )
+    )
+    findings: list[dict[str, Any]] = []
+    for item in newly_repeated_adjacent_spans(previous, candidate):
+        key = (int(item["word_count"]), str(item["normalized_phrase"]))
+        if unjustified[key] <= 0:
+            continue
+        findings.append(item)
+        unjustified[key] -= 1
+    return findings
 
 
 def repeated_persian_clause_artifacts(text: str) -> list[dict[str, Any]]:
@@ -1237,6 +1397,44 @@ def repair_source_grounded_language_artifacts(
                 "offset": close_offset,
                 "note_marker": marker,
             })
+
+    # Translate only exact structural framing copied from a source
+    # parenthetical. Author names, years and the surrounding citation remain
+    # byte-identical; this is language-level apparatus normalization, not a
+    # semantic or terminological rewrite.
+    structural_replacements: dict[str, str] = {}
+    for parenthetical in _SOURCE_PAREN_RE.findall(source or ""):
+        for match in _SOURCE_STRUCTURAL_REFERENCE_RE.finditer(parenthetical):
+            before = match.group()
+            label = _PERSIAN_STRUCTURAL_LABELS[match.group("label").casefold()]
+            number = match.group("number").translate(_ASCII_TO_PERSIAN_DIGITS)
+            prefix = "نگاه کنید به " if match.group("see") else ""
+            structural_replacements.setdefault(
+                before.casefold(), f"{prefix}{label} {number}"
+            )
+    structural_edits: list[tuple[int, int, str, str]] = []
+    for target_parenthetical in _SOURCE_PAREN_RE.finditer(repaired):
+        inner = target_parenthetical.group(1)
+        inner_start = target_parenthetical.start(1)
+        for source_phrase, replacement in structural_replacements.items():
+            pattern = re.compile(re.escape(source_phrase), re.IGNORECASE)
+            for match in pattern.finditer(inner):
+                structural_edits.append((
+                    inner_start + match.start(),
+                    inner_start + match.end(),
+                    match.group(),
+                    replacement,
+                ))
+    for start, end, before, after in sorted(
+        structural_edits, key=lambda item: item[0], reverse=True
+    ):
+        repaired = repaired[:start] + after + repaired[end:]
+        edits.append({
+            "type": "source_structural_reference",
+            "before": before,
+            "after": after,
+            "offset": start,
+        })
 
     for match in reversed(list(_TATWEEL_SEPARATOR_RE.finditer(repaired))):
         repaired = repaired[:match.start()] + "\u2014" + repaired[match.end():]
@@ -2328,6 +2526,24 @@ class PostEditIntegrityGate:
                 "duplicate_span_source_grounded", "info",
                 "Repeated translated wording aligns with repeated source content.",
                 span_count=len(grounded_spans),
+            )
+
+        # Short replacement-boundary corruption needs a separate relative
+        # check. The long-span detector above intentionally starts at eight
+        # words, while real refiner damage often repeats a one-word compound or
+        # a two-to-six-word phrase immediately beside itself.
+        blocking_adjacent = newly_source_unjustified_repeated_adjacent_spans(
+            source, previous, candidate
+        )
+        if blocking_adjacent:
+            add(
+                "adjacent_repeated_span_introduced", "blocking",
+                "The edit introduces an adjacent repeated phrase absent from "
+                "the aligned source.",
+                span_count=len(blocking_adjacent),
+                samples=[
+                    str(item["phrase"]) for item in blocking_adjacent[:3]
+                ],
             )
 
         missing_terms = []

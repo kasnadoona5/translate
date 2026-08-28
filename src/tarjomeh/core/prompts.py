@@ -274,6 +274,11 @@ or parentheses, accidental repetition, an opaque source-order calque, or a modif
 stack whose attachment is grammatically unclear. Formal complexity, uncommon
 technical vocabulary, and a merely preferable synonym are not defects.
 
+For predicate completeness, identify the matrix predicate of each independent
+clause. A finite verb inside a relative clause introduced by words such as «که»
+does not by itself complete the surrounding matrix clause. Do not propose a lexical
+or semantic change when the matrix dependency is already complete.
+
 Persian paragraph:
 {translation}
 

@@ -501,10 +501,28 @@ def test_single_paragraph_translation_uses_sentence_groups_after_length() -> Non
     pipeline.db = MagicMock()
     pipeline.db.get_job.return_value = {"status": "running"}
     pipeline.llm_client = MagicMock()
+    alphabet = "ابتثجحخدذرزسشصضطظعغفقکلمنوهی"
+    labels = [
+        f"{left}{right}"
+        for left in alphabet
+        for right in alphabet
+    ][:45]
     recovered = [
-        "<<<TRANSLATION c0.p0.s0>>>\n" + "\u062a\u0631\u062c\u0645\u0647 \u062f\u0642\u06cc\u0642 " * 45 + "\n<<<END c0.p0.s0>>>",
-        "<<<TRANSLATION c0.p0.s1>>>\n" + "\u0628\u0631\u06af\u0631\u062f\u0627\u0646 \u0641\u0627\u0631\u0633\u06cc " * 45 + "\n<<<END c0.p0.s1>>>",
-        "<<<TRANSLATION c0.p0.s2>>>\n" + "\u0645\u062a\u0646 \u062f\u0627\u0646\u0634\u06af\u0627\u0647\u06cc " * 45 + "\n<<<END c0.p0.s2>>>",
+        "<<<TRANSLATION c0.p0.s0>>>\n"
+        + " ".join(
+            f"ترجمه دقیق بخش{label}" for label in labels
+        )
+        + "\n<<<END c0.p0.s0>>>",
+        "<<<TRANSLATION c0.p0.s1>>>\n"
+        + " ".join(
+            f"برگردان فارسی بخش{label}" for label in labels
+        )
+        + "\n<<<END c0.p0.s1>>>",
+        "<<<TRANSLATION c0.p0.s2>>>\n"
+        + " ".join(
+            f"متن دانشگاهی بخش{label}" for label in labels
+        )
+        + "\n<<<END c0.p0.s2>>>",
     ]
     pipeline.llm_client.complete.side_effect = [
         TruncatedCompletionError("whole request exhausted output budget"),

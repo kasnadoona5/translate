@@ -152,11 +152,23 @@ def test_empty_whole_chunk_uses_existing_validated_split_recovery() -> None:
     pipeline.db.get_job.return_value = {"status": "running"}
     pipeline.llm_client = MagicMock()
     source = "A" * 1000 + ". " + "B" * 1000 + "."
+    alphabet = "ابتثجحخدذرزسشصضطظعغفقکلمنوهی"
+    labels = [
+        f"{left}{right}"
+        for left in alphabet
+        for right in alphabet
+    ][:45]
     pipeline.llm_client.complete.side_effect = [
         EmptyCompletionError("provider returned no visible completion"),
-        "<<<TRANSLATION c0.p0.s0>>>\n" + "ترجمه دقیق " * 45
+        "<<<TRANSLATION c0.p0.s0>>>\n"
+        + " ".join(
+            f"ترجمه دقیق بخش{label}" for label in labels
+        )
         + "\n<<<END c0.p0.s0>>>",
-        "<<<TRANSLATION c0.p0.s1>>>\n" + "متن دانشگاهی " * 45
+        "<<<TRANSLATION c0.p0.s1>>>\n"
+        + " ".join(
+            f"متن دانشگاهی بخش{label}" for label in labels
+        )
         + "\n<<<END c0.p0.s1>>>",
     ]
 
