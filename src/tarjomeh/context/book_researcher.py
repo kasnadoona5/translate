@@ -443,9 +443,37 @@ class BookResearcher:
                 source_item for source_item in sources
                 if source_item.get("url") in cited
             ]
+            evidence_terms = [source]
+            evidence_terms.extend(
+                str(value).strip()
+                for value in list(item.get("aliases", []) or [])
+                if str(value).strip()
+            )
+
+            def supports_term(source_item: dict[str, Any]) -> bool:
+                haystack = " ".join((
+                    str(source_item.get("title", "")),
+                    str(source_item.get("snippet", "")),
+                )).casefold()
+                normalized_haystack = re.sub(r"[^\w]+", " ", haystack)
+                for evidence_term in evidence_terms:
+                    normalized_term = re.sub(
+                        r"[^\w]+", " ", evidence_term.casefold()
+                    ).strip()
+                    if normalized_term and re.search(
+                        rf"(?<!\w){re.escape(normalized_term)}(?!\w)",
+                        normalized_haystack,
+                    ):
+                        return True
+                return False
+
+            term_cited_sources = [
+                source_item for source_item in cited_sources
+                if supports_term(source_item)
+            ]
             cited_authorities = {
                 source_item.get("source_authority", "general")
-                for source_item in cited_sources
+                for source_item in term_cited_sources
             }
             identity_supported = bool(cited_sources) and all(
                 bool(
@@ -481,6 +509,14 @@ class BookResearcher:
                 }
                 for source_item in cited_sources[:3]
             ]
+            term_supporting_excerpts = [
+                excerpt for excerpt in supporting_excerpts
+                if any(
+                    excerpt.get("url") == source_item.get("url")
+                    for source_item in term_cited_sources
+                )
+            ]
+            term_supported = bool(term_supporting_excerpts)
             terms.append({
                 "source": source,
                 "target": target,
@@ -493,12 +529,16 @@ class BookResearcher:
                 "confidence": str(item.get("confidence", "low")).strip().lower(),
                 "source_urls": cited,
                 "supporting_excerpts": supporting_excerpts,
+                "term_supporting_excerpts": term_supporting_excerpts,
+                "term_evidence_terms": evidence_terms,
+                "term_supported": term_supported,
                 "identity_supported": identity_supported,
                 "evidence_type": (
                     "source_supported"
-                    if identity_supported
+                    if term_supported and identity_supported
                     and cited_authorities & {"primary", "scholarly", "catalogue"}
                     else "weak_source_supported"
+                    if term_supported else "book_context_only"
                     if cited else "book_excerpt_inference"
                 ),
                 "authority": "advisory_context_only",

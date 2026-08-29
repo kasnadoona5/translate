@@ -127,6 +127,10 @@ class ResumeSourceMismatchError(RuntimeError):
     """Raised when a resumed job's input no longer matches its saved chunks."""
 
 
+class JobWorkerBusyError(RuntimeError):
+    """Raised when another live worker generation owns the job."""
+
+
 class ChapterCheckpointReached(PipelinePausedException):
     """Raised after an intentional chapter-boundary review checkpoint."""
 
@@ -1556,13 +1560,17 @@ def _research_context_for_memory(artifact: dict[str, Any] | None) -> str:
             confidence = str(item.get("confidence", "unknown"))
             evidence = str(item.get("evidence_type", "unspecified"))
             identity = "supported" if item.get("identity_supported") else "unverified"
+            term_evidence = (
+                "supported" if item.get("term_supported") else "not_demonstrated"
+            )
             intended_use = str(
                 item.get("intended_use", "unapproved_terminology_proposal")
             )
             suggestions.append(
                 f"- {source} -> {target} "
                 f"[confidence={confidence}; evidence={evidence}; "
-                f"book_identity={identity}; use={intended_use}; unapproved]"
+                f"book_identity={identity}; term_evidence={term_evidence}; "
+                f"use={intended_use}; unapproved]"
             )
     if suggestions:
         parts.extend([
@@ -2129,6 +2137,81 @@ def _critique_candidate_rank(critique: Any) -> tuple[float, float, float, float]
     )
 
 
+_SOURCE_FIDELITY_CATEGORIES = frozenset({
+    "accuracy",
+    "addition",
+    "citation",
+    "name",
+    "number",
+    "omission",
+    "terminology",
+})
+
+
+def _grounded_source_fidelity_issues(
+    critique: Any,
+    *,
+    minimum_confidence: float = 0.70,
+) -> list[dict[str, Any]]:
+    """Return serious source-grounded findings that cannot teach final wording."""
+    findings: list[dict[str, Any]] = []
+    details = (
+        critique.get("issue_details", [])
+        if isinstance(critique, dict)
+        else getattr(critique, "issue_details", [])
+    )
+    for detail in list(details or []):
+        if not isinstance(detail, dict):
+            continue
+        severity = str(detail.get("severity", "")).strip().casefold()
+        category = str(detail.get("category", "")).strip().casefold()
+        try:
+            confidence = float(detail.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if (
+            severity in {"critical", "major"}
+            and category in _SOURCE_FIDELITY_CATEGORIES
+            and confidence >= minimum_confidence
+            and str(detail.get("source_quote", "")).strip()
+            and str(detail.get("current_persian_quote", "")).strip()
+        ):
+            findings.append(detail)
+    return findings
+
+
+def _best_source_faithful_version(
+    evaluated_versions: list[tuple[str, Any]],
+) -> tuple[int, str, Any] | None:
+    """Choose an earlier integrity-valid version with source fidelity first.
+
+    This is used only after the current candidate has a grounded serious source
+    defect.  Earlier order wins an exact tie so repeated refinement cannot drift
+    away from an equally scored complete translation.
+    """
+    if not evaluated_versions:
+        return None
+
+    def rank(item: tuple[int, tuple[str, Any]]) -> tuple[float, ...]:
+        index, (_text, critique) = item
+        scores = [
+            float(getattr(critique, name, 0.0) or 0.0)
+            for name in ("accuracy", "terminology", "fluency", "register")
+        ]
+        return (
+            -float(len(_blocking_critique_issues(critique))),
+            -float(len(_grounded_source_fidelity_issues(critique))),
+            scores[0],
+            scores[1],
+            min(scores),
+            float(getattr(critique, "average", 0.0) or 0.0),
+            -float(index),
+        )
+
+    index, (text, critique) = max(enumerate(evaluated_versions), key=rank)
+    return index, text, critique
+
+
 def _critique_passes_quality_gate(critique: Any, threshold: float) -> bool:
     """Pass when no validated issue justifies another bounded refinement."""
     return bool(
@@ -2173,6 +2256,7 @@ _DISQUALIFYING_RELIABILITY_REASONS = frozenset({
     "semantic_dimension_below_memory_floor",
     "persian_prose_dimension_below_memory_floor",
     "objective_final_language_artifact",
+    "unresolved_grounded_quality_issue",
 })
 _ADVISORY_RELIABILITY_REASONS = frozenset({
     "final_critique_below_configured_threshold",
@@ -2208,6 +2292,61 @@ def _high_confidence_semantic_minor_issues(critique: Any) -> list[dict[str, Any]
         ):
             routed.append(detail)
     return routed
+
+
+def _unresolved_grounded_memory_issues(critique: Any) -> list[dict[str, Any]]:
+    """Keep unresolved, exact-span quality advice out of durable memories."""
+    findings = list(_grounded_source_fidelity_issues(critique))
+    seen = {str(item.get("issue_id", "")) for item in findings}
+    details = (
+        critique.get("issue_details", [])
+        if isinstance(critique, dict)
+        else getattr(critique, "issue_details", [])
+    )
+    for detail in list(details or []):
+        if not isinstance(detail, dict):
+            continue
+        issue_id = str(detail.get("issue_id", ""))
+        if issue_id in seen:
+            continue
+        severity = str(detail.get("severity", "")).strip().casefold()
+        category = str(detail.get("category", "")).strip().casefold()
+        try:
+            confidence = float(detail.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        source_quote = str(detail.get("source_quote", "")).strip()
+        current = normalize_for_match(
+            str(detail.get("current_persian_quote", ""))
+        )
+        suggested = normalize_for_match(
+            str(detail.get("suggested_correction", ""))
+        )
+        semantic_minor = bool(
+            severity == "minor"
+            and category in _SOURCE_FIDELITY_CATEGORIES
+            and confidence >= 0.75
+        )
+        evidence = " ".join(
+            str(detail.get(field, ""))
+            for field in ("rationale", "explanation", "error_type")
+        )
+        objective_prose_minor = bool(
+            severity == "minor"
+            and category in {"fluency", "register"}
+            and confidence >= 0.70
+            and _OBJECTIVE_FLUENCY_RATIONALE_RE.search(evidence)
+        )
+        if (
+            (semantic_minor or objective_prose_minor)
+            and source_quote
+            and current
+            and suggested
+            and current != suggested
+        ):
+            findings.append(detail)
+            seen.add(issue_id)
+    return findings
 
 
 def _high_confidence_structural_fluency_minor_issues(
@@ -2995,6 +3134,18 @@ def _chunk_style_policy(
             "excluded_paragraphs": [],
             "reason": "major_or_critical_final_issue",
         }
+    grounded_unresolved = _unresolved_grounded_memory_issues(latest)
+    if grounded_unresolved:
+        return {
+            "approved": False,
+            "excluded_paragraphs": [],
+            "reason": "unresolved_grounded_quality_issue",
+            "issue_ids": [
+                str(detail.get("issue_id", ""))
+                for detail in grounded_unresolved
+                if str(detail.get("issue_id", ""))
+            ],
+        }
     has_routed_issue_policy = (
         "high_confidence_minor_refinement_issue_ids" in latest
     )
@@ -3092,6 +3243,11 @@ def _chunk_memory_admission(
             reasons.append("semantic_dimension_below_memory_floor")
         if fluency < 8.0 or register < 8.0:
             reasons.append("persian_prose_dimension_below_memory_floor")
+        grounded_unresolved = _unresolved_grounded_memory_issues(latest)
+        if grounded_unresolved:
+            reasons.append("unresolved_grounded_quality_issue")
+    else:
+        grounded_unresolved = []
 
     if any(
         event.get("event_type") == "language_quality_review"
@@ -3126,6 +3282,11 @@ def _chunk_memory_admission(
         "reliability_reasons": reasons,
         "disqualifying_reliability_reasons": hard_reasons,
         "advisory_reliability_reasons": advisory_reasons,
+        "grounded_unresolved_issue_ids": [
+            str(detail.get("issue_id", ""))
+            for detail in grounded_unresolved
+            if str(detail.get("issue_id", ""))
+        ],
         "continuity_retained": True,
     }
 
@@ -3670,12 +3831,23 @@ class TranslationPipeline:
     Coordinates document parsing, chunking, LLM execution stages, and final file export.
     """
 
-    def __init__(self, config: TarjomehConfig) -> None:
+    def __init__(
+        self,
+        config: TarjomehConfig,
+        *,
+        worker_id: str | None = None,
+    ) -> None:
         self.config = config
         self.llm_client = LLMClient(config)
         self.critic_client = self._build_critic_client(config)
         self.db = JobDatabase()
         self.current_job_id: str | None = None
+        self.worker_id = worker_id or uuid.uuid4().hex
+        self._worker_claimed = False
+        self._worker_stage = "created"
+        self._worker_chunk_index: int | None = None
+        self._lease_heartbeat_stop = threading.Event()
+        self._lease_heartbeat_thread: threading.Thread | None = None
         self._async_loop: Any = None
         self._async_thread: threading.Thread | None = None
         self._async_loop_lock = threading.Lock()
@@ -3694,6 +3866,11 @@ class TranslationPipeline:
         chunk_index = payload.pop("chunk_index", None)
         if not job_id:
             return
+        self._worker_heartbeat(
+            str(payload.get("operation", "llm_call")),
+            int(chunk_index) if chunk_index is not None else None,
+        )
+        payload["worker_id"] = self.worker_id
         if chunk_index is None:
             # Keep the human-readable log while also retaining the full
             # sanitized evidence used by VPS audits and QA diagnostics.
@@ -3724,6 +3901,111 @@ class TranslationPipeline:
             "llm_call_attempt",
             payload,
         )
+
+    def _worker_heartbeat(
+        self,
+        stage: str,
+        chunk_index: int | None = None,
+    ) -> None:
+        """Refresh this pipeline's durable ownership without changing job state."""
+        self._worker_stage = stage
+        self._worker_chunk_index = chunk_index
+        current_job_id = getattr(self, "current_job_id", None)
+        worker_claimed = bool(getattr(self, "_worker_claimed", False))
+        if not current_job_id or not worker_claimed:
+            return
+        self.db.heartbeat_worker(
+            current_job_id,
+            getattr(self, "worker_id", ""),
+            stage=stage,
+            chunk_index=chunk_index,
+        )
+
+    def _start_lease_heartbeat(self, interval_seconds: float = 30.0) -> None:
+        """Keep ownership live while a provider call or parser stage is busy."""
+        existing = getattr(self, "_lease_heartbeat_thread", None)
+        if existing is not None and existing.is_alive():
+            return
+        stop = getattr(self, "_lease_heartbeat_stop", None)
+        if stop is None:
+            stop = threading.Event()
+            self._lease_heartbeat_stop = stop
+        stop.clear()
+
+        def maintain_lease() -> None:
+            while not stop.wait(max(0.01, interval_seconds)):
+                job_id = getattr(self, "current_job_id", None)
+                claimed = bool(getattr(self, "_worker_claimed", False))
+                if not job_id or not claimed:
+                    return
+                try:
+                    self.db.heartbeat_worker(
+                        job_id,
+                        getattr(self, "worker_id", ""),
+                        stage=getattr(self, "_worker_stage", "working"),
+                        chunk_index=getattr(self, "_worker_chunk_index", None),
+                    )
+                except Exception:
+                    logger.debug(
+                        "Background worker heartbeat failed",
+                        exc_info=True,
+                    )
+
+        thread = threading.Thread(
+            target=maintain_lease,
+            name=f"tarjomeh-lease-{getattr(self, 'worker_id', '')[:8]}",
+            daemon=True,
+        )
+        self._lease_heartbeat_thread = thread
+        thread.start()
+
+    def _stop_lease_heartbeat(self) -> None:
+        """Stop the lease keeper before releasing this worker generation."""
+        stop = getattr(self, "_lease_heartbeat_stop", None)
+        if stop is not None:
+            stop.set()
+        thread = getattr(self, "_lease_heartbeat_thread", None)
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+        self._lease_heartbeat_thread = None
+
+    def _pause_if_requested(
+        self,
+        job_id: str,
+        *,
+        stage: str,
+        chunk_index: int | None = None,
+    ) -> None:
+        """Acknowledge pause only at a transaction-safe pipeline boundary."""
+        job = self.db.get_job(job_id) or {}
+        status = str(job.get("raw_status") or job.get("status") or "")
+        if status not in {JobStatus.PAUSING, JobStatus.PAUSED}:
+            self._worker_heartbeat(stage, chunk_index)
+            return
+        if not bool(getattr(self, "_worker_claimed", False)):
+            raise PipelinePausedException("Job paused cooperatively")
+        acknowledged = self.db.acknowledge_job_pause(
+            job_id,
+            getattr(self, "worker_id", ""),
+            stage=stage,
+            chunk_index=chunk_index,
+        )
+        if acknowledged:
+            self.db.log_chunk_event(
+                job_id,
+                chunk_index if chunk_index is not None else -1,
+                "worker_pause_acknowledged",
+                {
+                    "worker_id": getattr(self, "worker_id", ""),
+                    "stage": stage,
+                    "chunk_index": chunk_index,
+                    "message": (
+                        "The owning worker acknowledged pause at an atomic "
+                        "checkpoint."
+                    ),
+                },
+            )
+        raise PipelinePausedException("Job paused cooperatively")
 
     def _build_critic_client(self, config: TarjomehConfig) -> LLMClient:
         """Build the judge client for critique / back-translation QA.
@@ -3915,6 +4197,26 @@ class TranslationPipeline:
         if getattr(self, "_closed", False):
             return
 
+        self._stop_lease_heartbeat()
+
+        if (
+            getattr(self, "_worker_claimed", False)
+            and getattr(self, "current_job_id", None)
+        ):
+            try:
+                job = self.db.get_job(self.current_job_id) or {}
+                reason = str(
+                    job.get("raw_status") or job.get("status") or "closed"
+                )
+                self.db.release_worker(
+                    self.current_job_id,
+                    self.worker_id,
+                    reason=reason,
+                )
+                self._worker_claimed = False
+            except Exception:
+                logger.debug("Worker lease release failed", exc_info=True)
+
         seen: set[int] = set()
         for client in (
             getattr(self, "llm_client", None),
@@ -4031,11 +4333,27 @@ class TranslationPipeline:
             )
 
         job_id = self.current_job_id
+        lease = self.db.claim_worker(job_id, self.worker_id)
+        if not lease.get("acquired"):
+            owner = lease.get("worker", {}) or {}
+            raise JobWorkerBusyError(
+                "Another live worker owns this job "
+                f"(worker={owner.get('worker_id', 'unknown')}, "
+                f"stage={owner.get('stage', 'unknown')})."
+            )
+        self._worker_claimed = True
+        self._start_lease_heartbeat()
+        self.db.log_chunk_event(job_id, -1, "worker_claimed", {
+            "worker_id": self.worker_id,
+            "reclaimed": bool(lease.get("reclaimed")),
+            "previous_worker": lease.get("previous_worker", {}),
+        })
         # create_job() writes PENDING and only the resume branch used to write
         # RUNNING, so a fresh job stayed PENDING for its entire life. Both
         # render identically in the UI, which hid the difference. Mark every
         # path explicitly.
         self.db.update_job_status(job_id, JobStatus.RUNNING)
+        self._worker_heartbeat("starting")
 
         # OCR runs AFTER the job record exists, so jobs.input_path holds the
         # ORIGINAL file (resume could not find the old temp path), and the
@@ -4456,6 +4774,9 @@ class TranslationPipeline:
                         memory_policy["advisory_reliability_reasons"] = (
                             memory_admission["advisory_reliability_reasons"]
                         )
+                        memory_policy["grounded_unresolved_issue_ids"] = (
+                            memory_admission["grounded_unresolved_issue_ids"]
+                        )
                         self.db.log_chunk_event(
                             job_id, idx, "memory_update_policy", memory_policy
                         )
@@ -4592,6 +4913,11 @@ class TranslationPipeline:
                             memory_manager.to_dict(),
                             search_state=web_searcher.export_state(),
                         )
+                        self._pause_if_requested(
+                            job_id,
+                            stage="chunk_checkpoint_committed",
+                            chunk_index=idx,
+                        )
                     
                     return idx, translation
 
@@ -4710,6 +5036,9 @@ class TranslationPipeline:
                         )
                         memory_policy["advisory_reliability_reasons"] = (
                             memory_admission["advisory_reliability_reasons"]
+                        )
+                        memory_policy["grounded_unresolved_issue_ids"] = (
+                            memory_admission["grounded_unresolved_issue_ids"]
                         )
                         self.db.log_chunk_event(
                             job_id, idx, "memory_update_policy", memory_policy
@@ -4846,6 +5175,11 @@ class TranslationPipeline:
                             translation,
                             memory_manager.to_dict(),
                             search_state=web_searcher.export_state(),
+                        )
+                        self._pause_if_requested(
+                            job_id,
+                            stage="chunk_checkpoint_committed",
+                            chunk_index=idx,
                         )
 
                         if self._claim_chapter_checkpoint(job_id, chunks, idx):
@@ -5888,6 +6222,9 @@ class TranslationPipeline:
         memory_policy["advisory_reliability_reasons"] = (
             memory_admission["advisory_reliability_reasons"]
         )
+        memory_policy["grounded_unresolved_issue_ids"] = (
+            memory_admission["grounded_unresolved_issue_ids"]
+        )
         self.db.log_chunk_event(
             job_id, chunk_index, "memory_update_policy", memory_policy
         )
@@ -6195,11 +6532,9 @@ class TranslationPipeline:
         lock: threading.Lock | None = None,
         adjacent_source_context: str = "",
     ) -> str:
-        # Cooperative pause check
-        job_record = self.db.get_job(job_id)
-        if job_record and job_record.get("status") == JobStatus.PAUSED:
-            logger.info("Pipeline paused cooperatively for job %s", job_id)
-            raise PipelinePausedException("Job paused cooperatively")
+        self._pause_if_requested(
+            job_id, stage="chunk_start", chunk_index=idx
+        )
 
         if hasattr(self.llm_client, "set_trace_context"):
             self.llm_client.set_trace_context(job_id, idx)
@@ -6208,6 +6543,7 @@ class TranslationPipeline:
             critic_client.set_trace_context(job_id, idx)
         self.db.clear_chunk_qa_records(job_id, idx)
         self.db.log_chunk_event(job_id, idx, "chunk_started", {
+            "worker_id": getattr(self, "worker_id", "legacy-direct-call"),
             "source_chars": len(chunk.text),
             "source_paragraphs": _paragraph_count(chunk.text),
             "paragraph_indices": chunk.metadata.get("paragraph_indices", []),
@@ -7906,6 +8242,65 @@ class TranslationPipeline:
                     break
                 if ref_iter == self.config.translation.max_refine_iterations:
                     blocking_issues = _blocking_critique_issues(critique_rep)
+                    source_fidelity_issues = _grounded_source_fidelity_issues(
+                        critique_rep
+                    )
+                    restored_version: int | None = None
+                    if source_fidelity_issues:
+                        selected = _best_source_faithful_version(
+                            evaluated_versions
+                        )
+                        if selected is not None:
+                            selected_index, selected_text, selected_critique = selected
+                            selected_source_issues = (
+                                _grounded_source_fidelity_issues(
+                                    selected_critique
+                                )
+                            )
+                            if (
+                                len(selected_source_issues)
+                                < len(source_fidelity_issues)
+                                and _normalized_translation_version(selected_text)
+                                != _normalized_translation_version(translation)
+                            ):
+                                rejected_translation = translation
+                                translation = selected_text
+                                last_accepted_translation = translation
+                                current_integrity_accepted = True
+                                restored_version = selected_index
+                                self.db.update_chunk(
+                                    job_id,
+                                    idx,
+                                    ChunkStatus.REFINED,
+                                    translation,
+                                )
+                                self.db.log_chunk_event(
+                                    job_id,
+                                    idx,
+                                    "refinement_best_source_version_restored",
+                                    {
+                                        "iteration": ref_iter,
+                                        "selected_evaluated_version": selected_index,
+                                        "evaluated_version_count": len(
+                                            evaluated_versions
+                                        ),
+                                        "rejected_chars": len(
+                                            rejected_translation
+                                        ),
+                                        "restored_chars": len(translation),
+                                        "current_source_issue_count": len(
+                                            source_fidelity_issues
+                                        ),
+                                        "restored_source_issue_count": len(
+                                            selected_source_issues
+                                        ),
+                                        "message": (
+                                            "A late grounded source-fidelity warning "
+                                            "exposed refinement drift; the strongest "
+                                            "earlier integrity-valid version was retained."
+                                        ),
+                                    },
+                                )
                     review_reason = (
                         "blocking_critique_disagreement"
                         if blocking_issues else "quality_threshold_unmet"
@@ -7921,6 +8316,10 @@ class TranslationPipeline:
                         "iteration": ref_iter,
                         "critique_average": critique_rep.average,
                         "blocking_issue_count": len(blocking_issues),
+                        "source_fidelity_issue_count": len(
+                            source_fidelity_issues
+                        ),
+                        "restored_evaluated_version": restored_version,
                         "blocking_issues": [
                             _truncate_for_event(str(issue), 1000)
                             for issue in blocking_issues

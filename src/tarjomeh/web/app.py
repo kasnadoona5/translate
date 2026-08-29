@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 # Global job executor — bounded to 2 concurrent workers
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tarjomeh-job")
 _active_jobs: dict[str, Future | _JobClaim] = {}
+_job_worker_ids: dict[str, str] = {}
 _active_jobs_lock = threading.Lock()
 # Every glossary route does load -> mutate -> full rewrite. Without one lock
 # around that whole sequence, concurrent edits silently lose updates.
@@ -145,7 +146,7 @@ class _JobClaim:
         return False
 
 
-def _try_claim_job(job_id: str) -> bool:
+def _try_claim_job(job_id: str, *, persist: bool = True) -> bool:
     """Reserve exclusive worker ownership of *job_id*.
 
     Returns False when another worker already owns it. The check and the
@@ -156,8 +157,25 @@ def _try_claim_job(job_id: str) -> bool:
         existing = _active_jobs.get(job_id)
         if existing is not None and not existing.done():
             return False
+        worker_id = uuid.uuid4().hex
         _active_jobs[job_id] = _JobClaim()
-        return True
+        _job_worker_ids[job_id] = worker_id
+    if persist:
+        from tarjomeh.jobs.database import JobDatabase
+
+        lease = JobDatabase().claim_worker(job_id, worker_id)
+        if not bool(lease.get("acquired")):
+            with _active_jobs_lock:
+                _active_jobs.pop(job_id, None)
+                _job_worker_ids.pop(job_id, None)
+            return False
+    return True
+
+
+def _job_worker_id(job_id: str) -> str:
+    """Return the reserved worker generation for pipeline attribution."""
+    with _active_jobs_lock:
+        return _job_worker_ids.get(job_id, "")
 
 
 def _assign_job_worker(job_id: str, future: Future) -> None:
@@ -172,6 +190,18 @@ def _release_job_claim(job_id: str, expected: Any = None) -> None:
         current = _active_jobs.get(job_id)
         if expected is None or current is expected:
             _active_jobs.pop(job_id, None)
+            worker_id = _job_worker_ids.pop(job_id, "")
+        else:
+            worker_id = ""
+    if worker_id:
+        try:
+            from tarjomeh.jobs.database import JobDatabase
+
+            JobDatabase().release_worker(
+                job_id, worker_id, reason="web_worker_finished"
+            )
+        except Exception:
+            logger.debug("Durable worker lease release failed", exc_info=True)
 
 
 def _serialise_glossary_writes(f):
@@ -548,6 +578,11 @@ def _register_api(app: Flask) -> None:
                     "selected_chapters must be a JSON list of positive integers"
                 )
 
+        # Reserve this new job locally; the pipeline persists the same worker
+        # generation immediately after creating the job row.
+        if not _try_claim_job(job_id, persist=False):
+            return _reject("Unable to reserve a worker for this job", 409)
+
         # Create progress queue for SSE
         worker_queue = queue.Queue()
         _progress_queues[job_id] = worker_queue
@@ -568,7 +603,9 @@ def _register_api(app: Flask) -> None:
                 if config_overrides:
                     config.update_from_overrides(config_overrides)
 
-                pipeline = TranslationPipeline(config)
+                pipeline = TranslationPipeline(
+                    config, worker_id=_job_worker_id(job_id)
+                )
 
                 def progress_callback(stage: str, pct: float, message: str = "") -> None:
                     worker_queue.put({
@@ -1809,7 +1846,9 @@ def _register_api(app: Flask) -> None:
                 job.get("config", {}),
                 credential_source=app.config.get("TARJOMEH_CONFIG"),
             )
-            pipeline = TranslationPipeline(config)
+            pipeline = TranslationPipeline(
+                config, worker_id=_job_worker_id(job_id)
+            )
             translation = pipeline.retranslate_chunk(job_id, chunk_index)
         finally:
             _close_pipeline(pipeline)
@@ -1893,23 +1932,24 @@ def _register_api(app: Flask) -> None:
     @_require_auth
     def api_pause_job(job_id: str):
         """Pause a running job."""
-        from tarjomeh.jobs.database import JobDatabase, JobStatus
+        from tarjomeh.jobs.database import JobDatabase
         db = JobDatabase()
         job = db.get_job(job_id)
         if not job:
             return jsonify({"error": "Job not found"}), 404
 
-        # Update DB status to PAUSED
-        db.update_job_status(job_id, JobStatus.PAUSED)
+        pause = db.request_job_pause(job_id)
         db.log_event(job_id, "INFO", "Pause requested by user.")
 
-        future = _active_jobs.get(job_id)
-        if future and not future.done():
-            future.cancel()
+        if pause.get("active_worker"):
             return jsonify({
                 "status": "pausing",
                 "job_id": job_id,
-                "message": "Pause requested. The current pipeline stage will finish before the job stops.",
+                "worker_id": pause.get("worker_id"),
+                "message": (
+                    "Pause requested. The owning worker will acknowledge it "
+                    "after the current atomic chunk checkpoint."
+                ),
             })
         return jsonify({"status": "paused", "job_id": job_id})
 
@@ -1953,7 +1993,9 @@ def _register_api(app: Flask) -> None:
                     job.get("config", {}),
                     credential_source=app.config.get("TARJOMEH_CONFIG"),
                 )
-                pipeline = TranslationPipeline(config)
+                pipeline = TranslationPipeline(
+                    config, worker_id=_job_worker_id(job_id)
+                )
 
                 def progress_callback(stage: str, pct: float, message: str = "") -> None:
                     worker_queue.put({

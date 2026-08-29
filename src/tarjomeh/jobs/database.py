@@ -63,6 +63,7 @@ def _decode_payload_row(row: sqlite3.Row) -> dict[str, Any]:
 class JobStatus:
     PENDING = "pending"
     RUNNING = "running"
+    PAUSING = "pausing"
     COMPLETED = "completed"
     PAUSED = "paused"
     PAUSED_ERROR = "paused_error"
@@ -112,6 +113,20 @@ class JobDatabase:
                     config TEXT,
                     error_message TEXT,
                     created_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS job_workers (
+                    job_id TEXT PRIMARY KEY,
+                    worker_id TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    stage TEXT,
+                    chunk_index INTEGER,
+                    acquired_at TEXT NOT NULL,
+                    heartbeat_at TEXT NOT NULL,
+                    pause_requested_at TEXT,
+                    released_at TEXT,
+                    release_reason TEXT
                 )
             """)
             conn.execute("""
@@ -517,6 +532,190 @@ class JobDatabase:
                     (status, error_message, job_id)
                 )
             conn.commit()
+
+    def claim_worker(
+        self,
+        job_id: str,
+        worker_id: str,
+        *,
+        stale_after_seconds: float = 180.0,
+    ) -> dict[str, Any]:
+        """Atomically claim a durable job-worker lease across processes."""
+        now = datetime.utcnow()
+        timestamp = now.isoformat()
+        with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM job_workers WHERE job_id=?", (job_id,)
+            ).fetchone()
+            previous = dict(row) if row else {}
+            active = bool(
+                row and str(row["state"]) in {"active", "pausing"}
+            )
+            stale = False
+            if active:
+                try:
+                    heartbeat = datetime.fromisoformat(str(row["heartbeat_at"]))
+                    stale = (now - heartbeat).total_seconds() > stale_after_seconds
+                except (TypeError, ValueError):
+                    stale = True
+            if active and str(row["worker_id"]) != worker_id and not stale:
+                conn.commit()
+                return {
+                    "acquired": False,
+                    "reason": "active_worker",
+                    "worker": previous,
+                }
+
+            reclaimed = bool(
+                active and str(row["worker_id"]) != worker_id and stale
+            )
+            acquired_at = (
+                str(row["acquired_at"])
+                if row and str(row["worker_id"]) == worker_id
+                else timestamp
+            )
+            conn.execute(
+                """
+                INSERT INTO job_workers (
+                    job_id,worker_id,state,stage,chunk_index,acquired_at,
+                    heartbeat_at,pause_requested_at,released_at,release_reason
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(job_id) DO UPDATE SET
+                    worker_id=excluded.worker_id,
+                    state=excluded.state,
+                    stage=excluded.stage,
+                    chunk_index=excluded.chunk_index,
+                    acquired_at=excluded.acquired_at,
+                    heartbeat_at=excluded.heartbeat_at,
+                    pause_requested_at=NULL,
+                    released_at=NULL,
+                    release_reason=NULL
+                """,
+                (
+                    job_id, worker_id, "active", "claimed", None,
+                    acquired_at, timestamp, None, None, None,
+                ),
+            )
+            conn.commit()
+        return {
+            "acquired": True,
+            "reclaimed": reclaimed,
+            "previous_worker": previous if reclaimed else {},
+            "worker_id": worker_id,
+        }
+
+    def heartbeat_worker(
+        self,
+        job_id: str,
+        worker_id: str,
+        *,
+        stage: str = "",
+        chunk_index: int | None = None,
+    ) -> bool:
+        """Refresh a lease only when the caller still owns it."""
+        timestamp = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE job_workers
+                SET heartbeat_at=?, stage=?, chunk_index=?
+                WHERE job_id=? AND worker_id=? AND state IN ('active','pausing')
+                """,
+                (timestamp, stage, chunk_index, job_id, worker_id),
+            )
+            conn.commit()
+            return bool(cursor.rowcount)
+
+    def request_job_pause(self, job_id: str) -> dict[str, Any]:
+        """Record a pause request, distinguishing request from acknowledgement."""
+        timestamp = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM job_workers WHERE job_id=?", (job_id,)
+            ).fetchone()
+            active = bool(
+                row and str(row["state"]) in {"active", "pausing"}
+            )
+            status = JobStatus.PAUSING if active else JobStatus.PAUSED
+            conn.execute(
+                "UPDATE jobs SET status=?, error_message=NULL WHERE id=?",
+                (status, job_id),
+            )
+            if active:
+                conn.execute(
+                    """
+                    UPDATE job_workers
+                    SET state='pausing', pause_requested_at=?, heartbeat_at=?
+                    WHERE job_id=? AND worker_id=?
+                    """,
+                    (timestamp, timestamp, job_id, str(row["worker_id"])),
+                )
+            conn.commit()
+        return {
+            "status": status,
+            "active_worker": active,
+            "worker_id": str(row["worker_id"]) if active else None,
+        }
+
+    def acknowledge_job_pause(
+        self,
+        job_id: str,
+        worker_id: str,
+        *,
+        stage: str = "paused",
+        chunk_index: int | None = None,
+    ) -> bool:
+        """Let the owning worker acknowledge pause after its atomic checkpoint."""
+        timestamp = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                UPDATE job_workers
+                SET state='paused', stage=?, chunk_index=?, heartbeat_at=?
+                WHERE job_id=? AND worker_id=? AND state IN ('active','pausing')
+                """,
+                (stage, chunk_index, timestamp, job_id, worker_id),
+            )
+            if cursor.rowcount:
+                conn.execute(
+                    "UPDATE jobs SET status=?, error_message=NULL WHERE id=?",
+                    (JobStatus.PAUSED, job_id),
+                )
+            conn.commit()
+            return bool(cursor.rowcount)
+
+    def release_worker(
+        self,
+        job_id: str,
+        worker_id: str,
+        *,
+        reason: str = "finished",
+    ) -> bool:
+        """Release only the lease owned by this worker generation."""
+        timestamp = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE job_workers
+                SET state='released', released_at=?, heartbeat_at=?,
+                    release_reason=?
+                WHERE job_id=? AND worker_id=?
+                """,
+                (timestamp, timestamp, reason[:200], job_id, worker_id),
+            )
+            conn.commit()
+            return bool(cursor.rowcount)
+
+    def get_worker_lease(self, job_id: str) -> dict[str, Any] | None:
+        """Return the persisted worker generation for diagnostics."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM job_workers WHERE job_id=?", (job_id,)
+            ).fetchone()
+        return dict(row) if row else None
 
     def log_event(self, job_id: str, level: str, message: str) -> None:
         """Append a log event to the job log table."""

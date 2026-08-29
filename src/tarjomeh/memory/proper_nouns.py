@@ -754,11 +754,9 @@ def _mapping_applies_to_source(
     if not source_text or not _source_term_present(source_text, term):
         return False
     normalized_category = _normalise_category(category)
-    origin = str(provenance.get("origin", "legacy"))
     compact = " ".join((term or "").split())
     if (
         normalized_category not in _AMBIGUOUS_ENTITY_CATEGORIES
-        or origin not in _LOW_AUTHORITY_ORIGINS
         or len(compact.split()) != 1
         or not compact.islower()
     ):
@@ -774,6 +772,16 @@ def _mapping_applies_to_source(
             return True
         if match.group() != match.group().lower():
             return True
+        window = source_text[
+            max(0, match.start() - 60):min(len(source_text), match.end() + 60)
+        ]
+        if re.search(
+            r"\b(?:published\s+by|publisher|press|company|corporation|"
+            r"limited|ltd\.?|inc\.?|university|journal|review|volume|edition)\b",
+            window,
+            re.IGNORECASE,
+        ):
+            return True
     return False
 
 
@@ -784,6 +792,30 @@ def _normalise_category(category: str) -> str:
 
 def _normalise_target(value: str) -> str:
     return re.sub(r"[\s\u200c]+", " ", (value or "").strip()).casefold()
+
+
+def _strip_redundant_entity_original(
+    english: str,
+    persian: str,
+    category: str,
+) -> tuple[str, str]:
+    """Keep reusable entity targets lexical; first-use metadata owns originals."""
+    if _normalise_category(category) not in INLINE_ORIGINAL_CATEGORIES:
+        return persian.strip(), ""
+    compact = " ".join((english or "").split()).strip()
+    if not compact:
+        return persian.strip(), ""
+    escaped = re.escape(compact).replace(r"\ ", r"\s+")
+    annotation = re.compile(
+        rf"\s*\((?P<original>{escaped})"
+        rf"(?P<dates>\s*,\s*\d{{4}}(?:\s*[\-\u2013\u2014]\s*\d{{4}})?)?\)\s*$",
+        re.IGNORECASE,
+    )
+    match = annotation.search(persian or "")
+    if not match:
+        return persian.strip(), ""
+    lexical = (persian or "")[:match.start()].rstrip(" \t,،؛;-")
+    return (lexical or persian.strip()), match.group(0).strip()
 
 
 def _mapping_authority_class(
@@ -868,9 +900,11 @@ class ProperNouns:
             Established Persian translation/transliteration.
         """
         en_key = " ".join(english.split()).strip()
-        fa_val = persian.strip()
         origin = provenance if provenance in _PROVENANCE_AUTHORITY else "legacy"
         new_category = _normalise_category(category)
+        fa_val, stripped_annotation = _strip_redundant_entity_original(
+            en_key, persian, new_category
+        )
         if origin in _LOW_AUTHORITY_ORIGINS:
             new_category = low_authority_mapping_category(
                 en_key, fa_val, new_category
@@ -952,6 +986,10 @@ class ProperNouns:
                 "evidence_keys": evidence_keys[-12:],
                 "context_independent": independent,
                 "authority_class": authority_class,
+                "stripped_target_annotation": (
+                    stripped_annotation
+                    or str(prior.get("stripped_target_annotation", ""))
+                ),
             }
         elif prior:
             prior["observations"] = observations
@@ -977,6 +1015,9 @@ class ProperNouns:
             "authority_class": self._provenance.get(stored_key, {}).get(
                 "authority_class", "legacy_advisory"
             ),
+            "stripped_target_annotation": self._provenance.get(
+                stored_key, {}
+            ).get("stripped_target_annotation", stripped_annotation),
         }
 
     def add_alias(self, english: str, persian: str) -> bool:

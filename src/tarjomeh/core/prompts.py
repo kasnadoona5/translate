@@ -142,6 +142,8 @@ Instructions:
    deleting qualifications, adding interpretation, or changing logical relations.
    Do not improve readability by simplifying the author's theory, replacing a
    precise relation with a looser paraphrase, or suppressing deliberate complexity.
+   A parenthetical term or foreign label supplements its full proposition; it must
+   not replace the proposition's head, complement, participants, or relation.
 2. Apply every entry marked mandatory using its prescribed lexical rendering and
    standard Persian orthography. Treat entries marked advisory as non-binding context.
 3. Ensure stylistic and terminological continuity with the preceding translation.
