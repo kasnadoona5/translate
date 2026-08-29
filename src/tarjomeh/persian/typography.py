@@ -75,6 +75,14 @@ _AUTHOR_YEAR_CITATION_RE = re.compile(
     r"|:\s*[0-9]{1,4}(?:[-\u2010-\u2015][0-9]{1,4})?"
     r"))*"
 )
+_LATIN_SCHOLARLY_ABBREVIATION_RE = re.compile(
+    r"(?<![A-Za-z])(?:"
+    r"e\.g\.|i\.e\.|cf\.|ibid\.|idem\.|viz\.|"
+    r"et\s+al\.|op\.\s+cit\.|loc\.\s+cit\."
+    r")(?:[,\u060c]\s*(?:[0-9]{1,4}(?:[-\u2010-\u2015][0-9]{1,4})?)?)?"
+    r"(?![A-Za-z])",
+    re.IGNORECASE,
+)
 _SCHOLARLY_PROTECTED_RE = re.compile(
     r"\b(?:ISBN(?:-1[03])?|ISSN)\s*:?\s*"
     r"[0-9Xx](?:[0-9Xx \t\-‐-―]{6,30})[0-9Xx]\b"
@@ -265,6 +273,13 @@ class PersianTypographer:
     @staticmethod
     def _protect_scholarly(text: str, spans: list[str]) -> str:
         """Replace scholarly-apparatus spans with digit-free PUA sentinels."""
+        text = _LATIN_SCHOLARLY_ABBREVIATION_RE.sub(
+            lambda match: match.group(0).replace("\u060c", ","),
+            text,
+        )
+        text = PersianTypographer._protect_pattern(
+            text, spans, _LATIN_SCHOLARLY_ABBREVIATION_RE
+        )
         text = PersianTypographer._protect_pattern(
             text, spans, _AUTHOR_YEAR_CITATION_RE
         )

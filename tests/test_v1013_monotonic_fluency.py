@@ -92,7 +92,7 @@ def test_readability_review_targets_changed_or_final_candidate_only() -> None:
     assert not _readability_review_eligible(
         chunk, clean, 9.0, candidate_changed=False, final_candidate=False
     )
-    assert not _readability_review_eligible(
+    assert _readability_review_eligible(
         chunk, clean, 9.0, candidate_changed=False, final_candidate=True
     )
 

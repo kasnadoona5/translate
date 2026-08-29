@@ -16,18 +16,20 @@ GENERAL_EDITORIAL_CONTRACT: str = """\
   never force an isolated dictionary equivalent.
 - Preserve semantic roles and relations: agency, attribution, negation, modality,
   quantity, comparison, causality, and time.
-- Preserve explicit quantities and source-authored inconsistencies; translate the
-  source instead of silently reconciling it with later text.
-- Preserve relational compounds and scholarly apparatus: multilingual expressions,
-  titles, names, citation atoms, and note markers. Translate connective prose.
-- Write idiomatic formal Iranian Persian with clear dependencies, standard ezafe,
+- Preserve source quantities and inconsistencies; never reconcile later text.
+- Preserve apparatus: multilingual expressions, titles, names, citations, and note
+  markers; translate connective prose.
+- Write idiomatic academic Iranian Persian with clear dependencies, ezafe,
   agreement, punctuation, and ZWNJ; avoid calques.
-- Attach parenthetical restatements and appositives to their intended Persian head
-  while keeping the main predicate complete and clear.
-- Emit only the requested translation or structured response; never insert model
-  notes, protocol labels, or unexplained foreign prose.
-- Only mandatory glossary entries and established names are binding. Advisory
-  candidates may be revised or rejected; resolve other terms from context.
+- Attach restatements and appositives correctly without breaking the predicate.
+- Treat a recurring coordinated conceptual series as one terminological unit:
+  preserve distinctions and parallel Persian only when trustworthy context or a
+  mandatory phrase establishes it. Advisory context remains revisable and cannot
+  override the source.
+- Emit only the requested response; never insert notes, labels, or unexplained
+  foreign prose.
+- Only mandatory glossary entries and established names bind; other terms remain
+  contextual and advisory.
 """
 
 # ---------------------------------------------------------------------------
@@ -281,6 +283,11 @@ agreement or dependency, an unresolved or dangling referent, malformed punctuati
 or parentheses, accidental repetition, an opaque source-order calque, or a modifier
 stack whose attachment is grammatically unclear. Formal complexity, uncommon
 technical vocabulary, and a merely preferable synonym are not defects.
+
+Check whether an appositive or parenthetical explanation interrupts the dependency
+between a Persian head and its complement, and whether ZWNJ has incorrectly welded
+two independent words rather than joining a real compound or affix. Do not replace
+technical vocabulary merely because it is uncommon.
 
 Also report a governed phrase or complement that is accidentally stated twice in
 one clause with competing predicates between its two occurrences. Do not report

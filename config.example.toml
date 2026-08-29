@@ -205,6 +205,8 @@ enable_4layer = true
 summary_update_interval = "chapter"
 long_term_retrieval_k = 5
 short_term_window = 4
+# Minimum 0-100 quality score for prose to guide the active style profile.
+style_min_score = 75.0
 
 [pdf]
 # pymupdf | doclayout-yolo

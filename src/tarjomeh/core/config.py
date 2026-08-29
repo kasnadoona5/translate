@@ -306,6 +306,7 @@ class MemoryConfig:
     summary_update_interval: str = "chapter"
     long_term_retrieval_k: int = 5
     short_term_window: int = 4
+    style_min_score: float = 75.0
 
 
 @dataclass

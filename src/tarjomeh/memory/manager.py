@@ -228,11 +228,18 @@ class MemoryManager:
         self.book_context = ""
         self.style_profile = ""
         self.style_samples: list[str] = []
-        
+
         # Pull retrieval_k and window_size from config
         retrieval_k = config.to_dict().get("memory", {}).get("long_term_retrieval_k", 5)
         window_size = config.to_dict().get("memory", {}).get("short_term_window", 4)
-        
+        try:
+            configured_style_floor = float(
+                config.to_dict().get("memory", {}).get("style_min_score", 75.0)
+            )
+        except (TypeError, ValueError):
+            configured_style_floor = 75.0
+        self._style_min_score = min(100.0, max(0.0, configured_style_floor))
+
         self.long_term = LongTermMemory(retrieval_k=retrieval_k)
         self.short_term = ShortTermMemory(window_size=window_size)
 
@@ -462,9 +469,22 @@ class MemoryManager:
             if not paragraph.strip():
                 continue
             quality = _style_sample_quality(paragraph)
-            if quality.get("approved"):
+            if (
+                quality.get("approved")
+                and float(quality.get("score", 0.0)) >= self._style_min_score
+            ):
                 candidates.append(quality)
             else:
+                if (
+                    quality.get("approved")
+                    and float(quality.get("score", 0.0)) < self._style_min_score
+                ):
+                    quality = {
+                        **quality,
+                        "approved": False,
+                        "reasons": list(quality.get("reasons", []) or [])
+                        + ["style_score_below_floor"],
+                    }
                 rejections.append(quality)
 
         report: dict[str, Any] = {
@@ -472,6 +492,7 @@ class MemoryManager:
             "accepted": False,
             "reason": "no_fluent_complete_paragraph",
             "rejections": rejections[:5],
+            "minimum_score": self._style_min_score,
         }
         if candidates:
             selected = max(candidates, key=lambda item: float(item["score"]))
@@ -530,8 +551,11 @@ class MemoryManager:
     def _render_style_profile(self) -> str:
         """Build a prompt-safe style guide from trusted prose samples."""
         clean_samples = [
-            cleaned for sample in self.style_samples
+            cleaned
+            for sample in self.style_samples
             if (cleaned := _clean_style_sample(sample))
+            and float(_style_sample_quality(cleaned).get("score", 0.0))
+            >= self._style_min_score
         ][:5]
         if not clean_samples:
             return ""

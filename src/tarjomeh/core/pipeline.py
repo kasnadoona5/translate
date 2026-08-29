@@ -2154,6 +2154,18 @@ _OBJECTIVE_FLUENCY_RATIONALE_RE = re.compile(
     r"typograph(?:y|ic)|ungrammatical|word order|zwnj)\b",
     re.IGNORECASE,
 )
+_OBJECTIVE_GRAMMAR_RATIONALE_RE = re.compile(
+    r"\b(?:agreement|attachment|broken grammar|dependency|fragment|modifier stack|"
+    r"participle|referent|incomplete (?:clause|coordination|sentence)|"
+    r"missing (?:predicate|verb)|malformed (?:grammar|participle|spacing|syntax|zwnj)|"
+    r"predicate|spacing|syntax|ungrammatical|word order|zwnj)\b",
+    re.IGNORECASE,
+)
+_OBJECTIVE_SURFACE_RATIONALE_RE = re.compile(
+    r"\b(?:malformed|orthograph(?:y|ic)|punctuation|spacing|"
+    r"typograph(?:y|ic)|zwnj)\b",
+    re.IGNORECASE,
+)
 _DISQUALIFYING_RELIABILITY_REASONS = frozenset({
     "unresolved_qa_review",
     "invalid_final_critique",
@@ -2479,7 +2491,7 @@ def _readability_review_eligible(
     candidate_changed: bool = False,
     final_candidate: bool = False,
 ) -> bool:
-    """Use one advisory target-only pass on the latest meaningful candidate."""
+    """Use one advisory target-only pass on each final body-prose candidate."""
     if _is_front_matter(chunk):
         return False
     metadata = getattr(chunk, "metadata", None) or {}
@@ -2489,21 +2501,9 @@ def _readability_review_eligible(
     }
     if roles.intersection(_READABILITY_EXCLUDED_ROLES):
         return False
-    details = list(getattr(critique, "issue_details", []) or [])
-    has_grounded_fluency_issue = any(
-        str(detail.get("category", "")).casefold() in {"fluency", "register"}
-        for detail in details
-    )
     return bool(
         getattr(critique, "valid", True)
-        and (
-            candidate_changed
-            or final_candidate
-            and (
-            float(getattr(critique, "fluency", 10.0)) < threshold
-            or has_grounded_fluency_issue
-            )
-        )
+        and (candidate_changed or final_candidate)
     )
 
 
@@ -2692,25 +2692,55 @@ def _decisions_without_regressed_edits(
 def _objective_unmatched_readability_issues(
     issues: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Keep target-only grammar evidence advisory but visible for human review."""
+    """Return exact-span objective evidence eligible for source-aware review.
+
+    Reviewer severity is advisory because providers sometimes label broken
+    dependencies as ``minor``.  A minor finding routes only when its rationale
+    names an objective grammar or spacing defect.  Softer punctuation,
+    repetition, nominalization, and stylistic observations still require a
+    major/critical label and remain subject to source reconciliation.
+    """
     findings: list[dict[str, Any]] = []
     for issue in issues:
         if not isinstance(issue, dict):
             continue
         severity = str(issue.get("severity", "")).casefold()
+        raw_current = " ".join(
+            str(issue.get("current_persian_quote", "")).split()
+        )
+        raw_suggested = " ".join(
+            str(issue.get("suggested_correction", "")).split()
+        )
         current = normalize_for_match(
-            str(issue.get("current_persian_quote", ""))
+            raw_current
         )
         suggested = normalize_for_match(
-            str(issue.get("suggested_correction", ""))
+            raw_suggested
         )
         rationale = str(issue.get("rationale", ""))
+        objective_rationale = bool(
+            _OBJECTIVE_FLUENCY_RATIONALE_RE.search(rationale)
+        )
+        minor_grammar_rationale = bool(
+            severity == "minor"
+            and _OBJECTIVE_GRAMMAR_RATIONALE_RE.search(rationale)
+        )
+        meaningfully_changed = bool(
+            current != suggested
+            or (
+                raw_current != raw_suggested
+                and _OBJECTIVE_SURFACE_RATIONALE_RE.search(rationale)
+            )
+        )
         if (
-            severity in {"critical", "major"}
-            and current
+            current
             and suggested
-            and current != suggested
-            and _OBJECTIVE_FLUENCY_RATIONALE_RE.search(rationale)
+            and meaningfully_changed
+            and objective_rationale
+            and (
+                severity in {"critical", "major"}
+                or minor_grammar_rationale
+            )
         ):
             findings.append(issue)
     return findings
@@ -2768,7 +2798,7 @@ def _promote_objective_readability_issues(
     source_text: str = "",
     suppressed: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Route major target-only grammar evidence through the source-aware refiner.
+    """Route objective target-only grammar evidence through the source-aware refiner.
 
     The Persian-only reviewer has no authority over source meaning. Promotion
     therefore creates a non-blocking advisory issue with no source quote. The
@@ -2785,8 +2815,9 @@ def _promote_objective_readability_issues(
     promoted: list[dict[str, Any]] = []
     normalized_translation = normalize_for_match(translation)
     for issue in _objective_unmatched_readability_issues(issues):
-        if str(issue.get("severity", "")).strip().casefold() != "major":
-            continue
+        original_severity = str(
+            issue.get("severity", "")
+        ).strip().casefold()
         quote = str(issue.get("current_persian_quote", "")).strip()
         suggested = str(issue.get("suggested_correction", "")).strip()
         rationale = str(issue.get("rationale", "")).strip()
@@ -2820,10 +2851,16 @@ def _promote_objective_readability_issues(
             continue
         advisory = {
             "severity": "major",
+            "original_severity": original_severity or None,
             "current_persian_quote": quote,
             "suggested_correction": suggested,
             "rationale": rationale,
             "authority": "target_only_advisory",
+            "routing_basis": (
+                "objective_minor_grammar"
+                if original_severity == "minor"
+                else "reviewer_major_objective"
+            ),
         }
         detail: dict[str, Any] = {
             "issue_id": issue_id,
