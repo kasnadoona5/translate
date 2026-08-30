@@ -358,6 +358,18 @@ async function trackJobProgress(jobId) {
     let jobFinished = false;
     let snapshotPollTimer = null;
 
+    const snapshotStage = (chunks, worker) => {
+        const base = `Tracking ${chunks.completed || 0}/${chunks.total || 0} completed chunks`;
+        if (!worker || !["active", "pausing"].includes(worker.state)) return base;
+        const rawStage = String(worker.stage || "working");
+        const stage = rawStage.startsWith("llm:")
+            ? rawStage.slice(4).replace(/:attempt-(\d+)$/, " (attempt $1)").replaceAll("_", " ")
+            : rawStage.replaceAll("_", " ");
+        const chunk = Number.isInteger(worker.chunk_index) && worker.chunk_index >= 0
+            ? `chunk ${worker.chunk_index + 1}` : "current stage";
+        return `${base}; ${chunk}: ${stage}`;
+    };
+
     const finish = (stage) => {
         jobFinished = true;
         if (currentEventSource) {
@@ -387,10 +399,11 @@ async function trackJobProgress(jobId) {
         const snapshot = await response.json();
         const job = snapshot.job || {};
         const chunks = snapshot.chunks || {};
+        const worker = snapshot.worker || null;
         const pct = Math.max(0, Math.min(100, Math.round(Number(job.pct || 0) * 100)));
         progressBar.style.width = `${pct}%`;
         progressPct.innerText = `${pct}%`;
-        progressStage.innerText = `Tracking ${chunks.completed || 0}/${chunks.total || 0} completed chunks`;
+        progressStage.innerText = snapshotStage(chunks, worker);
         appendLog(`Restored current job state: ${pct}% complete.`, "info");
 
         const status = job.raw_status || job.status;
@@ -409,10 +422,11 @@ async function trackJobProgress(jobId) {
             const snapshot = await response.json();
             const job = snapshot.job || {};
             const chunks = snapshot.chunks || {};
+            const worker = snapshot.worker || null;
             const pct = Math.max(0, Math.min(100, Math.round(Number(job.pct || 0) * 100)));
             progressBar.style.width = `${pct}%`;
             progressPct.innerText = `${pct}%`;
-            progressStage.innerText = `Tracking ${chunks.completed || 0}/${chunks.total || 0} completed chunks`;
+            progressStage.innerText = snapshotStage(chunks, worker);
             const status = job.raw_status || job.status;
             if (status === "completed") { finish("complete"); return; }
             if (status === "paused") { finish("paused"); return; }

@@ -283,8 +283,10 @@ must not infer, simplify, add, remove, reinterpret, or weaken meaning.
 Report only defects visible in Persian itself: a missing finite predicate, broken
 agreement or dependency, an unresolved or dangling referent, malformed punctuation
 or parentheses, accidental repetition, an opaque source-order calque, or a modifier
-stack whose attachment is grammatically unclear. Formal complexity, uncommon
-technical vocabulary, and a merely preferable synonym are not defects.
+stack whose attachment is grammatically unclear. Also report visibly malformed word
+construction, such as an accidental extra morpheme or a ZWNJ that fuses independent
+words. Formal complexity, uncommon technical vocabulary, and a merely preferable
+synonym are not defects.
 
 Check whether an appositive or parenthetical explanation interrupts the dependency
 between a Persian head and its complement, and whether ZWNJ has incorrectly welded

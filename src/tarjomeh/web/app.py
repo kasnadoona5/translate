@@ -684,7 +684,11 @@ def _register_api(app: Flask) -> None:
         if not job:
             return jsonify({"error": "Job not found"}), 404
         chunks = db.get_chunk_summary(job_id)
-        return jsonify({"job": job, "chunks": chunks})
+        return jsonify({
+            "job": job,
+            "chunks": chunks,
+            "worker": db.get_worker_lease(job_id),
+        })
 
     @app.route("/api/jobs/<job_id>/events")
     @_require_auth

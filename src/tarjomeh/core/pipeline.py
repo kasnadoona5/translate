@@ -15,6 +15,7 @@ import uuid
 import threading
 import json
 import httpx
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -1152,6 +1153,17 @@ def _language_quality_strictly_improves(
     )
 
 
+def _language_quality_does_not_regress(
+    before: dict[str, Any],
+    after: dict[str, Any],
+) -> bool:
+    """Require every deterministic language-artifact count to stay monotonic."""
+    return all(
+        int(after.get(key, 0) or 0) <= int(before.get(key, 0) or 0)
+        for key in _LANGUAGE_QUALITY_COUNT_FIELDS
+    )
+
+
 def _language_repair_is_local(
     before: str,
     after: str,
@@ -1174,8 +1186,9 @@ def _targeted_language_repair_prompt(
     findings: dict[str, Any],
     *,
     structural_role: str,
+    source_fidelity_findings: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Build one paragraph-local repair request from deterministic evidence."""
+    """Build one paragraph-local repair request from grounded final evidence."""
     evidence = {
         key: findings.get(key, [])
         for key in (
@@ -1194,9 +1207,21 @@ def _targeted_language_repair_prompt(
         )
         if findings.get(key)
     }
+    grounded = [
+        {
+            key: item.get(key)
+            for key in (
+                "issue_id", "category", "severity", "confidence",
+                "source_quote", "current_persian_quote",
+                "suggested_correction", "rationale",
+            )
+        }
+        for item in list(source_fidelity_findings or [])
+        if isinstance(item, dict)
+    ]
     return f"""\
-The accepted Persian paragraph below has objective surface-language artifacts.
-Correct only the evidenced artifacts while preserving its full meaning.
+The accepted Persian paragraph below has grounded final-review evidence. Correct
+only the evidenced artifacts while preserving its full meaning.
 
 ### Structural role
 {structural_role}
@@ -1210,16 +1235,22 @@ Correct only the evidenced artifacts while preserving its full meaning.
 ### Deterministic findings
 {json.dumps(evidence, ensure_ascii=False, indent=2)}
 
+### Source-fidelity findings from the source-aware critic
+{json.dumps(grounded, ensure_ascii=False, indent=2)}
+
 Requirements:
 1. Return exactly one complete Persian paragraph and nothing else.
 2. Preserve every proposition, qualification, relation, citation, number, name,
    required English parenthetical, and list or table label.
 3. Change only what is necessary to remove the listed foreign-script, untranslated
    ordinary prose, duplicate, semantic-dash, tatweel-punctuation, markup,
-   parenthesis, or detached-ezafe artifact.
+   parenthesis, detached-ezafe, or explicitly grounded source-fidelity defect.
 4. Do not choose new terminology, summarize, add commentary, or alter source facts.
 5. Use fluent formal Iranian Persian. For a contents/title row, preserve the title's
    meaning and page label while repairing Persian syntax.
+6. When a source-fidelity finding identifies an omitted proposition, quantity,
+   qualification, relation, negation, or modality, restore exactly that obligation;
+   do not rewrite unrelated correct wording.
 """
 
 
@@ -2257,6 +2288,7 @@ _DISQUALIFYING_RELIABILITY_REASONS = frozenset({
     "persian_prose_dimension_below_memory_floor",
     "objective_final_language_artifact",
     "unresolved_grounded_quality_issue",
+    "final_quality_authority_withheld",
 })
 _ADVISORY_RELIABILITY_REASONS = frozenset({
     "final_critique_below_configured_threshold",
@@ -2337,9 +2369,15 @@ def _unresolved_grounded_memory_issues(critique: Any) -> list[dict[str, Any]]:
             and confidence >= 0.70
             and _OBJECTIVE_FLUENCY_RATIONALE_RE.search(evidence)
         )
+        objective_prose_major = bool(
+            severity in {"critical", "major"}
+            and category in {"fluency", "readability", "register", "typography"}
+            and confidence >= 0.60
+            and _OBJECTIVE_FLUENCY_RATIONALE_RE.search(evidence)
+        )
         if (
-            (semantic_minor or objective_prose_minor)
-            and source_quote
+            (semantic_minor or objective_prose_minor or objective_prose_major)
+            and (source_quote or category == "readability")
             and current
             and suggested
             and current != suggested
@@ -2347,6 +2385,151 @@ def _unresolved_grounded_memory_issues(critique: Any) -> list[dict[str, Any]]:
             findings.append(detail)
             seen.add(issue_id)
     return findings
+
+
+def _canonical_final_quality_record(
+    db: Any,
+    job_id: str,
+    chunk_index: int,
+) -> dict[str, Any]:
+    """Reconcile final critique, refiner veto, repair, and review authority.
+
+    Continuity memory is always retained by its own trust policy. This record
+    controls only durable wording and active style authority, so the same final
+    evidence cannot be accepted by one layer and rejected by another.
+    """
+    events = db.get_chunk_events(job_id, chunk_index)
+    last_start = 0
+    for index, event in enumerate(events):
+        if event.get("event_type") == "chunk_started":
+            last_start = index
+    current_events = events[last_start:]
+    critique_events = [
+        (index, event.get("payload", {}) or {})
+        for index, event in enumerate(current_events)
+        if event.get("event_type") == "critique_completed"
+    ]
+    latest_index, latest = critique_events[-1] if critique_events else (-1, {})
+
+    resolved_source_ids: set[str] = set()
+    for event in current_events:
+        if event.get("event_type") != "targeted_language_repair":
+            continue
+        payload = event.get("payload", {}) or {}
+        resolved_source_ids.update(
+            str(value).strip()
+            for value in list(payload.get("resolved_source_issue_ids", []) or [])
+            if str(value).strip()
+        )
+
+    later_decisions: dict[str, dict[str, Any]] = {}
+    for event in current_events[latest_index + 1:]:
+        if event.get("event_type") != "refinement_completed":
+            continue
+        for decision in list(
+            (event.get("payload", {}) or {}).get("issue_decisions", []) or []
+        ):
+            if isinstance(decision, dict) and str(decision.get("issue_id", "")).strip():
+                later_decisions[str(decision["issue_id"]).strip()] = decision
+
+    unresolved_candidates = {
+        str(item.get("issue_id", "")).strip(): item
+        for item in _unresolved_grounded_memory_issues(latest)
+        if str(item.get("issue_id", "")).strip()
+    }
+    issue_records: list[dict[str, Any]] = []
+    unresolved_ids: list[str] = []
+    for detail_index, detail in enumerate(
+        list(latest.get("issue_details", []) or [])
+    ):
+        if not isinstance(detail, dict):
+            continue
+        issue_id = str(detail.get("issue_id", "")).strip()
+        decision = later_decisions.get(issue_id, {})
+        disposition = str(decision.get("decision", "")).strip().casefold()
+        commit_status = str(decision.get("commit_status", "")).strip()
+        if issue_id and issue_id in resolved_source_ids:
+            status = "resolved_by_source_validated_repair"
+        elif disposition == "rejected":
+            status = "rejected_by_source_aware_refiner"
+        elif (
+            disposition in {"accepted", "partially_applied"}
+            and commit_status.startswith("committed")
+        ):
+            status = "resolved_by_committed_refinement"
+        elif issue_id and issue_id in unresolved_candidates:
+            status = "unresolved_grounded"
+            unresolved_ids.append(issue_id)
+        elif str(detail.get("severity", "")).strip().casefold() in {
+            "critical", "major",
+        }:
+            status = "unresolved_serious"
+            unresolved_ids.append(issue_id or f"unidentified:{detail_index}")
+        else:
+            status = "advisory_only"
+        issue_records.append({
+            "issue_id": issue_id or None,
+            "category": detail.get("category"),
+            "severity": detail.get("severity"),
+            "confidence": detail.get("confidence"),
+            "status": status,
+        })
+
+    unresolved_blocking_ids = [
+        str(record.get("issue_id") or "")
+        for record in issue_records
+        if str(record["status"]).startswith("unresolved_")
+        and (
+            (
+                str(record.get("severity", "")).strip().casefold() == "critical"
+                and str(record.get("category", "")).strip().casefold()
+                in {"accuracy", "omission", "number", "citation", "name"}
+            )
+            or (
+                str(record.get("severity", "")).strip().casefold() == "major"
+                and str(record.get("category", "")).strip().casefold()
+                in _SOURCE_FIDELITY_CATEGORIES
+            )
+        )
+    ]
+    blocking_count = (
+        len(unresolved_blocking_ids)
+        if issue_records
+        else int(latest.get("blocking_issue_count", 0) or 0)
+    )
+    valid = bool(latest.get("valid", True)) if critique_events else True
+    review_required = _chunk_needs_review(db, job_id, chunk_index)
+    unresolved_language_events = [
+        event for event in current_events
+        if event.get("event_type") == "language_quality_review"
+    ]
+    durable_authority = bool(
+        valid
+        and not blocking_count
+        and not unresolved_ids
+        and not unresolved_language_events
+        and not review_required
+    )
+    status_counts = Counter(record["status"] for record in issue_records)
+    return {
+        "policy_version": 1,
+        "critique_present": bool(critique_events),
+        "critique_valid": valid,
+        "blocking_issue_count": blocking_count,
+        "unresolved_blocking_issue_ids": unresolved_blocking_ids,
+        "review_required": review_required,
+        "unresolved_language_event_count": len(unresolved_language_events),
+        "durable_authority": durable_authority,
+        "unresolved_grounded_issue_ids": list(dict.fromkeys(unresolved_ids)),
+        "resolved_source_issue_ids": sorted(resolved_source_ids),
+        "issue_status_counts": dict(status_counts),
+        "issues": issue_records,
+        "policy": (
+            "One reconciled final record controls reliable retrieval and active "
+            "style authority. Refiner-rejected advice remains rejected; unresolved "
+            "grounded defects retain continuity only as advisory evidence."
+        ),
+    }
 
 
 def _high_confidence_structural_fluency_minor_issues(
@@ -3084,7 +3267,8 @@ def _chunk_style_policy(
     chunk_index: int,
 ) -> dict[str, Any]:
     """Select clean paragraph-level style evidence from finalized prose."""
-    if _chunk_needs_review(db, job_id, chunk_index):
+    final_quality = _canonical_final_quality_record(db, job_id, chunk_index)
+    if final_quality["review_required"]:
         return {
             "approved": False,
             "excluded_paragraphs": [],
@@ -3113,7 +3297,7 @@ def _chunk_style_policy(
             "excluded_paragraphs": [],
             "reason": "invalid_final_critique",
         }
-    if int(latest.get("blocking_issue_count", 0) or 0):
+    if int(final_quality.get("blocking_issue_count", 0) or 0):
         return {
             "approved": False,
             "excluded_paragraphs": [],
@@ -3123,28 +3307,20 @@ def _chunk_style_policy(
     # voice anchor. Major or critical unresolved issues still disqualify the
     # sample, while continuity memory remains available under its own trust.
     issue_details = list(latest.get("issue_details", []) or [])
-    if any(
-        str(detail.get("severity", "")).strip().casefold()
-        in {"critical", "major"}
-        for detail in issue_details
-        if isinstance(detail, dict)
-    ):
+    if not final_quality["durable_authority"]:
+        statuses = final_quality["issue_status_counts"]
+        reason = (
+            "major_or_critical_final_issue"
+            if statuses.get("unresolved_serious")
+            else "unresolved_grounded_quality_issue"
+            if final_quality["unresolved_grounded_issue_ids"]
+            else "final_quality_authority_withheld"
+        )
         return {
             "approved": False,
             "excluded_paragraphs": [],
-            "reason": "major_or_critical_final_issue",
-        }
-    grounded_unresolved = _unresolved_grounded_memory_issues(latest)
-    if grounded_unresolved:
-        return {
-            "approved": False,
-            "excluded_paragraphs": [],
-            "reason": "unresolved_grounded_quality_issue",
-            "issue_ids": [
-                str(detail.get("issue_id", ""))
-                for detail in grounded_unresolved
-                if str(detail.get("issue_id", ""))
-            ],
+            "reason": reason,
+            "issue_ids": final_quality["unresolved_grounded_issue_ids"],
         }
     has_routed_issue_policy = (
         "high_confidence_minor_refinement_issue_ids" in latest
@@ -3206,6 +3382,7 @@ def _chunk_memory_admission(
         if event.get("event_type") == "chunk_started":
             last_start = index
     current_events = events[last_start:]
+    final_quality = _canonical_final_quality_record(db, job_id, chunk_index)
     needs_review = _chunk_needs_review(db, job_id, chunk_index)
     reasons: list[str] = []
     if needs_review:
@@ -3226,7 +3403,7 @@ def _chunk_memory_admission(
         latest = critiques[-1]
         if not bool(latest.get("valid", True)):
             reasons.append("invalid_final_critique")
-        if int(latest.get("blocking_issue_count", 0) or 0):
+        if int(final_quality.get("blocking_issue_count", 0) or 0):
             reasons.append("blocking_critique_issue")
         scores = latest.get("scores", {}) or {}
         try:
@@ -3243,11 +3420,14 @@ def _chunk_memory_admission(
             reasons.append("semantic_dimension_below_memory_floor")
         if fluency < 8.0 or register < 8.0:
             reasons.append("persian_prose_dimension_below_memory_floor")
-        grounded_unresolved = _unresolved_grounded_memory_issues(latest)
+        grounded_unresolved = final_quality["unresolved_grounded_issue_ids"]
         if grounded_unresolved:
             reasons.append("unresolved_grounded_quality_issue")
     else:
         grounded_unresolved = []
+
+    if not final_quality["durable_authority"] and not needs_review:
+        reasons.append("final_quality_authority_withheld")
 
     if any(
         event.get("event_type") == "language_quality_review"
@@ -3283,11 +3463,10 @@ def _chunk_memory_admission(
         "disqualifying_reliability_reasons": hard_reasons,
         "advisory_reliability_reasons": advisory_reasons,
         "grounded_unresolved_issue_ids": [
-            str(detail.get("issue_id", ""))
-            for detail in grounded_unresolved
-            if str(detail.get("issue_id", ""))
+            str(issue_id) for issue_id in grounded_unresolved if str(issue_id)
         ],
         "continuity_retained": True,
+        "final_quality": final_quality,
     }
 
 
@@ -3857,6 +4036,7 @@ class TranslationPipeline:
         for client in (self.llm_client, self.critic_client):
             if id(client) not in observed:
                 client.set_attempt_observer(self._record_llm_attempt)
+                client.set_start_observer(self._record_llm_attempt)
                 observed.add(id(client))
 
     def _record_llm_attempt(self, event: dict[str, Any]) -> None:
@@ -3871,6 +4051,20 @@ class TranslationPipeline:
             int(chunk_index) if chunk_index is not None else None,
         )
         payload["worker_id"] = self.worker_id
+        if payload.pop("phase", "") == "started":
+            operation = str(payload.get("operation", "llm")).strip() or "llm"
+            attempt = int(payload.get("attempt", 1) or 1)
+            self._worker_heartbeat(
+                f"llm:{operation}:attempt-{attempt}",
+                int(chunk_index) if chunk_index is not None else None,
+            )
+            self.db.log_chunk_event(
+                job_id,
+                int(chunk_index) if chunk_index is not None else -1,
+                "llm_call_started",
+                payload,
+            )
+            return
         if chunk_index is None:
             # Keep the human-readable log while also retaining the full
             # sanitized evidence used by VPS audits and QA diagnostics.
@@ -4755,6 +4949,12 @@ class TranslationPipeline:
                         style_policy = _chunk_style_policy(
                             self.db, job_id, idx
                         )
+                        self.db.log_chunk_event(
+                            job_id,
+                            idx,
+                            "final_quality_admission",
+                            memory_admission["final_quality"],
+                        )
                         memory_policy = memory_manager.update_after_translation(
                             chunk,
                             translation,
@@ -4776,6 +4976,12 @@ class TranslationPipeline:
                         )
                         memory_policy["grounded_unresolved_issue_ids"] = (
                             memory_admission["grounded_unresolved_issue_ids"]
+                        )
+                        memory_policy["final_quality_authority"] = (
+                            memory_admission["final_quality"]["durable_authority"]
+                        )
+                        memory_policy["final_quality_issue_status_counts"] = (
+                            memory_admission["final_quality"]["issue_status_counts"]
                         )
                         self.db.log_chunk_event(
                             job_id, idx, "memory_update_policy", memory_policy
@@ -5018,6 +5224,12 @@ class TranslationPipeline:
                         style_policy = _chunk_style_policy(
                             self.db, job_id, idx
                         )
+                        self.db.log_chunk_event(
+                            job_id,
+                            idx,
+                            "final_quality_admission",
+                            memory_admission["final_quality"],
+                        )
                         memory_policy = memory_manager.update_after_translation(
                             chunk,
                             translation,
@@ -5039,6 +5251,12 @@ class TranslationPipeline:
                         )
                         memory_policy["grounded_unresolved_issue_ids"] = (
                             memory_admission["grounded_unresolved_issue_ids"]
+                        )
+                        memory_policy["final_quality_authority"] = (
+                            memory_admission["final_quality"]["durable_authority"]
+                        )
+                        memory_policy["final_quality_issue_status_counts"] = (
+                            memory_admission["final_quality"]["issue_status_counts"]
                         )
                         self.db.log_chunk_event(
                             job_id, idx, "memory_update_policy", memory_policy
@@ -6205,6 +6423,12 @@ class TranslationPipeline:
             self.config.translation.critique_threshold,
         )
         style_policy = _chunk_style_policy(self.db, job_id, chunk_index)
+        self.db.log_chunk_event(
+            job_id,
+            chunk_index,
+            "final_quality_admission",
+            memory_admission["final_quality"],
+        )
         memory_policy = memory_manager.update_after_translation(
             chunks[chunk_index],
             translation,
@@ -6224,6 +6448,12 @@ class TranslationPipeline:
         )
         memory_policy["grounded_unresolved_issue_ids"] = (
             memory_admission["grounded_unresolved_issue_ids"]
+        )
+        memory_policy["final_quality_authority"] = (
+            memory_admission["final_quality"]["durable_authority"]
+        )
+        memory_policy["final_quality_issue_status_counts"] = (
+            memory_admission["final_quality"]["issue_status_counts"]
         )
         self.db.log_chunk_event(
             job_id, chunk_index, "memory_update_policy", memory_policy
@@ -7616,6 +7846,7 @@ class TranslationPipeline:
         })
 
         # Critique and Refine (judge scores against the terminology mandate)
+        final_critique_rep: Any = None
         if self.config.translation.enable_critique:
             threshold = getattr(self.config.translation, "critique_threshold", 9.0)
             current_integrity_accepted = baseline_integrity_accepted
@@ -7649,6 +7880,7 @@ class TranslationPipeline:
                         f"Critique unavailable for Chunk {idx}: {type(exc).__name__}",
                     )
                     break
+                final_critique_rep = critique_rep
                 self.db.update_chunk(job_id, idx, ChunkStatus.CRITIQUED)
                 if getattr(critique_rep, "attempts", 1) > 1:
                     retry_payload = {
@@ -9373,6 +9605,21 @@ Output ONLY the corrected Persian translation.
             structural_role=language_role,
             chapter_title=chunk.chapter_title,
         )
+        final_source_fidelity_findings = (
+            _grounded_source_fidelity_issues(final_critique_rep)
+            if final_critique_rep is not None else []
+        )
+        pre_repair_quality = _canonical_final_quality_record(
+            self.db, job_id, idx
+        )
+        unresolved_source_ids = set(
+            pre_repair_quality["unresolved_grounded_issue_ids"]
+        )
+        final_source_fidelity_findings = [
+            finding for finding in final_source_fidelity_findings
+            if not str(finding.get("issue_id", "")).strip()
+            or str(finding.get("issue_id", "")).strip() in unresolved_source_ids
+        ]
         repairable_language_finding = any(
             int(language_quality.get(key, 0) or 0)
             for key in (
@@ -9392,6 +9639,10 @@ Output ONLY the corrected Persian translation.
         targeted_language_repair: dict[str, Any] = {
             "attempted": False,
             "accepted_count": 0,
+            "source_fidelity_finding_count": len(
+                final_source_fidelity_findings
+            ),
+            "resolved_source_issue_ids": [],
             "paragraphs": [],
             "policy": (
                 "one bounded paragraph-local target-only repair; unaffected "
@@ -9399,7 +9650,7 @@ Output ONLY the corrected Persian translation.
                 "must pass"
             ),
         }
-        if repairable_language_finding:
+        if repairable_language_finding or final_source_fidelity_findings:
             source_parts = split_paragraphs(chunk.text)
             target_parts = split_paragraphs(translation)
             targeted_language_repair["attempted"] = True
@@ -9410,6 +9661,27 @@ Output ONLY the corrected Persian translation.
                 for paragraph_index, (source_part, target_part) in enumerate(
                     zip(source_parts, target_parts, strict=True)
                 ):
+                    paragraph_source_findings: list[dict[str, Any]] = []
+                    for finding in final_source_fidelity_findings:
+                        segment = str(
+                            finding.get("source_segment_id", "")
+                        ).strip()
+                        match = re.fullmatch(
+                            r"p(?P<paragraph>\d+):s\d+",
+                            segment,
+                            re.IGNORECASE,
+                        )
+                        source_quote = str(
+                            finding.get("source_quote", "")
+                        ).strip()
+                        if (
+                            match
+                            and int(match.group("paragraph")) - 1
+                            == paragraph_index
+                        ) or (
+                            not match and source_quote and source_quote in source_part
+                        ):
+                            paragraph_source_findings.append(finding)
                     paragraph_quality = audit_translation_language(
                         source_part,
                         target_part,
@@ -9433,11 +9705,16 @@ Output ONLY the corrected Persian translation.
                             "unbalanced_explanatory_dash_count",
                         )
                     )
-                    if not paragraph_repairable:
+                    if not paragraph_repairable and not paragraph_source_findings:
                         continue
                     paragraph_event: dict[str, Any] = {
                         "paragraph_index": paragraph_index,
                         "accepted": False,
+                        "source_issue_ids": [
+                            str(item.get("issue_id", ""))
+                            for item in paragraph_source_findings
+                            if str(item.get("issue_id", ""))
+                        ],
                     }
                     try:
                         self.llm_client.limit_next_call_attempts(1)
@@ -9449,6 +9726,9 @@ Output ONLY the corrected Persian translation.
                                     target_part,
                                     paragraph_quality,
                                     structural_role=language_role,
+                                    source_fidelity_findings=(
+                                        paragraph_source_findings
+                                    ),
                                 ),
                             }],
                             system_prompt=sys_prompt,
@@ -9486,10 +9766,68 @@ Output ONLY the corrected Persian translation.
                         improved = _language_quality_strictly_improves(
                             paragraph_quality, candidate_quality
                         )
+                        source_validation: dict[str, Any] = {
+                            "attempted": False,
+                            "accepted": not paragraph_source_findings,
+                        }
+                        source_improved = not paragraph_source_findings
+                        if paragraph_source_findings:
+                            source_validation["attempted"] = True
+                            validation_critique = self._run_async(
+                                critique_tool.critique(
+                                    source_part,
+                                    candidate_part,
+                                    terminology=terminology_ctx,
+                                    review_context=qa_context,
+                                )
+                            )
+                            remaining_source_findings = (
+                                _grounded_source_fidelity_issues(
+                                    validation_critique
+                                )
+                            )
+                            source_improved = bool(
+                                getattr(validation_critique, "valid", True)
+                                and not _blocking_critique_issues(
+                                    validation_critique
+                                )
+                                and len(remaining_source_findings)
+                                < len(paragraph_source_findings)
+                                and float(
+                                    getattr(validation_critique, "accuracy", 0.0)
+                                    or 0.0
+                                ) >= 8.0
+                                and float(
+                                    getattr(
+                                        validation_critique, "terminology", 0.0
+                                    ) or 0.0
+                                ) >= 8.0
+                            )
+                            source_validation.update({
+                                "accepted": source_improved,
+                                "before_issue_count": len(
+                                    paragraph_source_findings
+                                ),
+                                "after_issue_count": len(
+                                    remaining_source_findings
+                                ),
+                                "remaining_issue_ids": [
+                                    str(item.get("issue_id", ""))
+                                    for item in remaining_source_findings
+                                    if str(item.get("issue_id", ""))
+                                ],
+                                "critique": _critique_for_event(
+                                    validation_critique,
+                                    self.config.translation.critique_threshold,
+                                    -1,
+                                ),
+                            })
                         paragraph_event.update({
                             "candidate_chars": len(candidate_part),
                             "integrity_accepted": candidate_integrity.accepted,
                             "strictly_improved": improved,
+                            "source_fidelity_improved": source_improved,
+                            "source_validation": source_validation,
                             "local_edit": _language_repair_is_local(
                                 target_part,
                                 candidate_part,
@@ -9500,12 +9838,22 @@ Output ONLY the corrected Persian translation.
                             candidate_part
                             and len(split_paragraphs(candidate_part)) == 1
                             and candidate_integrity.accepted
-                            and improved
+                            and (
+                                improved
+                                if not paragraph_source_findings
+                                else source_improved
+                                and _language_quality_does_not_regress(
+                                    paragraph_quality, candidate_quality
+                                )
+                            )
                             and paragraph_event["local_edit"]
                         ):
                             repaired_parts[paragraph_index] = candidate_part
                             paragraph_event["accepted"] = True
                             targeted_language_repair["accepted_count"] += 1
+                            targeted_language_repair[
+                                "resolved_source_issue_ids"
+                            ].extend(paragraph_event["source_issue_ids"])
                     except _QUALITY_STAGE_ERRORS as exc:
                         paragraph_event.update({
                             "failure_type": type(exc).__name__,
@@ -9534,6 +9882,9 @@ Output ONLY the corrected Persian translation.
                     )
             else:
                 targeted_language_repair["reason"] = "paragraph_count_mismatch"
+        targeted_language_repair["resolved_source_issue_ids"] = list(
+            dict.fromkeys(targeted_language_repair["resolved_source_issue_ids"])
+        )
         self.db.log_chunk_event(
             job_id,
             idx,

@@ -190,6 +190,7 @@ class LLMClient:
         self._api_key_index = 0
         self._api_key_lock = threading.Lock()
         self._attempt_observer: Any = None
+        self._start_observer: Any = None
         # Keyed (operation, transport profile, serving model); the value is a
         # bounded rolling list of observed completion sizes.
         self._budget_history: dict[tuple[str, str, str], dict[str, list[int]]] = {}
@@ -842,6 +843,20 @@ class LLMClient:
         """Register a callback that receives sanitized per-attempt diagnostics."""
         self._attempt_observer = observer
 
+    def set_start_observer(self, observer: Any) -> None:
+        """Register a callback for in-flight calls without changing attempt events."""
+        self._start_observer = observer
+
+    def _emit_start(self, payload: dict[str, Any]) -> None:
+        context: dict[str, Any] = self._trace_context.get() or {}
+        event = {**context, **payload}
+        observer = self._start_observer
+        if observer is not None:
+            try:
+                observer(event)
+            except Exception:
+                logger.exception("Failed to persist LLM start diagnostics.")
+
     def _emit_attempt(self, payload: dict[str, Any]) -> None:
         context: dict[str, Any] = self._trace_context.get() or {}
         event = {**context, **payload}
@@ -1294,6 +1309,15 @@ class LLMClient:
             transport_evidence: dict[str, Any] = {
                 "transport_profile": self._transport_profile(url),
             }
+            self._emit_start({
+                "phase": "started",
+                "operation": operation,
+                "attempt": attempt + 1,
+                "max_attempts": max_attempts,
+                "model": payload.get("model"),
+                "max_tokens": payload.get("max_tokens"),
+                "stream_requested": bool(payload.get("stream", False)),
+            })
             try:
                 response, res_json, transport_evidence = self._request_sync(
                     url, headers, payload
@@ -1543,6 +1567,15 @@ class LLMClient:
             transport_evidence: dict[str, Any] = {
                 "transport_profile": self._transport_profile(url),
             }
+            self._emit_start({
+                "phase": "started",
+                "operation": operation,
+                "attempt": attempt + 1,
+                "max_attempts": max_attempts,
+                "model": payload.get("model"),
+                "max_tokens": payload.get("max_tokens"),
+                "stream_requested": bool(payload.get("stream", False)),
+            })
             try:
                 response, res_json, transport_evidence = await self._request_async(
                     url, headers, payload

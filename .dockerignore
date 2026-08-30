@@ -1,0 +1,24 @@
+.git
+.codegraph
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.venv
+**/__pycache__
+**/*.py[cod]
+
+# Runtime and host-only state is mounted or retained outside the image.
+jobs
+output
+9router-data
+*-backups
+*.backup-*
+*.before-*
+
+# Release tooling and tests are not needed by the runtime image.
+scripts
+tests
+docs
+*.txt
+*.docx
+*.pdf

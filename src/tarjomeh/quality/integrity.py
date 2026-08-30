@@ -979,8 +979,10 @@ def repeated_persian_word_artifacts(text: str) -> list[dict[str, Any]]:
     return findings
 
 
+_PERSIAN_DIACRITIC_CLASS = r"\u064b-\u065f\u0670\u06d6-\u06ed"
 _PERSIAN_LEXICAL_TOKEN_RE = re.compile(
-    rf"[{_PERSIAN_LETTER_CLASS}]+(?:\u200c[{_PERSIAN_LETTER_CLASS}]+)*"
+    rf"[{_PERSIAN_LETTER_CLASS}]+[{_PERSIAN_DIACRITIC_CLASS}]*"
+    rf"(?:\u200c[{_PERSIAN_LETTER_CLASS}]+[{_PERSIAN_DIACRITIC_CLASS}]*)*"
 )
 _PERSIAN_COORDINATORS = frozenset({"و", "یا"})
 _PERSIAN_GOVERNORS = frozenset({
@@ -996,6 +998,14 @@ _SOURCE_LEXICAL_TOKEN_RE = re.compile(
 _ADJACENT_REPEAT_SEPARATOR_RE = re.compile(
     r"^[ \t\u200c]+$"
 )
+
+
+def _repeat_token_key(value: str) -> str:
+    """Ignore optional Persian combining marks only for corruption matching."""
+    return "".join(
+        character for character in (value or "").casefold()
+        if not unicodedata.combining(character)
+    )
 
 
 def _adjacent_repeated_spans(
@@ -1022,8 +1032,8 @@ def _adjacent_repeated_spans(
         for width in range(maximum, 0, -1):
             left = tokens[index:index + width]
             right = tokens[index + width:index + (2 * width)]
-            if [item.group().casefold() for item in left] != [
-                item.group().casefold() for item in right
+            if [_repeat_token_key(item.group()) for item in left] != [
+                _repeat_token_key(item.group()) for item in right
             ]:
                 continue
             if width == 1:
@@ -1036,9 +1046,12 @@ def _adjacent_repeated_spans(
             phrase = value[left[0].start():left[-1].end()]
             findings.append({
                 "phrase": phrase,
-                "normalized_phrase": normalize_for_match(phrase),
+                "normalized_phrase": " ".join(
+                    _repeat_token_key(item.group()) for item in left
+                ),
                 "word_count": width,
                 "offset": left[0].start(),
+                "second_offset": right[0].start(),
                 "end_offset": right[-1].end(),
                 "context": value[
                     max(0, left[0].start() - 60):
@@ -1096,7 +1109,7 @@ def _repeated_governed_spans(
     """
     value = text or ""
     tokens = list(token_re.finditer(value))
-    normalized = [normalize_for_match(token.group()) for token in tokens]
+    normalized = [_repeat_token_key(token.group()) for token in tokens]
     findings: list[dict[str, Any]] = []
     seen: set[tuple[int, int]] = set()
     for left_index, governor in enumerate(normalized):
@@ -1225,6 +1238,7 @@ def source_unjustified_repeated_adjacent_span_artifacts(
             findings.append({
                 **finding,
                 "offset": target_start + int(finding["offset"]),
+                "second_offset": target_start + int(finding["second_offset"]),
                 "end_offset": target_start + int(finding["end_offset"]),
             })
     return findings
@@ -1274,8 +1288,8 @@ def repeated_persian_clause_artifacts(text: str) -> list[dict[str, Any]]:
                 continue
             left = tokens[left_start:connector_index]
             right = tokens[connector_index + 1:right_end]
-            if [item.group().casefold() for item in left] != [
-                item.group().casefold() for item in right
+            if [_repeat_token_key(item.group()) for item in left] != [
+                _repeat_token_key(item.group()) for item in right
             ]:
                 continue
             left_gap = value[left[-1].end():connector.start()]
@@ -1616,6 +1630,45 @@ def repair_source_grounded_language_artifacts(
     source_paragraphs = _paragraph_text_spans(source)
     target_paragraphs = _paragraph_text_spans(repaired)
     if len(source_paragraphs) == len(target_paragraphs):
+        phrase_replacements: list[tuple[int, int, str, str]] = []
+        for source_record, target_record in zip(
+            source_paragraphs, target_paragraphs, strict=True
+        ):
+            source_paragraph = source_record[2]
+            target_start, _target_end, target_paragraph = target_record
+            for finding in source_unjustified_repeated_adjacent_span_artifacts(
+                source_paragraph, target_paragraph
+            ):
+                if int(finding.get("word_count", 0) or 0) < 2:
+                    continue
+                start = int(finding["offset"])
+                second = int(finding["second_offset"])
+                end = int(finding["end_offset"])
+                before = target_paragraph[start:end]
+                after = target_paragraph[start:second].rstrip(" \t\u200c")
+                if not after:
+                    continue
+                phrase_replacements.append((
+                    target_start + start,
+                    target_start + end,
+                    before,
+                    after,
+                ))
+        for start, end, before, after in sorted(
+            phrase_replacements, key=lambda item: item[0], reverse=True
+        ):
+            repaired = repaired[:start] + after + repaired[end:]
+            edits.append({
+                "type": "adjacent_duplicate_phrase",
+                "before": before,
+                "after": after,
+                "offset": start,
+            })
+
+        # Recompute paragraph offsets after phrase repairs before applying the
+        # older single-word repair; the two edit classes must never use stale
+        # offsets or overlap.
+        target_paragraphs = _paragraph_text_spans(repaired)
         duplicate_replacements: list[tuple[int, int, str, str]] = []
         for source_record, target_record in zip(
             source_paragraphs, target_paragraphs, strict=True
@@ -1637,7 +1690,7 @@ def repair_source_grounded_language_artifacts(
                 ):
                     start = int(finding["offset"])
                     word = str(finding["word"])
-                    match = re.match(
+                    duplicate_match = re.match(
                         rf"{re.escape(word)}"
                         rf"(?P<separator>[ \t\u200c]+|"
                         rf"[ \t]*[-\u2010-\u2015][ \t]*)"
@@ -1645,9 +1698,9 @@ def repair_source_grounded_language_artifacts(
                         target_paragraph[start:],
                         re.IGNORECASE,
                     )
-                    if not match:
+                    if not duplicate_match:
                         continue
-                    before = match.group(0)
+                    before = duplicate_match.group(0)
                     absolute_start = target_start + start
                     duplicate_replacements.append((
                         absolute_start,
