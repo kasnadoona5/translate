@@ -134,6 +134,9 @@ Instructions:
    qualification is represented, every finite Persian clause has an identifiable
    predicate, pronoun referents and modifier attachments are clear, and no English
    modifier stack or nominal chain has been copied mechanically into Persian.
+   Treat every content-bearing source head and its complements as an obligation:
+   a fluent paraphrase may reorganize them, but it must retain the governing
+   concept, action or relation as well as every modifier that limits its scope.
    Treat coordinated source members separately: preserve every verb, complement,
    contrast, and qualification in pairs such as "extended and qualified" rather
    than allowing one fluent Persian phrase to swallow the other member.
@@ -254,9 +257,11 @@ MQM rules:
   and technical precision remain unchanged.
 - Build a compact proposition checklist for each source sentence before assigning
   scores: matrix action, coordinated actions, participants, negation/modality,
-  explicit quantities, contrasts, and qualifications. Report an omission whenever
-  one checklist member has no Persian equivalent, even if the remaining sentence is
-  grammatical and stylistically polished.
+  content-bearing nominal heads and complements, explicit quantities, contrasts,
+  and qualifications. Report an omission whenever one checklist member has no
+  Persian equivalent, even if the remaining sentence is grammatical and
+  stylistically polished. Do not let a translated modifier stand in for an omitted
+  head concept such as a process, relation, institution, or form of change.
 - Check every source-authored announced quantity against the Persian wording itself,
   even when the enumeration continues in another paragraph or chunk. Follow the
   source exactly when its announcement and later list disagree; never silently repair
@@ -376,7 +381,10 @@ Instructions:
    You may reorder or split sentences within the same paragraph to repair an objective
    fluency defect, but preserve every proposition and keep paragraph boundaries fixed.
    Before returning the candidate, verify every coordinated source member separately
-   and identify a natural Persian matrix predicate for each independent clause. A
+   and identify a natural Persian matrix predicate for each independent clause.
+   Compare the complete candidate with the source again: every content-bearing head,
+   complement, action, contrast, quantity and qualification present before editing
+   must still be represented after editing. A
    reduction in surface verb count is allowed when Persian grammar expresses the same
    relations more naturally; loss of a source action, contrast, modifier, or scope is
    never allowed.

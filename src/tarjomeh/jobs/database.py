@@ -533,6 +533,29 @@ class JobDatabase:
                 )
             conn.commit()
 
+    @staticmethod
+    def _log_worker_lifecycle(
+        conn: sqlite3.Connection,
+        job_id: str,
+        timestamp: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Append durable worker evidence inside the lease transaction."""
+        conn.execute(
+            """
+            INSERT INTO chunk_events
+                (job_id, chunk_index, timestamp, event_type, payload)
+            VALUES (?, -1, ?, ?, ?)
+            """,
+            (
+                job_id,
+                timestamp,
+                event_type,
+                json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            ),
+        )
+
     def claim_worker(
         self,
         job_id: str,
@@ -560,6 +583,20 @@ class JobDatabase:
                 except (TypeError, ValueError):
                     stale = True
             if active and str(row["worker_id"]) != worker_id and not stale:
+                self._log_worker_lifecycle(
+                    conn,
+                    job_id,
+                    timestamp,
+                    "worker_claim_rejected",
+                    {
+                        "worker_id": worker_id,
+                        "reason": "active_worker",
+                        "owner_worker_id": str(row["worker_id"]),
+                        "owner_stage": row["stage"],
+                        "owner_chunk_index": row["chunk_index"],
+                        "owner_heartbeat_at": row["heartbeat_at"],
+                    },
+                )
                 conn.commit()
                 return {
                     "acquired": False,
@@ -569,6 +606,9 @@ class JobDatabase:
 
             reclaimed = bool(
                 active and str(row["worker_id"]) != worker_id and stale
+            )
+            renewed = bool(
+                active and str(row["worker_id"]) == worker_id
             )
             acquired_at = (
                 str(row["acquired_at"])
@@ -597,10 +637,39 @@ class JobDatabase:
                     acquired_at, timestamp, None, None, None,
                 ),
             )
+            self._log_worker_lifecycle(
+                conn,
+                job_id,
+                timestamp,
+                "worker_lease_reclaimed"
+                if reclaimed else "worker_lease_renewed"
+                if renewed else "worker_lease_acquired",
+                {
+                    "worker_id": worker_id,
+                    "reclaimed": reclaimed,
+                    "renewed": renewed,
+                    "previous_worker_id": (
+                        str(previous.get("worker_id", "")) if reclaimed else ""
+                    ),
+                    "previous_stage": previous.get("stage") if reclaimed else None,
+                    "previous_chunk_index": (
+                        previous.get("chunk_index") if reclaimed else None
+                    ),
+                    "previous_heartbeat_at": (
+                        previous.get("heartbeat_at") if reclaimed else None
+                    ),
+                    "reason": (
+                        "stale_lease" if reclaimed
+                        else "existing_generation" if renewed
+                        else "new_lease"
+                    ),
+                },
+            )
             conn.commit()
         return {
             "acquired": True,
             "reclaimed": reclaimed,
+            "renewed": renewed,
             "previous_worker": previous if reclaimed else {},
             "worker_id": worker_id,
         }
@@ -652,6 +721,19 @@ class JobDatabase:
                     """,
                     (timestamp, timestamp, job_id, str(row["worker_id"])),
                 )
+            self._log_worker_lifecycle(
+                conn,
+                job_id,
+                timestamp,
+                "worker_pause_requested",
+                {
+                    "worker_id": str(row["worker_id"]) if active else None,
+                    "active_worker": active,
+                    "resulting_status": status,
+                    "stage": row["stage"] if active else None,
+                    "chunk_index": row["chunk_index"] if active else None,
+                },
+            )
             conn.commit()
         return {
             "status": status,
@@ -684,6 +766,17 @@ class JobDatabase:
                     "UPDATE jobs SET status=?, error_message=NULL WHERE id=?",
                     (JobStatus.PAUSED, job_id),
                 )
+                self._log_worker_lifecycle(
+                    conn,
+                    job_id,
+                    timestamp,
+                    "worker_pause_persisted",
+                    {
+                        "worker_id": worker_id,
+                        "stage": stage,
+                        "chunk_index": chunk_index,
+                    },
+                )
             conn.commit()
             return bool(cursor.rowcount)
 
@@ -697,15 +790,34 @@ class JobDatabase:
         """Release only the lease owned by this worker generation."""
         timestamp = datetime.utcnow().isoformat()
         with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM job_workers WHERE job_id=? AND worker_id=?",
+                (job_id, worker_id),
+            ).fetchone()
             cursor = conn.execute(
                 """
                 UPDATE job_workers
                 SET state='released', released_at=?, heartbeat_at=?,
                     release_reason=?
-                WHERE job_id=? AND worker_id=?
+                WHERE job_id=? AND worker_id=? AND state!='released'
                 """,
                 (timestamp, timestamp, reason[:200], job_id, worker_id),
             )
+            if cursor.rowcount:
+                self._log_worker_lifecycle(
+                    conn,
+                    job_id,
+                    timestamp,
+                    "worker_lease_released",
+                    {
+                        "worker_id": worker_id,
+                        "reason": reason[:200],
+                        "previous_state": row["state"] if row else None,
+                        "stage": row["stage"] if row else None,
+                        "chunk_index": row["chunk_index"] if row else None,
+                    },
+                )
             conn.commit()
             return bool(cursor.rowcount)
 

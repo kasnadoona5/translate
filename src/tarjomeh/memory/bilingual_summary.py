@@ -107,6 +107,37 @@ class BilingualSummary:
         if fa_parts:
             self.persian_summary = "\n".join(fa_parts)
 
+    def candidate_quality(self) -> dict[str, object]:
+        """Validate a complete bilingual candidate without granting authority."""
+        english = self.english_summary.strip()
+        persian = self.persian_summary.strip()
+        reasons: list[str] = []
+        if len(re.findall(r"[A-Za-z]", english)) < 12:
+            reasons.append("english_summary_missing_or_too_short")
+        if len(re.findall(r"[\u0600-\u06ff]", persian)) < 12:
+            reasons.append("persian_summary_missing_or_too_short")
+        protocol_re = re.compile(
+            r"<<<(?:TRANSLATION|END)|```|"
+            r"[\"'](?:translation|decision|rationale)[\"']\s*:|"
+            r"</?(?:analysis|answer|assistant|tool)>?",
+            re.IGNORECASE,
+        )
+        if protocol_re.search(english) or protocol_re.search(persian):
+            reasons.append("protocol_material_in_summary")
+        if len(english) > 12000 or len(persian) > 12000:
+            reasons.append("summary_exceeds_context_budget")
+        return {
+            "accepted": not reasons,
+            "reasons": reasons,
+            "english_chars": len(english),
+            "persian_chars": len(persian),
+            "policy": (
+                "Both language sections must be present and protocol-clean. "
+                "The summary remains advisory argument context, never lexical "
+                "or style authority."
+            ),
+        }
+
     def get_context(self) -> str:
         """Return prompt-ready bilingual summary string.
 

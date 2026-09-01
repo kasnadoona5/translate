@@ -794,13 +794,31 @@ class MemoryManager:
             if hasattr(llm_client, "set_operation"):
                 llm_client.set_operation("bilingual_summary_update")
             response = await llm_client.chat(prompt)
-            self.bilingual_summary.update(response)
-            self.bilingual_summary.set_input_trust(input_trust, trust_reasons)
+            candidate = BilingualSummary()
+            candidate.update(response)
+            candidate_quality = candidate.candidate_quality()
+            if not candidate_quality["accepted"]:
+                return {
+                    "replacement_count": 0,
+                    "changes": [],
+                    "candidate_quality": candidate_quality,
+                    "input_trust": self.bilingual_summary.input_trust,
+                    "trust_reasons": list(
+                        self.bilingual_summary.trust_reasons
+                    ),
+                    "context_retained": bool(current != "None"),
+                    "candidate_committed": False,
+                    "authority": "argument_orientation_only",
+                }
+            candidate.set_input_trust(input_trust, trust_reasons)
+            self.bilingual_summary = candidate
             report = self.reconcile_bilingual_summary()
             report.update({
                 "input_trust": self.bilingual_summary.input_trust,
                 "trust_reasons": list(self.bilingual_summary.trust_reasons),
                 "context_retained": True,
+                "candidate_committed": True,
+                "candidate_quality": candidate_quality,
                 "authority": "argument_orientation_only",
             })
             return report

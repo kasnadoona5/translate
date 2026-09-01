@@ -2211,6 +2211,14 @@ def _grounded_source_fidelity_issues(
     return findings
 
 
+def _source_obligation_identity(detail: dict[str, Any]) -> tuple[str, str]:
+    """Identify one source obligation independently of its current target wording."""
+    return (
+        str(detail.get("source_segment_id", "")).strip().casefold(),
+        normalize_for_match(str(detail.get("source_quote", ""))),
+    )
+
+
 def _best_source_faithful_version(
     evaluated_versions: list[tuple[str, Any]],
 ) -> tuple[int, str, Any] | None:
@@ -2230,8 +2238,8 @@ def _best_source_faithful_version(
             for name in ("accuracy", "terminology", "fluency", "register")
         ]
         return (
-            -float(len(_blocking_critique_issues(critique))),
             -float(len(_grounded_source_fidelity_issues(critique))),
+            -float(len(_blocking_critique_issues(critique))),
             scores[0],
             scores[1],
             min(scores),
@@ -2935,6 +2943,10 @@ def _candidate_regression_details(
         for detail in list(getattr(baseline_critique, "issue_details", []) or [])
         if isinstance(detail, dict)
     }
+    baseline_source_obligations = {
+        _source_obligation_identity(detail)
+        for detail in _grounded_source_fidelity_issues(baseline_critique)
+    }
     routed_minor_ids = {
         str(detail.get("issue_id", ""))
         for detail in _high_confidence_minor_issues(critique)
@@ -2954,8 +2966,6 @@ def _candidate_regression_details(
             span and (span in current or current in span)
             for span in changed_spans
         )
-        if not overlaps_change:
-            continue
         evidence = " ".join(
             str(detail.get(field, ""))
             for field in ("issue_id", "rationale", "explanation", "error_type")
@@ -2976,7 +2986,15 @@ def _candidate_regression_details(
                 )
             )
         )
-        if serious:
+        new_source_obligation = bool(
+            category in _SOURCE_FIDELITY_CATEGORIES
+            and severity in {"critical", "major"}
+            and confidence >= 0.70
+            and str(detail.get("source_quote", "")).strip()
+            and _source_obligation_identity(detail)
+            not in baseline_source_obligations
+        )
+        if serious and (overlaps_change or new_source_obligation):
             regressions.append(detail)
     return regressions
 
@@ -4540,6 +4558,7 @@ class TranslationPipeline:
         self.db.log_chunk_event(job_id, -1, "worker_claimed", {
             "worker_id": self.worker_id,
             "reclaimed": bool(lease.get("reclaimed")),
+            "renewed": bool(lease.get("renewed")),
             "previous_worker": lease.get("previous_worker", {}),
         })
         # create_job() writes PENDING and only the resume branch used to write
@@ -8251,7 +8270,72 @@ class TranslationPipeline:
                                 "critique_completed",
                                 post_critique_event,
                             )
-                            critique_rep = post_critique
+                            baseline_critique = pending_candidate[
+                                "baseline_critique"
+                            ]
+                            baseline_source_obligations = {
+                                _source_obligation_identity(item)
+                                for item in _grounded_source_fidelity_issues(
+                                    baseline_critique
+                                )
+                            }
+                            post_source_regressions = [
+                                item
+                                for item in _grounded_source_fidelity_issues(
+                                    post_critique
+                                )
+                                if _source_obligation_identity(item)
+                                not in baseline_source_obligations
+                            ]
+                            if post_source_regressions:
+                                translation = baseline_translation
+                                last_accepted_translation = translation
+                                self.db.update_chunk(
+                                    job_id,
+                                    idx,
+                                    ChunkStatus.REFINED,
+                                    translation,
+                                )
+                                atomic_recovery[
+                                    "rolled_back_after_source_validation"
+                                ] = True
+                                atomic_recovery[
+                                    "source_regression_count"
+                                ] = len(post_source_regressions)
+                                post_validation.update({
+                                    "atomic_recovery_rolled_back": True,
+                                    "source_regressions": post_source_regressions,
+                                    "translation_chars": len(translation),
+                                })
+                                self.db.log_chunk_event(
+                                    job_id,
+                                    idx,
+                                    "refinement_atomic_recovery_rolled_back",
+                                    {
+                                        "iteration": ref_iter,
+                                        "restored_chars": len(translation),
+                                        "source_regression_count": len(
+                                            post_source_regressions
+                                        ),
+                                        "source_regressions": (
+                                            post_source_regressions
+                                        ),
+                                        "message": (
+                                            "Post-recovery source validation found "
+                                            "a newly omitted or altered source "
+                                            "obligation. The exact pre-refinement "
+                                            "baseline was restored."
+                                        ),
+                                    },
+                                )
+                                critique_rep = baseline_critique
+                                post_critique = baseline_critique
+                                post_review_required = True
+                                post_review_details.append(
+                                    "atomic_recovery_source_regression"
+                                )
+                            else:
+                                critique_rep = post_critique
                             if (
                                 not getattr(post_critique, "valid", True)
                                 or _critique_requires_refinement(
@@ -8499,6 +8583,8 @@ class TranslationPipeline:
                                 translation = selected_text
                                 last_accepted_translation = translation
                                 current_integrity_accepted = True
+                                critique_rep = selected_critique
+                                final_critique_rep = selected_critique
                                 restored_version = selected_index
                                 self.db.update_chunk(
                                     job_id,
@@ -8532,6 +8618,21 @@ class TranslationPipeline:
                                             "earlier integrity-valid version was retained."
                                         ),
                                     },
+                                )
+                                restored_critique_event = _critique_for_event(
+                                    selected_critique, threshold, ref_iter
+                                )
+                                restored_critique_event["stage"] = (
+                                    "restored_source_faithful_version"
+                                )
+                                restored_critique_event[
+                                    "selected_evaluated_version"
+                                ] = selected_index
+                                self.db.log_chunk_event(
+                                    job_id,
+                                    idx,
+                                    "critique_completed",
+                                    restored_critique_event,
                                 )
                     review_reason = (
                         "blocking_critique_disagreement"

@@ -1037,8 +1037,10 @@ def _adjacent_repeated_spans(
             ]:
                 continue
             if width == 1:
-                lexical_length = sum(character.isalpha() for character in left[0].group())
-                if lexical_length < 4:
+                lexical_length = sum(
+                    character.isalpha() for character in left[0].group()
+                )
+                if lexical_length < 2:
                     continue
             separator = value[left[-1].end():right[0].start()]
             if not _ADJACENT_REPEAT_SEPARATOR_RE.fullmatch(separator):
@@ -1630,7 +1632,7 @@ def repair_source_grounded_language_artifacts(
     source_paragraphs = _paragraph_text_spans(source)
     target_paragraphs = _paragraph_text_spans(repaired)
     if len(source_paragraphs) == len(target_paragraphs):
-        phrase_replacements: list[tuple[int, int, str, str]] = []
+        phrase_replacements: list[tuple[int, int, str, str, int]] = []
         for source_record, target_record in zip(
             source_paragraphs, target_paragraphs, strict=True
         ):
@@ -1639,8 +1641,6 @@ def repair_source_grounded_language_artifacts(
             for finding in source_unjustified_repeated_adjacent_span_artifacts(
                 source_paragraph, target_paragraph
             ):
-                if int(finding.get("word_count", 0) or 0) < 2:
-                    continue
                 start = int(finding["offset"])
                 second = int(finding["second_offset"])
                 end = int(finding["end_offset"])
@@ -1653,13 +1653,17 @@ def repair_source_grounded_language_artifacts(
                     target_start + end,
                     before,
                     after,
+                    int(finding.get("word_count", 0) or 0),
                 ))
-        for start, end, before, after in sorted(
+        for start, end, before, after, word_count in sorted(
             phrase_replacements, key=lambda item: item[0], reverse=True
         ):
             repaired = repaired[:start] + after + repaired[end:]
             edits.append({
-                "type": "adjacent_duplicate_phrase",
+                "type": (
+                    "adjacent_duplicate"
+                    if word_count == 1 else "adjacent_duplicate_phrase"
+                ),
                 "before": before,
                 "after": after,
                 "offset": start,
