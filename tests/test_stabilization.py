@@ -491,7 +491,7 @@ class TestBoundedRecovery(unittest.TestCase):
 
 
 class TestStabilizationPolicies(unittest.TestCase):
-    def test_final_original_audit_removes_grounded_noise_and_duplicates(self) -> None:
+    def test_final_original_audit_preserves_grounded_text_and_deduplicates(self) -> None:
         document = TranslatedDocument(paragraphs=[
             TranslatedParagraph(
                 index=0,
@@ -515,11 +515,12 @@ class TestStabilizationPolicies(unittest.TestCase):
             {"Marx": "Marx-fa", "Monsanto": "Monsanto-fa"},
         )
         combined = "\n".join(p.translated_text for p in document.paragraphs)
-        self.assertNotIn("(ground)", combined)
+        self.assertIn("(ground)", combined)
         self.assertEqual(combined.count("(Monsanto)"), 1)
         self.assertIn("(1973, 408)", combined)
         self.assertIn("(Editorial Note)", combined)
-        self.assertEqual(report["removed_unauthorized_count"], 1)
+        self.assertEqual(report["removed_unauthorized_count"], 0)
+        self.assertEqual(report["preserved_source_grounded_count"], 1)
         self.assertEqual(report["removed_duplicate_count"], 1)
         self.assertEqual(report["preserved_citation_count"], 1)
 

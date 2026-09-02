@@ -1001,6 +1001,16 @@ class ProperNouns:
             or new_category == "approved_term"
             or action == "replaced_lower_authority"
             or (
+                current_category == "technical_loanword"
+                and new_category in {
+                    "person", "source_grounded_entity"
+                }
+                and origin in {
+                    "observed_translation", "accepted_correction",
+                    "curated_glossary",
+                }
+            )
+            or (
                 current_category not in INLINE_ORIGINAL_CATEGORIES
                 and new_category in INLINE_ORIGINAL_CATEGORIES
             )

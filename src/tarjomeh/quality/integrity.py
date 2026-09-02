@@ -1114,6 +1114,15 @@ def _repeated_governed_spans(
     normalized = [_repeat_token_key(token.group()) for token in tokens]
     findings: list[dict[str, Any]] = []
     seen: set[tuple[int, int]] = set()
+
+    def contiguous_phrase(start: int, width: int) -> bool:
+        """Require one real lexical phrase, not tokens skipped across apparatus."""
+        for token_index in range(start, start + width - 1):
+            gap = value[tokens[token_index].end():tokens[token_index + 1].start()]
+            if not re.fullmatch(r"[ \t\u00a0]+", gap):
+                return False
+        return True
+
     for left_index, governor in enumerate(normalized):
         if governor not in governors:
             continue
@@ -1121,10 +1130,14 @@ def _repeated_governed_spans(
             left_end = left_index + width
             if left_end >= len(tokens):
                 continue
+            if not contiguous_phrase(left_index, width):
+                continue
             phrase = normalized[left_index:left_end]
             maximum_right = min(len(tokens) - width + 1, left_end + 10)
             for right_index in range(left_end + 1, maximum_right):
                 if normalized[right_index:right_index + width] != phrase:
+                    continue
+                if not contiguous_phrase(right_index, width):
                     continue
                 separator = value[tokens[left_end - 1].end():tokens[right_index].start()]
                 if re.search(r"[.!?\u061f\u061b;:\n]", separator):

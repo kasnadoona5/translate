@@ -650,10 +650,11 @@ def audit_inline_english_originals(
     document: TranslatedDocument,
     authorized_originals: dict[str, str],
 ) -> dict[str, Any]:
-    """Remove grounded unauthorized originals and deduplicate authorized ones.
+    """Audit Latin parentheticals and deduplicate only authorized repeats.
 
-    Numeric and source-authored parentheticals are treated as scholarly
-    apparatus and are always preserved.
+    Numeric apparatus and source-grounded lexical expressions are preserved.
+    An unknown insertion is evidence for review, not permission to delete text:
+    removing an expression can leave a grammatically incomplete translation.
     """
     authorized = {
         _original_identity(source): source
@@ -663,6 +664,8 @@ def audit_inline_english_originals(
     seen: set[str] = set()
     removed_unauthorized: list[dict[str, Any]] = []
     removed_duplicates: list[dict[str, Any]] = []
+    preserved_source_grounded: list[dict[str, Any]] = []
+    unapproved_ungrounded: list[dict[str, Any]] = []
     preserved_citations = 0
 
     for paragraph in document.paragraphs:
@@ -673,7 +676,10 @@ def audit_inline_english_originals(
             for value in source_abbreviation_expansions(source_text)
         }
 
-        def replace(match: re.Match[str]) -> str:
+        def replace(
+            match: re.Match[str],
+            paragraph_index: int = paragraph.index,
+        ) -> str:
             nonlocal preserved_citations
             content = " ".join(match.group(1).split()).strip()
             if not re.search(r"[A-Za-z]", content):
@@ -697,18 +703,22 @@ def audit_inline_english_originals(
                     seen.add(key)
                     return match.group(0)
                 removed_duplicates.append({
-                    "paragraph_index": paragraph.index,
+                    "paragraph_index": paragraph_index,
                     "original": content,
                 })
                 return ""
 
             grounded = source_term_present(source_text, content)
             if grounded:
-                removed_unauthorized.append({
-                    "paragraph_index": paragraph.index,
+                preserved_source_grounded.append({
+                    "paragraph_index": paragraph_index,
                     "original": content,
                 })
-                return ""
+                return match.group(0)
+            unapproved_ungrounded.append({
+                "paragraph_index": paragraph_index,
+                "original": content,
+            })
             return match.group(0)
 
         cleaned = _LATIN_PARENTHETICAL_RE.sub(
@@ -722,9 +732,55 @@ def audit_inline_english_originals(
         "removed_unauthorized_count": len(removed_unauthorized),
         "removed_duplicate_count": len(removed_duplicates),
         "preserved_citation_count": preserved_citations,
+        "preserved_source_grounded_count": len(preserved_source_grounded),
+        "unapproved_ungrounded_count": len(unapproved_ungrounded),
         "removed_unauthorized": removed_unauthorized,
         "removed_duplicates": removed_duplicates,
+        "preserved_source_grounded": preserved_source_grounded,
+        "unapproved_ungrounded": unapproved_ungrounded,
     }
+
+
+def merge_inline_english_original_audits(
+    reports: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Combine ordered cleanup passes without losing earlier evidence."""
+    valid = [dict(report) for report in reports if isinstance(report, dict)]
+    list_fields = (
+        "removed_unauthorized",
+        "removed_duplicates",
+        "preserved_source_grounded",
+        "unapproved_ungrounded",
+    )
+    count_fields = (
+        "removed_unauthorized_count",
+        "removed_duplicate_count",
+        "preserved_citation_count",
+        "preserved_source_grounded_count",
+        "unapproved_ungrounded_count",
+    )
+    merged: dict[str, Any] = {
+        "authorized_count": max(
+            (int(report.get("authorized_count", 0) or 0) for report in valid),
+            default=0,
+        ),
+        "kept_authorized": max(
+            (int(report.get("kept_authorized", 0) or 0) for report in valid),
+            default=0,
+        ),
+        "passes": valid,
+        "pass_count": len(valid),
+    }
+    for field in count_fields:
+        merged[field] = sum(int(report.get(field, 0) or 0) for report in valid)
+    for field in list_fields:
+        merged[field] = [
+            item
+            for report in valid
+            for item in list(report.get(field, []) or [])
+            if isinstance(item, dict)
+        ]
+    return merged
 
 
 def apply_term_notes(

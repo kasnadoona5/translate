@@ -1135,6 +1135,13 @@ def _register_api(app: Flask) -> None:
                 f"  authorized={original_audit.get('authorized_count', 0)} kept={original_audit.get('kept_authorized', 0)}",
                 f"  unauthorized_removed={original_audit.get('removed_unauthorized_count', 0)} duplicates_removed={original_audit.get('removed_duplicate_count', 0)}",
                 f"  citations_preserved={original_audit.get('preserved_citation_count', 0)}",
+                "  source_grounded_preserved="
+                f"{original_audit.get('preserved_source_grounded_count', 0)} "
+                "ungrounded_review="
+                f"{original_audit.get('unapproved_ungrounded_count', 0)}",
+                f"  audit_passes={original_audit.get('pass_count', 1)} "
+                "final_stage="
+                f"{original_audit.get('final_reconciliation_stage', 'legacy')}",
                 "",
             ])
         anchor_audit = db.get_job_artifact(

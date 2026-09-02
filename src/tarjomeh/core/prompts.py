@@ -147,6 +147,10 @@ Instructions:
    precise relation with a looser paraphrase, or suppressing deliberate complexity.
    A parenthetical term or foreign label supplements its full proposition; it must
    not replace the proposition's head, complement, participants, or relation.
+   Keep Persian heads visibly connected to their complements; do not interrupt
+   that dependency with an ambiguous parenthetical, dash, or modifier stack.
+   Close every list-introducing matrix construction with its own predicate after
+   translating all of its members.
 2. Apply every entry marked mandatory using its prescribed lexical rendering and
    standard Persian orthography. Treat entries marked advisory as non-binding context.
 3. Ensure stylistic and terminological continuity with the preceding translation.
@@ -297,6 +301,10 @@ Check whether an appositive or parenthetical explanation interrupts the dependen
 between a Persian head and its complement, and whether ZWNJ has incorrectly welded
 two independent words rather than joining a real compound or affix. Do not replace
 technical vocabulary merely because it is uncommon.
+
+For long enumerations, verify that the introductory matrix construction still has
+its own finite predicate after all listed members. A predicate inside one list item
+does not complete an unfinished frame that governs the whole list.
 
 Also report a governed phrase or complement that is accidentally stated twice in
 one clause with competing predicates between its two occurrences. Do not report

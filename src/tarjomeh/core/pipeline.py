@@ -75,6 +75,7 @@ from tarjomeh.core.term_notes import (
     audit_inline_english_originals,
     effective_term_notes_mode,
     ensure_inline_proper_noun_originals,
+    merge_inline_english_original_audits,
     normalize_adjacent_original_citations,
     reconcile_redundant_original_fragments,
 )
@@ -1378,12 +1379,12 @@ def _accepted_grounded_inline_originals(
         if not target:
             continue
         if category == "source_entity_candidate":
-            if looks_like_transliterated_loanword(source, target):
-                category = "technical_loanword"
-            elif len(words) >= 2 and all(
+            if len(words) >= 2 and all(
                 word[:1].isupper() or len(word) == 1 for word in words
             ):
                 category = "source_grounded_entity"
+            elif looks_like_transliterated_loanword(source, target):
+                category = "technical_loanword"
             else:
                 continue
         categories[source] = category
@@ -2805,6 +2806,59 @@ def _chunk_needs_review(db: Any, job_id: str, chunk_index: int) -> bool:
         )
         for event in current_events
     )
+
+
+def _log_chunk_terminal_failure(
+    db: Any,
+    job_id: str,
+    chunk_index: int,
+    error: Exception,
+) -> dict[str, Any]:
+    """Persist the exact active-generation failure before status transitions."""
+    events = list(db.get_chunk_events(job_id, chunk_index) or [])
+    last_start = max(
+        (
+            position
+            for position, event in enumerate(events)
+            if event.get("event_type") == "chunk_started"
+        ),
+        default=0,
+    )
+    current = events[last_start:]
+    latest_integrity: dict[str, Any] = next(
+        (
+            event.get("payload", {})
+            for event in reversed(current)
+            if event.get("event_type")
+            in {"integrity_final_failed", "integrity_check_completed"}
+        ),
+        {},
+    )
+    lease = db.get_worker_lease(job_id) or {}
+    payload = {
+        "exception_type": type(error).__name__,
+        "error": str(error),
+        "worker_id": lease.get("worker_id"),
+        "worker_stage": lease.get("stage"),
+        "worker_state": lease.get("state"),
+        "generation_event_count": len(current),
+        "latest_integrity_stage": latest_integrity.get("stage"),
+        "latest_integrity_accepted": latest_integrity.get("accepted"),
+        "latest_integrity_blocking_count": latest_integrity.get(
+            "blocking_count"
+        ),
+        "latest_integrity_findings": list(
+            latest_integrity.get("findings", []) or []
+        )[:12],
+        "message": (
+            "The active chunk generation ended without a committable translation; "
+            "later chunks were not allowed to advance past its memory position."
+        ),
+    }
+    db.log_chunk_event(
+        job_id, chunk_index, "chunk_terminal_failure", payload
+    )
+    return payload
 
 
 _READABILITY_EXCLUDED_ROLES = frozenset({
@@ -5173,6 +5227,9 @@ class TranslationPipeline:
                                 raise PipelinePausedException("Job paused cooperatively")
                             
                             logger.error("Failed to translate chunk %d: %s", idx, e)
+                            _log_chunk_terminal_failure(
+                                self.db, job_id, idx, e
+                            )
                             self.db.log_event(job_id, "ERROR", f"Chunk {idx} failed: {type(e).__name__}: {e}")
                             self.db.update_chunk(job_id, idx, ChunkStatus.ERROR)
                             consecutive_errors += 1
@@ -5429,6 +5486,9 @@ class TranslationPipeline:
                         raise e
                     except Exception as e:
                         logger.error("Failed to translate chunk %d: %s", idx, e)
+                        _log_chunk_terminal_failure(
+                            self.db, job_id, idx, e
+                        )
                         self.db.log_event(job_id, "ERROR", f"Chunk {idx} failed: {type(e).__name__}: {e}")
                         self.db.update_chunk(job_id, idx, ChunkStatus.ERROR)
                         consecutive_errors += 1
@@ -5819,8 +5879,12 @@ class TranslationPipeline:
             trans_doc,
             proper_nouns if note_mode in {"inline", "both"} else {},
         )
+        original_audit["stage"] = "before_final_anchor_reconciliation"
+        original_audit_passes = [original_audit]
         self.db.save_job_artifact(
-            job_id, "english_original_audit", original_audit
+            job_id,
+            "english_original_audit",
+            merge_inline_english_original_audits(original_audit_passes),
         )
         self.db.log_event(
             job_id,
@@ -5932,11 +5996,12 @@ class TranslationPipeline:
             original_audit = audit_inline_english_originals(
                 trans_doc, proper_nouns
             )
-            original_audit["final_reconciliation_stage"] = (
-                "after_fragment_cleanup"
-            )
+            original_audit["stage"] = "after_fragment_cleanup"
+            original_audit_passes.append(original_audit)
             self.db.save_job_artifact(
-                job_id, "english_original_audit", original_audit
+                job_id,
+                "english_original_audit",
+                merge_inline_english_original_audits(original_audit_passes),
             )
         if note_mode != "inline" and self.config.output.format in note_formats:
             notes = apply_term_notes(
@@ -5992,6 +6057,22 @@ class TranslationPipeline:
                 "Restored exact source identifiers after final typography: "
                 f"{identifier_audit['repair_count']} repair(s).",
             )
+
+        final_original_audit = audit_inline_english_originals(
+            trans_doc,
+            proper_nouns if note_mode in {"inline", "both"} else {},
+        )
+        final_original_audit["stage"] = "final_rendered_document"
+        original_audit_passes.append(final_original_audit)
+        original_audit = merge_inline_english_original_audits(
+            original_audit_passes
+        )
+        original_audit["final_reconciliation_stage"] = (
+            "final_rendered_document"
+        )
+        self.db.save_job_artifact(
+            job_id, "english_original_audit", original_audit
+        )
 
         final_text_audit = audit_document_final_text(
             trans_doc,
@@ -6129,8 +6210,12 @@ class TranslationPipeline:
             trans_doc,
             dict(proper_nouns) if note_mode in {"inline", "both"} else {},
         )
+        original_audit["stage"] = "before_final_anchor_reconciliation"
+        original_audit_passes = [original_audit]
         self.db.save_job_artifact(
-            job_id, "english_original_audit", original_audit
+            job_id,
+            "english_original_audit",
+            merge_inline_english_original_audits(original_audit_passes),
         )
         if note_mode in {"inline", "both"}:
             anchor_audit = cast(
@@ -6222,11 +6307,12 @@ class TranslationPipeline:
             original_audit = audit_inline_english_originals(
                 trans_doc, dict(proper_nouns)
             )
-            original_audit["final_reconciliation_stage"] = (
-                "after_fragment_cleanup"
-            )
+            original_audit["stage"] = "after_fragment_cleanup"
+            original_audit_passes.append(original_audit)
             self.db.save_job_artifact(
-                job_id, "english_original_audit", original_audit
+                job_id,
+                "english_original_audit",
+                merge_inline_english_original_audits(original_audit_passes),
             )
         if note_mode != "inline" and fmt in {"docx", "epub", "markdown"}:
             glossary_manager = GlossaryManager()
@@ -6271,6 +6357,21 @@ class TranslationPipeline:
         identifier_audit = restore_document_source_identifiers(trans_doc)
         self.db.save_job_artifact(
             job_id, "final_identifier_reconciliation", identifier_audit
+        )
+        final_original_audit = audit_inline_english_originals(
+            trans_doc,
+            dict(proper_nouns) if note_mode in {"inline", "both"} else {},
+        )
+        final_original_audit["stage"] = "final_rendered_document"
+        original_audit_passes.append(final_original_audit)
+        original_audit = merge_inline_english_original_audits(
+            original_audit_passes
+        )
+        original_audit["final_reconciliation_stage"] = (
+            "final_rendered_document"
+        )
+        self.db.save_job_artifact(
+            job_id, "english_original_audit", original_audit
         )
         final_text_audit = audit_document_final_text(
             trans_doc,
@@ -9728,6 +9829,7 @@ Output ONLY the corrected Persian translation.
                 "unexpected_latin_count",
                 "repeated_word_count",
                 "repeated_adjacent_span_count",
+                "repeated_governed_span_count",
                 "repeated_clause_count",
                 "foreign_script_count",
                 "markup_wrapper_count",
@@ -9797,6 +9899,7 @@ Output ONLY the corrected Persian translation.
                             "unexpected_latin_count",
                             "repeated_word_count",
                             "repeated_adjacent_span_count",
+                            "repeated_governed_span_count",
                             "repeated_clause_count",
                             "foreign_script_count",
                             "markup_wrapper_count",

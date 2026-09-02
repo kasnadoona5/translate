@@ -46,6 +46,11 @@ _NON_PROSE_RE = re.compile(
     r"index of names|subject index|catalog(?:ue|ing)-in-publication)\b",
     re.IGNORECASE,
 )
+_NONREPRESENTATIVE_STYLE_SOURCE_RE = re.compile(
+    r"^\s*(?:(?:this\s+(?:book|volume|work)\s+is\s+)?dedicated\s+to|"
+    r"to\s+the\s+memory\s+of|in\s+memory\s+of)\b",
+    re.IGNORECASE,
+)
 _STYLE_PROTOCOL_RE = re.compile(
     r"(?:^|\s)(?:source|target|translation|rationale|decision)\s*[:=]|"
     r"```|</?(?:analysis|answer|tool|assistant)>|\{\s*\"",
@@ -417,6 +422,9 @@ class MemoryManager:
         style_eligible = bool(
             structure_eligible
             and style_quality_approved
+            and not _NONREPRESENTATIVE_STYLE_SOURCE_RE.search(
+                chunk.text or ""
+            )
             and (
                 not has_structure_policy
                 or (
@@ -431,6 +439,10 @@ class MemoryManager:
             "accepted": False,
             "reason": "style_not_eligible",
         }
+        if _NONREPRESENTATIVE_STYLE_SOURCE_RE.search(chunk.text or ""):
+            style_sample_policy["reason"] = (
+                "source_genre_not_representative_of_body_voice"
+            )
         if style_eligible:
             style_sample_policy = self._update_style_profile(style_translation)
         # Any known proper noun occurring in this chunk has now had its first
