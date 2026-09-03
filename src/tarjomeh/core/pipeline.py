@@ -133,6 +133,10 @@ class JobWorkerBusyError(RuntimeError):
     """Raised when another live worker generation owns the job."""
 
 
+class SourceStructureAdmissionError(ValueError):
+    """Raised when explicit source structure remains wrong after bounded repair."""
+
+
 class ChapterCheckpointReached(PipelinePausedException):
     """Raised after an intentional chapter-boundary review checkpoint."""
 
@@ -2072,6 +2076,13 @@ def _salvage_local_refinement_edits(
                     "before_sentence_terminals": sentence_terminal_count(current),
                     "after_sentence_terminals": sentence_terminal_count(candidate),
                 }
+            elif structure_conflicts := _introduced_structure_conflicts(
+                source, current, candidate
+            ):
+                failed_reason = "new_source_structure_conflict"
+                integrity_payload = {
+                    "structure_conflicts": structure_conflicts,
+                }
             else:
                 predicate_regressions = [
                     {
@@ -2222,6 +2233,8 @@ def _source_obligation_identity(detail: dict[str, Any]) -> tuple[str, str]:
 
 def _best_source_faithful_version(
     evaluated_versions: list[tuple[str, Any]],
+    *,
+    source: str = "",
 ) -> tuple[int, str, Any] | None:
     """Choose an earlier integrity-valid version with source fidelity first.
 
@@ -2233,12 +2246,13 @@ def _best_source_faithful_version(
         return None
 
     def rank(item: tuple[int, tuple[str, Any]]) -> tuple[float, ...]:
-        index, (_text, critique) = item
+        index, (text, critique) = item
         scores = [
             float(getattr(critique, name, 0.0) or 0.0)
             for name in ("accuracy", "terminology", "fluency", "register")
         ]
         return (
+            -float(len(_actionable_structure_findings(source, text))),
             -float(len(_grounded_source_fidelity_issues(critique))),
             -float(len(_blocking_critique_issues(critique))),
             scores[0],
@@ -2799,13 +2813,15 @@ def _chunk_needs_review(db: Any, job_id: str, chunk_index: int) -> bool:
         "translation_structure_mismatch",
         "unauthorized_source_correction",
     }
-    return any(
-        event.get("event_type") == "structure_audit"
-        and actionable_structure.intersection(
-            event.get("payload", {}).get("classifications", []) or []
-        )
-        for event in current_events
-    )
+    structure_events = [
+        event for event in current_events
+        if event.get("event_type") == "structure_audit"
+    ]
+    if not structure_events:
+        return False
+    return bool(actionable_structure.intersection(
+        structure_events[-1].get("payload", {}).get("classifications", []) or []
+    ))
 
 
 def _log_chunk_terminal_failure(
@@ -3144,6 +3160,57 @@ _ACTIONABLE_STRUCTURE_CLASSIFICATIONS = frozenset({
     "translation_structure_mismatch",
     "unauthorized_source_correction",
 })
+
+
+def _actionable_structure_findings(
+    source: str,
+    candidate: str,
+) -> list[dict[str, Any]]:
+    """Return deterministic source-structure findings that can block admission."""
+    if not (source or "").strip() or not (candidate or "").strip():
+        return []
+    try:
+        payload = audit_payload(source, candidate)
+    except Exception:
+        logger.exception("Source-structure admission audit failed")
+        return []
+    return [
+        finding
+        for finding in list(payload.get("findings", []) or [])
+        if isinstance(finding, dict)
+        and str(finding.get("classification", ""))
+        in _ACTIONABLE_STRUCTURE_CLASSIFICATIONS
+    ]
+
+
+def _structure_findings_as_source_issues(
+    findings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Route objective structure evidence through the existing source-aware repair."""
+    issues: list[dict[str, Any]] = []
+    for position, finding in enumerate(findings):
+        details = finding.get("details", {}) or {}
+        paragraph = details.get("source_paragraph")
+        segment = (
+            f"p{int(paragraph) + 1}:s1"
+            if isinstance(paragraph, int) and paragraph >= 0
+            else ""
+        )
+        issues.append({
+            "issue_id": (
+                f"structure:{finding.get('check_id', 'unknown')}:{position}"
+            ),
+            "category": "number",
+            "severity": "major",
+            "confidence": 1.0,
+            "source_segment_id": segment,
+            "source_quote": str(details.get("source_excerpt", "")),
+            "current_persian_quote": str(details.get("candidate_excerpt", "")),
+            "rationale": str(finding.get("message", "")),
+            "structure_classification": finding.get("classification"),
+            "structure_details": details,
+        })
+    return issues
 
 
 def _introduced_structure_conflicts(
@@ -4118,6 +4185,12 @@ class TranslationPipeline:
         chunk_index = payload.pop("chunk_index", None)
         if not job_id:
             return
+        if chunk_index is not None:
+            payload["db_chunk_index"] = int(chunk_index)
+            payload["ui_chunk_number"] = int(chunk_index) + 1
+        payload["worker_stage_before_event"] = getattr(
+            self, "_worker_stage", "unknown"
+        )
         self._worker_heartbeat(
             str(payload.get("operation", "llm_call")),
             int(chunk_index) if chunk_index is not None else None,
@@ -6601,6 +6674,7 @@ class TranslationPipeline:
         )
         repair_proposed = repair_candidate != canonical
         repair_accepted = False
+        structure_conflicts: list[dict[str, Any]] = []
         if repair_proposed:
             identifiers_unchanged = (
                 extract_identifiers(repair_candidate)
@@ -6635,6 +6709,12 @@ class TranslationPipeline:
             )
             if repair_accepted:
                 canonical = repair_candidate
+        structure_conflicts = _introduced_structure_conflicts(
+            chunk.text, translation, canonical
+        )
+        if structure_conflicts:
+            canonical = translation
+            repair_accepted = False
         self.db.log_chunk_event(
             job_id,
             chunk_index,
@@ -6649,6 +6729,7 @@ class TranslationPipeline:
                 "source_grounded_repair_proposed": repair_proposed,
                 "source_grounded_repair_accepted": repair_accepted,
                 "source_grounded_repairs": repair_report.get("repairs", []),
+                "source_structure_conflicts": structure_conflicts,
                 "policy": (
                     "The exact idempotent exporter typography and only "
                     "identifier-preserving, monotonically improving deterministic "
@@ -8665,7 +8746,8 @@ class TranslationPipeline:
                     restored_version: int | None = None
                     if source_fidelity_issues:
                         selected = _best_source_faithful_version(
-                            evaluated_versions
+                            evaluated_versions,
+                            source=chunk.text,
                         )
                         if selected is not None:
                             selected_index, selected_text, selected_critique = selected
@@ -8925,6 +9007,19 @@ class TranslationPipeline:
                 )
                 local_salvage: dict[str, Any] | None = None
                 salvaged_translation = before_translation
+                structure_conflicts = _introduced_structure_conflicts(
+                    chunk.text,
+                    before_translation,
+                    proposed_translation,
+                )
+                if not integrity_enabled and structure_conflicts:
+                    edit_accepted = False
+                    integrity_payload = {
+                        "accepted": False,
+                        "blocking_count": 1,
+                        "source_structure_conflicts": structure_conflicts,
+                        "stage": "refinement_source_structure_admission",
+                    }
                 if integrity_enabled:
                     edit_integrity = integrity_gate.evaluate(
                         chunk.text,
@@ -8943,6 +9038,18 @@ class TranslationPipeline:
                         job_id, idx, "integrity_check_completed", integrity_payload
                     )
                     edit_accepted = edit_integrity.accepted
+                    if edit_accepted and structure_conflicts:
+                        edit_accepted = False
+                        integrity_payload = dict(integrity_payload or {})
+                        integrity_payload.update({
+                            "accepted": False,
+                            "blocking_count": max(
+                                1,
+                                int(integrity_payload.get("blocking_count", 0) or 0),
+                            ),
+                            "source_structure_conflicts": structure_conflicts,
+                            "stage": "refinement_source_structure_admission",
+                        })
                     if not edit_accepted:
                         self.db.log_chunk_event(
                             job_id, idx, "integrity_edit_rejected", integrity_payload
@@ -9071,6 +9178,9 @@ class TranslationPipeline:
                     best_index, (translation, _) = max(
                         enumerate(evaluated_versions),
                         key=lambda item: (
+                            -len(_actionable_structure_findings(
+                                chunk.text, item[1][0]
+                            )),
                             _critique_candidate_rank(item[1][1]),
                             item[0],
                         ),
@@ -9762,10 +9872,9 @@ Output ONLY the corrected Persian translation.
             safe_language_repair,
         )
 
-        # Audit the text that will actually continue into memory and export,
-        # after every refinement, correction and integrity restoration. This is
-        # report-only: actionable findings mark review and lower memory trust,
-        # but never rewrite the author's source structure automatically.
+        # Audit deterministic source obligations before the one bounded final
+        # repair. Findings are evidence for the existing source-aware repair,
+        # never permission for a target-only rewrite.
         try:
             structure_payload = {
                 "stage": "final_translation",
@@ -9777,13 +9886,12 @@ Output ONLY the corrected Persian translation.
                 job_id, idx, "structure_audit_failed", {"stage": "final_translation"}
             )
             structure_payload = {"finding_count": 0, "classifications": []}
-        if structure_payload["finding_count"]:
-            self.db.log_chunk_event(job_id, idx, "structure_audit", structure_payload)
-            if {
-                "translation_structure_mismatch",
-                "unauthorized_source_correction",
-            }.intersection(structure_payload.get("classifications", [])):
-                _ensure_chunk_review_reason(self.db, job_id, idx)
+        self.db.log_chunk_event(
+            job_id, idx, "structure_audit_pre_repair", structure_payload
+        )
+        objective_structure_findings = _actionable_structure_findings(
+            chunk.text, translation
+        )
 
         structural_roles = {
             str(role).casefold()
@@ -9822,6 +9930,9 @@ Output ONLY the corrected Persian translation.
             if not str(finding.get("issue_id", "")).strip()
             or str(finding.get("issue_id", "")).strip() in unresolved_source_ids
         ]
+        final_source_fidelity_findings.extend(
+            _structure_findings_as_source_issues(objective_structure_findings)
+        )
         repairable_language_finding = any(
             int(language_quality.get(key, 0) or 0)
             for key in (
@@ -9976,6 +10087,15 @@ Output ONLY the corrected Persian translation.
                         }
                         source_improved = not paragraph_source_findings
                         if paragraph_source_findings:
+                            structure_issue_count = sum(
+                                bool(item.get("structure_classification"))
+                                for item in paragraph_source_findings
+                            )
+                            candidate_structure_findings = (
+                                _actionable_structure_findings(
+                                    source_part, candidate_part
+                                )
+                            )
                             source_validation["attempted"] = True
                             validation_critique = self._run_async(
                                 critique_tool.critique(
@@ -10006,6 +10126,11 @@ Output ONLY the corrected Persian translation.
                                         validation_critique, "terminology", 0.0
                                     ) or 0.0
                                 ) >= 8.0
+                                and (
+                                    not structure_issue_count
+                                    or len(candidate_structure_findings)
+                                    < structure_issue_count
+                                )
                             )
                             source_validation.update({
                                 "accepted": source_improved,
@@ -10020,6 +10145,12 @@ Output ONLY the corrected Persian translation.
                                     for item in remaining_source_findings
                                     if str(item.get("issue_id", ""))
                                 ],
+                                "before_structure_issue_count": (
+                                    structure_issue_count
+                                ),
+                                "after_structure_issue_count": len(
+                                    candidate_structure_findings
+                                ),
                                 "critique": _critique_for_event(
                                     validation_critique,
                                     self.config.translation.critique_threshold,
@@ -10095,6 +10226,52 @@ Output ONLY the corrected Persian translation.
             "targeted_language_repair",
             targeted_language_repair,
         )
+        try:
+            final_structure_payload = {
+                "stage": "final_translation_after_bounded_repair",
+                **audit_payload(chunk.text, translation),
+            }
+        except Exception:
+            logger.exception("Final structure audit failed for chunk %s", idx)
+            self.db.log_chunk_event(
+                job_id,
+                idx,
+                "structure_audit_failed",
+                {"stage": "final_translation_after_bounded_repair"},
+            )
+            final_structure_payload = {
+                "stage": "final_translation_after_bounded_repair",
+                "finding_count": 0,
+                "classifications": [],
+                "findings": [],
+                "audit_available": False,
+            }
+        self.db.log_chunk_event(
+            job_id, idx, "structure_audit", final_structure_payload
+        )
+        unresolved_structure = _ACTIONABLE_STRUCTURE_CLASSIFICATIONS.intersection(
+            final_structure_payload.get("classifications", []) or []
+        )
+        if unresolved_structure:
+            _ensure_chunk_review_reason(self.db, job_id, idx)
+            failure_payload = {
+                "stage": "final_source_structure_admission",
+                "accepted": False,
+                "blocking_count": len(
+                    _actionable_structure_findings(chunk.text, translation)
+                ),
+                "classifications": sorted(unresolved_structure),
+                "findings": final_structure_payload.get("findings", []),
+                "message": (
+                    "Explicit source structure remained inaccurate after the "
+                    "bounded source-aware repair; memory and complete export were "
+                    "not committed."
+                ),
+            }
+            self.db.log_chunk_event(
+                job_id, idx, "integrity_final_failed", failure_payload
+            )
+            raise SourceStructureAdmissionError(failure_payload["message"])
         self.db.log_chunk_event(
             job_id, idx, "language_quality_checked", language_quality
         )

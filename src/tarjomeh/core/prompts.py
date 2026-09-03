@@ -12,24 +12,21 @@ from __future__ import annotations
 
 GENERAL_EDITORIAL_CONTRACT: str = """\
 ### General editorial contract
-- Resolve meaning from proposition, discourse, context, and approved terminology;
-  never force an isolated dictionary equivalent.
-- Preserve semantic roles and relations: agency, attribution, negation, modality,
-  quantity, comparison, causality, and time.
-- Preserve source quantities and inconsistencies; never reconcile later text.
-- Preserve apparatus: multilingual expressions, titles, names, citations, and note
-  markers; translate connective prose.
-- Write idiomatic academic Iranian Persian with clear dependencies, ezafe,
-  agreement, punctuation, and ZWNJ; avoid calques.
-- Attach restatements and appositives correctly without breaking the predicate.
-- Treat a recurring coordinated conceptual series as one terminological unit:
-  preserve distinctions and parallel Persian only when trustworthy context or a
-  mandatory phrase establishes it. Advisory context remains revisable and cannot
-  override the source.
-- Emit only the requested response; never insert notes, labels, or unexplained
-  foreign prose.
-- Only mandatory glossary entries and established names bind; other terms remain
-  contextual and advisory.
+- Resolve meaning from proposition and context; never force an isolated dictionary equivalent.
+- Preserve semantic roles and relations, including quantity, negation, modality,
+  comparison, causality, and time. Preserve source inconsistencies too.
+- Preserve titles, names, citations, multilingual expressions, and note markers;
+  translate only their connective prose.
+- Write idiomatic academic Iranian Persian with clear dependencies, agreement,
+  punctuation, ZWNJ, and ezafe; avoid calques and opaque modifier stacks.
+- Use conventional hamza after final heh when ezafe is needed. Preserve selective
+  model-authored kasra, but never add blanket diacritics.
+- Keep appositives attached without breaking predicates or head-complement links.
+- Preserve distinctions and parallel form in a recurring coordinated conceptual series when
+  supported by source context or mandatory terminology.
+- Emit only the requested response; never add commentary or unexplained foreign prose.
+- Mandatory entries and established names bind. Advisory context remains revisable
+  and cannot override source.
 """
 
 # ---------------------------------------------------------------------------

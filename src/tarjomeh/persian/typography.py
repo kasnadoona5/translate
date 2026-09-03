@@ -83,6 +83,13 @@ _LATIN_SCHOLARLY_ABBREVIATION_RE = re.compile(
     r"(?![A-Za-z])",
     re.IGNORECASE,
 )
+_LATIN_PUNCTUATED_RUN_RE = re.compile(
+    r"(?<![A-Za-z])"
+    r"[A-Z][A-Za-z'\u2019.-]*(?:\s+[A-Za-z][A-Za-z'\u2019.-]*){0,7}"
+    r",\s*"
+    r"[A-Za-z][A-Za-z'\u2019.-]*(?:\s+[A-Za-z][A-Za-z'\u2019.-]*){0,7}"
+    r"(?![A-Za-z])"
+)
 _SCHOLARLY_PROTECTED_RE = re.compile(
     r"\b(?:ISBN(?:-1[03])?|ISSN)\s*:?\s*"
     r"[0-9Xx](?:[0-9Xx \t\-‐-―]{6,30})[0-9Xx]\b"
@@ -282,6 +289,9 @@ class PersianTypographer:
         )
         text = PersianTypographer._protect_pattern(
             text, spans, _AUTHOR_YEAR_CITATION_RE
+        )
+        text = PersianTypographer._protect_pattern(
+            text, spans, _LATIN_PUNCTUATED_RUN_RE
         )
         return PersianTypographer._protect_pattern(
             text, spans, _SCHOLARLY_PROTECTED_RE

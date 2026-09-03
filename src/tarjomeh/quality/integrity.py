@@ -194,6 +194,10 @@ _LATIN_PROSE_TOKEN_RE = re.compile(
     rf"[{_LATIN_LETTERS}'\u2019-]{{1,}}(?![{_LATIN_LETTERS}])"
 )
 _ROMAN_NUMERAL_RE = re.compile(r"[ivxlcdm]+", re.IGNORECASE)
+_MEASUREMENT_UNIT_TOKENS = frozenset({
+    "cm", "em", "ft", "g", "gb", "hz", "kg", "khz", "km", "lb",
+    "mb", "mhz", "mm", "ms", "oz", "pc", "pt", "px", "tb", "v", "w",
+})
 _APPARATUS_CHAPTER_RE = re.compile(
     r"\b(?:abbreviations?|bibliograph(?:y|ies)|catalog(?:ue|ing)?|contents?|"
     r"glossar(?:y|ies)|index(?:es)?|references?|works cited)\b",
@@ -2064,6 +2068,17 @@ def unexpected_latin_prose(
         ):
             continue
         context = text[max(0, start - 80):min(len(text), end + 80)]
+        if (
+            source_present
+            and token.casefold() in _MEASUREMENT_UNIT_TOKENS
+            and re.search(
+                rf"(?:[0-9\u06f0-\u06f9]\s*{re.escape(token)}\b|"
+                rf"\b{re.escape(token)}\s*[0-9\u06f0-\u06f9])",
+                context,
+                re.IGNORECASE,
+            )
+        ):
+            continue
         citation_context = bool(_CITATION_YEAR_RE.search(context))
         if source_present and citation_context and (
             token[:1].isupper()

@@ -403,18 +403,23 @@ class MemoryManager:
             if paragraph.strip()
         ]
         style_translation = translation
+        style_source_indices = list(range(len(translation_paragraphs)))
         excluded_style_indices = {
             int(index) for index in (style_excluded_paragraphs or [])
             if isinstance(index, int) or str(index).isdigit()
         }
         if has_body_policy:
             if body_indices and max(body_indices) < len(translation_paragraphs):
-                style_translation = "\n\n".join(
-                    translation_paragraphs[index] for index in body_indices
+                style_source_indices = [
+                    index for index in body_indices
                     if index not in excluded_style_indices
+                ]
+                style_translation = "\n\n".join(
+                    translation_paragraphs[index] for index in style_source_indices
                 )
             elif not chunk.metadata.get("style_eligible", False):
                 style_translation = ""
+                style_source_indices = []
         style_quality_approved = (
             bool(quality_approved)
             if style_approved is None else bool(style_approved)
@@ -445,6 +450,12 @@ class MemoryManager:
             )
         if style_eligible:
             style_sample_policy = self._update_style_profile(style_translation)
+            selected = style_sample_policy.get("selected", {}) or {}
+            local_index = selected.get("paragraph_index")
+            if isinstance(local_index, int) and local_index < len(style_source_indices):
+                style_sample_policy["source_paragraph_index"] = (
+                    style_source_indices[local_index]
+                )
         # Any known proper noun occurring in this chunk has now had its first
         # appearance — later chunks must not repeat the English parenthetical.
         self.proper_nouns.mark_introduced_from_translation(
@@ -477,10 +488,13 @@ class MemoryManager:
         """Maintain a compact book-level style guide from early translations."""
         candidates: list[dict[str, Any]] = []
         rejections: list[dict[str, Any]] = []
-        for paragraph in re.split(r"\n\s*\n", translation or ""):
+        for paragraph_index, paragraph in enumerate(
+            re.split(r"\n\s*\n", translation or "")
+        ):
             if not paragraph.strip():
                 continue
             quality = _style_sample_quality(paragraph)
+            quality["paragraph_index"] = paragraph_index
             if (
                 quality.get("approved")
                 and float(quality.get("score", 0.0)) >= self._style_min_score

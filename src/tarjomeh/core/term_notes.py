@@ -139,6 +139,7 @@ def ensure_inline_proper_noun_originals(
     missing_targets: list[dict[str, Any]] = []
     citation_only: list[dict[str, Any]] = []
     overlap_suppressed: list[dict[str, Any]] = []
+    parenthetical_deferred: list[dict[str, Any]] = []
     categories = categories or {}
     aliases = aliases or {}
     for paragraph in document.paragraphs:
@@ -205,11 +206,28 @@ def ensure_inline_proper_noun_originals(
                 for target in target_variants
                 for match in _target_spans(text, target)
             ]
+            parenthetical_matches = [
+                match for match in target_matches
+                if _inside_parenthetical(text, match[0])
+            ]
+            target_matches = [
+                match for match in target_matches
+                if not _inside_parenthetical(text, match[0])
+            ]
             target_offsets = sorted({
                 offset for offset, _end, _rendered, _canonical in target_matches
             })
             target = target_variants[0]
             if not target_offsets:
+                if parenthetical_matches:
+                    parenthetical_deferred.append({
+                        "paragraph_index": paragraph.index,
+                        "source": source,
+                        "target": target,
+                        "category": category,
+                        "reason": "target_only_inside_parenthetical_context",
+                    })
+                    continue
                 bare_originals = [
                     match
                     for match in _source_original_pattern(source).finditer(text)
@@ -354,11 +372,13 @@ def ensure_inline_proper_noun_originals(
         "missing_target_count": len(missing_targets),
         "citation_only_count": len(citation_only),
         "overlap_suppressed_count": len(overlap_suppressed),
+        "parenthetical_deferred_count": len(parenthetical_deferred),
         "anchors": anchors,
         "ambiguous": ambiguous,
         "missing_targets": missing_targets,
         "citation_only": citation_only,
         "overlap_suppressed": overlap_suppressed,
+        "parenthetical_deferred": parenthetical_deferred,
     }
     return report if return_report else inserted
 
