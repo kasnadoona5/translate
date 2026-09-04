@@ -48,7 +48,8 @@ _NON_PROSE_RE = re.compile(
 )
 _NONREPRESENTATIVE_STYLE_SOURCE_RE = re.compile(
     r"^\s*(?:(?:this\s+(?:book|volume|work)\s+is\s+)?dedicated\s+to|"
-    r"to\s+the\s+memory\s+of|in\s+memory\s+of)\b",
+    r"to\s+the\s+memory\s+of|in\s+memory\s+of|in\s+memoriam|"
+    r"acknowledg(?:e|ement|ements|ing)|thanks?\s+(?:are|is|goes?)\s+to)\b",
     re.IGNORECASE,
 )
 _STYLE_PROTOCOL_RE = re.compile(
@@ -68,6 +69,43 @@ _AUTHOR_YEAR_CITATION_RE = re.compile(
 _LEADING_NOTE_MARKER_RE = re.compile(
     r"^(?:\[?\d{1,3}\]?|[\u00b9\u00b2\u00b3\u2070-\u2079])\s+"
 )
+
+
+def _summary_lexical_near_misses(
+    candidate_persian: str,
+    trusted_persian: str,
+) -> list[dict[str, str]]:
+    """Find high-confidence one-letter drift from already accepted wording."""
+    token_re = re.compile(r"[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff\u200c]+")
+
+    def normalized_tokens(value: str) -> set[str]:
+        return {
+            re.sub(r"[\u064b-\u065f\u0670\u06d6-\u06ed\u200c]", "", token)
+            for token in token_re.findall(value or "")
+            if len(re.sub(r"[\u064b-\u065f\u0670\u06d6-\u06ed\u200c]", "", token)) >= 8
+        }
+
+    trusted = normalized_tokens(trusted_persian)
+    candidate = normalized_tokens(candidate_persian)
+    findings: list[dict[str, str]] = []
+    for token in sorted(candidate - trusted):
+        matches = [
+            established for established in trusted
+            if len(established) == len(token)
+            and token[:3] == established[:3]
+            and token[-3:] == established[-3:]
+            and sum(
+                left != right
+                for left, right in zip(token, established, strict=True)
+            ) == 1
+        ]
+        if len(matches) == 1:
+            findings.append({
+                "candidate": token,
+                "established": matches[0],
+                "reason": "one_letter_drift_from_accepted_persian",
+            })
+    return findings[:12]
 
 
 def _clean_style_sample(text: str) -> str:
@@ -402,12 +440,31 @@ class MemoryManager:
             paragraph.strip() for paragraph in translation.split("\n\n")
             if paragraph.strip()
         ]
+        source_paragraphs = [
+            paragraph.strip() for paragraph in re.split(r"\n\s*\n", chunk.text or "")
+            if paragraph.strip()
+        ]
         style_translation = translation
         style_source_indices = list(range(len(translation_paragraphs)))
         excluded_style_indices = {
             int(index) for index in (style_excluded_paragraphs or [])
             if isinstance(index, int) or str(index).isdigit()
         }
+        source_genre_excluded_indices: set[int] = set()
+        if len(source_paragraphs) == len(translation_paragraphs):
+            source_genre_excluded_indices = {
+                index for index, paragraph in enumerate(source_paragraphs)
+                if _NONREPRESENTATIVE_STYLE_SOURCE_RE.search(paragraph)
+            }
+            excluded_style_indices.update(source_genre_excluded_indices)
+        if not has_body_policy and excluded_style_indices:
+            style_source_indices = [
+                index for index in style_source_indices
+                if index not in excluded_style_indices
+            ]
+            style_translation = "\n\n".join(
+                translation_paragraphs[index] for index in style_source_indices
+            )
         if has_body_policy:
             if body_indices and max(body_indices) < len(translation_paragraphs):
                 style_source_indices = [
@@ -427,9 +484,7 @@ class MemoryManager:
         style_eligible = bool(
             structure_eligible
             and style_quality_approved
-            and not _NONREPRESENTATIVE_STYLE_SOURCE_RE.search(
-                chunk.text or ""
-            )
+            and style_translation.strip()
             and (
                 not has_structure_policy
                 or (
@@ -444,7 +499,7 @@ class MemoryManager:
             "accepted": False,
             "reason": "style_not_eligible",
         }
-        if _NONREPRESENTATIVE_STYLE_SOURCE_RE.search(chunk.text or ""):
+        if source_genre_excluded_indices and not style_translation.strip():
             style_sample_policy["reason"] = (
                 "source_genre_not_representative_of_body_voice"
             )
@@ -481,6 +536,9 @@ class MemoryManager:
             "quality_approved": bool(quality_approved),
             "style_approved": style_quality_approved,
             "style_excluded_paragraphs": sorted(excluded_style_indices),
+            "style_source_genre_excluded_paragraphs": sorted(
+                source_genre_excluded_indices
+            ),
             "structural_roles": structural_roles,
         }
 
@@ -823,6 +881,34 @@ class MemoryManager:
             candidate = BilingualSummary()
             candidate.update(response)
             candidate_quality = candidate.candidate_quality()
+            from tarjomeh.quality.structure_audit import audit_payload
+
+            alignment = audit_payload(
+                candidate.english_summary,
+                candidate.persian_summary,
+            )
+            lexical_near_misses = _summary_lexical_near_misses(
+                candidate.persian_summary,
+                self.bilingual_summary.persian_summary + "\n" + translation,
+            )
+            extra_reasons: list[str] = []
+            if "translation_structure_mismatch" in set(
+                alignment.get("classifications", []) or []
+            ):
+                extra_reasons.append("bilingual_summary_structure_mismatch")
+            if lexical_near_misses:
+                extra_reasons.append("persian_summary_lexical_near_miss")
+            if extra_reasons:
+                prior_reasons = candidate_quality.get("reasons", [])
+                if not isinstance(prior_reasons, list):
+                    prior_reasons = []
+                candidate_quality["accepted"] = False
+                candidate_quality["reasons"] = list(dict.fromkeys(
+                    [str(reason) for reason in prior_reasons if str(reason)]
+                    + extra_reasons
+                ))
+            candidate_quality["bilingual_alignment"] = alignment
+            candidate_quality["lexical_near_misses"] = lexical_near_misses
             if not candidate_quality["accepted"]:
                 return {
                     "replacement_count": 0,

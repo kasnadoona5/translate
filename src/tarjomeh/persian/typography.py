@@ -85,9 +85,10 @@ _LATIN_SCHOLARLY_ABBREVIATION_RE = re.compile(
 )
 _LATIN_PUNCTUATED_RUN_RE = re.compile(
     r"(?<![A-Za-z])"
-    r"[A-Z][A-Za-z'\u2019.-]*(?:\s+[A-Za-z][A-Za-z'\u2019.-]*){0,7}"
+    r"[A-Z][A-Za-z'\u2019.-]*(?:\s+[A-Za-z][A-Za-z'\u2019.-]*){0,11}"
     r",\s*"
-    r"[A-Za-z][A-Za-z'\u2019.-]*(?:\s+[A-Za-z][A-Za-z'\u2019.-]*){0,7}"
+    r"[A-Za-z][A-Za-z'\u2019.-]*(?:\s+[A-Za-z][A-Za-z'\u2019.-]*){0,11}"
+    r"(?:\s+(?:1[5-9][0-9]{2}|20[0-9]{2}))?"
     r"(?![A-Za-z])"
 )
 _SCHOLARLY_PROTECTED_RE = re.compile(
@@ -279,23 +280,39 @@ class PersianTypographer:
 
     @staticmethod
     def _protect_scholarly(text: str, spans: list[str]) -> str:
-        """Replace scholarly-apparatus spans with digit-free PUA sentinels."""
+        """Protect the longest non-overlapping scholarly spans in one pass."""
         text = _LATIN_SCHOLARLY_ABBREVIATION_RE.sub(
             lambda match: match.group(0).replace("\u060c", ","),
             text,
         )
-        text = PersianTypographer._protect_pattern(
-            text, spans, _LATIN_SCHOLARLY_ABBREVIATION_RE
+        patterns = (
+            _LATIN_SCHOLARLY_ABBREVIATION_RE,
+            _AUTHOR_YEAR_CITATION_RE,
+            _LATIN_PUNCTUATED_RUN_RE,
+            _SCHOLARLY_PROTECTED_RE,
         )
-        text = PersianTypographer._protect_pattern(
-            text, spans, _AUTHOR_YEAR_CITATION_RE
-        )
-        text = PersianTypographer._protect_pattern(
-            text, spans, _LATIN_PUNCTUATED_RUN_RE
-        )
-        return PersianTypographer._protect_pattern(
-            text, spans, _SCHOLARLY_PROTECTED_RE
-        )
+        candidates = [
+            (match.start(), match.end(), priority)
+            for priority, pattern in enumerate(patterns)
+            for match in pattern.finditer(text)
+        ]
+        selected: list[tuple[int, int, int]] = []
+        for candidate in sorted(
+            candidates,
+            key=lambda item: (-(item[1] - item[0]), item[2], item[0]),
+        ):
+            start, end, _priority = candidate
+            if any(start < kept_end and end > kept_start for kept_start, kept_end, _ in selected):
+                continue
+            selected.append(candidate)
+        for start, end, _priority in sorted(selected, reverse=True):
+            spans.append(text[start:end])
+            sentinel = (
+                f"{_SENTINEL_OPEN}{chr(_SENTINEL_BASE + len(spans) - 1)}"
+                f"{_SENTINEL_CLOSE}"
+            )
+            text = text[:start] + sentinel + text[end:]
+        return text
 
     @staticmethod
     def _protect_pattern(

@@ -97,6 +97,10 @@ _PERSIAN_ROMANIZATION = str.maketrans({
 _AMBIGUOUS_ENTITY_CATEGORIES = frozenset({
     "institution", "organization", "publication", "product",
 })
+_SEMANTICALLY_TRANSLATED_ENTITY_CATEGORIES = frozenset({
+    "institution", "organization", "publication", "product", "theory",
+    "legal_instrument",
+})
 _LOW_AUTHORITY_ORIGINS = frozenset({
     "auto_extraction", "incremental_extraction", "research_suggestion",
     "observed_translation",
@@ -843,6 +847,10 @@ def _mapping_authority_class(
         origin == "observed_translation"
         and normalized_category in INLINE_ORIGINAL_CATEGORIES
     ):
+        if normalized_category in _SEMANTICALLY_TRANSLATED_ENTITY_CATEGORIES:
+            if context_independent and independent_evidence >= 2:
+                return "source_observed_entity"
+            return "observed_entity_advisory"
         return "source_observed_entity"
     if origin in _LOW_AUTHORITY_ORIGINS:
         if (
@@ -1272,6 +1280,19 @@ class ProperNouns:
                         f"category={category}; do not force this wording in another sense; "
                         "never add an English parenthetical]"
                     )
+            elif authority_class in {
+                "contextual_advisory", "observed_entity_advisory",
+            }:
+                occurrence = (
+                    "introduced" if en in self._introduced
+                    else "first occurrence pending"
+                )
+                marker = (
+                    f"[{occurrence}; observed identity evidence, but Persian "
+                    f"wording is advisory; authority={authority_class}; source "
+                    "context decides; add the English original only beside a "
+                    "source-faithful rendering]"
+                )
             elif en in self._introduced:
                 marker = "[introduced]"
             elif not include_inline_originals:
@@ -1367,9 +1388,7 @@ class ProperNouns:
                 record = self._provenance[source]
                 record.setdefault("evidence_keys", [])
                 record.setdefault("context_independent", False)
-                record.setdefault(
-                    "authority_class",
-                    _mapping_authority_class(
+                computed_authority = _mapping_authority_class(
                         source,
                         self._nouns[source],
                         self._categories.get(source, "proper_noun"),
@@ -1380,8 +1399,11 @@ class ProperNouns:
                             if str(value)
                         ],
                         bool(record.get("context_independent", False)),
-                    ),
-                )
+                    )
+                if record.get("origin") in _LOW_AUTHORITY_ORIGINS:
+                    record["authority_class"] = computed_authority
+                else:
+                    record.setdefault("authority_class", computed_authority)
                 if record.get("origin") in _LOW_AUTHORITY_ORIGINS:
                     category = low_authority_mapping_category(
                         source,

@@ -12,18 +12,19 @@ from __future__ import annotations
 
 GENERAL_EDITORIAL_CONTRACT: str = """\
 ### General editorial contract
-- Resolve meaning from proposition and context; never force an isolated dictionary equivalent.
-- Preserve semantic roles and relations, including quantity, negation, modality,
-  comparison, causality, and time. Preserve source inconsistencies too.
+- Resolve meaning in context; never force an isolated dictionary equivalent.
+- Preserve semantic roles and relations: quantity, negation, modality, comparison,
+  causality, and time. Preserve source inconsistencies.
 - Preserve titles, names, citations, multilingual expressions, and note markers;
   translate only their connective prose.
-- Write idiomatic academic Iranian Persian with clear dependencies, agreement,
+- Write clear academic Iranian Persian with sound dependencies, agreement,
   punctuation, ZWNJ, and ezafe; avoid calques and opaque modifier stacks.
-- Use conventional hamza after final heh when ezafe is needed. Preserve selective
-  model-authored kasra, but never add blanket diacritics.
-- Keep appositives attached without breaking predicates or head-complement links.
-- Preserve distinctions and parallel form in a recurring coordinated conceptual series when
-  supported by source context or mandatory terminology.
+- Use conventional final-heh hamza for ezafe. Preserve selective authored kasra;
+  never add blanket diacritics.
+- Preserve a clear finite matrix clause. Recast stacked English modifiers into
+  natural Persian clauses while keeping appositives and head-complement links intact.
+- Preserve distinctions and parallel form in recurring coordinated conceptual series when
+  supported by source or mandatory terminology.
 - Emit only the requested response; never add commentary or unexplained foreign prose.
 - Mandatory entries and established names bind. Advisory context remains revisable
   and cannot override source.
@@ -537,7 +538,10 @@ Instructions:
 5. Focus on: main arguments, key concepts, named entities, and chapter progression.
 6. Summarize only claims supported by the current summary and new translated content.
    Do not extrapolate from a table of contents, book research, or future chapter titles.
-7. Return plain text under the required headers. Do not emit HTML or XML tags.
+7. Treat the English source as factual authority when it conflicts with wording in
+   the translation. Preserve explicit quantities and established Persian terms;
+   do not coin a near-copy spelling or broaden a term with contextual material.
+8. Return plain text under the required headers. Do not emit HTML or XML tags.
 
 Output format (use these exact headers):
 

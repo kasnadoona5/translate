@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from tarjomeh.exporters.base import TranslatedDocument
-from tarjomeh.glossary.manager import GlossaryManager
-from tarjomeh.glossary.compliance import term_occurs_only_in_citations
 from tarjomeh.memory.proper_nouns import source_term_pattern, source_term_present
 from tarjomeh.persian.typography import PersianTypographer
-from tarjomeh.quality.integrity import source_abbreviation_expansions
+
+if TYPE_CHECKING:
+    from tarjomeh.glossary.manager import GlossaryManager
 
 
 NOTE_CAPABLE_FORMATS = {"docx", "epub", "markdown"}
@@ -130,6 +130,8 @@ def ensure_inline_proper_noun_originals(
     return_report: bool = False,
 ) -> int | dict[str, Any]:
     """Anchor one English original to its exact source occurrence."""
+    from tarjomeh.glossary.compliance import term_occurs_only_in_citations
+
     inserted = 0
     repositioned = 0
     paired_repaired = 0
@@ -676,6 +678,8 @@ def audit_inline_english_originals(
     An unknown insertion is evidence for review, not permission to delete text:
     removing an expression can leave a grammatically incomplete translation.
     """
+    from tarjomeh.quality.integrity import source_abbreviation_expansions
+
     authorized = {
         _original_identity(source): source
         for source in authorized_originals

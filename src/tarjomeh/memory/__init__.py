@@ -11,6 +11,21 @@ Orchestrated by :class:`MemoryManager`.
 
 from __future__ import annotations
 
-from tarjomeh.memory.manager import MemoryContext, MemoryManager
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from tarjomeh.memory.manager import MemoryContext, MemoryManager
 
 __all__ = ["MemoryContext", "MemoryManager"]
+
+
+def __getattr__(name: str) -> Any:
+    """Load the orchestrator lazily so leaf memory modules remain importable."""
+    if name in __all__:
+        from tarjomeh.memory.manager import MemoryContext, MemoryManager
+
+        return {
+            "MemoryContext": MemoryContext,
+            "MemoryManager": MemoryManager,
+        }[name]
+    raise AttributeError(name)

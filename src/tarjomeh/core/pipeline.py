@@ -105,6 +105,7 @@ from tarjomeh.quality.integrity import (
     markup_wrapper_artifacts,
     parenthesis_artifacts,
     restore_source_identifiers,
+    restore_source_note_markers,
     normalize_for_match,
     protected_english_originals,
     protected_source_apparatus,
@@ -118,6 +119,27 @@ from tarjomeh.core.prompts import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _restore_source_bound_artifacts(
+    source: str,
+    translation: str,
+) -> tuple[str, dict[str, Any]]:
+    """Canonicalize exact identifiers and uniquely proven note markers."""
+    repaired, identifier_report = restore_source_identifiers(source, translation)
+    repaired, note_report = restore_source_note_markers(source, repaired)
+    report = dict(identifier_report)
+    report["identifier_repair_count"] = int(
+        identifier_report.get("repair_count", 0) or 0
+    )
+    report["note_marker_repair_count"] = int(
+        note_report.get("repair_count", 0) or 0
+    )
+    report["note_markers"] = note_report
+    report["repair_count"] = (
+        report["identifier_repair_count"] + report["note_marker_repair_count"]
+    )
+    return repaired, report
 
 
 class PipelinePausedException(Exception):
@@ -224,7 +246,7 @@ def restore_document_source_identifiers(
     repairs: list[dict[str, Any]] = []
     unresolved: list[dict[str, Any]] = []
     for paragraph in document.paragraphs:
-        repaired, report = restore_source_identifiers(
+        repaired, report = _restore_source_bound_artifacts(
             paragraph.source_text, paragraph.translated_text
         )
         paragraph.translated_text = repaired
@@ -2023,90 +2045,130 @@ def _salvage_local_refinement_edits(
             paragraph = previous.count("\n\n", 0, start)
             paragraph_groups.setdefault(paragraph, []).append(item)
 
-    # All accepted edits touching one paragraph are admitted or rejected as a
-    # coherent unit. This prevents individually valid substitutions from
-    # producing a broken dependency when combined.
+    # Admit non-overlapping edits monotonically. Every retained step is checked
+    # against the already accepted candidate, so one bad correction cannot
+    # discard an independent good correction in the same paragraph.
     for paragraph in sorted(paragraph_groups):
         group = paragraph_groups[paragraph]
-        candidate = current
-        failed_reason = ""
+        coherent_candidate = current
+        coherent_reason = ""
         for item in sorted(group, key=lambda value: int(value["order"])):
+            current_span = str(item["current_span"])
+            if coherent_candidate.count(current_span) != 1:
+                coherent_reason = "group_span_not_unique"
+                break
+            coherent_candidate = coherent_candidate.replace(
+                current_span, str(item["resulting_span"]), 1
+            )
+        coherent_integrity_payload: dict[str, Any] | None = None
+        if not coherent_reason:
+            if newly_source_unjustified_repeated_adjacent_spans(
+                source, current, coherent_candidate
+            ):
+                coherent_reason = "new_adjacent_phrase_repetition"
+            elif newly_source_unjustified_repeated_governed_spans(
+                source, current, coherent_candidate
+            ):
+                coherent_reason = "new_governed_phrase_repetition"
+            elif sentence_terminal_count(coherent_candidate) < sentence_terminal_count(current):
+                coherent_reason = "sentence_boundary_removed"
+            elif _introduced_structure_conflicts(
+                source, current, coherent_candidate
+            ):
+                coherent_reason = "new_source_structure_conflict"
+            elif any(
+                _finite_predicate_evidence_count(str(item["current_span"])) > 0
+                and _finite_predicate_evidence_count(
+                    str(item["resulting_span"])
+                ) == 0
+                for item in group
+            ):
+                coherent_reason = "local_predicate_evidence_removed"
+        if not coherent_reason:
+            coherent_integrity = integrity_gate.evaluate(
+                source,
+                coherent_candidate,
+                previous=current,
+                stage="refinement_local_salvage",
+                protected_terms=protected_terms,
+                protect_inline_english=protect_inline_english,
+                allowed_inline_originals=allowed_inline_originals,
+            )
+            coherent_integrity_payload = coherent_integrity.to_dict()
+            if not coherent_integrity.accepted:
+                coherent_reason = "local_integrity_rejected"
+        if not coherent_reason:
+            for item in group:
+                item["integrity"] = coherent_integrity_payload
+                item["reason"] = "coherent_local_edits_committed"
+                item["committed"] = True
+            current = coherent_candidate
+            committed += len(group)
+            continue
+
+        # If the complete coherent set fails, isolate the bad edit while
+        # retaining each independently valid correction in issue order.
+        for item in sorted(group, key=lambda value: int(value["order"])):
+            candidate = current
+            failed_reason = ""
             current_span = str(item["current_span"])
             if candidate.count(current_span) != 1:
                 failed_reason = "group_span_not_unique"
-                break
-            candidate = candidate.replace(
-                current_span, str(item["resulting_span"]), 1
-            )
-        integrity_payload: dict[str, Any] | None = None
-        if not failed_reason:
-            repeated_spans = newly_source_unjustified_repeated_adjacent_spans(
-                source, current, candidate
-            )
-            if repeated_spans:
-                simple_words_only = all(
-                    int(item.get("word_count", 0)) == 1
-                    and "\u200c" not in str(item.get("phrase", ""))
-                    for item in repeated_spans
+            else:
+                candidate = candidate.replace(
+                    current_span, str(item["resulting_span"]), 1
                 )
-                failed_reason = (
-                    "new_adjacent_word_repetition"
-                    if simple_words_only
-                    else "new_adjacent_phrase_repetition"
-                )
-                integrity_payload = {
-                    "repeated_spans": repeated_spans,
-                }
-            elif repeated_governed := (
-                newly_source_unjustified_repeated_governed_spans(
+            integrity_payload: dict[str, Any] | None = None
+            if not failed_reason:
+                repeated_spans = newly_source_unjustified_repeated_adjacent_spans(
                     source, current, candidate
                 )
-            ):
-                failed_reason = "new_governed_phrase_repetition"
-                integrity_payload = {
-                    "repeated_governed_spans": repeated_governed,
-                }
-            elif sentence_terminal_count(candidate) < sentence_terminal_count(current):
-                # Local salvage is a conservative fallback after a complete
-                # candidate failed. It may add a clarifying boundary, but it
-                # must not merge source-aligned sentences behind the rejected
-                # candidate's broader rewrite.
-                failed_reason = "sentence_boundary_removed"
-                integrity_payload = {
-                    "before_sentence_terminals": sentence_terminal_count(current),
-                    "after_sentence_terminals": sentence_terminal_count(candidate),
-                }
-            elif structure_conflicts := _introduced_structure_conflicts(
-                source, current, candidate
-            ):
-                failed_reason = "new_source_structure_conflict"
-                integrity_payload = {
-                    "structure_conflicts": structure_conflicts,
-                }
-            else:
-                predicate_regressions = [
-                    {
-                        "issue_id": str(item["issue_id"]),
-                        "source_quote": str(item["source_quote"]),
-                        "before": _finite_predicate_evidence_count(
-                            str(item["current_span"])
-                        ),
-                        "after": _finite_predicate_evidence_count(
-                            str(item["resulting_span"])
-                        ),
+                if repeated_spans:
+                    simple_words_only = all(
+                        int(span.get("word_count", 0)) == 1
+                        and "\u200c" not in str(span.get("phrase", ""))
+                        for span in repeated_spans
+                    )
+                    failed_reason = (
+                        "new_adjacent_word_repetition"
+                        if simple_words_only
+                        else "new_adjacent_phrase_repetition"
+                    )
+                    integrity_payload = {"repeated_spans": repeated_spans}
+                elif repeated_governed := (
+                    newly_source_unjustified_repeated_governed_spans(
+                        source, current, candidate
+                    )
+                ):
+                    failed_reason = "new_governed_phrase_repetition"
+                    integrity_payload = {
+                        "repeated_governed_spans": repeated_governed,
                     }
-                    for item in group
-                    if _finite_predicate_evidence_count(
-                        str(item["current_span"])
-                    ) > 0
+                elif sentence_terminal_count(candidate) < sentence_terminal_count(current):
+                    failed_reason = "sentence_boundary_removed"
+                    integrity_payload = {
+                        "before_sentence_terminals": sentence_terminal_count(current),
+                        "after_sentence_terminals": sentence_terminal_count(candidate),
+                    }
+                elif structure_conflicts := _introduced_structure_conflicts(
+                    source, current, candidate
+                ):
+                    failed_reason = "new_source_structure_conflict"
+                    integrity_payload = {"structure_conflicts": structure_conflicts}
+                elif (
+                    _finite_predicate_evidence_count(current_span) > 0
                     and _finite_predicate_evidence_count(
                         str(item["resulting_span"])
                     ) == 0
-                ]
-                if predicate_regressions:
+                ):
                     failed_reason = "local_predicate_evidence_removed"
                     integrity_payload = {
-                        "predicate_regressions": predicate_regressions,
+                        "predicate_regressions": [{
+                            "issue_id": str(item["issue_id"]),
+                            "source_quote": str(item["source_quote"]),
+                            "before": _finite_predicate_evidence_count(current_span),
+                            "after": 0,
+                        }],
                     }
             if not failed_reason:
                 integrity = integrity_gate.evaluate(
@@ -2121,13 +2183,12 @@ def _salvage_local_refinement_edits(
                 integrity_payload = integrity.to_dict()
                 if not integrity.accepted:
                     failed_reason = "local_integrity_rejected"
-        for item in group:
             item["integrity"] = integrity_payload
             item["reason"] = failed_reason or "local_edit_committed"
             item["committed"] = not failed_reason
-        if not failed_reason:
-            current = candidate
-            committed += len(group)
+            if not failed_reason:
+                current = candidate
+                committed += 1
 
     for item in sorted(prepared, key=lambda value: int(value["order"])):
         decision = dict(cast(dict[str, Any], item["decision"]))
@@ -7725,7 +7786,7 @@ class TranslationPipeline:
             translation = recover_all_parts()
             log_recovery_protocol("adaptive_recovery_assembly", translation)
 
-            translation, identifier_repairs = restore_source_identifiers(
+            translation, identifier_repairs = _restore_source_bound_artifacts(
                 chunk.text, translation
             )
             if identifier_repairs["repair_count"]:
@@ -7762,7 +7823,7 @@ class TranslationPipeline:
                     log_recovery_protocol(
                         "adaptive_recovery_strict_assembly", translation
                     )
-                    translation, identifier_repairs = restore_source_identifiers(
+                    translation, identifier_repairs = _restore_source_bound_artifacts(
                         chunk.text, translation
                     )
                     if identifier_repairs["repair_count"]:
@@ -7798,7 +7859,7 @@ class TranslationPipeline:
         translation, orthography_edits = apply_safe_persian_orthography(
             translation
         )
-        translation, identifier_repairs = restore_source_identifiers(
+        translation, identifier_repairs = _restore_source_bound_artifacts(
             chunk.text, translation
         )
         if identifier_repairs["repair_count"]:
@@ -7951,7 +8012,7 @@ class TranslationPipeline:
                             apply_safe_persian_orthography(repaired_translation)
                         )
                         repaired_translation, repair_identifiers = (
-                            restore_source_identifiers(
+                            _restore_source_bound_artifacts(
                                 chunk.text, repaired_translation
                             )
                         )
@@ -8972,7 +9033,7 @@ class TranslationPipeline:
                     apply_safe_persian_orthography(proposed_translation)
                 )
                 proposed_translation, refinement_identifier_repairs = (
-                    restore_source_identifiers(chunk.text, proposed_translation)
+                    _restore_source_bound_artifacts(chunk.text, proposed_translation)
                 )
                 if refinement_identifier_repairs["repair_count"]:
                     self.db.log_chunk_event(
@@ -9544,7 +9605,7 @@ Output ONLY the corrected Persian translation.
             self.db.log_chunk_event(job_id, idx, "glossary_compliance_skipped", {"enabled": False})
 
         if integrity_enabled:
-            translation, identifier_repairs = restore_source_identifiers(
+            translation, identifier_repairs = _restore_source_bound_artifacts(
                 chunk.text, translation
             )
             if identifier_repairs["repair_count"]:
@@ -9838,6 +9899,10 @@ Output ONLY the corrected Persian translation.
         language_candidate, safe_language_repair = (
             repair_source_grounded_language_artifacts(chunk.text, translation)
         )
+        language_candidate, source_bound_repairs = (
+            _restore_source_bound_artifacts(chunk.text, language_candidate)
+        )
+        safe_language_repair["source_bound_repairs"] = source_bound_repairs
         safe_language_repair["accepted"] = False
         if language_candidate != translation:
             language_integrity = integrity_gate.evaluate(
@@ -10050,6 +10115,11 @@ Output ONLY the corrected Persian translation.
                             _operation="translation_language_repair",
                             _recovery_source_text=source_part,
                         ).strip()
+                        candidate_part, paragraph_source_repairs = (
+                            _restore_source_bound_artifacts(
+                                source_part, candidate_part
+                            )
+                        )
                         candidate_quality = audit_translation_language(
                             source_part,
                             candidate_part,
@@ -10168,6 +10238,7 @@ Output ONLY the corrected Persian translation.
                                 candidate_part,
                                 structural_role=language_role,
                             ),
+                            "source_bound_repairs": paragraph_source_repairs,
                         })
                         if (
                             candidate_part
@@ -10226,6 +10297,47 @@ Output ONLY the corrected Persian translation.
             "targeted_language_repair",
             targeted_language_repair,
         )
+        translation, final_source_bound_repairs = (
+            _restore_source_bound_artifacts(chunk.text, translation)
+        )
+        self.db.log_chunk_event(
+            job_id,
+            idx,
+            "source_bound_artifact_recovery",
+            {
+                "stage": "final_canonical_admission",
+                **final_source_bound_repairs,
+            },
+        )
+        if integrity_enabled:
+            final_canonical_integrity = integrity_gate.evaluate(
+                chunk.text,
+                translation,
+                stage="final_canonical_admission",
+                protected_terms=protected_targets,
+                protect_inline_english=protect_inline_english,
+                allowed_inline_originals=allowed_inline_originals,
+                enforce_all_terms=bool(
+                    self.config.glossary.enable_compliance_check
+                ),
+            )
+            self.db.log_chunk_event(
+                job_id,
+                idx,
+                "integrity_check_completed",
+                final_canonical_integrity.to_dict(),
+            )
+            if not final_canonical_integrity.accepted:
+                self.db.log_chunk_event(
+                    job_id,
+                    idx,
+                    "integrity_final_failed",
+                    final_canonical_integrity.to_dict(),
+                )
+                raise ValueError(
+                    "Final canonical translation failed deterministic integrity "
+                    "after source-confirmed artifact recovery."
+                )
         try:
             final_structure_payload = {
                 "stage": "final_translation_after_bounded_repair",

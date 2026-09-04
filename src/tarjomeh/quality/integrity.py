@@ -16,7 +16,14 @@ _DIGIT_MAP = str.maketrans(
     "\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669",
     "01234567890123456789",
 )
-_SUPERSCRIPT_MAP = str.maketrans("\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079\u2070", "1234567890")
+_SUPERSCRIPT_MAP = str.maketrans(
+    "\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079\u2070",
+    "1234567890",
+)
+_ASCII_TO_SUPERSCRIPT = str.maketrans(
+    "0123456789",
+    "\u2070\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079",
+)
 _NUMBER_RE = re.compile(r"(?<!\w)[+-]?\d+(?:[.,\u066b\u066c]\d+)*(?:\s*[%\u066a])?")
 _NOTE_RE = re.compile(r"\[(\d+)\]|([\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079\u2070]+)")
 _PLAIN_NOTE_DIGITS = "0-9\u0660-\u0669\u06f0-\u06f9"
@@ -671,6 +678,149 @@ def available_note_markers(text: str, required: Counter[str]) -> Counter[str]:
         return strict
     spaced = Counter(extract_note_markers(text, allow_spaced=True))
     return strict | Counter({value: spaced[value] for value in required if spaced[value]})
+
+
+def restore_source_note_markers(
+    source: str,
+    translation: str,
+) -> tuple[str, dict[str, Any]]:
+    """Restore note markers only at positions uniquely proven by the source.
+
+    PDF extraction can flatten a superscript after a parenthetical name. A
+    later edit may preserve that exact parenthetical but drop its note number.
+    This repair uses a unique shared anchor, or a unique aligned paragraph-final
+    marker. Ambiguous locations are reported and remain blocking.
+    """
+    repaired = translation or ""
+    required = Counter(extract_note_markers(source))
+    missing = required - available_note_markers(repaired, required)
+    repairs: list[dict[str, Any]] = []
+    ambiguous: list[dict[str, Any]] = []
+    if not missing:
+        return repaired, {
+            "repair_count": 0,
+            "repairs": [],
+            "ambiguous": [],
+            "unresolved": [],
+        }
+
+    def marker_pattern(marker: str) -> str:
+        variants: list[str] = []
+        superscripts = "\u2070\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079"
+        for digit in marker:
+            value = int(digit)
+            variants.append(
+                "[" + re.escape(
+                    f"{digit}{chr(0x06F0 + value)}{chr(0x0660 + value)}"
+                    f"{superscripts[value]}"
+                ) + "]"
+            )
+        return "".join(variants)
+
+    for marker in list(missing.elements()):
+        token = marker_pattern(marker)
+        source_anchor_re = re.compile(
+            rf"\((?P<anchor>[^()\n]{{2,240}})\)\s*{token}"
+            rf"(?=$|[\s,.;:!?\u060c\u061b\u061f\u2013\u2014])"
+        )
+        anchors: list[str] = []
+        for match in source_anchor_re.finditer(source or ""):
+            anchor = match.group("anchor").strip()
+            if not re.search(r"[A-Za-z\u00c0-\u024f]", anchor):
+                continue
+            anchors.append(anchor)
+            trailing_name = re.search(
+                r"(?P<name>[A-Z\u00c0-\u00de][A-Za-z\u00c0-\u024f'\u2019-]+"
+                r"(?:\s+[A-Z\u00c0-\u00de][A-Za-z\u00c0-\u024f'\u2019-]+){1,5})$",
+                anchor,
+            )
+            if trailing_name:
+                anchors.append(trailing_name.group("name"))
+        target_candidates: list[tuple[int, str]] = []
+        for anchor in dict.fromkeys(anchors):
+            flexible = re.escape(anchor).replace(r"\ ", r"\s+")
+            matches = list(re.finditer(rf"\({flexible}\)", repaired, re.IGNORECASE))
+            if (source or "").count(anchor) == 1 and len(matches) == 1:
+                match = matches[0]
+                after = repaired[match.end():match.end() + len(marker) + 2]
+                if not re.match(rf"\s*{token}", after):
+                    target_candidates.append((match.end(), anchor))
+        if len(target_candidates) == 1:
+            offset, anchor = target_candidates[0]
+            rendered = marker.translate(_ASCII_TO_SUPERSCRIPT)
+            repaired = repaired[:offset] + rendered + repaired[offset:]
+            repairs.append({
+                "type": "unique_parenthetical_note_anchor",
+                "marker": marker,
+                "anchor": anchor,
+                "offset": offset,
+                "rendered": rendered,
+            })
+            missing[marker] -= 1
+            if missing[marker] <= 0:
+                del missing[marker]
+        elif len(target_candidates) > 1:
+            ambiguous.append({
+                "marker": marker,
+                "reason": "multiple_target_parenthetical_anchors",
+                "candidate_count": len(target_candidates),
+            })
+
+    source_paragraphs = _paragraphs(source)
+    target_paragraphs = _paragraphs(repaired)
+    if missing and len(source_paragraphs) == len(target_paragraphs):
+        for paragraph_index, (source_part, target_part) in enumerate(
+            zip(source_paragraphs, target_paragraphs, strict=True)
+        ):
+            local_required = Counter(extract_note_markers(source_part))
+            local_available = available_note_markers(target_part, local_required)
+            for marker in list((local_required - local_available).elements()):
+                if missing[marker] <= 0:
+                    continue
+                token = marker_pattern(marker)
+                normalized_source = source_part.translate(_DIGIT_MAP)
+                if not re.search(
+                    rf"(?:[.!?\u061f\u2026]|\))\s*{token}\s*$",
+                    normalized_source,
+                ):
+                    continue
+                source_paragraph_occurrences = sum(
+                    Counter(extract_note_markers(part))[marker] > 0
+                    for part in source_paragraphs
+                )
+                if source_paragraph_occurrences != 1:
+                    ambiguous.append({
+                        "marker": marker,
+                        "reason": "paragraph_final_marker_not_unique",
+                        "paragraph_index": paragraph_index,
+                    })
+                    continue
+                rendered = marker.translate(_ASCII_TO_SUPERSCRIPT)
+                target_paragraphs[paragraph_index] = target_part.rstrip() + rendered
+                repaired = "\n\n".join(target_paragraphs)
+                repairs.append({
+                    "type": "aligned_paragraph_final_note_marker",
+                    "marker": marker,
+                    "paragraph_index": paragraph_index,
+                    "rendered": rendered,
+                })
+                missing[marker] -= 1
+                if missing[marker] <= 0:
+                    del missing[marker]
+
+    unresolved = list(
+        (required - available_note_markers(repaired, required)).elements()
+    )
+    return repaired, {
+        "repair_count": len(repairs),
+        "repairs": repairs,
+        "ambiguous": ambiguous,
+        "unresolved": unresolved,
+        "policy": (
+            "source-confirmed unique anchors only; ambiguous note positions "
+            "remain blocking"
+        ),
+    }
 
 
 def extract_identifiers(text: str) -> Counter[str]:
