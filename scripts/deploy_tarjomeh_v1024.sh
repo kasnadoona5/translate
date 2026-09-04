@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 cd /opt/translate
 
-TAG="v10.24.0"
+TAG="v10.24.1"
 CONTAINER="translate_tarjomeh_1"
 SERVICE="tarjomeh"
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -223,7 +223,10 @@ sources = {
     "term_notes": (r / "core" / "term_notes.py").read_text(encoding="utf-8"),
 }
 checks = {
-    "atomic_local_salvage": "coherent unit" in sources["pipeline"],
+    "atomic_local_salvage": (
+        "_salvage_local_refinement_edits" in sources["pipeline"]
+        and "coherent_local_edits_committed" in sources["pipeline"]
+    ),
     "salvage_rollback": "refinement_salvage_rolled_back" in sources["pipeline"],
     "bounded_readability": "review_persian_readability" in sources["critique"],
     "readability_advisory": "target_only_advisory" in sources["pipeline"],
@@ -483,7 +486,10 @@ d = (r / "jobs" / "database.py").read_text(encoding="utf-8")
 l = (r / "core" / "llm_client.py").read_text(encoding="utf-8")
 o = (r / "core" / "term_notes.py").read_text(encoding="utf-8")
 checks = {
-    "atomic_local_salvage": "coherent unit" in p,
+    "atomic_local_salvage": (
+        "_salvage_local_refinement_edits" in p
+        and "coherent_local_edits_committed" in p
+    ),
     "salvage_rollback": "refinement_salvage_rolled_back" in p,
     "bounded_readability": "review_persian_readability" in c,
     "promoted_readability": (

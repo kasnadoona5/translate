@@ -252,7 +252,10 @@ def test_v1024_release_scripts_are_current_and_audit_canonical_admission() -> No
     ).read_text(encoding="utf-8")
 
     assert deploy.startswith("#!/usr/bin/env bash\n")
-    assert 'TAG="v10.24.0"' in deploy
+    assert 'TAG="v10.24.1"' in deploy
+    assert '"coherent unit" in' not in deploy
+    assert '"_salvage_local_refinement_edits" in' in deploy
+    assert '"coherent_local_edits_committed" in' in deploy
     assert "VERIFY 9ROUTER UNCHANGED" in deploy
     assert 'docker rm -f "$CONTAINER"' in deploy
     assert "docker rm -f 9router" not in deploy
