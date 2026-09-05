@@ -29,13 +29,13 @@ _NOTE_RE = re.compile(r"\[(\d+)\]|([\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u
 _PLAIN_NOTE_DIGITS = "0-9\u0660-\u0669\u06f0-\u06f9"
 _PLAIN_ATTACHED_NOTE_RE = re.compile(
     rf"(?<![{_PLAIN_NOTE_DIGITS}])"
-    rf"(?P<leader>[)\],.;:!?\u060c\u061b\u061f])"
+    rf"(?P<leader>[)\]\"\u00bb\u201d,.;:!?\u060c\u061b\u061f])"
     rf"(?P<marker>[{_PLAIN_NOTE_DIGITS}]{{1,3}})"
     rf"(?=\s*(?:[-\u2010-\u2015]|[A-Za-z\u0600-\u06ff]|$))"
 )
 _PLAIN_SPACED_NOTE_RE = re.compile(
     rf"(?<![{_PLAIN_NOTE_DIGITS}])"
-    rf"(?P<leader>[)\],.;:!?\u060c\u061b\u061f])\s*"
+    rf"(?P<leader>[)\]\"\u00bb\u201d,.;:!?\u060c\u061b\u061f])\s*"
     rf"(?P<marker>[{_PLAIN_NOTE_DIGITS}]{{1,3}})"
     rf"(?=\s*(?:[-\u2010-\u2015\u060c\u061b\u061f,;.!?]|"
     rf"[A-Za-z\u0600-\u06ff]|$))"
@@ -688,8 +688,9 @@ def restore_source_note_markers(
 
     PDF extraction can flatten a superscript after a parenthetical name. A
     later edit may preserve that exact parenthetical but drop its note number.
-    This repair uses a unique shared anchor, or a unique aligned paragraph-final
-    marker. Ambiguous locations are reported and remain blocking.
+    This repair uses a unique shared anchor, a unique aligned sentence boundary,
+    or a unique aligned paragraph-final marker. Ambiguous locations are reported
+    and remain blocking.
     """
     repaired = translation or ""
     required = Counter(extract_note_markers(source))
@@ -716,6 +717,40 @@ def restore_source_note_markers(
                 ) + "]"
             )
         return "".join(variants)
+
+    sentence_closers = r"[\"'\u00bb\u2019\u201d)\]]*"
+    sentence_starters = r"(?:[\"'\u00ab\u2018\u201c(\[]*)[A-Z\u0600-\u06ff]"
+
+    def sentence_boundaries(value: str) -> list[int]:
+        """Return conservative sentence-end offsets used only for alignment."""
+        pattern = re.compile(
+            rf"(?P<terminal>[.!?\u061f\u2026]+{sentence_closers})"
+            rf"(?P<gap>\s+|$)(?={sentence_starters}|$)"
+        )
+        return [match.end("terminal") for match in pattern.finditer(value or "")]
+
+    def remove_sentence_marker(value: str, token: str) -> str:
+        return re.sub(
+            rf"(?P<terminal>[.!?\u061f\u2026]+{sentence_closers})\s*{token}",
+            r"\g<terminal>",
+            value or "",
+        )
+
+    def marked_sentence_boundaries(value: str, token: str) -> list[tuple[int, int]]:
+        """Return ``(ordinal, offset)`` for source sentence ends carrying a marker."""
+        plain_boundaries = sentence_boundaries(
+            remove_sentence_marker(value, token)
+        )
+        pattern = re.compile(
+            rf"(?P<terminal>[.!?\u061f\u2026]+{sentence_closers})\s*{token}"
+            rf"(?P<gap>\s+|$)(?={sentence_starters}|$)"
+        )
+        marked: list[tuple[int, int]] = []
+        for match in pattern.finditer(value or ""):
+            ordinal = sum(offset <= match.end("terminal") for offset in plain_boundaries) - 1
+            if ordinal >= 0:
+                marked.append((ordinal, match.end("terminal")))
+        return marked
 
     for marker in list(missing.elements()):
         token = marker_pattern(marker)
@@ -765,6 +800,67 @@ def restore_source_note_markers(
                 "reason": "multiple_target_parenthetical_anchors",
                 "candidate_count": len(target_candidates),
             })
+
+    source_paragraphs = _paragraphs(source)
+    target_paragraphs = _paragraphs(repaired)
+    if missing and len(source_paragraphs) == len(target_paragraphs):
+        for marker in list(missing.elements()):
+            if required[marker] != 1:
+                ambiguous.append({
+                    "marker": marker,
+                    "reason": "sentence_marker_not_globally_unique",
+                    "source_count": required[marker],
+                })
+                continue
+            token = marker_pattern(marker)
+            candidates: list[tuple[int, int, int]] = []
+            for paragraph_index, (source_part, target_part) in enumerate(
+                zip(source_paragraphs, target_paragraphs, strict=True)
+            ):
+                marked = marked_sentence_boundaries(source_part, token)
+                if len(marked) != 1:
+                    continue
+                source_boundaries = sentence_boundaries(
+                    remove_sentence_marker(source_part, token)
+                )
+                target_boundaries = sentence_boundaries(target_part)
+                ordinal, _source_offset = marked[0]
+                if (
+                    len(source_boundaries) < 2
+                    or len(source_boundaries) != len(target_boundaries)
+                    or ordinal >= len(target_boundaries) - 1
+                ):
+                    continue
+                candidates.append((
+                    paragraph_index,
+                    ordinal,
+                    target_boundaries[ordinal],
+                ))
+            if len(candidates) == 1:
+                paragraph_index, ordinal, offset = candidates[0]
+                target_part = target_paragraphs[paragraph_index]
+                rendered = marker.translate(_ASCII_TO_SUPERSCRIPT)
+                target_paragraphs[paragraph_index] = (
+                    target_part[:offset] + rendered + target_part[offset:]
+                )
+                repaired = "\n\n".join(target_paragraphs)
+                repairs.append({
+                    "type": "aligned_sentence_terminal_note_marker",
+                    "marker": marker,
+                    "paragraph_index": paragraph_index,
+                    "sentence_index": ordinal,
+                    "offset": offset,
+                    "rendered": rendered,
+                })
+                missing[marker] -= 1
+                if missing[marker] <= 0:
+                    del missing[marker]
+            elif len(candidates) > 1:
+                ambiguous.append({
+                    "marker": marker,
+                    "reason": "multiple_aligned_sentence_boundaries",
+                    "candidate_count": len(candidates),
+                })
 
     source_paragraphs = _paragraphs(source)
     target_paragraphs = _paragraphs(repaired)

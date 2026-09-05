@@ -11,22 +11,22 @@ from __future__ import annotations
 
 
 GENERAL_EDITORIAL_CONTRACT: str = """\
-### General editorial contract
+### Editorial contract
 - Resolve meaning in context; never force an isolated dictionary equivalent.
 - Preserve semantic roles and relations: quantity, negation, modality, comparison,
   causality, and time. Preserve source inconsistencies.
-- Preserve titles, names, citations, multilingual expressions, and note markers;
-  translate only their connective prose.
-- Write clear academic Iranian Persian with sound dependencies, agreement,
-  punctuation, ZWNJ, and ezafe; avoid calques and opaque modifier stacks.
-- Use conventional final-heh hamza for ezafe. Preserve selective authored kasra;
-  never add blanket diacritics.
-- Preserve a clear finite matrix clause. Recast stacked English modifiers into
-  natural Persian clauses while keeping appositives and head-complement links intact.
+- Preserve titles, names, citations, expressions, and note markers.
+- Write clear academic Iranian Persian with correct syntax, punctuation, ZWNJ,
+  and ezafe; avoid calques and modifier stacks.
+- Use final-heh hamza for ezafe and preserve authored kasra; never add blanket diacritics.
+- Keep finite matrix clauses. Recast stacked modifiers naturally without breaking
+  appositives or head-complement links.
+- Render relational frames such as "in X terms" by their contextual function,
+  not an opaque English preposition frame.
 - Preserve distinctions and parallel form in recurring coordinated conceptual series when
   supported by source or mandatory terminology.
-- Emit only the requested response; never add commentary or unexplained foreign prose.
-- Mandatory entries and established names bind. Advisory context remains revisable
+- Emit only requested output; never add commentary or unexplained foreign prose.
+- Mandatory entries and names bind. Advisory context remains revisable
   and cannot override source.
 """
 
@@ -90,7 +90,7 @@ ACADEMIC_EXEMPLARS: str = """\
 ### Exemplars — match this register and these conventions exactly
 Example 1 (political theory, formal register):
 EN: The state, on this account, is not a neutral arbiter but an ensemble of institutions that crystallizes prevailing relations of power.
-FA: دولت، بنا بر این روایت، داور بی‌طرف نیست، بلکه مجموعه‌ای از نهادهاست که مناسبات مسلطِ قدرت را تثبیت می‌کند.
+FA: دولت، بنا بر این روایت، داور بی‌طرف نیست، بلکه مجموعهٔ نهادهایی است که مناسبات مسلطِ قدرت را تثبیت می‌کند.
 
 Example 2 (philosophy, first-occurrence proper noun gets the English parenthetical):
 EN: Hegemony, as Gramsci conceives it, operates less through coercion than through the organization of consent.
@@ -98,7 +98,7 @@ FA: هژمونی، آن‌گونه که گرامشی (Gramsci) در نظر دا�
 
 Example 3 (quotation translated, citation kept in Latin script and Western digits):
 EN: As Marx (1867, 92) observes, "the wealth of societies appears as an immense collection of commodities."
-FA: چنان‌که مارکس (Marx) (1867, 92) خاطرنشان می‌کند، «ثروت جامعه‌ها همچون توده‌ای عظیم از کالاها پدیدار می‌شود».
+FA: چنان‌که مارکس (Marx) (1867, 92) خاطرنشان می‌کند، «ثروتِ جامعه‌ها همچون مجموعهٔ عظیمی از کالاها پدیدار می‌شود».
 """
 
 

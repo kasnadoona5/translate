@@ -451,7 +451,9 @@ def _citation_without_repeated_surname(original: str, citation: str) -> str:
     ).strip()
 
 
-def _normalize_citation_house_style(text: str) -> tuple[str, list[dict[str, str]]]:
+def normalize_citation_house_style_text(
+    text: str,
+) -> tuple[str, list[dict[str, str]]]:
     """Translate only citation framing and normalize structural separators."""
     changes: list[dict[str, str]] = []
 
@@ -507,6 +509,11 @@ def _normalize_citation_house_style(text: str) -> tuple[str, list[dict[str, str]
         return replacement
 
     return _STRUCTURAL_REFERENCE_RE.sub(structural, result), changes
+
+
+# Backward-compatible private name for callers outside the package that used
+# the pre-v10.25 helper while it was still internal.
+_normalize_citation_house_style = normalize_citation_house_style_text
 
 
 def normalize_adjacent_original_citations(
@@ -569,7 +576,7 @@ def normalize_adjacent_original_citations(
         paragraph.translated_text = _ORIGINAL_BARE_YEAR_RE.sub(
             replace_bare_year, paragraph.translated_text or ""
         )
-        normalized, style_changes = _normalize_citation_house_style(
+        normalized, style_changes = normalize_citation_house_style_text(
             paragraph.translated_text
         )
         paragraph.translated_text = normalized

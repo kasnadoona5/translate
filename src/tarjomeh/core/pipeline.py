@@ -77,6 +77,7 @@ from tarjomeh.core.term_notes import (
     ensure_inline_proper_noun_originals,
     merge_inline_english_original_audits,
     normalize_adjacent_original_citations,
+    normalize_citation_house_style_text,
     reconcile_redundant_original_fragments,
 )
 from tarjomeh.exporters import get_exporter
@@ -1214,6 +1215,7 @@ def _targeted_language_repair_prompt(
     *,
     structural_role: str,
     source_fidelity_findings: list[dict[str, Any]] | None = None,
+    objective_language_findings: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build one paragraph-local repair request from grounded final evidence."""
     evidence = {
@@ -1246,6 +1248,17 @@ def _targeted_language_repair_prompt(
         for item in list(source_fidelity_findings or [])
         if isinstance(item, dict)
     ]
+    objective = [
+        {
+            key: item.get(key)
+            for key in (
+                "issue_id", "category", "severity", "confidence",
+                "current_persian_quote", "suggested_correction", "rationale",
+            )
+        }
+        for item in list(objective_language_findings or [])
+        if isinstance(item, dict)
+    ]
     return f"""\
 The accepted Persian paragraph below has grounded final-review evidence. Correct
 only the evidenced artifacts while preserving its full meaning.
@@ -1265,19 +1278,25 @@ only the evidenced artifacts while preserving its full meaning.
 ### Source-fidelity findings from the source-aware critic
 {json.dumps(grounded, ensure_ascii=False, indent=2)}
 
+### Objective Persian dependency and readability findings
+{json.dumps(objective, ensure_ascii=False, indent=2)}
+
 Requirements:
 1. Return exactly one complete Persian paragraph and nothing else.
 2. Preserve every proposition, qualification, relation, citation, number, name,
    required English parenthetical, and list or table label.
 3. Change only what is necessary to remove the listed foreign-script, untranslated
    ordinary prose, duplicate, semantic-dash, tatweel-punctuation, markup,
-   parenthesis, detached-ezafe, or explicitly grounded source-fidelity defect.
+   parenthesis, detached-ezafe, explicitly grounded source-fidelity defect, or
+   exact-span Persian predicate, governor, attachment, scope, or calque defect.
 4. Do not choose new terminology, summarize, add commentary, or alter source facts.
 5. Use fluent formal Iranian Persian. For a contents/title row, preserve the title's
    meaning and page label while repairing Persian syntax.
 6. When a source-fidelity finding identifies an omitted proposition, quantity,
    qualification, relation, negation, or modality, restore exactly that obligation;
    do not rewrite unrelated correct wording.
+7. Restructure English-order modifier stacks into transparent academic Persian when
+   requested, but never simplify, merge, omit, or reinterpret a source proposition.
 """
 
 
@@ -1924,7 +1943,7 @@ def _refinement_decisions_with_commit_state(
 
 
 _PERSIAN_VERB_LETTERS = (
-    "\u0621-\u063a\u0641-\u064a\u067e\u0686\u0698\u06a9\u06cc"
+    "\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff"
 )
 _FINITE_PREDICATE_EVIDENCE_RE = re.compile(
     rf"(?<![{_PERSIAN_VERB_LETTERS}])(?:"
@@ -1947,6 +1966,65 @@ _FINITE_PREDICATE_EVIDENCE_RE = re.compile(
 def _finite_predicate_evidence_count(text: str) -> int:
     """Count conservative Persian finite-predicate surfaces for edit monotonicity."""
     return len(_FINITE_PREDICATE_EVIDENCE_RE.findall(text or ""))
+
+
+_BOUNDARY_FUNCTION_WORDS = frozenset({
+    "اگر", "اما", "از", "با", "بر", "برای", "به", "پس", "تا", "چون", "در",
+    "را", "زیرا", "که", "و", "یا",
+})
+_PERSIAN_BOUNDARY_WORD_RE = re.compile(
+    r"[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]+"
+    r"(?:\u200c[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]+)*"
+)
+
+
+def _replace_local_span_with_boundary_guard(
+    source: str,
+    text: str,
+    current_span: str,
+    resulting_span: str,
+) -> tuple[str, str, dict[str, Any] | None]:
+    """Remove one unsupported duplicated function word at an edit boundary."""
+    if text.count(current_span) != 1:
+        return text, resulting_span, None
+    start = text.find(current_span)
+    raw_candidate = text[:start] + resulting_span + text[start + len(current_span):]
+    prefix_words = list(_PERSIAN_BOUNDARY_WORD_RE.finditer(text[:start]))
+    first = _PERSIAN_BOUNDARY_WORD_RE.match(resulting_span)
+    if not prefix_words or first is None:
+        return raw_candidate, resulting_span, None
+    preceding = prefix_words[-1]
+    repeated_word = normalize_for_match(first.group())
+    if (
+        normalize_for_match(preceding.group()) != repeated_word
+        or repeated_word not in _BOUNDARY_FUNCTION_WORDS
+    ):
+        return raw_candidate, resulting_span, None
+    introduced = newly_source_unjustified_repeated_adjacent_spans(
+        source, text, raw_candidate
+    )
+    if len(introduced) != 1:
+        return raw_candidate, resulting_span, None
+    finding = introduced[0]
+    if (
+        int(finding.get("word_count", 0) or 0) != 1
+        or int(finding.get("offset", -1)) != preceding.start()
+        or int(finding.get("second_offset", -1)) != start
+    ):
+        return raw_candidate, resulting_span, None
+    adjusted_span = resulting_span[first.end():].lstrip()
+    if not adjusted_span:
+        return raw_candidate, resulting_span, None
+    adjusted_candidate = (
+        text[:start] + adjusted_span + text[start + len(current_span):]
+    )
+    return adjusted_candidate, adjusted_span, {
+        "type": "unsupported_function_word_boundary_deduplicated",
+        "word": first.group(),
+        "offset": start,
+        "raw_resulting_span": resulting_span,
+        "adjusted_resulting_span": adjusted_span,
+    }
 
 
 def _salvage_local_refinement_edits(
@@ -2035,6 +2113,8 @@ def _salvage_local_refinement_edits(
             "current_span": current_span,
             "source_quote": source_quote,
             "resulting_span": resulting_span,
+            "proposed_resulting_span": resulting_span,
+            "boundary_deduplication": None,
             "reason": reason,
             "integrity": None,
             "committed": False,
@@ -2052,13 +2132,25 @@ def _salvage_local_refinement_edits(
         group = paragraph_groups[paragraph]
         coherent_candidate = current
         coherent_reason = ""
+        coherent_applied: dict[str, tuple[str, dict[str, Any] | None]] = {}
         for item in sorted(group, key=lambda value: int(value["order"])):
             current_span = str(item["current_span"])
             if coherent_candidate.count(current_span) != 1:
                 coherent_reason = "group_span_not_unique"
                 break
-            coherent_candidate = coherent_candidate.replace(
-                current_span, str(item["resulting_span"]), 1
+            (
+                coherent_candidate,
+                applied_span,
+                boundary_deduplication,
+            ) = _replace_local_span_with_boundary_guard(
+                source,
+                coherent_candidate,
+                current_span,
+                str(item["proposed_resulting_span"]),
+            )
+            coherent_applied[str(item["issue_id"])] = (
+                applied_span,
+                boundary_deduplication,
             )
         coherent_integrity_payload: dict[str, Any] | None = None
         if not coherent_reason:
@@ -2079,7 +2171,10 @@ def _salvage_local_refinement_edits(
             elif any(
                 _finite_predicate_evidence_count(str(item["current_span"])) > 0
                 and _finite_predicate_evidence_count(
-                    str(item["resulting_span"])
+                    coherent_applied.get(
+                        str(item["issue_id"]),
+                        (str(item["resulting_span"]), None),
+                    )[0]
                 ) == 0
                 for item in group
             ):
@@ -2099,6 +2194,12 @@ def _salvage_local_refinement_edits(
                 coherent_reason = "local_integrity_rejected"
         if not coherent_reason:
             for item in group:
+                applied_span, boundary_deduplication = coherent_applied.get(
+                    str(item["issue_id"]),
+                    (str(item["resulting_span"]), None),
+                )
+                item["resulting_span"] = applied_span
+                item["boundary_deduplication"] = boundary_deduplication
                 item["integrity"] = coherent_integrity_payload
                 item["reason"] = "coherent_local_edits_committed"
                 item["committed"] = True
@@ -2115,9 +2216,18 @@ def _salvage_local_refinement_edits(
             if candidate.count(current_span) != 1:
                 failed_reason = "group_span_not_unique"
             else:
-                candidate = candidate.replace(
-                    current_span, str(item["resulting_span"]), 1
+                (
+                    candidate,
+                    applied_span,
+                    boundary_deduplication,
+                ) = _replace_local_span_with_boundary_guard(
+                    source,
+                    candidate,
+                    current_span,
+                    str(item["proposed_resulting_span"]),
                 )
+                item["resulting_span"] = applied_span
+                item["boundary_deduplication"] = boundary_deduplication
             integrity_payload: dict[str, Any] | None = None
             if not failed_reason:
                 repeated_spans = newly_source_unjustified_repeated_adjacent_spans(
@@ -2199,6 +2309,7 @@ def _salvage_local_refinement_edits(
         reason = str(item["reason"])
         decision.update({
             "resulting_span": item["resulting_span"],
+            "boundary_deduplication": item["boundary_deduplication"],
             "commit_status": "committed_local" if was_committed else "not_committed",
             "integrity_status": (
                 "accepted" if was_committed
@@ -2215,6 +2326,7 @@ def _salvage_local_refinement_edits(
             "reason": reason,
             "current_span": item["current_span"],
             "resulting_span": item["resulting_span"],
+            "boundary_deduplication": item["boundary_deduplication"],
             "before_chars": len(str(item["current_span"])),
             "after_chars": len(str(item["resulting_span"])),
             "integrity": integrity_payload,
@@ -2353,8 +2465,10 @@ _OBJECTIVE_FLUENCY_RATIONALE_RE = re.compile(
     re.IGNORECASE,
 )
 _OBJECTIVE_GRAMMAR_RATIONALE_RE = re.compile(
-    r"\b(?:agreement|attachment|broken grammar|dependency|fragment|modifier stack|"
-    r"participle|referent|incomplete (?:clause|coordination|sentence)|"
+    r"\b(?:agreement|attachment|broken grammar|calque|dependency|fragment|governor|"
+    r"head(?:-| )complement|modifier stack|parenthetical scope|participle|referent|"
+    r"scope|subordinate clause|relative clause|"
+    r"incomplete (?:clause|coordination|sentence)|"
     r"missing (?:predicate|verb)|malformed (?:grammar|participle|spacing|syntax|zwnj)|"
     r"predicate|spacing|syntax|ungrammatical|word order|zwnj)\b",
     re.IGNORECASE,
@@ -2496,6 +2610,7 @@ def _canonical_final_quality_record(
     latest_index, latest = critique_events[-1] if critique_events else (-1, {})
 
     resolved_source_ids: set[str] = set()
+    resolved_objective_ids: set[str] = set()
     for event in current_events:
         if event.get("event_type") != "targeted_language_repair":
             continue
@@ -2503,6 +2618,13 @@ def _canonical_final_quality_record(
         resolved_source_ids.update(
             str(value).strip()
             for value in list(payload.get("resolved_source_issue_ids", []) or [])
+            if str(value).strip()
+        )
+        resolved_objective_ids.update(
+            str(value).strip()
+            for value in list(
+                payload.get("resolved_objective_issue_ids", []) or []
+            )
             if str(value).strip()
         )
 
@@ -2534,6 +2656,8 @@ def _canonical_final_quality_record(
         commit_status = str(decision.get("commit_status", "")).strip()
         if issue_id and issue_id in resolved_source_ids:
             status = "resolved_by_source_validated_repair"
+        elif issue_id and issue_id in resolved_objective_ids:
+            status = "resolved_by_strict_language_repair"
         elif disposition == "rejected":
             status = "rejected_by_source_aware_refiner"
         elif (
@@ -2606,6 +2730,7 @@ def _canonical_final_quality_record(
         "durable_authority": durable_authority,
         "unresolved_grounded_issue_ids": list(dict.fromkeys(unresolved_ids)),
         "resolved_source_issue_ids": sorted(resolved_source_ids),
+        "resolved_objective_issue_ids": sorted(resolved_objective_ids),
         "issue_status_counts": dict(status_counts),
         "issues": issue_records,
         "policy": (
@@ -3215,6 +3340,23 @@ def _objective_unmatched_readability_issues(
         ):
             findings.append(issue)
     return findings
+
+
+def _grounded_objective_language_issues(critique: Any) -> list[dict[str, Any]]:
+    """Return exact-span Persian defects eligible for one bounded final repair."""
+    details = (
+        critique.get("issue_details", [])
+        if isinstance(critique, dict)
+        else getattr(critique, "issue_details", [])
+    )
+    return [
+        issue
+        for issue in _objective_unmatched_readability_issues(
+            [item for item in list(details or []) if isinstance(item, dict)]
+        )
+        if str(issue.get("category", "")).strip().casefold()
+        in {"fluency", "readability", "register", "typography"}
+    ]
 
 
 _ACTIONABLE_STRUCTURE_CLASSIFICATIONS = frozenset({
@@ -6770,12 +6912,19 @@ class TranslationPipeline:
             )
             if repair_accepted:
                 canonical = repair_candidate
+        canonical, citation_house_style_changes = (
+            normalize_citation_house_style_text(canonical)
+        )
         structure_conflicts = _introduced_structure_conflicts(
             chunk.text, translation, canonical
         )
         if structure_conflicts:
             canonical = translation
             repair_accepted = False
+            citation_house_style_changes = []
+        canonical_target_hash = hashlib.sha256(
+            canonical.strip().encode("utf-8")
+        ).hexdigest()
         self.db.log_chunk_event(
             job_id,
             chunk_index,
@@ -6790,6 +6939,8 @@ class TranslationPipeline:
                 "source_grounded_repair_proposed": repair_proposed,
                 "source_grounded_repair_accepted": repair_accepted,
                 "source_grounded_repairs": repair_report.get("repairs", []),
+                "citation_house_style_changes": citation_house_style_changes,
+                "canonical_target_hash": canonical_target_hash,
                 "source_structure_conflicts": structure_conflicts,
                 "policy": (
                     "The exact idempotent exporter typography and only "
@@ -9995,6 +10146,15 @@ Output ONLY the corrected Persian translation.
             if not str(finding.get("issue_id", "")).strip()
             or str(finding.get("issue_id", "")).strip() in unresolved_source_ids
         ]
+        final_objective_language_findings = (
+            _grounded_objective_language_issues(final_critique_rep)
+            if final_critique_rep is not None else []
+        )
+        final_objective_language_findings = [
+            finding for finding in final_objective_language_findings
+            if not str(finding.get("issue_id", "")).strip()
+            or str(finding.get("issue_id", "")).strip() in unresolved_source_ids
+        ]
         final_source_fidelity_findings.extend(
             _structure_findings_as_source_issues(objective_structure_findings)
         )
@@ -10021,7 +10181,11 @@ Output ONLY the corrected Persian translation.
             "source_fidelity_finding_count": len(
                 final_source_fidelity_findings
             ),
+            "objective_language_finding_count": len(
+                final_objective_language_findings
+            ),
             "resolved_source_issue_ids": [],
+            "resolved_objective_issue_ids": [],
             "paragraphs": [],
             "policy": (
                 "one bounded paragraph-local target-only repair; unaffected "
@@ -10029,7 +10193,11 @@ Output ONLY the corrected Persian translation.
                 "must pass"
             ),
         }
-        if repairable_language_finding or final_source_fidelity_findings:
+        if (
+            repairable_language_finding
+            or final_source_fidelity_findings
+            or final_objective_language_findings
+        ):
             source_parts = split_paragraphs(chunk.text)
             target_parts = split_paragraphs(translation)
             targeted_language_repair["attempted"] = True
@@ -10061,6 +10229,21 @@ Output ONLY the corrected Persian translation.
                             not match and source_quote and source_quote in source_part
                         ):
                             paragraph_source_findings.append(finding)
+                    paragraph_objective_findings = [
+                        finding
+                        for finding in final_objective_language_findings
+                        if (
+                            str(finding.get("current_persian_quote", "")).strip()
+                            and translation.count(
+                                str(
+                                    finding.get("current_persian_quote", "")
+                                ).strip()
+                            ) == 1
+                            and str(
+                                finding.get("current_persian_quote", "")
+                            ).strip() in target_part
+                        )
+                    ]
                     paragraph_quality = audit_translation_language(
                         source_part,
                         target_part,
@@ -10085,7 +10268,11 @@ Output ONLY the corrected Persian translation.
                             "unbalanced_explanatory_dash_count",
                         )
                     )
-                    if not paragraph_repairable and not paragraph_source_findings:
+                    if (
+                        not paragraph_repairable
+                        and not paragraph_source_findings
+                        and not paragraph_objective_findings
+                    ):
                         continue
                     paragraph_event: dict[str, Any] = {
                         "paragraph_index": paragraph_index,
@@ -10093,6 +10280,11 @@ Output ONLY the corrected Persian translation.
                         "source_issue_ids": [
                             str(item.get("issue_id", ""))
                             for item in paragraph_source_findings
+                            if str(item.get("issue_id", ""))
+                        ],
+                        "objective_issue_ids": [
+                            str(item.get("issue_id", ""))
+                            for item in paragraph_objective_findings
                             if str(item.get("issue_id", ""))
                         ],
                     }
@@ -10108,6 +10300,9 @@ Output ONLY the corrected Persian translation.
                                     structural_role=language_role,
                                     source_fidelity_findings=(
                                         paragraph_source_findings
+                                    ),
+                                    objective_language_findings=(
+                                        paragraph_objective_findings
                                     ),
                                 ),
                             }],
@@ -10156,7 +10351,14 @@ Output ONLY the corrected Persian translation.
                             "accepted": not paragraph_source_findings,
                         }
                         source_improved = not paragraph_source_findings
-                        if paragraph_source_findings:
+                        objective_improved = not paragraph_objective_findings
+                        validation_accepted = bool(
+                            source_improved and objective_improved
+                        )
+                        if (
+                            paragraph_source_findings
+                            or paragraph_objective_findings
+                        ):
                             structure_issue_count = sum(
                                 bool(item.get("structure_classification"))
                                 for item in paragraph_source_findings
@@ -10180,13 +10382,32 @@ Output ONLY the corrected Persian translation.
                                     validation_critique
                                 )
                             )
+                            remaining_objective_findings = (
+                                _grounded_objective_language_issues(
+                                    validation_critique
+                                )
+                            )
+                            changed_spans = _changed_candidate_spans(
+                                target_part, candidate_part
+                            )
+                            candidate_regressions = (
+                                _candidate_regression_details(
+                                    validation_critique,
+                                    final_critique_rep,
+                                    changed_spans,
+                                )
+                                if final_critique_rep is not None else []
+                            )
                             source_improved = bool(
                                 getattr(validation_critique, "valid", True)
                                 and not _blocking_critique_issues(
                                     validation_critique
                                 )
-                                and len(remaining_source_findings)
-                                < len(paragraph_source_findings)
+                                and (
+                                    not paragraph_source_findings
+                                    or len(remaining_source_findings)
+                                    < len(paragraph_source_findings)
+                                )
                                 and float(
                                     getattr(validation_critique, "accuracy", 0.0)
                                     or 0.0
@@ -10197,13 +10418,34 @@ Output ONLY the corrected Persian translation.
                                     ) or 0.0
                                 ) >= 8.0
                                 and (
-                                    not structure_issue_count
+                                    not paragraph_source_findings
+                                    or not structure_issue_count
                                     or len(candidate_structure_findings)
                                     < structure_issue_count
                                 )
                             )
+                            objective_improved = bool(
+                                not paragraph_objective_findings
+                                or len(remaining_objective_findings)
+                                < len(paragraph_objective_findings)
+                            )
+                            validation_accepted = bool(
+                                source_improved
+                                and objective_improved
+                                and not candidate_regressions
+                                and min(
+                                    float(
+                                        getattr(validation_critique, field, 0.0)
+                                        or 0.0
+                                    )
+                                    for field in (
+                                        "accuracy", "fluency",
+                                        "terminology", "register",
+                                    )
+                                ) >= 8.0
+                            )
                             source_validation.update({
-                                "accepted": source_improved,
+                                "accepted": validation_accepted,
                                 "before_issue_count": len(
                                     paragraph_source_findings
                                 ),
@@ -10215,6 +10457,21 @@ Output ONLY the corrected Persian translation.
                                     for item in remaining_source_findings
                                     if str(item.get("issue_id", ""))
                                 ],
+                                "before_objective_issue_count": len(
+                                    paragraph_objective_findings
+                                ),
+                                "after_objective_issue_count": len(
+                                    remaining_objective_findings
+                                ),
+                                "remaining_objective_issue_ids": [
+                                    str(item.get("issue_id", ""))
+                                    for item in remaining_objective_findings
+                                    if str(item.get("issue_id", ""))
+                                ],
+                                "candidate_regression_count": len(
+                                    candidate_regressions
+                                ),
+                                "candidate_regressions": candidate_regressions,
                                 "before_structure_issue_count": (
                                     structure_issue_count
                                 ),
@@ -10232,6 +10489,8 @@ Output ONLY the corrected Persian translation.
                             "integrity_accepted": candidate_integrity.accepted,
                             "strictly_improved": improved,
                             "source_fidelity_improved": source_improved,
+                            "objective_language_improved": objective_improved,
+                            "strict_validation_accepted": validation_accepted,
                             "source_validation": source_validation,
                             "local_edit": _language_repair_is_local(
                                 target_part,
@@ -10245,12 +10504,15 @@ Output ONLY the corrected Persian translation.
                             and len(split_paragraphs(candidate_part)) == 1
                             and candidate_integrity.accepted
                             and (
-                                improved
-                                if not paragraph_source_findings
-                                else source_improved
+                                validation_accepted
                                 and _language_quality_does_not_regress(
                                     paragraph_quality, candidate_quality
                                 )
+                                if (
+                                    paragraph_source_findings
+                                    or paragraph_objective_findings
+                                )
+                                else improved
                             )
                             and paragraph_event["local_edit"]
                         ):
@@ -10260,6 +10522,9 @@ Output ONLY the corrected Persian translation.
                             targeted_language_repair[
                                 "resolved_source_issue_ids"
                             ].extend(paragraph_event["source_issue_ids"])
+                            targeted_language_repair[
+                                "resolved_objective_issue_ids"
+                            ].extend(paragraph_event["objective_issue_ids"])
                     except _QUALITY_STAGE_ERRORS as exc:
                         paragraph_event.update({
                             "failure_type": type(exc).__name__,
@@ -10290,6 +10555,11 @@ Output ONLY the corrected Persian translation.
                 targeted_language_repair["reason"] = "paragraph_count_mismatch"
         targeted_language_repair["resolved_source_issue_ids"] = list(
             dict.fromkeys(targeted_language_repair["resolved_source_issue_ids"])
+        )
+        targeted_language_repair["resolved_objective_issue_ids"] = list(
+            dict.fromkeys(
+                targeted_language_repair["resolved_objective_issue_ids"]
+            )
         )
         self.db.log_chunk_event(
             job_id,

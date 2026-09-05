@@ -38,6 +38,8 @@ class LongTermMemory:
         *,
         reliable: bool = True,
         chapter_title: str = "",
+        chunk_index: int | None = None,
+        canonical_target_hash: str = "",
     ) -> None:
         """Add a new translated pair to the memory database."""
         src = source.strip()
@@ -49,6 +51,8 @@ class LongTermMemory:
                 "translation": trans,
                 "reliable": bool(reliable),
                 "chapter_title": chapter_title,
+                "chunk_index": chunk_index,
+                "canonical_target_hash": canonical_target_hash,
             })
 
     def get_relevant(self, query_text: str) -> list[dict[str, Any]]:

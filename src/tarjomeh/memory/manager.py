@@ -47,7 +47,8 @@ _NON_PROSE_RE = re.compile(
     re.IGNORECASE,
 )
 _NONREPRESENTATIVE_STYLE_SOURCE_RE = re.compile(
-    r"^\s*(?:(?:this\s+(?:book|volume|work)\s+is\s+)?dedicated\s+to|"
+    r"^\s*(?:(?:I|we)\s+dedicate\s+(?:this\s+(?:book|volume|work)\s+)?to|"
+    r"(?:this\s+(?:book|volume|work)\s+is\s+)?dedicated\s+to|"
     r"to\s+the\s+memory\s+of|in\s+memory\s+of|in\s+memoriam|"
     r"acknowledg(?:e|ement|ements|ing)|thanks?\s+(?:are|is|goes?)\s+to)\b",
     re.IGNORECASE,
@@ -422,6 +423,9 @@ class MemoryManager:
         )
         if not structure_eligible:
             resolved_short_term_trust = "structural_only"
+        canonical_target_hash = hashlib.sha256(
+            translation.strip().encode("utf-8")
+        ).hexdigest()
         self.short_term.add(
             chunk.text,
             translation,
@@ -434,6 +438,8 @@ class MemoryManager:
             translation,
             reliable=resolved_long_term_reliable,
             chapter_title=chunk.chapter_title,
+            chunk_index=chunk.index,
+            canonical_target_hash=canonical_target_hash,
         )
         has_structure_policy = "style_eligible" in chunk.metadata
         translation_paragraphs = [
@@ -525,6 +531,8 @@ class MemoryManager:
             "long_term_trust": (
                 "reliable" if resolved_long_term_reliable else "advisory"
             ),
+            "canonical_target_hash": canonical_target_hash,
+            "canonical_chunk_index": chunk.index,
             "reliability_reasons": list(dict.fromkeys(
                 str(reason).strip()
                 for reason in (reliability_reasons or [])
