@@ -355,7 +355,14 @@ def repair_document_source_grounded_language_artifacts(
     }
 
 
-_SPACED_EXPLANATORY_DASH_RE = re.compile(r"(?<=\S)[ \t]+[-\u2013\u2014][ \t]+(?=\S)")
+_SPACED_EXPLANATORY_DASH_RE = re.compile(
+    r"(?<=\S)[ \t]+(?P<dash>[-\u2013\u2014])[ \t]+(?=\S)"
+)
+_SPACED_EM_DASH_RE = re.compile(r"(?<=\S)[ \t]+\u2014[ \t]+(?=\S)")
+_SPACED_EN_DASH_RE = re.compile(r"(?<=\S)[ \t]+\u2013[ \t]+(?=\S)")
+_DANGLING_OBJECT_MARKER_DASH_RE = re.compile(
+    r"(?:^|[\s\u060c\u061b])\u0631\u0627[ \t]+(?P<dash>[\u2013\u2014])[ \t]+"
+)
 
 
 def _unbalanced_explanatory_dash_artifacts(
@@ -376,14 +383,39 @@ def _unbalanced_explanatory_dash_artifacts(
         zip(source_parts, target_parts, strict=True)
     ):
         source_count = len(_SPACED_EXPLANATORY_DASH_RE.findall(source_part))
-        target_count = len(_SPACED_EXPLANATORY_DASH_RE.findall(target_part))
-        if source_count >= 2 and source_count % 2 == 0 and target_count % 2 == 1:
+        target_em_count = len(_SPACED_EM_DASH_RE.findall(target_part))
+        target_en_count = len(_SPACED_EN_DASH_RE.findall(target_part))
+        # An en dash may encode a conceptual relation while em dashes delimit
+        # an aside in the same Persian sentence.  Never add those two roles.
+        target_aside_count = (
+            target_em_count
+            if target_em_count
+            else target_en_count
+        )
+        if (
+            source_count >= 2
+            and source_count % 2 == 0
+            and target_aside_count % 2 == 1
+        ):
             findings.append({
                 "paragraph_index": index,
                 "source_dash_count": source_count,
-                "target_dash_count": target_count,
+                "target_dash_count": target_aside_count,
+                "target_em_dash_count": target_em_count,
+                "target_en_dash_count": target_en_count,
                 "target_preview": target_part[:500],
                 "reason": "source_paired_explanatory_dash_became_unbalanced",
+            })
+        for match in _DANGLING_OBJECT_MARKER_DASH_RE.finditer(target_part):
+            findings.append({
+                "paragraph_index": index,
+                "source_dash_count": source_count,
+                "target_dash_count": target_aside_count,
+                "target_em_dash_count": target_em_count,
+                "target_en_dash_count": target_en_count,
+                "target_preview": target_part[:500],
+                "target_offset": match.start(),
+                "reason": "persian_object_marker_detached_by_dash",
             })
     return findings
 
@@ -1388,6 +1420,8 @@ def _reconcile_current_entity_anchors(
                 ).hexdigest()[:16]
             ),
             context_independent=True,
+            source_surface=source,
+            semantic_role=stored_category,
         )
         if outcome.get("action") != "ignored":
             observed.append({"source": source, "target": target, **outcome})
@@ -2324,6 +2358,7 @@ def _salvage_local_refinement_edits(
             "decision": item["choice"],
             "committed": was_committed,
             "reason": reason,
+            "source_quote": item["source_quote"],
             "current_span": item["current_span"],
             "resulting_span": item["resulting_span"],
             "boundary_deduplication": item["boundary_deduplication"],
@@ -3285,6 +3320,62 @@ def _decisions_without_regressed_edits(
     return retained, [issue_id for issue_id in excluded if issue_id]
 
 
+def _recover_non_regressed_local_edits(
+    *,
+    source: str,
+    baseline: str,
+    proposed: str,
+    issue_details: list[dict[str, Any]],
+    issue_decisions: list[dict[str, Any]],
+    regressions: list[dict[str, Any]],
+    integrity_gate: PostEditIntegrityGate,
+    protected_terms: list[str],
+    protect_inline_english: bool,
+    allowed_inline_originals: list[str],
+) -> tuple[str, list[dict[str, Any]], dict[str, Any], list[str]]:
+    """Replay only edits not implicated by a later grounded regression.
+
+    This is deliberately conservative: if the later finding cannot be tied to
+    a local resulting span, no edit is replayed.  The caller still records a
+    review requirement because deterministic integrity is not a substitute for
+    a fresh source-aware judgment.
+    """
+    retained, excluded = _decisions_without_regressed_edits(
+        issue_decisions,
+        regressions,
+    )
+    if regressions and not excluded:
+        return baseline, [], {
+            "attempted_count": 0,
+            "committed_count": 0,
+            "attempts": [],
+            "policy": "ambiguous_regression_restored_exact_baseline",
+        }, []
+    if not retained:
+        return baseline, [], {
+            "attempted_count": 0,
+            "committed_count": 0,
+            "attempts": [],
+            "policy": "all_implicated_edits_rejected",
+        }, excluded
+    recovered, decisions, report = _salvage_local_refinement_edits(
+        source=source,
+        previous=baseline,
+        proposed=proposed,
+        issue_details=issue_details,
+        issue_decisions=retained,
+        integrity_gate=integrity_gate,
+        protected_terms=protected_terms,
+        protect_inline_english=protect_inline_english,
+        allowed_inline_originals=allowed_inline_originals,
+    )
+    report["policy"] = (
+        "Only non-implicated local edits were replayed from the exact valid "
+        "baseline and each retained step passed deterministic integrity."
+    )
+    return recovered, decisions, report, excluded
+
+
 def _objective_unmatched_readability_issues(
     issues: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -3969,12 +4060,26 @@ def _reconcile_committed_terminology(
             })
             continue
 
-        if not is_reusable_terminology_mapping(source, target):
+        memory_category = (
+            "term" if derived_source
+            else memory_manager.proper_nouns.category_for(source)
+        )
+        entity_categories = {
+            "person", "place", "institution", "organization",
+            "publication", "product", "legal_instrument",
+            "source_grounded_entity", "proper_noun",
+        }
+        scope_risks = (
+            [] if memory_category in entity_categories
+            else automatic_terminology_risk_reasons(source, target)
+        )
+        if not is_reusable_terminology_mapping(source, target) or scope_risks:
             report["context_deferred"].append({
                 "issue_id": issue_id,
                 "source": source,
                 "target": target,
                 "reason": "contextual_correction_not_reusable_as_global_term",
+                "risk_reasons": scope_risks,
             })
             continue
 
@@ -3989,16 +4094,18 @@ def _reconcile_committed_terminology(
         outcome = memory_manager.proper_nouns.add_noun(
             source,
             target,
-            category=(
-                "term" if derived_source
-                else memory_manager.proper_nouns.category_for(source)
-            ),
+            category=memory_category,
             provenance="accepted_correction",
             evidence_key=(
                 "review:"
                 + hashlib.sha256(source_text.encode("utf-8")).hexdigest()[:16]
             ),
             context_independent=True,
+            source_surface=source_quote,
+            semantic_role=(
+                "terminology_correction"
+                if derived_source else category
+            ),
         )
         if outcome.get("action") in {"replaced_lower_authority", "confirmed"}:
             report["reconciled"].append({"issue_id": issue_id, **outcome})
@@ -4367,6 +4474,8 @@ class TranslationPipeline:
         self._worker_claimed = False
         self._worker_stage = "created"
         self._worker_chunk_index: int | None = None
+        self._llm_observation_lock = threading.Lock()
+        self._active_llm_calls: dict[tuple[str, int, str, int], dict[str, Any]] = {}
         self._lease_heartbeat_stop = threading.Event()
         self._lease_heartbeat_thread: threading.Thread | None = None
         self._async_loop: Any = None
@@ -4383,6 +4492,14 @@ class TranslationPipeline:
 
     def _record_llm_attempt(self, event: dict[str, Any]) -> None:
         """Persist sanitized provider completion evidence for the active job."""
+        observation_lock = getattr(self, "_llm_observation_lock", None)
+        if observation_lock is None:
+            # Recovery tools and focused tests may construct a pipeline without
+            # running the full client-building constructor.
+            observation_lock = threading.Lock()
+            self._llm_observation_lock = observation_lock
+        if not hasattr(self, "_active_llm_calls"):
+            self._active_llm_calls = {}
         payload = dict(event)
         job_id = payload.pop("job_id", None) or self.current_job_id
         chunk_index = payload.pop("chunk_index", None)
@@ -4399,9 +4516,25 @@ class TranslationPipeline:
             int(chunk_index) if chunk_index is not None else None,
         )
         payload["worker_id"] = self.worker_id
-        if payload.pop("phase", "") == "started":
-            operation = str(payload.get("operation", "llm")).strip() or "llm"
-            attempt = int(payload.get("attempt", 1) or 1)
+        phase = str(payload.pop("phase", ""))
+        operation = str(payload.get("operation", "llm")).strip() or "llm"
+        attempt = int(payload.get("attempt", 1) or 1)
+        call_key = (
+            str(job_id),
+            int(chunk_index) if chunk_index is not None else -1,
+            operation,
+            attempt,
+        )
+        if phase == "started":
+            with observation_lock:
+                self._active_llm_calls[call_key] = {
+                    "job_id": str(job_id),
+                    "chunk_index": call_key[1],
+                    "operation": operation,
+                    "attempt": attempt,
+                    "started_monotonic": time.monotonic(),
+                    "last_progress_monotonic": time.monotonic(),
+                }
             self._worker_heartbeat(
                 f"llm:{operation}:attempt-{attempt}",
                 int(chunk_index) if chunk_index is not None else None,
@@ -4413,6 +4546,17 @@ class TranslationPipeline:
                 payload,
             )
             return
+        with observation_lock:
+            active_call = self._active_llm_calls.pop(call_key, None)
+        if active_call is not None:
+            payload["observed_elapsed_seconds"] = round(
+                max(
+                    0.0,
+                    time.monotonic()
+                    - float(active_call.get("started_monotonic", 0.0) or 0.0),
+                ),
+                3,
+            )
         if chunk_index is None:
             # Keep the human-readable log while also retaining the full
             # sanitized evidence used by VPS audits and QA diagnostics.
@@ -4487,6 +4631,43 @@ class TranslationPipeline:
                         stage=getattr(self, "_worker_stage", "working"),
                         chunk_index=getattr(self, "_worker_chunk_index", None),
                     )
+                    now = time.monotonic()
+                    progress: list[tuple[int, dict[str, Any]]] = []
+                    with self._llm_observation_lock:
+                        for active in self._active_llm_calls.values():
+                            started = float(
+                                active.get("started_monotonic", now) or now
+                            )
+                            last = float(
+                                active.get("last_progress_monotonic", started)
+                                or started
+                            )
+                            if now - last < 120.0:
+                                continue
+                            active["last_progress_monotonic"] = now
+                            active_chunk = active.get("chunk_index", -1)
+                            progress.append((
+                                int(active_chunk) if active_chunk is not None else -1,
+                                {
+                                    "operation": active.get("operation", "llm"),
+                                    "attempt": int(
+                                        active.get("attempt", 1) or 1
+                                    ),
+                                    "elapsed_seconds": round(now - started, 1),
+                                    "worker_id": getattr(self, "worker_id", ""),
+                                    "message": (
+                                        "The provider call is still in progress; "
+                                        "the worker lease remains healthy."
+                                    ),
+                                },
+                            ))
+                    for progress_chunk, progress_payload in progress:
+                        self.db.log_chunk_event(
+                            job_id,
+                            progress_chunk,
+                            "llm_call_in_progress",
+                            progress_payload,
+                        )
                 except Exception:
                     logger.debug(
                         "Background worker heartbeat failed",
@@ -5158,6 +5339,13 @@ class TranslationPipeline:
                             ),
                             context_independent=bool(
                                 item.get("context_independent")
+                            ),
+                            source_surface=str(
+                                item.get("exact_source_span", "")
+                            ),
+                            semantic_role=str(
+                                item.get("semantic_role", "")
+                                or item.get("category", "")
                             ),
                         )
                 glossary_manager.merge_auto_extracted(auto_terms)
@@ -8568,6 +8756,7 @@ class TranslationPipeline:
                             "committed_count": 0,
                             "attempts": [],
                         }
+                        _recovered_decisions: list[dict[str, Any]] = []
                         recovered_translation = baseline_translation
                         if safe_decisions:
                             (
@@ -8682,7 +8871,34 @@ class TranslationPipeline:
                                 not in baseline_source_obligations
                             ]
                             if post_source_regressions:
-                                translation = baseline_translation
+                                post_rejected_translation = translation
+                                (
+                                    translation,
+                                    post_recovered_decisions,
+                                    post_atomic_recovery,
+                                    post_excluded_issue_ids,
+                                ) = _recover_non_regressed_local_edits(
+                                    source=chunk.text,
+                                    baseline=baseline_translation,
+                                    proposed=str(
+                                        pending_candidate.get(
+                                            "proposed", rejected_translation
+                                        )
+                                    ),
+                                    issue_details=list(
+                                        pending_candidate.get(
+                                            "issue_details", []
+                                        ) or []
+                                    ),
+                                    issue_decisions=_recovered_decisions,
+                                    regressions=post_source_regressions,
+                                    integrity_gate=integrity_gate,
+                                    protected_terms=protected_targets,
+                                    protect_inline_english=protect_inline_english,
+                                    allowed_inline_originals=(
+                                        allowed_inline_originals
+                                    ),
+                                )
                                 last_accepted_translation = translation
                                 self.db.update_chunk(
                                     job_id,
@@ -8696,8 +8912,19 @@ class TranslationPipeline:
                                 atomic_recovery[
                                     "source_regression_count"
                                 ] = len(post_source_regressions)
+                                atomic_recovery[
+                                    "post_validation_recovery"
+                                ] = post_atomic_recovery
+                                atomic_recovery[
+                                    "post_validation_excluded_issue_ids"
+                                ] = post_excluded_issue_ids
                                 post_validation.update({
                                     "atomic_recovery_rolled_back": True,
+                                    "atomic_recovery_mode": (
+                                        "partial_non_regressed_replay"
+                                        if translation != baseline_translation
+                                        else "exact_baseline"
+                                    ),
                                     "source_regressions": post_source_regressions,
                                     "translation_chars": len(translation),
                                 })
@@ -8707,7 +8934,23 @@ class TranslationPipeline:
                                     "refinement_atomic_recovery_rolled_back",
                                     {
                                         "iteration": ref_iter,
+                                        "rejected_chars": len(
+                                            post_rejected_translation
+                                        ),
                                         "restored_chars": len(translation),
+                                        "retained_edit_count": int(
+                                            post_atomic_recovery.get(
+                                                "committed_count", 0
+                                            ) or 0
+                                        ),
+                                        "retained_issue_ids": [
+                                            str(item.get("issue_id", ""))
+                                            for item in post_recovered_decisions
+                                            if str(item.get("issue_id", ""))
+                                        ],
+                                        "excluded_regressed_issue_ids": (
+                                            post_excluded_issue_ids
+                                        ),
                                         "source_regression_count": len(
                                             post_source_regressions
                                         ),
@@ -8717,8 +8960,9 @@ class TranslationPipeline:
                                         "message": (
                                             "Post-recovery source validation found "
                                             "a newly omitted or altered source "
-                                            "obligation. The exact pre-refinement "
-                                            "baseline was restored."
+                                            "obligation. The implicated edit was "
+                                            "rejected; only unrelated edits that "
+                                            "again passed integrity were retained."
                                         ),
                                     },
                                 )
@@ -8857,7 +9101,31 @@ class TranslationPipeline:
                     )
                     if salvage_regressions and pending_salvage_baseline:
                         rejected_translation = translation
-                        translation = pending_salvage_baseline
+                        (
+                            translation,
+                            retained_salvage_decisions,
+                            retained_salvage,
+                            excluded_salvage_issue_ids,
+                        ) = _recover_non_regressed_local_edits(
+                            source=chunk.text,
+                            baseline=pending_salvage_baseline,
+                            proposed=str(
+                                pending_salvage.get(
+                                    "proposed", rejected_translation
+                                )
+                            ),
+                            issue_details=list(
+                                pending_salvage.get("issue_details", []) or []
+                            ),
+                            issue_decisions=list(
+                                pending_salvage.get("issue_decisions", []) or []
+                            ),
+                            regressions=salvage_regressions,
+                            integrity_gate=integrity_gate,
+                            protected_terms=protected_targets,
+                            protect_inline_english=protect_inline_english,
+                            allowed_inline_originals=allowed_inline_originals,
+                        )
                         last_accepted_translation = translation
                         current_integrity_accepted = True
                         self.db.update_chunk(
@@ -8871,12 +9139,31 @@ class TranslationPipeline:
                                 "iteration": ref_iter,
                                 "rejected_chars": len(rejected_translation),
                                 "restored_chars": len(translation),
+                                "rollback_mode": (
+                                    "partial_non_regressed_replay"
+                                    if translation != pending_salvage_baseline
+                                    else "exact_baseline"
+                                ),
+                                "retained_edit_count": int(
+                                    retained_salvage.get(
+                                        "committed_count", 0
+                                    ) or 0
+                                ),
+                                "retained_issue_ids": [
+                                    str(item.get("issue_id", ""))
+                                    for item in retained_salvage_decisions
+                                    if str(item.get("issue_id", ""))
+                                ],
+                                "excluded_regressed_issue_ids": (
+                                    excluded_salvage_issue_ids
+                                ),
                                 "regression_count": len(salvage_regressions),
                                 "regressions": salvage_regressions,
                                 "message": (
                                     "Source-aware review found a new serious "
-                                    "defect in locally salvaged wording; the "
-                                    "previous integrity-valid translation was retained."
+                                    "defect in locally salvaged wording. The "
+                                    "implicated edit was rejected; independent "
+                                    "edits were replayed only if integrity-valid."
                                 ),
                             },
                         )
@@ -9322,8 +9609,13 @@ class TranslationPipeline:
                             **readability_decisions,
                         },
                     )
-                if (local_salvage or {}).get("committed_count"):
-                    pending_salvage = local_salvage
+                if local_salvage and local_salvage.get("committed_count"):
+                    pending_salvage = {
+                        **local_salvage,
+                        "issue_details": issue_details,
+                        "issue_decisions": issue_decisions,
+                        "proposed": proposed_translation,
+                    }
                     pending_salvage_baseline = before_translation
                 else:
                     pending_salvage = None
@@ -10119,10 +10411,15 @@ Output ONLY the corrected Persian translation.
             if len(structural_roles) == 1 and "body" not in structural_roles
             else "body"
         )
-        allowed_language_originals = tuple(
-            set(memory_manager.proper_nouns.inline_eligible_nouns()).union(
-                source_entity_candidates
+        source_applicable_originals = {
+            source
+            for source in memory_manager.proper_nouns.inline_eligible_nouns()
+            if memory_manager.proper_nouns.applies_to_source(
+                source, chunk.text
             )
+        }
+        allowed_language_originals = tuple(
+            source_applicable_originals.union(source_entity_candidates)
         )
         language_quality = audit_translation_language(
             chunk.text,

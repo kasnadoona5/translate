@@ -677,6 +677,19 @@ def automatic_terminology_risk_reasons(
         target,
     ):
         reasons.append("inflected_or_clausal_target")
+    source_tail = source_words[-1].casefold()
+    source_looks_plural = bool(
+        len(source_tail) > 3
+        and source_tail.endswith("s")
+        and not source_tail.endswith(("ss", "us", "is", "ics", "ness"))
+    )
+    target_has_explicit_plural = bool(re.search(
+        r"[\u0600-\u06ff](?:\u200c)?\u0647\u0627(?:\u06cc\u06cc?)?"
+        r"(?=\s|$|[،؛؟,.!?])",
+        target,
+    ))
+    if target_has_explicit_plural != source_looks_plural:
+        reasons.append("source_target_number_scope_mismatch")
     return list(dict.fromkeys(reasons))
 
 
@@ -762,7 +775,6 @@ def _mapping_applies_to_source(
     if (
         normalized_category not in _AMBIGUOUS_ENTITY_CATEGORIES
         or len(compact.split()) != 1
-        or not compact.islower()
     ):
         return True
 
@@ -897,6 +909,8 @@ class ProperNouns:
         provenance: str = "legacy",
         evidence_key: str = "",
         context_independent: bool | None = None,
+        source_surface: str = "",
+        semantic_role: str = "",
     ) -> dict[str, Any]:
         """Add or reconcile a proper noun mapping by source authority.
 
@@ -994,6 +1008,14 @@ class ProperNouns:
                 "evidence_keys": evidence_keys[-12:],
                 "context_independent": independent,
                 "authority_class": authority_class,
+                "source_surface": (
+                    " ".join(source_surface.split()).strip()
+                    or str(prior.get("source_surface", ""))
+                ),
+                "semantic_role": (
+                    " ".join(semantic_role.split()).strip().casefold()
+                    or str(prior.get("semantic_role", ""))
+                ),
                 "stripped_target_annotation": (
                     stripped_annotation
                     or str(prior.get("stripped_target_annotation", ""))
@@ -1388,6 +1410,8 @@ class ProperNouns:
                 record = self._provenance[source]
                 record.setdefault("evidence_keys", [])
                 record.setdefault("context_independent", False)
+                record.setdefault("source_surface", "")
+                record.setdefault("semantic_role", "")
                 computed_authority = _mapping_authority_class(
                         source,
                         self._nouns[source],

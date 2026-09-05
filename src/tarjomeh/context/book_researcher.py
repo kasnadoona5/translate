@@ -517,6 +517,17 @@ class BookResearcher:
                 )
             ]
             term_supported = bool(term_supporting_excerpts)
+            exact_evidence_quote = str(
+                item.get("exact_evidence_quote", "")
+            ).strip()[:500]
+            if exact_evidence_quote and not any(
+                exact_evidence_quote.casefold() in " ".join((
+                    str(excerpt.get("title", "")),
+                    str(excerpt.get("snippet", "")),
+                )).casefold()
+                for excerpt in term_supporting_excerpts
+            ):
+                exact_evidence_quote = ""
             terms.append({
                 "source": source,
                 "target": target,
@@ -524,6 +535,10 @@ class BookResearcher:
                 "domain": str(item.get("domain", "")).strip()
                 or self.config.translation.domain,
                 "sense": str(item.get("sense", "")).strip(),
+                "semantic_role": str(
+                    item.get("semantic_role", "concept")
+                ).strip().casefold()[:80],
+                "exact_evidence_quote": exact_evidence_quote,
                 "author": str(item.get("author", "")).strip(),
                 "reason": str(item.get("reason", "")).strip()[:1200],
                 "confidence": str(item.get("confidence", "low")).strip().lower(),
@@ -652,7 +667,8 @@ Web search evidence:
 Return one JSON object with:
 - book_context: a short factual domain note for the translator
 - terms: at most 30 objects with source, target, context, domain, sense,
-  author, reason, confidence (low/medium/high), and source_urls
+  semantic_role, exact_evidence_quote, author, reason, confidence
+  (low/medium/high), and source_urls
 {follow_up_instruction}
 
 Rules:
@@ -688,10 +704,11 @@ Evidence batch:
 {evidence}
 
 Return JSON only with book_context and at most 12 terms. Each term must contain
-source, target, context, domain, sense, author, reason, confidence, and
-source_urls. Cite only supplied URLs. Suggestions are non-authoritative and
-must be conservative. Commercial listings cannot by themselves establish a
-published translation or edition. Do not include follow-up queries or commentary."""
+source, target, context, domain, sense, semantic_role, exact_evidence_quote,
+author, reason, confidence, and source_urls. Cite only supplied URLs. Suggestions
+are non-authoritative and must be conservative. Commercial listings cannot by
+themselves establish a published translation or edition. Do not include follow-up
+queries or commentary."""
 
     @staticmethod
     def _compact_synthesis_prompt(
@@ -717,5 +734,6 @@ Batch findings:
 
 Return JSON only with book_context, at most 30 deduplicated terms, and
 follow_up_queries ({follow_up}). Preserve only supplied source URLs. Each term
-must contain source, target, context, domain, sense, author, reason, confidence,
-and source_urls. Suggestions remain non-authoritative."""
+must contain source, target, context, domain, sense, semantic_role,
+exact_evidence_quote, author, reason, confidence, and source_urls. Suggestions
+remain non-authoritative."""

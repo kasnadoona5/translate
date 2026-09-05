@@ -35,21 +35,20 @@ new evidence so later patches cannot silently revive an earlier defect.
 
 ## Current Baseline
 
-- Deployed evidence baseline: `v10.24.1`, commit `1dc2f21`
-- Test job: `e4589658195e`
+- Deployed evidence baseline: `v10.25.0`, commit `33b16fa`
+- Test job: `f48bf43e6000`
 - Source: *The State: Past, Present, Future* (Bob Jessop, 2016)
-- Runtime result: 127 current-generation attempts and 10 successful obsolete
-  attempts, with no provider/content failure or zero-output success. Database chunk
-  11 (UI chunk 12) stopped once because a unique internal sentence-terminal source
-  note marker `2` was absent from every candidate. Resume then completed the
-  configured checkpoint.
-- Translation verdict: improved and source-faithful in several previously adverse
-  passages, including preservation of the source's explicit `two issues`, but not
-  ready for the longer run. Six of sixteen finished chunks need review, central
-  academic prose is still denser than natural Persian, and a first-person dedication
-  incorrectly became style authority. The v10.24 companion `FAIL` was also partly an
-  audit-marker false failure (`atomic_local_salvage=False` despite the behavior being
-  present), not a missing pipeline capability.
+- Runtime result: 150 recorded LLM attempts, with no provider/content failure or
+  zero-output success. The job reached its configured checkpoint with 16 of 222
+  chunks finished; four chunks need review. The apparent long pause around UI chunk
+  12 was a successful 625-second readability call, not a terminal worker failure.
+- Translation verdict: source-count preservation, internal note recovery, canonical
+  DB/event/Layer-3 identity, refiner veto, dedication filtering, memory trust
+  separation, citation handling, and prior typography protections held. The run is
+  still `REVIEW`: a later source rollback can discard an unrelated good refiner edit,
+  lowercase lexical `polity` can inherit the publisher mapping `Polity`, two
+  dash/appositive attachments are malformed, some contextual term corrections remain
+  too broad for Layer 1, and the English summary contains localized digits.
 
 ## v10.24 Live Result
 
@@ -1005,6 +1004,8 @@ push, and fresh VPS evidence.
 | v10.24.1 | awaiting VPS deployment retry | PENDING | Maintenance correction for a stale deployment source-marker assertion. The v10.24 image passed every substantive marker, including all new protections, but deployment stopped before recreation because the verifier searched for removed comment wording. Production pipeline behavior is unchanged. |
 | v10.24.1 | `e4589658195e` | REVIEW | Stable provider transport and normal checkpoint completion after one resume. Database chunk 11 stopped on a unique internal sentence-terminal note marker. Explicit source `two issues`, proposition coverage, four-layer trust separation, research authority, and prior mechanical protections held; dedication-style admission and opaque academic syntax remained. |
 | v10.25 (`pending`) | awaiting VPS run | PENDING | General aligned sentence-note recovery, boundary-safe local salvage, grounded objective language repair, canonical citation/memory identity, first-person dedication filtering, semantic runtime probes, and shared-layer low-space deployment pass all 883 local tests. Live evidence remains required. |
+| v10.25 | `f48bf43e6000` | REVIEW | Stable 150-call checkpoint run with no provider/content failure. Note recovery, source count, refiner veto, canonical memory identity, dedication filtering, and prior regressions held; second-stage rollback granularity, role-scoped mappings/originals, dash attachment, contextual terminology, and English-summary digits remain open. |
+| v10.26 (`pending`) | awaiting VPS run | PENDING | Transactional second-stage replay, typed dash/attachment evidence, source-scoped originals, role- and scope-safe terminology memory, normalized English Layer-2 digits, evidence-bound research metadata, and long-call progress events are locally implemented; live evidence is required. |
 
 ## v10.24 Live Validation
 
@@ -1081,6 +1082,61 @@ pass. Ruff remains at the exact v10.24.1 baseline of `238` findings, and mypy
 remains at the exact baseline of `88` errors in 17 files. No new lint or type
 finding was introduced. Live translation quality and runtime claims remain
 pending a fresh v10.25 VPS run.
+
+## v10.25 Live Validation
+
+- Job `f48bf43e6000` reached the configured checkpoint with 16 of 222 chunks
+  finished (12 completed, 4 needs review). No terminal chunk failure is recorded.
+  The apparent stop was a 625-second successful readability call. One refiner
+  returned invalid structured JSON after bounded repair; prior valid text was kept.
+- The aligned internal note-marker repair worked without guessing ambiguous markers.
+  The explicit source announcement `two issues` remained two, canonical final text
+  hashes agreed across event, chunk, and Layer 3, and the first-person dedication was
+  excluded from style authority while continuity memory remained populated.
+- The refiner veto and all four memory layers remained active. Research stayed
+  attributable and advisory-only. No previous identifier, citation, mixed-script,
+  blank-page, entity-boundary, or Persian typography regression was observed.
+- Remaining defects are real but bounded: second-stage rollback may discard an
+  unrelated valid local edit; explanatory and relational dashes are counted as one
+  class; lowercase lexical uses may inherit a single-word brand mapping; globally
+  known originals may be treated as locally licensed; context-expanded or
+  number-shifted terminology can look reusable; and English Layer-2 digits can be
+  localized. These are `OPEN` until v10.26 live evidence is available.
+- Full scholarly-table reconstruction remains deferred by user decision.
+
+## v10.26 Pending Live Validation
+
+- A late grounded regression must reject only the implicated refiner edit. Any
+  unrelated edit may survive only when replayed from the exact valid baseline and
+  independently accepted by the deterministic integrity gate; an ambiguous mapping
+  restores the exact baseline and requires review.
+- Explanatory em dashes and relational en dashes must be audited by role. A balanced
+  em-dash aside plus a relational en dash is valid, while an object marker detached
+  from its governor by either dash is objective repair evidence.
+- Single-word publisher, product, publication, and organization mappings must not
+  capture lowercase lexical uses. Stored context remains available, but retrieval and
+  first-occurrence originals are source- and role-scoped.
+- Automatic and accepted-review terminology with expanded scope or explicit
+  source/target number drift must remain contextual rather than becoming book-wide
+  Layer-1 authority. The accepted paragraph remains available to Layers 3 and 4.
+- The English half of Layer 2 must use ASCII digits; the Persian half is unchanged.
+  Summary updates remain transactional and argument-only.
+- Long provider calls must emit periodic in-progress evidence while preserving the
+  same request, retry budget, worker lease, and eventual success/failure semantics.
+- Research records may retain a semantic role and an exact evidence quote only when
+  that quote exists in supplied evidence. Research remains advisory and adds no call.
+- The final source-aware fluency path remains conditional and bounded. Accuracy and
+  completeness outrank fluency, per-issue refiner rejection remains intact, and no
+  pipeline stage or memory layer is removed.
+- Generalized tests, all historical protected tests, release scripts, embedded Python,
+  Bash syntax, lint baseline, type baseline, runtime image identity, full stage/event
+  audit, memory/style authority, research isolation, LLM failure accounting, and
+  unchanged 9router identity must pass before live validation.
+- Local release verification: all `893` tests pass. Source compilation, all three
+  v10.26 Bash scripts, their embedded Python, and both external audit wrappers pass.
+  Ruff reports `235` findings, improving the v10.25 baseline of `238`; mypy remains
+  at the exact established baseline of `88` errors in 17 files. Live translation,
+  runtime identity, and VPS audit claims remain pending a fresh v10.26 run.
 
 ## Update Procedure
 

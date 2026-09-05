@@ -155,9 +155,15 @@ def test_committed_subterm_defers_only_automatic_container_memory() -> None:
         f"The {container} protects Patents.",
         "\u0627\u06cc\u0646 \u0642\u0627\u0646\u0648\u0646 \u0627\u0632 \u062d\u0642 \u0627\u062e\u062a\u0631\u0627\u0639 \u062d\u0645\u0627\u06cc\u062a \u0645\u06cc\u200c\u06a9\u0646\u062f.",
     )
-    assert memory.proper_nouns.all_nouns()["Patents"] == "\u062d\u0642 \u0627\u062e\u062a\u0631\u0627\u0639"
-    assert report["context_deferred"]
-    assert container not in memory.proper_nouns.get_context()
+    assert "Patents" not in memory.proper_nouns.all_nouns()
+    deferred = next(
+        item for item in report["context_deferred"]
+        if item.get("source") == "Patents"
+    )
+    assert deferred["target"] == "\u062d\u0642 \u0627\u062e\u062a\u0631\u0627\u0639"
+    assert "source_target_number_scope_mismatch" in deferred["risk_reasons"]
+    assert memory.proper_nouns.authority_class_for(container) == "contextual_advisory"
+    assert "contextual evidence" in memory.proper_nouns.get_context()
 
 
 def test_research_identity_requires_ordered_title_or_corroboration() -> None:

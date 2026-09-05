@@ -21,6 +21,16 @@ _PROVENANCE_LINE_RE = re.compile(
     r"\u0634\u062f\u0647\.?)$",
     re.IGNORECASE,
 )
+_ENGLISH_DIGIT_TRANSLATION = str.maketrans(
+    "\u06f0\u06f1\u06f2\u06f3\u06f4\u06f5\u06f6\u06f7\u06f8\u06f9"
+    "\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669",
+    "01234567890123456789",
+)
+
+
+def _normalize_english_summary_digits(value: str) -> str:
+    """Keep the English half of Layer 2 in ordinary ASCII notation."""
+    return (value or "").translate(_ENGLISH_DIGIT_TRANSLATION)
 
 
 def _clean_summary_line(value: str) -> str:
@@ -103,7 +113,9 @@ class BilingualSummary:
         eng_parts = _deduplicate_summary_lines(eng_parts)
         fa_parts = _deduplicate_summary_lines(fa_parts)
         if eng_parts:
-            self.english_summary = "\n".join(eng_parts)
+            self.english_summary = _normalize_english_summary_digits(
+                "\n".join(eng_parts)
+            )
         if fa_parts:
             self.persian_summary = "\n".join(fa_parts)
 
@@ -234,9 +246,11 @@ class BilingualSummary:
 
     def deserialize(self, data: dict[str, object]) -> None:
         """Restore the layer state from serialized data."""
-        self.english_summary = "\n".join(_deduplicate_summary_lines(
-            str(data.get("english_summary", "")).splitlines()
-        ))
+        self.english_summary = _normalize_english_summary_digits(
+            "\n".join(_deduplicate_summary_lines(
+                str(data.get("english_summary", "")).splitlines()
+            ))
+        )
         self.persian_summary = "\n".join(_deduplicate_summary_lines(
             str(data.get("persian_summary", "")).splitlines()
         ))

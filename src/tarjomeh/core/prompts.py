@@ -14,20 +14,21 @@ GENERAL_EDITORIAL_CONTRACT: str = """\
 ### Editorial contract
 - Resolve meaning in context; never force an isolated dictionary equivalent.
 - Preserve semantic roles and relations: quantity, negation, modality, comparison,
-  causality, and time. Preserve source inconsistencies.
-- Preserve titles, names, citations, expressions, and note markers.
-- Write clear academic Iranian Persian with correct syntax, punctuation, ZWNJ,
-  and ezafe; avoid calques and modifier stacks.
-- Use final-heh hamza for ezafe and preserve authored kasra; never add blanket diacritics.
-- Keep finite matrix clauses. Recast stacked modifiers naturally without breaking
-  appositives or head-complement links.
-- Render relational frames such as "in X terms" by their contextual function,
-  not an opaque English preposition frame.
-- Preserve distinctions and parallel form in recurring coordinated conceptual series when
-  supported by source or mandatory terminology.
-- Emit only requested output; never add commentary or unexplained foreign prose.
-- Mandatory entries and names bind. Advisory context remains revisable
-  and cannot override source.
+  causality, time, and source inconsistencies.
+- Preserve names, titles, citations, expressions, and note markers.
+- Write clear academic Iranian Persian; avoid calques and modifier stacks. Keep
+  finite clauses and appositive or head-complement links intact.
+- Preserve parallel form in recurring coordinated conceptual series.
+- Use correct punctuation, ZWNJ, and ezafe; preserve authored diacritics;
+  never add blanket diacritics.
+- Render relational frames by function, not opaque English syntax.
+- Resolve homographs by source role and casing; memory cannot turn lowercase lexical
+  uses into entity readings.
+- Add an English parenthetical only when its exact original or source-supplied
+  expansion occurs here.
+- Emit only requested output; no commentary or unexplained foreign prose.
+- Mandatory entries and names bind. Advisory context remains revisable and cannot
+  override source.
 """
 
 # ---------------------------------------------------------------------------
@@ -147,6 +148,8 @@ Instructions:
    not replace the proposition's head, complement, participants, or relation.
    Keep Persian heads visibly connected to their complements; do not interrupt
    that dependency with an ambiguous parenthetical, dash, or modifier stack.
+   Integrate source appositives as an unambiguous Persian explanation; do not leave
+   a dash-delimited phrase between a Persian object marker or head and its governor.
    Close every list-introducing matrix construction with its own predicate after
    translating all of its members.
 2. Apply every entry marked mandatory using its prescribed lexical rendering and

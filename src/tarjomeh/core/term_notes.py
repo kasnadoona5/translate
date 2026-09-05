@@ -710,6 +710,9 @@ def audit_inline_english_originals(
         def replace(
             match: re.Match[str],
             paragraph_index: int = paragraph.index,
+            source_paragraph: str = source_text,
+            folded_source_paragraph: str = source_folded,
+            paragraph_expansions: set[str] = source_expansions,
         ) -> str:
             nonlocal preserved_citations
             content = " ".join(match.group(1).split()).strip()
@@ -717,11 +720,13 @@ def audit_inline_english_originals(
                 return match.group(0)
 
             key = _original_identity(content)
-            exact_source_parenthetical = f"({content})".casefold() in source_folded
+            exact_source_parenthetical = (
+                f"({content})".casefold() in folded_source_paragraph
+            )
             if (
                 any(char.isdigit() for char in content)
                 or exact_source_parenthetical
-                or key in source_expansions
+                or key in paragraph_expansions
             ):
                 leading_original = _original_identity(content.split(",", 1)[0])
                 if leading_original in authorized:
@@ -729,7 +734,11 @@ def audit_inline_english_originals(
                 preserved_citations += 1
                 return match.group(0)
 
-            if key in authorized:
+            authorized_here = bool(
+                key in authorized
+                and source_term_present(source_paragraph, authorized[key])
+            )
+            if authorized_here:
                 if key not in seen:
                     seen.add(key)
                     return match.group(0)
@@ -739,7 +748,15 @@ def audit_inline_english_originals(
                 })
                 return ""
 
-            grounded = source_term_present(source_text, content)
+            if key in authorized:
+                unapproved_ungrounded.append({
+                    "paragraph_index": paragraph_index,
+                    "original": content,
+                    "reason": "authorized_original_not_grounded_in_source_paragraph",
+                })
+                return match.group(0)
+
+            grounded = source_term_present(source_paragraph, content)
             if grounded:
                 preserved_source_grounded.append({
                     "paragraph_index": paragraph_index,
