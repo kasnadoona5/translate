@@ -143,6 +143,65 @@ def _restore_source_bound_artifacts(
     return repaired, report
 
 
+def _canonical_surface(text: str) -> str:
+    """Normalize layout whitespace without changing lexical content."""
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def audit_canonical_document_identity(
+    document: TranslatedDocument,
+    chunks: list[Chunk],
+    translations: dict[int, str],
+) -> dict[str, Any]:
+    """Prove that assembly did not alter canonical persisted chunk text."""
+    expected = _canonical_surface("\n\n".join(
+        translations.get(index, "").strip()
+        for index in range(len(chunks))
+        if translations.get(index, "").strip()
+    ))
+    assembled = _canonical_surface("\n\n".join(
+        paragraph.translated_text.strip()
+        for paragraph in document.paragraphs
+        if paragraph.translated_text.strip()
+    ))
+    expected_hash = hashlib.sha256(expected.encode("utf-8")).hexdigest()
+    assembled_hash = hashlib.sha256(assembled.encode("utf-8")).hexdigest()
+    return {
+        "stage": "pre_render_canonical_assembly",
+        "lexically_identical": expected == assembled,
+        "expected_hash": expected_hash,
+        "assembled_hash": assembled_hash,
+        "expected_characters": len(expected),
+        "assembled_characters": len(assembled),
+        "persisted_chunk_count": sum(
+            bool(translations.get(index, "").strip())
+            for index in range(len(chunks))
+        ),
+        "assembled_paragraph_count": sum(
+            bool(paragraph.translated_text.strip())
+            for paragraph in document.paragraphs
+        ),
+        "normalization": "unicode_preserving_whitespace_only",
+    }
+
+
+def _save_canonical_document_identity(
+    db: JobDatabase,
+    job_id: str,
+    document: TranslatedDocument,
+    chunks: list[Chunk],
+    translations: dict[int, str],
+) -> dict[str, Any]:
+    audit = audit_canonical_document_identity(document, chunks, translations)
+    db.save_job_artifact(job_id, "canonical_document_identity", audit)
+    if not audit["lexically_identical"]:
+        raise RuntimeError(
+            "Export blocked: assembled text differs from the canonical "
+            "translations stored for continuity and memory."
+        )
+    return audit
+
+
 class PipelinePausedException(Exception):
     """Raised when the translation pipeline is cooperatively paused."""
     pass
@@ -1143,6 +1202,60 @@ def _source_entity_inventory(source_text: str, limit: int = 24) -> list[str]:
     return candidates
 
 
+_FOREIGN_EXPRESSION_WORD_RE = re.compile(
+    r"[A-Za-z\u00c0-\u024f\u1e00-\u1eff]+(?:['\u2019]"
+    r"[A-Za-z\u00c0-\u024f\u1e00-\u1eff]+)?"
+)
+_FOREIGN_EXPRESSION_LEADERS = frozenset({
+    "a", "an", "and", "as", "at", "by", "for", "from", "in", "of",
+    "on", "or", "the", "to", "with",
+})
+
+
+def _source_foreign_expression_inventory(source_text: str) -> list[str]:
+    """Find compact, source-authored non-English phrases without a word list.
+
+    Lowercase Latin diacritics and non-possessive internal apostrophes provide
+    strong local evidence. The immediately preceding lexical word is retained
+    when it is not an English function word, producing spans such as
+    ``longue durée`` and ``raison d'état``. Capitalized names, citations, and
+    English possessives are outside this classifier.
+    """
+    words = list(_FOREIGN_EXPRESSION_WORD_RE.finditer(source_text or ""))
+    candidates: list[str] = []
+    for index, match in enumerate(words):
+        token = match.group()
+        has_diacritic = any(ord(character) > 127 for character in token)
+        has_internal_apostrophe = bool(
+            re.search(r"[A-Za-z]['\u2019][A-Za-z]", token)
+            and not re.search(r"['\u2019]s$", token, re.IGNORECASE)
+        )
+        if (
+            token[:1].isupper()
+            or not token[:1].islower()
+            or not (has_diacritic or has_internal_apostrophe)
+        ):
+            continue
+        start = match.start()
+        if index:
+            previous = words[index - 1]
+            separator = (source_text or "")[previous.end():match.start()]
+            previous_token = previous.group()
+            if (
+                separator.isspace()
+                and previous_token[:1].islower()
+                and previous_token.casefold() not in _FOREIGN_EXPRESSION_LEADERS
+                and not re.search(r"['\u2019]s$", previous_token, re.IGNORECASE)
+            ):
+                start = previous.start()
+        value = " ".join((source_text or "")[start:match.end()].split())
+        if 2 <= len(value.split()) <= 3 and value.casefold() not in {
+            item.casefold() for item in candidates
+        }:
+            candidates.append(value)
+    return candidates
+
+
 def _source_entity_category(source_text: str, candidate: str) -> str:
     """Classify provisional entities conservatively from local source evidence."""
     tokens = re.findall(r"[A-Za-z\u00c0-\u024f]+", candidate or "")
@@ -1182,6 +1295,18 @@ def _source_entity_categories(
     return {
         candidate: _source_entity_category(source_text, candidate)
         for candidate in candidates
+    }
+
+
+def _stored_source_entity_categories(chunk: Chunk) -> dict[str, str]:
+    """Return only the typed source-role map persisted in chunk metadata."""
+    value = chunk.metadata.get("source_entity_categories", {})
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(source): str(category)
+        for source, category in value.items()
+        if str(source).strip() and str(category).strip()
     }
 
 
@@ -3040,9 +3165,16 @@ def _chunk_needs_review(db: Any, job_id: str, chunk_index: int) -> bool:
     ]
     if not structure_events:
         return False
-    return bool(actionable_structure.intersection(
-        structure_events[-1].get("payload", {}).get("classifications", []) or []
-    ))
+    findings = list(
+        structure_events[-1].get("payload", {}).get("findings", []) or []
+    )
+    return any(
+        isinstance(finding, dict)
+        and str(finding.get("classification", "")) in actionable_structure
+        and str((finding.get("details", {}) or {}).get("admission", "blocking"))
+        in {"blocking", "review"}
+        for finding in findings
+    )
 
 
 def _log_chunk_terminal_failure(
@@ -3477,6 +3609,17 @@ def _actionable_structure_findings(
     ]
 
 
+def _blocking_structure_findings(
+    findings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep only exact typed evidence that may stop sequential admission."""
+    return [
+        finding for finding in findings
+        if str((finding.get("details", {}) or {}).get("admission", "blocking"))
+        == "blocking"
+    ]
+
+
 def _structure_findings_as_source_issues(
     findings: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -3525,6 +3668,8 @@ def _introduced_structure_conflicts(
             if classification not in _ACTIONABLE_STRUCTURE_CLASSIFICATIONS:
                 continue
             details = finding.get("details", {}) or {}
+            if str(details.get("admission", "blocking")) != "blocking":
+                continue
             signature = json.dumps(
                 {
                     "check_id": finding.get("check_id"),
@@ -5567,7 +5712,14 @@ class TranslationPipeline:
                                 try:
                                     noun_report = self._run_async(
                                         memory_manager.update_proper_nouns(
-                                            self.llm_client, chunk.text, translation
+                                            self.llm_client,
+                                            chunk.text,
+                                            translation,
+                                            source_categories=(
+                                                _stored_source_entity_categories(
+                                                    chunk
+                                                )
+                                            ),
                                         )
                                     )
                                     self.db.log_chunk_event(
@@ -5845,7 +5997,14 @@ class TranslationPipeline:
                                 try:
                                     noun_report = self._run_async(
                                         memory_manager.update_proper_nouns(
-                                            self.llm_client, chunk.text, translation
+                                            self.llm_client,
+                                            chunk.text,
+                                            translation,
+                                            source_categories=(
+                                                _stored_source_entity_categories(
+                                                    chunk
+                                                )
+                                            ),
                                         )
                                     )
                                     self.db.log_chunk_event(
@@ -6284,6 +6443,9 @@ class TranslationPipeline:
             "ambiguous_forms_auto_classified": False,
             "edits": final_orthography_edits,
         })
+        _save_canonical_document_identity(
+            self.db, job_id, trans_doc, chunks, translations
+        )
         if remaining_orthography_issues:
             warning = (
                 "Persian orthography audit found "
@@ -6631,6 +6793,9 @@ class TranslationPipeline:
             )
 
         trans_doc = self._assemble_translated_document(document, chunks, translations)
+        _save_canonical_document_identity(
+            self.db, job_id, trans_doc, chunks, translations
+        )
         protocol_audit = sanitize_document_protocol_artifacts(trans_doc)
         self.db.save_job_artifact(
             job_id, "protocol_integrity_audit", protocol_audit
@@ -7625,8 +7790,29 @@ class TranslationPipeline:
             ]
             if not _is_front_matter(chunk) else []
         )
+        source_foreign_expressions = (
+            _source_foreign_expression_inventory(chunk.text)
+            if not _is_front_matter(chunk) else []
+        )
+        for expression in source_foreign_expressions:
+            if (
+                not memory_manager.proper_nouns.is_introduced(expression)
+                and expression.casefold() not in known_source_entities
+                and expression.casefold() not in {
+                    value.casefold() for value in source_entity_candidates
+                }
+            ):
+                source_entity_candidates.append(expression)
         source_entity_categories = _source_entity_categories(
             chunk.text, source_entity_candidates
+        )
+        source_entity_categories.update({
+            expression: "technical_loanword"
+            for expression in source_foreign_expressions
+            if expression in source_entity_candidates
+        })
+        chunk.metadata["source_entity_categories"] = dict(
+            source_entity_categories
         )
         required_person_candidates = _high_confidence_person_candidates(
             source_entity_candidates, chunk.text
@@ -7634,9 +7820,15 @@ class TranslationPipeline:
         required_instrument_candidates = _high_confidence_instrument_candidates(
             source_entity_candidates
         )
+        required_foreign_expressions = [
+            expression for expression in source_foreign_expressions
+            if expression in source_entity_candidates
+            or expression in pending_originals
+        ]
         required_entity_candidates = list(dict.fromkeys([
             *required_person_candidates,
             *required_instrument_candidates,
+            *required_foreign_expressions,
         ]))
         allowed_inline_originals = (
             sorted(
@@ -7679,6 +7871,7 @@ class TranslationPipeline:
             "source_entity_candidates": source_entity_candidates,
             "required_person_candidates": required_person_candidates,
             "required_instrument_candidates": required_instrument_candidates,
+            "required_source_foreign_expressions": required_foreign_expressions,
             "required_entity_candidates": required_entity_candidates,
             "categories": {
                 source: (
@@ -10928,19 +11121,48 @@ Output ONLY the corrected Persian translation.
         self.db.log_chunk_event(
             job_id, idx, "structure_audit", final_structure_payload
         )
-        unresolved_structure = _ACTIONABLE_STRUCTURE_CLASSIFICATIONS.intersection(
-            final_structure_payload.get("classifications", []) or []
+        final_actionable_structure = _actionable_structure_findings(
+            chunk.text, translation
         )
-        if unresolved_structure:
+        blocking_structure = _blocking_structure_findings(
+            final_actionable_structure
+        )
+        review_structure = [
+            finding for finding in final_actionable_structure
+            if finding not in blocking_structure
+        ]
+        if review_structure:
+            self.db.log_chunk_event(
+                job_id,
+                idx,
+                "language_quality_review",
+                {
+                    "stage": "final_source_structure_admission",
+                    "review_reason": "uncertain_source_structure_evidence",
+                    "finding_count": len(review_structure),
+                    "findings": review_structure,
+                    "message": (
+                        "Potential structure drift lacked exact typed evidence. "
+                        "The best integrity-valid translation was retained for "
+                        "human review without stopping later chunks."
+                    ),
+                },
+            )
+        if blocking_structure:
             _ensure_chunk_review_reason(self.db, job_id, idx)
+            unresolved_structure = {
+                str(finding.get("classification", ""))
+                for finding in blocking_structure
+                if str(finding.get("classification", ""))
+            }
             failure_payload = {
                 "stage": "final_source_structure_admission",
                 "accepted": False,
                 "blocking_count": len(
-                    _actionable_structure_findings(chunk.text, translation)
+                    blocking_structure
                 ),
                 "classifications": sorted(unresolved_structure),
-                "findings": final_structure_payload.get("findings", []),
+                "findings": blocking_structure,
                 "message": (
                     "Explicit source structure remained inaccurate after the "
                     "bounded source-aware repair; memory and complete export were "

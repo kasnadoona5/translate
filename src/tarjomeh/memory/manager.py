@@ -272,6 +272,7 @@ class MemoryManager:
         self.book_context = ""
         self.style_profile = ""
         self.style_samples: list[str] = []
+        self.style_sample_records: list[dict[str, Any]] = []
 
         # Pull retrieval_k and window_size from config
         retrieval_k = config.to_dict().get("memory", {}).get("long_term_retrieval_k", 5)
@@ -283,6 +284,15 @@ class MemoryManager:
         except (TypeError, ValueError):
             configured_style_floor = 75.0
         self._style_min_score = min(100.0, max(0.0, configured_style_floor))
+        self._style_min_representative_samples = max(
+            1,
+            min(
+                5,
+                int(getattr(
+                    config.memory, "style_min_representative_samples", 3
+                ) or 3),
+            ),
+        )
 
         self.long_term = LongTermMemory(retrieval_k=retrieval_k)
         self.short_term = ShortTermMemory(window_size=window_size)
@@ -363,6 +373,7 @@ class MemoryManager:
                 "style_profile_version": len(
                     [sample for sample in self.style_samples if _clean_style_sample(sample)]
                 ),
+                "style_profile_status": self._style_profile_status(),
                 "long_term_entry_ids": [
                     pair.get("entry_id") for pair in relevant_long_term
                 ],
@@ -510,7 +521,17 @@ class MemoryManager:
                 "source_genre_not_representative_of_body_voice"
             )
         if style_eligible:
-            style_sample_policy = self._update_style_profile(style_translation)
+            style_sample_policy = self._update_style_profile(
+                style_translation,
+                source_paragraph_indices=style_source_indices,
+                paragraph_role=primary_role,
+                book_genre=self._book_genre(),
+                source_chunk_index=chunk.index,
+                representative=primary_role in {
+                    "body", "academic_argument", "expository_nonfiction",
+                    "narrative_prose", "dialogue",
+                },
+            )
             selected = style_sample_policy.get("selected", {}) or {}
             local_index = selected.get("paragraph_index")
             if isinstance(local_index, int) and local_index < len(style_source_indices):
@@ -550,7 +571,63 @@ class MemoryManager:
             "structural_roles": structural_roles,
         }
 
-    def _update_style_profile(self, translation: str) -> dict[str, Any]:
+    def _book_genre(self) -> str:
+        """Return a stable broad genre without an extra classification call."""
+        register = str(self.config.translation.style_register or "").casefold()
+        mode = str(self.config.translation.mode or "").casefold()
+        if "literary" in register:
+            return "literary"
+        if mode == "academic" or "academic" in register:
+            return "academic"
+        return "general"
+
+    def _ensure_style_sample_records(self) -> None:
+        """Backfill metadata for checkpoints that predate evidence records."""
+        known_hashes = {
+            str(record.get("text_hash", ""))
+            for record in self.style_sample_records
+            if isinstance(record, dict)
+        }
+        for sample in self.style_samples:
+            digest = hashlib.sha256(sample.encode("utf-8")).hexdigest()
+            if digest in known_hashes:
+                continue
+            quality = _style_sample_quality(sample)
+            self.style_sample_records.append({
+                "text": sample,
+                "text_hash": digest,
+                "paragraph_role": "legacy_unknown",
+                "book_genre": "unknown",
+                "representative": False,
+                "fallback": True,
+                "quality_score": float(quality.get("score", 0.0)),
+                "source_chunk_index": None,
+                "source_paragraph_index": None,
+                "reasons": ["legacy_sample_without_role_metadata"],
+            })
+            known_hashes.add(digest)
+
+    def _style_profile_status(self) -> str:
+        self._ensure_style_sample_records()
+        representative = sum(
+            bool(record.get("representative"))
+            and bool(_clean_style_sample(str(record.get("text", ""))))
+            for record in self.style_sample_records
+        )
+        if representative >= self._style_min_representative_samples:
+            return "established"
+        return "warming_up" if self.style_samples else "empty"
+
+    def _update_style_profile(
+        self,
+        translation: str,
+        *,
+        source_paragraph_indices: list[int] | None = None,
+        paragraph_role: str = "body",
+        book_genre: str = "general",
+        source_chunk_index: int | None = None,
+        representative: bool = True,
+    ) -> dict[str, Any]:
         """Maintain a compact book-level style guide from early translations."""
         candidates: list[dict[str, Any]] = []
         rejections: list[dict[str, Any]] = []
@@ -586,9 +663,31 @@ class MemoryManager:
             "rejections": rejections[:5],
             "minimum_score": self._style_min_score,
         }
+        self._ensure_style_sample_records()
         if candidates:
             selected = max(candidates, key=lambda item: float(item["score"]))
             text = str(selected["sample"])
+            local_index = int(selected.get("paragraph_index", 0) or 0)
+            source_paragraph_index = (
+                source_paragraph_indices[local_index]
+                if source_paragraph_indices
+                and local_index < len(source_paragraph_indices)
+                else local_index
+            )
+            record = {
+                "text": text,
+                "text_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "paragraph_role": paragraph_role,
+                "book_genre": book_genre,
+                "representative": bool(representative),
+                "fallback": not bool(representative),
+                "quality_score": float(selected.get("score", 0.0)),
+                "source_chunk_index": source_chunk_index,
+                "source_paragraph_index": source_paragraph_index,
+                "reasons": [] if representative else [
+                    "quality_approved_body_role_uncertain"
+                ],
+            }
             duplicate = any(
                 text == existing
                 or (
@@ -605,6 +704,7 @@ class MemoryManager:
                 })
             elif len(self.style_samples) < 5:
                 self.style_samples.append(text)
+                self.style_sample_records.append(record)
                 report.update({
                     "accepted": True,
                     "reason": "quality_approved_sample_added",
@@ -621,8 +721,30 @@ class MemoryManager:
                 weakest_score = float(
                     existing_quality[weakest_index].get("score", 0.0)
                 )
-                if float(selected["score"]) >= weakest_score + 8.0:
+                fallback_indices = [
+                    index for index, existing in enumerate(
+                        self.style_sample_records[:len(self.style_samples)]
+                    )
+                    if bool(existing.get("fallback"))
+                ]
+                replace_fallback = bool(representative and fallback_indices)
+                if replace_fallback:
+                    weakest_index = min(
+                        fallback_indices,
+                        key=lambda index: float(
+                            self.style_sample_records[index].get(
+                                "quality_score", 0.0
+                            )
+                        ),
+                    )
+                    weakest_score = float(
+                        self.style_sample_records[weakest_index].get(
+                            "quality_score", 0.0
+                        )
+                    )
+                if replace_fallback or float(selected["score"]) >= weakest_score + 8.0:
                     self.style_samples[weakest_index] = text
+                    self.style_sample_records[weakest_index] = record
                     report.update({
                         "accepted": True,
                         "reason": "weaker_style_sample_replaced",
@@ -638,14 +760,27 @@ class MemoryManager:
                     })
 
         self.style_profile = self._render_style_profile()
+        report["profile_status"] = self._style_profile_status()
+        report["representative_sample_count"] = sum(
+            bool(record.get("representative"))
+            for record in self.style_sample_records
+        )
         return report
 
     def _render_style_profile(self) -> str:
         """Build a prompt-safe style guide from trusted prose samples."""
+        self._ensure_style_sample_records()
+        ordered_records = sorted(
+            self.style_sample_records,
+            key=lambda record: (
+                not bool(record.get("representative")),
+                -float(record.get("quality_score", 0.0)),
+            ),
+        )
         clean_samples = [
             cleaned
-            for sample in self.style_samples
-            if (cleaned := _clean_style_sample(sample))
+            for record in ordered_records
+            if (cleaned := _clean_style_sample(str(record.get("text", ""))))
             and float(_style_sample_quality(cleaned).get("score", 0.0))
             >= self._style_min_score
         ][:5]
@@ -655,6 +790,22 @@ class MemoryManager:
             f"{i + 1}. {sample}"
             for i, sample in enumerate(clean_samples)
         )
+        genre = next((
+            str(record.get("book_genre", "general"))
+            for record in ordered_records
+            if record.get("representative")
+        ), self._book_genre())
+        genre_guidance = {
+            "academic": (
+                "Preserve argument structure, conceptual parallelism, explicit "
+                "logical relations, and integrated scholarly citations."
+            ),
+            "literary": (
+                "Preserve narrative voice, point of view, dialogue register, "
+                "imagery, and intentional rhythm."
+            ),
+        }.get(genre, "Preserve the source genre's register, voice, and paragraph rhythm.")
+        status = self._style_profile_status()
         return (
             "Maintain one coherent scholarly Iranian-Persian voice across the book. "
             "Prefer formal academic diction, precise conceptual renderings, stable "
@@ -662,7 +813,8 @@ class MemoryManager:
             "Do not simplify later chapters into a different register. These samples govern "
             "register and rhythm only: they are not terminology authority, and the source, "
             "curated glossary, and current context override every lexical choice. Do not copy "
-            "transliteration artifacts or untranslated citation prose from a sample.\n\n"
+            "transliteration artifacts or untranslated citation prose from a sample. "
+            f"Genre focus: {genre_guidance} Profile status: {status}.\n\n"
             f"Representative early translation samples:\n{samples}"
         )
 
@@ -680,7 +832,12 @@ class MemoryManager:
         )
 
     async def update_proper_nouns(
-        self, llm_client: Any, text: str, translation: str = ""
+        self,
+        llm_client: Any,
+        text: str,
+        translation: str = "",
+        *,
+        source_categories: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Incrementally identify new proper nouns in the text and add them."""
         from tarjomeh.core.prompts import INCREMENTAL_NER_PROMPT, GLOSSARY_EXTRACT_PROMPT
@@ -734,12 +891,25 @@ class MemoryManager:
             normalized_translation = re.sub(
                 r"[\s\u200c]+", " ", translation.strip()
             ).casefold()
+            category_by_source = {
+                " ".join(str(source).split()).casefold(): str(value)
+                for source, value in (source_categories or {}).items()
+                if str(source).strip() and str(value).strip()
+            }
             for item in candidates if isinstance(candidates, list) else []:
                 if not isinstance(item, dict):
                     continue
                 term = str(item.get("term", "")).strip()
                 persian = str(item.get("suggested_persian", "")).strip()
                 category = str(item.get("category", "term"))
+                source_category = category_by_source.get(
+                    " ".join(term.split()).casefold(), ""
+                )
+                if source_category in {
+                    "person", "place", "organization", "institution",
+                    "legal_instrument", "source_grounded_entity",
+                }:
+                    category = source_category
                 if not is_usable_memory_mapping(term, persian):
                     rejected_details.append({
                         "source": term,
@@ -956,6 +1126,7 @@ class MemoryManager:
             "book_context": self.book_context,
             "style_profile": self.style_profile,
             "style_samples": self.style_samples,
+            "style_sample_records": self.style_sample_records,
             "proper_nouns": self.proper_nouns.serialize(),
             "bilingual_summary": self.bilingual_summary.serialize(),
             "past_translations": self.long_term.serialize(),
@@ -967,6 +1138,12 @@ class MemoryManager:
         self.book_context = str(data.get("book_context", ""))
         self.style_profile = str(data.get("style_profile", ""))
         self.style_samples = list(data.get("style_samples", []))
+        raw_records = data.get("style_sample_records", [])
+        self.style_sample_records = [
+            dict(record) for record in list(raw_records or [])
+            if isinstance(record, dict)
+        ]
+        self._ensure_style_sample_records()
         self.proper_nouns.deserialize(data.get("proper_nouns", {}))
         self.bilingual_summary.deserialize(data.get("bilingual_summary", {}))
         self.long_term.deserialize(data.get("past_translations", []))

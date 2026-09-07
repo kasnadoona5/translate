@@ -307,6 +307,7 @@ class MemoryConfig:
     long_term_retrieval_k: int = 5
     short_term_window: int = 4
     style_min_score: float = 75.0
+    style_min_representative_samples: int = 3
 
 
 @dataclass

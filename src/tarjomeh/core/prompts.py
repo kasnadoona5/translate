@@ -139,6 +139,9 @@ Instructions:
    Treat coordinated source members separately: preserve every verb, complement,
    contrast, and qualification in pairs such as "extended and qualified" rather
    than allowing one fluent Persian phrase to swallow the other member.
+   If coordinated clauses use different subjects or voice, give each action an
+   explicit natural Persian predicate (active or impersonal as appropriate); do
+   not attach both to the nearest subject merely to shorten the sentence.
    Prefer natural Persian clause order. Split or reorganize sentences inside the
    same paragraph when that improves comprehension without merging claims,
    deleting qualifications, adding interpretation, or changing logical relations.
@@ -157,7 +160,10 @@ Instructions:
 3. Ensure stylistic and terminological continuity with the preceding translation.
    Continuity is evidence, not authority: do not imitate an awkward construction
    merely because it appears in advisory memory. Preserve parallel distinctions in
-   coordinated conceptual series with equally clear Persian phrasing.
+   coordinated conceptual series with equally clear Persian phrasing. When the
+   author deliberately contrasts a related lexical family, prefer a coherent
+   Persian family if it preserves each distinction naturally; never force shared
+   morphology when that would reduce accuracy or idiomatic clarity.
 4. Maintain paragraph structure; do not merge or split paragraphs. The source text contains
    exactly {paragraph_count} paragraph(s) — your translation MUST also contain exactly
    {paragraph_count} paragraph(s), separated by double newlines (\n\n).

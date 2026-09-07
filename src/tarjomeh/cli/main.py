@@ -393,6 +393,63 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     return 2 if args.fail_on_regression and blocked else 0
 
 
+def cmd_capabilities(args: argparse.Namespace) -> int:
+    """Print stable capabilities from the currently loaded installation."""
+    import json
+
+    from tarjomeh.runtime import runtime_behavior_probes, runtime_capabilities
+
+    payload = runtime_capabilities()
+    if args.verify:
+        payload["behavior_probes"] = runtime_behavior_probes()
+    if args.json:
+        console.print(json.dumps(payload, ensure_ascii=False, indent=2), markup=False)
+    else:
+        console.print(f"Runtime release: [cyan]{payload['release']}[/cyan]")
+        for name, enabled in payload["capabilities"].items():
+            console.print(f"  {name}: {'yes' if enabled else 'no'}")
+    probes = payload.get("behavior_probes", {})
+    return 0 if all(probes.values()) else 1
+
+
+def cmd_benchmark(args: argparse.Namespace) -> int:
+    """Run an isolated model comparison through the configured endpoint."""
+    from tarjomeh.core.config import TarjomehConfig
+    from tarjomeh.quality.model_benchmark import (
+        ModelBenchmark,
+        load_benchmark_suite,
+        write_benchmark_reports,
+    )
+
+    if args.benchmark_action != "compare":
+        console.print("[red]Benchmark action required.[/red]")
+        return 1
+    try:
+        config = TarjomehConfig.load(
+            Path(args.config) if args.config else None
+        )
+        suite = load_benchmark_suite(Path(args.suite))
+        report = ModelBenchmark(config).run(
+            suite, list(args.models), args.judge_model
+        )
+        paths = write_benchmark_reports(report, Path(args.output_dir))
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        console.print(f"[red]Benchmark failed:[/red] {exc}")
+        return 1
+
+    console.print(f"Benchmark ID: [cyan]{report['id']}[/cyan]")
+    for rank, summary in enumerate(report["summaries"], 1):
+        console.print(
+            f"  {rank}. {summary['model']}: "
+            f"quality={summary['average_quality_score']:.3f}, "
+            f"disqualified={summary['disqualified_passages']}, "
+            f"latency={summary['latency_seconds']:.3f}s"
+        )
+    console.print(f"Reports: [green]{paths['markdown'].parent}[/green]")
+    console.print("No job, memory layer, or runtime model setting was changed.")
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     """Start the web UI server."""
     from tarjomeh.web.app import create_app
@@ -510,6 +567,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exit with status 2 when the candidate has a blocking regression",
     )
 
+    p_capabilities = subparsers.add_parser(
+        "capabilities", help="Show loaded runtime quality capabilities"
+    )
+    p_capabilities.add_argument(
+        "--json", action="store_true", help="Emit machine-readable JSON"
+    )
+    p_capabilities.add_argument(
+        "--verify", action="store_true",
+        help="Run offline behavioral probes and fail if any probe fails",
+    )
+
+    p_benchmark = subparsers.add_parser(
+        "benchmark", help="Run isolated model quality comparisons"
+    )
+    benchmark_sub = p_benchmark.add_subparsers(dest="benchmark_action")
+    p_compare = benchmark_sub.add_parser(
+        "compare", help="Compare translation routes on one frozen suite"
+    )
+    p_compare.add_argument(
+        "--models", nargs="+", required=True,
+        help="Two or more model or 9router route names",
+    )
+    p_compare.add_argument(
+        "--judge-model", required=True,
+        help="Independent judge model or 9router route name",
+    )
+    p_compare.add_argument(
+        "--suite", default="benchmarks/suites/academic-core.json",
+        help="Frozen benchmark suite JSON",
+    )
+    p_compare.add_argument(
+        "--output-dir", default="benchmarks/runs",
+        help="Parent directory for immutable run artifacts",
+    )
+    p_compare.add_argument("-c", "--config", help="Config file path")
+
     # serve
     p_serve = subparsers.add_parser("serve", help="Start web UI server")
     p_serve.add_argument("-c", "--config", help="Config file path")
@@ -539,6 +632,8 @@ def main() -> int:
         "jobs": cmd_jobs,
         "glossary": cmd_glossary,
         "eval": cmd_evaluate,
+        "capabilities": cmd_capabilities,
+        "benchmark": cmd_benchmark,
         "serve": cmd_serve,
     }
 

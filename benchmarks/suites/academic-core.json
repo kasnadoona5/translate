@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "id": "academic-core-v1",
+  "description": "Synthetic source-grounded cases for academic English-to-Persian model comparison.",
+  "passages": [
+    {
+      "id": "explicit-count-and-enumeration",
+      "domain": "social theory",
+      "source": "This chapter addresses two issues. First, it distinguishes institutional authority from coercive capacity. Second, it explains why that distinction matters for comparative analysis.",
+      "notes": "Preserve the explicit count and both coordinated claims."
+    },
+    {
+      "id": "coordination-and-voice",
+      "domain": "political sociology",
+      "source": "The framework was extended by later research, and its central assumptions were qualified when comparative evidence revealed a different causal sequence.",
+      "notes": "Preserve both actions, their voice, and the causal relation."
+    },
+    {
+      "id": "conceptual-family-and-citation",
+      "domain": "political theory",
+      "source": "The analysis separates polity, politics, and policy while preserving their conceptual relationship (Author 1996, 42-44).",
+      "notes": "Keep the triad distinct and the citation unchanged."
+    },
+    {
+      "id": "foreign-expression-and-qualification",
+      "domain": "historical sociology",
+      "source": "A longue dur\u00e9e account may clarify the institutional pattern, but it does not by itself establish that the outcome was necessary.",
+      "notes": "Retain the source-authored foreign expression and the modal limitation."
+    }
+  ]
+}

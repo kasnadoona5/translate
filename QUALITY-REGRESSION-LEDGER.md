@@ -35,20 +35,45 @@ new evidence so later patches cannot silently revive an earlier defect.
 
 ## Current Baseline
 
-- Deployed evidence baseline: `v10.25.0`, commit `33b16fa`
-- Test job: `f48bf43e6000`
+- Deployed evidence baseline: `v10.26.0`, commit `40ca8fe`
+- Test job: `7eb03e1025a7`
 - Source: *The State: Past, Present, Future* (Bob Jessop, 2016)
-- Runtime result: 150 recorded LLM attempts, with no provider/content failure or
-  zero-output success. The job reached its configured checkpoint with 16 of 222
-  chunks finished; four chunks need review. The apparent long pause around UI chunk
-  12 was a successful 625-second readability call, not a terminal worker failure.
-- Translation verdict: source-count preservation, internal note recovery, canonical
-  DB/event/Layer-3 identity, refiner veto, dedication filtering, memory trust
-  separation, citation handling, and prior typography protections held. The run is
-  still `REVIEW`: a later source rollback can discard an unrelated good refiner edit,
-  lowercase lexical `polity` can inherit the publisher mapping `Polity`, two
-  dash/appositive attachments are malformed, some contextual term corrections remain
-  too broad for Layer 1, and the English summary contains localized digits.
+- Runtime result: the configured checkpoint finished 16 of 222 chunks (11 completed,
+  5 needs review). There were 126 lifetime attempts: 120 active, 6 successful obsolete,
+  and one active incomplete stream (`0.83%`) that recovered automatically.
+- Translation verdict: worker ownership, source-safe recovery, refiner veto, four-layer
+  trust separation, attributable advisory research, citation handling, and prior
+  mechanical typography protections held. The run is still `REVIEW`: an untyped
+  structure detector falsely paired `eight sources` with `chapter 5` and stopped the
+  worker on database chunk 3/UI chunk 4; one source-authored foreign expression was
+  omitted; automatic terminology admitted context-contaminated or incomplete mappings;
+  style evidence selected nonrepresentative/malformed material; and Layer-3 text did
+  not fully explain the final rendered identifier surface.
+
+## v10.26 Live Result
+
+- Code/runtime: v10.26 reached the configured checkpoint with 11 completed chunks,
+  5 needs-review chunks, and 206 pending chunks.
+- Stop root cause: the durable terminal event is on database chunk 3/UI chunk 4, not
+  chunk 12. The structure detector combined the quantity `eight sources` with the
+  unrelated reference `chapter 5` and treated the result as a blocking enumeration
+  mismatch. This was a deterministic evidence-classification defect, not an LLM or
+  9router transport failure.
+- LLM accounting: 126 lifetime attempts, 120 active attempts, 6 successful obsolete
+  attempts, and one active incomplete stream that recovered. No successful attempt had
+  an empty visible answer.
+- Memory/style: all four layers remained available and trust-separated, but the style
+  evidence record was not role/genre explicit and admitted a nonrepresentative sample.
+  Layer 1 also retained examples whose Persian span included local syntax or omitted one
+  member of a coordinated source concept. Such records remain continuity evidence but
+  are unsafe as reusable lexical authority.
+- Source/output: the explicit `two issues` obligation remained protected, but the
+  source-authored `(longue durée)` expression was absent in this run. The central
+  strategic-relational sentence and one coordinated conceptual family remained
+  academically dense or inconsistent rather than naturally fluent Persian.
+- Research remained attributable and advisory-only. Prior identifier, citation,
+  abbreviation, note-marker, duplication, worker-lease, and refiner-veto protections
+  did not regress. Full scholarly-table reconstruction remains deferred.
 
 ## v10.24 Live Result
 
@@ -227,12 +252,12 @@ new evidence so later patches cannot silently revive an earlier defect.
 | R11 | First-occurrence English anchors are complete and non-duplicated | PARTIAL | `methodological individualism` is now anchored, but final QA still reports a missing `apparatus` anchor in structural contents material. Reconciliation must distinguish prose, tables, contents, citations, and abbreviations without duplicating English originals. |
 | R12 | Citations, ISBNs, superscripts, and source identifiers survive | PROTECTED | Current output preserves these structures; future typography changes must retain this gate. |
 | R13 | Persian typography mechanism does not corrupt citations or model-authored diacritics | PROTECTED | Hazm `می` splitting, authored ezafe/tanwin preservation, and Latin citation protection remain covered. This row protects preservation mechanics; R59 separately tracks whether model output uses enough academic ezafe marking. |
-| R14 | Contextual phrases cannot become canonical terminology | PROTECTED | Live memory has explicit authority classes; 81 contextual mappings remained advisory and no unsafe automatic mapping became canonical. |
-| R15 | Accepted terminology cannot add source-external scope | PROTECTED | Single-passage corrections remained `reviewed_advisory`; only two curated glossary mappings were canonical. |
+| R14 | Contextual phrases cannot become canonical terminology | PARTIAL | Authority classes remain present, but v10.26 retained automatic mappings whose observed Persian span included local syntax or failed to represent every coordinated source member. v10.27 strips only recognized context syntax and rejects incomplete coordination before reusable admission. |
+| R15 | Accepted terminology cannot add source-external scope | PARTIAL | Reviewed/curated authority separation remains, but context-expanded observed targets show that lexical boundary evidence still needs live v10.27 confirmation. |
 | R16 | Layer 2 summary stays advisory and source-consistent | PARTIAL | Trust remains advisory and the earlier malformed construction is gone, but compressed or awkward summary wording can still bias later continuity. Summary admission needs proposition coverage and readability checks without turning the summary into a glossary. |
 | R17 | Layer 3 preserves retrieval while exposing reliability | PROTECTED | Reliable and advisory entries coexist; low-trust entries must not be forced as terminology. |
 | R18 | Layer 4 preserves immediate continuity without granting authority | PROTECTED | Trusted, advisory-review, and structural-only entries remain available with explicit trust. |
-| R19 | Style samples are accurate, fluent, representative prose | PARTIAL | v10.24 has four active samples, but `I dedicate this book...` escaped the source-genre filter and became style authority. v10.25 broadens only the source-anchored dedication form while retaining the paragraph in continuity memory; live confirmation is required. |
+| R19 | Style samples are accurate, fluent, representative prose | PARTIAL | Dedication filtering works, but v10.26 selected nonrepresentative/malformed evidence. v10.27 persists paragraph role, broad genre, quality score, source indices, representative/fallback status, and requires three representative samples before the profile is established. |
 | R20 | Research cannot override source, glossary, or accepted translation | PROTECTED | Suggestions are unapproved/advisory; continue testing source identity and evidence quality. |
 | R21 | Research evidence is attributable and book/author matched | PARTIAL | Five live sources are book/author matched and all thirty proposals remain advisory. Several proposals still rely on generic excerpts or evidence that does not contain the proposed term or alias; such evidence may provide book context but not terminology support. |
 | R22 | Broken chunks cannot contaminate trusted/style memory | PROTECTED | Needs-review language defects were excluded from trusted/style admission. |
@@ -246,7 +271,7 @@ new evidence so later patches cannot silently revive an earlier defect.
 | R30 | Structural table content does not gain duplicate rows | DEFERRED | Table 1.1 repeats `ویژگی‌های اساسی آپاراتوس دولت`. Full scholarly table reconstruction remains deferred by the user; retain source-relative duplicate evidence for the later table phase. |
 | R31 | Latin scholarly abbreviations survive Persian typography | PROTECTED | Fresh v10.18 DOCX evidence preserves bounded forms such as `e.g.`, `i.e.`, `cf.`, `ibid.`, and `viz.` together with their citation tails; paired tests still protect ordinary mixed Latin punctuation. |
 | R32 | Objective readability defects can reach bounded repair regardless of reviewer severity labels | MONITOR | The route is deployed, but this run produced zero qualifying live minor promotions. Keep the bounded exact-span route and refiner veto; require a future positive live event before marking it protected. |
-| R33 | Low-quality prose cannot become active style authority merely because it is complete | PARTIAL | Below-floor and unresolved-objective samples remain inactive. v10.24 exposed a remaining source-genre gap for first-person dedications; v10.25 closes that narrow general form without lowering the style floor or removing continuity. Live evidence is required before protection. |
+| R33 | Low-quality prose cannot become active style authority merely because it is complete | PARTIAL | Below-floor and unresolved-objective samples remain inactive, but v10.26 shows that quality alone is insufficient when role/genre provenance is implicit. v10.27 adds representative/fallback evidence without removing any sample from continuity memory. |
 | R34 | Every material source proposition survives translation and final admission | MONITOR | v10.24 live output restores the previously omitted `dynamics of state and civilization`, and source-obligation tests remain green. The final bounded route is extended in v10.25 to objective predicate/governor/attachment defects under the same source-monotonic admission; broader live adverse evidence is still required. |
 | R35 | Terminology memory is scoped by sense and structural role | OPEN | Front-matter publisher `polity` was correctly rendered as the brand `پولیتی`, then reused for conceptual `polity` in `polity / politics / policy`. Brand, title, person, citation, and lexical-concept senses must not share automatic authority merely because their normalized source surface matches. |
 | R36 | Reliable retrieval excludes known unresolved objective defects | OPEN | `at most -> به‌نهایت` entered a reliable long-term entry even though the final fluency score was below threshold and the defect remained unresolved. A chunk may remain useful as advisory continuity, but cannot become reliable/style authority while a grounded objective defect is unresolved. |
@@ -266,7 +291,7 @@ new evidence so later patches cannot silently revive an earlier defect.
 | R50 | A malformed or incomplete bilingual-summary response cannot replace prior Layer-2 memory | OPEN | v10.20 parsed summary updates directly into live state. v10.21 parses into a temporary candidate, requires both language sections and protocol-clean bounded content, then commits atomically while retaining advisory-only authority. |
 | R51 | First authoritative worker release reason survives generic web cleanup | OPEN | v10.20's pipeline release could be overwritten by `web_worker_finished`, obscuring pause/supersession evidence. v10.21 makes release idempotent and persists acquire, renew, reject, stale reclaim, pause request/acknowledgement, and first release events. |
 | R52 | Governed-phrase detection cannot skip citations or punctuation inside a phrase | PROTECTED | v10.22 completed the formerly failing region without a governed-span false positive, retry, or terminal failure; paired lexical-contiguity tests remain green. |
-| R53 | Final cleanup never silently deletes a source-grounded lexical expression | PROTECTED | v10.22 retained `(longue duree)` in the delivered text and aggregated all reconciliation passes. Unknown originals remain review evidence rather than being silently deleted. |
+| R53 | Final cleanup never silently deletes a source-grounded lexical expression | PARTIAL | v10.22 retained `(longue duree)`, but v10.26 omitted the source-authored `(longue durée)` form. v10.27 detects compact lowercase source expressions from non-English orthographic evidence and routes them through the existing required first-occurrence anchor and integrity path; fresh live confirmation is required. |
 | R54 | Multiword source names are not downgraded to technical loanwords by phonetic similarity | PROTECTED | v10.22 correctly categorized the observed multiword people in the live memory state while preserving accepted targets and provenance. |
 | R55 | Every terminal chunk failure has durable stage and integrity evidence | MONITOR | Implementation and paired tests exist, but v10.22 had no terminal failure, so the durable live event path was not exercised. |
 | R56 | Audit scripts default to the latest job independently of stale shell state | FIXED LOCALLY | The released v10.22 launchers used `${1:-${JOB:-LATEST}}`, so a previously assigned shell `JOB` could silently select an older run. The corrected launchers use a function-local job variable and `${1:-LATEST}`; an explicit job ID remains supported. Bash syntax and byte-for-byte companion-file checks pass. |
@@ -279,8 +304,13 @@ new evidence so later patches cannot silently revive an earlier defect.
 | R63 | Long active quality calls identify their chunk and remain distinguishable from stops | PARTIAL | v10.22 had one uninterrupted worker but database chunks 11 and 13 took about 23.8 and 18.8 minutes. Persist and report database/UI chunk number, operation, stage, worker generation, and elapsed time without counting a long call as a failure. |
 | R64 | Runtime audit markers test capabilities rather than incidental prose | MONITOR | v10.24 produced a false hard failure from a stale comment-text assertion. v10.25 directly probes aligned note recovery and citation normalization and uses paired function/event contracts for new repair, memory, and style behavior; deployment must fail only on a real missing capability. |
 | R65 | Unique internal sentence-terminal note markers recover without guessing | MONITOR | v10.24 stopped on one source marker at an internal sentence boundary. v10.25 restores it only when source/target paragraph and sentence counts align and the marker occurrence and ordinal boundary are unique. Reused, split, merged, or ambiguous cases remain blocking. |
-| R66 | Layer-3 text is the exact canonical text admitted before export | MONITOR | v10.24 could normalize citation framing only during document export, after memory admission. v10.25 canonicalizes the same house style before DB/memory, stores chunk identity and SHA-256 with Layer 3, and hard-fails audits on event, saved-chunk, or memory mismatch. |
+| R66 | Layer-3 text is the exact canonical text admitted before export | PARTIAL | Pre-memory canonical hashes exist, but v10.26 exposed an unexplained difference between memory evidence and one final rendered identifier surface. v10.27 proves whitespace-only lexical identity between persisted chunks and the assembled pre-render document and blocks export on unexplained mutation; intentional notes/anchors remain separately audited presentation changes. |
 | R67 | First-person dedication prose cannot become style authority | MONITOR | v10.24 admitted `I dedicate this book...` as an active sample. v10.25 excludes source-anchored `I/we dedicate [this book/volume/work] to...` paragraphs from style only; ordinary analytical uses of `dedicated to` and `thanks to` remain eligible. |
+| R68 | Structure evidence is typed and cannot bind unrelated quantities | MONITOR | v10.26 falsely paired `eight sources` with `chapter 5`. v10.27 binds only count-before-noun announcements to matching semantic categories; exact typed mismatches block, while ambiguous episode evidence is retained for review and cannot stop sequential progress. |
+| R69 | Automatic Layer-1 mappings preserve clean lexical boundaries and coordinated meaning | MONITOR | v10.27 removes only independently recognized leading context syntax before organization heads, lets source-derived entity roles override an LLM mislabel, and rejects a target that omits a source `and/or` member. Context remains available in Layers 3/4 even when Layer-1 authority is denied. |
+| R70 | Style memory records representative genre dimensions without becoming terminology authority | MONITOR | v10.27 migrates old samples as fallback evidence and records role, genre, source indices, quality, and representative status. Academic guidance preserves argument structure; literary guidance preserves voice/POV. Three representative samples establish a profile; no extra LLM call is added. |
+| R71 | Model comparisons are isolated, transparent, and source-disqualification aware | MONITOR | v10.27 adds an offline frozen-suite CLI benchmark that records requested and 9router-served models, weighted quality, latency, tokens, failures, and deterministic source disqualifications. It writes standalone reports and never changes jobs, memory, or runtime model configuration. |
+| R72 | Deployment audits consume a stable runtime capability contract | MONITOR | v10.27 exposes a versioned capability manifest and pairs critical declarations with behavioral probes. Comment wording and incidental source strings are no longer release identity. |
 
 ## Validated v10.17 External Audit Notes
 
@@ -1006,6 +1036,8 @@ push, and fresh VPS evidence.
 | v10.25 (`pending`) | awaiting VPS run | PENDING | General aligned sentence-note recovery, boundary-safe local salvage, grounded objective language repair, canonical citation/memory identity, first-person dedication filtering, semantic runtime probes, and shared-layer low-space deployment pass all 883 local tests. Live evidence remains required. |
 | v10.25 | `f48bf43e6000` | REVIEW | Stable 150-call checkpoint run with no provider/content failure. Note recovery, source count, refiner veto, canonical memory identity, dedication filtering, and prior regressions held; second-stage rollback granularity, role-scoped mappings/originals, dash attachment, contextual terminology, and English-summary digits remain open. |
 | v10.26 (`pending`) | awaiting VPS run | PENDING | Transactional second-stage replay, typed dash/attachment evidence, source-scoped originals, role- and scope-safe terminology memory, normalized English Layer-2 digits, evidence-bound research metadata, and long-call progress events are locally implemented; live evidence is required. |
+| v10.26 | `7eb03e1025a7` | REVIEW | Checkpoint run with 120 active and 126 lifetime attempts. One incomplete stream recovered. Typed dash, source scope, summary digit, research, and worker evidence held, but an untyped count/category collision caused a false terminal stop; foreign-expression retention, automatic mapping boundaries, representative style evidence, and canonical render identity remain partial. |
+| v10.27 (`pending`) | awaiting VPS run | PENDING | Typed nonterminal structure evidence, source-grounded foreign-expression anchors, Layer-1 coordination/boundary safety, genre-aware style records, canonical assembly identity, stable runtime capabilities, and an isolated 9router-aware model benchmark are implemented locally. Live validation is required. |
 
 ## v10.24 Live Validation
 
@@ -1137,6 +1169,42 @@ pending a fresh v10.25 VPS run.
   Ruff reports `235` findings, improving the v10.25 baseline of `238`; mypy remains
   at the exact established baseline of `88` errors in 17 files. Live translation,
   runtime identity, and VPS audit claims remain pending a fresh v10.26 run.
+
+## v10.27 Pending Live Validation
+
+- `eight sources` plus an unrelated `chapter 5` reference must not create a
+  structure mismatch or stop. A genuine `two issues` to `three issues` change must
+  remain blocking with exact typed source and target spans.
+- Review-level ambiguous structure evidence may mark the chunk for review but cannot
+  become a terminal sequential error. Exact blocking evidence still prevents trusted
+  memory and completed export.
+- Automatic Layer-1 targets must exclude recognized local syntax, preserve all members
+  of coordinated source concepts, and honor source-derived entity roles over an LLM
+  category guess. Rejected mappings remain available through ordinary paragraph
+  continuity in Layers 3 and 4.
+- Style checkpoints must expose representative versus fallback records, paragraph role,
+  broad genre, source indices, and quality score. The profile is `established` only
+  after three representative samples; old checkpoints remain usable as fallback.
+- A compact source-authored foreign expression with clear non-English orthography must
+  follow the normal first-occurrence original policy. Ordinary English, possessives,
+  names, and citations must not be reclassified by this rule.
+- The assembled pre-render document must match persisted canonical chunk text under
+  whitespace-only normalization. An unexplained lexical mutation blocks export; source-
+  grounded term-note and anchor presentation remains separately audited.
+- The runtime must report the v10.27 capability manifest, and critical audit claims must
+  also pass behavioral probes. The offline benchmark must report requested and actually
+  served 9router models, source disqualifications, weighted quality, tokens, failures,
+  and latency without modifying jobs, memory, or production model settings.
+- Full historical tests, script syntax, embedded audit Python, four-layer memory, style
+  authority, research isolation, refiner veto, worker lifecycle, active/obsolete LLM
+  accounting, output validity, and unchanged 9router identity must pass. Full scholarly-
+  table reconstruction remains deferred by user decision.
+- Local release verification: all `912` tests pass. Source/test compilation, all three
+  v10.27 Bash scripts, their embedded audit Python, both external audit wrappers, and
+  the offline runtime behavior contract pass. Ruff remains at the exact v10.26 baseline
+  of `235` findings, and mypy remains at the exact baseline of `88` errors in 17 files.
+  No production LLM stage, memory layer, refiner veto, or model setting was removed or
+  changed by the benchmark tooling. Live translation evidence remains required.
 
 ## Update Procedure
 

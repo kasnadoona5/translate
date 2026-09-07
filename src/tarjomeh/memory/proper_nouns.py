@@ -56,7 +56,7 @@ _CONTEXTUAL_TARGET_TOKEN_RE = re.compile(
     r"شد|شدند|می‌شود|می‌شوند)(?:\s|$)"
 )
 _LEADING_CONTEXT_RE = re.compile(
-    r"^(?:از|به|با|در|برای|توسط)\s+"
+    r"^(?:از|به|با|در|برای|توسط|که)\s+"
 )
 _TRAILING_CONNECTIVE_RE = re.compile(
     r"(?:^|\s)(?:از|به|با|در|برای|که|و|یا|اما|تا|را)\s*$"
@@ -67,7 +67,7 @@ _TRAILING_BOUNDARY_RE = re.compile(
 )
 _PERSIAN_CONTEXT_LEADERS = frozenset({
     "\u0627\u0632", "\u0628\u0647", "\u0628\u0627", "\u062f\u0631", "\u0628\u0631", "\u0628\u0631\u0627\u06cc",
-    "\u062a\u0648\u0633\u0637", "\u062f\u0631\u0628\u0627\u0631\u0647", "\u067e\u06cc\u0631\u0627\u0645\u0648\u0646", "\u062a\u0627",
+    "\u062a\u0648\u0633\u0637", "\u062f\u0631\u0628\u0627\u0631\u0647", "\u067e\u06cc\u0631\u0627\u0645\u0648\u0646", "\u062a\u0627", "\u06a9\u0647",
 })
 _PERSIAN_CONTEXT_TRAILERS = frozenset({
     "\u0627\u0632", "\u0628\u0647", "\u0628\u0627", "\u062f\u0631", "\u0628\u0631", "\u0628\u0631\u0627\u06cc", "\u06a9\u0647", "\u0648", "\u06cc\u0627",
@@ -480,6 +480,25 @@ def observed_bilingual_target(
                 break
         if not has_required_head(selected):
             return ""
+    if required_heads:
+        head_index = next((
+            index for index, token in enumerate(selected)
+            if any(
+                token.group() == head
+                or token.group() in {
+                    head + "\u06cc", head + "\u0647\u0627", head + "\u200c\u0647\u0627",
+                    head + "\u0647\u0627\u06cc", head + "\u200c\u0647\u0627\u06cc",
+                }
+                for head in required_heads
+            )
+        ), None)
+        # Remove only independently recognized syntax before an organization
+        # head. Never trim descriptive words merely to make an anchor pass.
+        if head_index and all(
+            token.group() in _PERSIAN_CONTEXT_LEADERS
+            for token in selected[:head_index]
+        ):
+            selected = selected[head_index:]
     if selected[-1].end() != len(local_prefix):
         return ""
     target = local_prefix[selected[0].start():selected[-1].end()].strip()
@@ -667,6 +686,23 @@ def automatic_terminology_risk_reasons(
         reasons.append("context_bound_target")
     if _TRAILING_CONNECTIVE_RE.search(target):
         reasons.append("incomplete_target_span")
+    source_coordination = len(re.findall(
+        r"\b(?:and|or)\b|&", source, re.IGNORECASE
+    ))
+    target_coordination = len(re.findall(
+        r"(?:^|\s)(?:\u0648|\u06cc\u0627)(?:\s|$)", target
+    ))
+    source_looks_named = bool(
+        re.search(r"\d", source)
+        or sum(word[:1].isupper() for word in source_words) >= 2
+    )
+    if (
+        1 <= len(source_words) <= 6
+        and not source_looks_named
+        and source_coordination
+        and target_coordination < source_coordination
+    ):
+        reasons.append("coordinated_source_target_incomplete")
     if re.search(r"[.!?\u061f\u061b\u060c:]", target):
         reasons.append("target_is_not_lexical_phrase")
     if re.search(
