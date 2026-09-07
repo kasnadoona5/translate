@@ -6099,7 +6099,7 @@ class TranslationPipeline:
                             chunk_index=idx,
                         )
 
-                        if self._claim_chapter_checkpoint(job_id, chunks, idx):
+                        if self._chapter_checkpoint_due(job_id, chunks, idx):
                             raise ChapterCheckpointReached(
                                 self._chunk_chapter_position(chunk),
                                 chunk.chapter_title,
@@ -6147,7 +6147,6 @@ class TranslationPipeline:
                                 )
                             ) from e
         except ChapterCheckpointReached as checkpoint:
-            self.db.update_job_status(job_id, JobStatus.PAUSED)
             selected_positions = list(
                 self.config.translation.chapter_selection
             )
@@ -6159,10 +6158,33 @@ class TranslationPipeline:
                 if selected_positions
                 else list(range(1, checkpoint.chapter_position + 1))
             )
-            partial_path = self.export_completed_job(
+            try:
+                partial_path = self.export_completed_job(
+                    job_id,
+                    output_path,
+                    chapter_positions=preview_positions,
+                )
+            except Exception as exc:
+                self.db.update_job_status(
+                    job_id,
+                    JobStatus.PAUSED_ERROR,
+                    error_message=(
+                        "Chapter checkpoint preview export failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                )
+                raise
+            # A visible PAUSED state promises that its review artifact is ready.
+            # Export first so the UI cannot race ahead and hide the download.
+            self._record_chapter_checkpoint(
                 job_id,
-                output_path,
-                chapter_positions=preview_positions,
+                checkpoint.chapter_position,
+                checkpoint.chapter_title,
+            )
+            self.db.update_job_status(
+                job_id,
+                JobStatus.PAUSED,
+                output_path=partial_path,
             )
             message = (
                 f"Review checkpoint after chapter {checkpoint.chapter_position}: "
@@ -7308,13 +7330,13 @@ class TranslationPipeline:
     def _chunk_chapter_position(chunk: Chunk) -> int:
         return int(chunk.metadata.get("chapter_position", 1))
 
-    def _claim_chapter_checkpoint(
+    def _chapter_checkpoint_due(
         self,
         job_id: str,
         chunks: list[Chunk],
         chunk_index: int,
     ) -> bool:
-        """Record a configured checkpoint at a completed chapter boundary."""
+        """Return whether a completed boundary still needs its checkpoint."""
         if chunk_index >= len(chunks) - 1:
             return False
         current = self._chunk_chapter_position(chunks[chunk_index])
@@ -7333,15 +7355,25 @@ class TranslationPipeline:
         reached = {
             int(value) for value in artifact.get("reached_positions", [])
         }
-        if current in reached:
-            return False
-        reached.add(current)
+        return current not in reached
+
+    def _record_chapter_checkpoint(
+        self,
+        job_id: str,
+        chapter_position: int,
+        chapter_title: str,
+    ) -> None:
+        """Persist a checkpoint only after its review artifact was exported."""
+        artifact = self.db.get_job_artifact(job_id, "chapter_checkpoints") or {}
+        reached = {
+            int(value) for value in artifact.get("reached_positions", [])
+        }
+        reached.add(chapter_position)
         self.db.save_job_artifact(job_id, "chapter_checkpoints", {
             "reached_positions": sorted(reached),
-            "latest_position": current,
-            "latest_title": chunks[chunk_index].chapter_title,
+            "latest_position": chapter_position,
+            "latest_title": chapter_title,
         })
-        return True
 
     def _parse_and_chunk(
         self,

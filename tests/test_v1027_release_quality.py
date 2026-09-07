@@ -253,11 +253,12 @@ def test_genre_guidance_changes_style_dimensions_not_terminology_authority() -> 
 def test_runtime_capability_manifest_is_versioned_and_complete() -> None:
     manifest = runtime_capabilities()
 
-    assert manifest["release"] == "v10.27.0"
+    assert manifest["release"] == "v10.28.0"
     assert manifest["revision"] >= 1
     assert all(manifest["capabilities"].values())
     assert manifest["capabilities"]["four_layer_memory"] is True
     assert manifest["capabilities"]["refiner_issue_veto"] is True
+    assert manifest["capabilities"]["checkpoint_preview_atomic_publish"] is True
 
 
 def test_canonical_document_identity_ignores_layout_whitespace_only() -> None:

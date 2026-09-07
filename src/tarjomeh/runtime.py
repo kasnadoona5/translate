@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-RUNTIME_RELEASE = "v10.27.0"
+RUNTIME_RELEASE = "v10.28.0"
 RUNTIME_REVISION = 1
 
 
@@ -31,6 +31,7 @@ def runtime_capabilities() -> dict[str, Any]:
             "four_layer_memory": True,
             "offline_model_benchmark": True,
             "durable_worker_lease": True,
+            "checkpoint_preview_atomic_publish": True,
         },
         "policy_versions": {
             "structure_evidence": 2,
@@ -38,6 +39,7 @@ def runtime_capabilities() -> dict[str, Any]:
             "layer1_admission": 4,
             "style_evidence": 2,
             "benchmark_schema": 1,
+            "checkpoint_export": 2,
         },
     }
 

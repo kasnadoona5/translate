@@ -581,6 +581,8 @@ class TestWebUI(unittest.TestCase):
             "format": "txt",
             "bilingual_mode": "target_only",
             "enforce_auto_extracted_terms": "true",
+            "stop_after_chapter": "7",
+            "pause_after_each_chapter": "false",
         }
 
         response = self.client.post("/api/translate", data=data, headers=headers)
@@ -596,6 +598,8 @@ class TestWebUI(unittest.TestCase):
             "config_overrides"
         ]
         self.assertTrue(overrides["glossary.enforce_auto_extracted_terms"])
+        self.assertEqual(overrides["translation.stop_after_chapter"], 7)
+        self.assertFalse(overrides["translation.pause_after_each_chapter"])
 
     @patch("tarjomeh.web.app._executor.submit")
     @patch("tarjomeh.jobs.database.JobDatabase")

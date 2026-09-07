@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from docx import Document as DocxDocument
+
 from tarjomeh.chunking.chunker import SemanticChunker
 from tarjomeh.core.config import TarjomehConfig
 from tarjomeh.core.pipeline import (
@@ -145,6 +147,125 @@ class TestChapterPipeline(unittest.TestCase):
                 "checkpoint-job", "chapter_checkpoints"
             )
             self.assertEqual(checkpoints["reached_positions"], [1])
+
+    def test_checkpoint_exports_partial_docx_then_resume_finishes_book(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            root = Path(temp_dir)
+            source = root / "book.txt"
+            source.write_text(
+                "Chapter 1: Opening\nFirst chapter text.\n\n"
+                "Chapter 2: Argument\nSecond chapter text.",
+                encoding="utf-8",
+            )
+            output = root / "translated.docx"
+            config = self._config()
+            config.output.format = "docx"
+            config.translation.stop_after_chapter = 1
+            pipeline = TranslationPipeline(config)
+            pipeline.db = JobDatabase(root / "jobs.db")
+            pipeline._translate_single_chunk = MagicMock(
+                side_effect=self._fake_translation
+            )
+
+            result = pipeline.run(source, output, job_id="checkpoint-docx-job")
+
+            paused = pipeline.db.get_job("checkpoint-docx-job")
+            self.assertEqual(paused["raw_status"], JobStatus.PAUSED)
+            self.assertEqual(result.output_path, output)
+            self.assertEqual(Path(paused["output_path"]), output)
+            self.assertTrue(output.is_file())
+            preview = "\n".join(
+                paragraph.text for paragraph in DocxDocument(output).paragraphs
+            )
+            self.assertIn("First chapter text", preview)
+            self.assertNotIn("Second chapter text", preview)
+
+            pipeline.run(source, output, job_id="checkpoint-docx-job")
+
+            completed = pipeline.db.get_job("checkpoint-docx-job")
+            self.assertEqual(completed["raw_status"], JobStatus.COMPLETED)
+            final = "\n".join(
+                paragraph.text for paragraph in DocxDocument(output).paragraphs
+            )
+            self.assertIn("First chapter text", final)
+            self.assertIn("Second chapter text", final)
+
+    def test_checkpoint_is_not_visible_as_paused_before_preview_export(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            root = Path(temp_dir)
+            source = root / "book.txt"
+            source.write_text(
+                "Chapter 1: Opening\nFirst chapter text.\n\n"
+                "Chapter 2: Argument\nSecond chapter text.",
+                encoding="utf-8",
+            )
+            output = root / "translated.docx"
+            config = self._config()
+            config.output.format = "docx"
+            config.translation.stop_after_chapter = 1
+            pipeline = TranslationPipeline(config)
+            pipeline.db = JobDatabase(root / "jobs.db")
+            pipeline._translate_single_chunk = MagicMock(
+                side_effect=self._fake_translation
+            )
+            observed_statuses: list[str] = []
+
+            from tarjomeh.exporters.docx_exporter import DocxExporter
+
+            class InspectingDocxExporter(DocxExporter):
+                def export(self, *args: object, **kwargs: object) -> None:
+                    job = pipeline.db.get_job("checkpoint-order-job")
+                    observed_statuses.append(job["raw_status"])
+                    super().export(*args, **kwargs)
+
+            with patch(
+                "tarjomeh.core.pipeline.get_exporter",
+                return_value=InspectingDocxExporter,
+            ):
+                pipeline.run(source, output, job_id="checkpoint-order-job")
+
+            self.assertEqual(observed_statuses, [JobStatus.RUNNING])
+            paused = pipeline.db.get_job("checkpoint-order-job")
+            self.assertEqual(paused["raw_status"], JobStatus.PAUSED)
+            self.assertEqual(Path(paused["output_path"]), output)
+            self.assertTrue(output.is_file())
+
+    def test_failed_checkpoint_export_is_retryable(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            root = Path(temp_dir)
+            source = root / "book.txt"
+            source.write_text(
+                "Chapter 1: Opening\nFirst chapter text.\n\n"
+                "Chapter 2: Argument\nSecond chapter text.",
+                encoding="utf-8",
+            )
+            output = root / "translated.docx"
+            config = self._config()
+            config.output.format = "docx"
+            config.translation.stop_after_chapter = 1
+            pipeline = TranslationPipeline(config)
+            pipeline.db = JobDatabase(root / "jobs.db")
+            pipeline._translate_single_chunk = MagicMock(
+                side_effect=self._fake_translation
+            )
+
+            with patch(
+                "tarjomeh.core.pipeline.get_exporter",
+                side_effect=RuntimeError("preview export failed"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "preview export failed"):
+                    pipeline.run(source, output, job_id="checkpoint-retry-job")
+
+            checkpoints = pipeline.db.get_job_artifact(
+                "checkpoint-retry-job", "chapter_checkpoints"
+            ) or {}
+            self.assertEqual(checkpoints.get("reached_positions", []), [])
+            failed = pipeline.db.get_job("checkpoint-retry-job")
+            self.assertEqual(failed["raw_status"], JobStatus.PAUSED_ERROR)
+            self.assertIn(
+                "Chapter checkpoint preview export failed",
+                failed["error_message"],
+            )
 
     def test_checkpoint_resume_restores_web_search_state(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:

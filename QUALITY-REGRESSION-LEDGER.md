@@ -1206,6 +1206,29 @@ pending a fresh v10.25 VPS run.
   No production LLM stage, memory layer, refiner veto, or model setting was removed or
   changed by the benchmark tooling. Live translation evidence remains required.
 
+## v10.28 Pending Live Validation
+
+- A chapter review checkpoint must publish its requested partial output before the
+  job becomes visibly `paused`. For DOCX, the stored `output_path` must point to a
+  valid, downloadable Word document containing completed chapters only.
+- If checkpoint export fails, the boundary must remain unclaimed and the job must
+  enter resumable `paused_error`; a later resume must retry the same checkpoint
+  rather than silently advancing beyond it.
+- The web upload contract must preserve the exact `stop_after_chapter` selected by
+  the user. Chapter selection, parsing, translation, critique, refinement, all four
+  memory layers, style memory, research, and final quality gates are unchanged.
+- Regression coverage includes the prior TXT checkpoint flow, a real DOCX partial
+  export followed by full-book resume, state visibility during export, retryability
+  after exporter failure, and upload-form configuration propagation.
+- This is an export-state hotfix only. It adds no LLM call, changes no model setting,
+  and weakens no source-fidelity or canonical-text check. Full scholarly-table
+  reconstruction remains deferred by user decision.
+- Local release verification: all `918` tests pass, including real partial-DOCX
+  generation and resume. Source/test compilation, all three v10.28 Bash scripts,
+  and their embedded Python pass. Ruff remains at the exact v10.27 baseline of
+  `235` findings; mypy remains at `88` errors in 17 files. Live checkpoint and
+  container evidence remain pending deployment.
+
 ## Update Procedure
 
 After each test run:
