@@ -35,20 +35,19 @@ new evidence so later patches cannot silently revive an earlier defect.
 
 ## Current Baseline
 
-- Deployed evidence baseline: `v10.26.0`, commit `40ca8fe`
-- Test job: `7eb03e1025a7`
+- Deployed evidence baseline: `v10.27.0`, commit `b45c3f2`
+- Test job: `e622b56eec7c`
 - Source: *The State: Past, Present, Future* (Bob Jessop, 2016)
-- Runtime result: the configured checkpoint finished 16 of 222 chunks (11 completed,
-  5 needs review). There were 126 lifetime attempts: 120 active, 6 successful obsolete,
-  and one active incomplete stream (`0.83%`) that recovered automatically.
-- Translation verdict: worker ownership, source-safe recovery, refiner veto, four-layer
-  trust separation, attributable advisory research, citation handling, and prior
-  mechanical typography protections held. The run is still `REVIEW`: an untyped
-  structure detector falsely paired `eight sources` with `chapter 5` and stopped the
-  worker on database chunk 3/UI chunk 4; one source-authored foreign expression was
-  omitted; automatic terminology admitted context-contaminated or incomplete mappings;
-  style evidence selected nonrepresentative/malformed material; and Layer-3 text did
-  not fully explain the final rendered identifier surface.
+- Runtime result: the configured checkpoint finished 16 of 222 chunks (10 completed,
+  6 needs review). All 112 recorded LLM calls completed successfully, but critique and
+  readability dominated latency and token use.
+- Translation verdict: worker ownership, refiner veto, four-layer trust separation,
+  advisory research authority, and earlier mechanical typography protections held.
+  The run remains `REVIEW`: one material postwar-revival proposition was omitted;
+  several sentences remained opaque or semantically weak; exact source identifiers
+  drifted in canonical DB text; style had only one warming-up sample; and normal
+  checkpoint DOCX export failed because chunk 10 independently reconstructed 81 target
+  blocks for 82 source paragraph identities.
 
 ## v10.26 Live Result
 
@@ -239,7 +238,7 @@ new evidence so later patches cannot silently revive an earlier defect.
 
 | ID | Behavior | Current status | Evidence / required behavior |
 |---|---|---|---|
-| R01 | Source-authored inconsistent enumeration is preserved | PROTECTED | v10.24 live output preserves the source's explicit `two issues` as `دو مسئله` even though the source later enumerates three items. Generalized adverse tests cover full-candidate admission, local salvage, version ranking, bounded repair, and the final pre-memory gate. |
+| R01 | Source-authored inconsistent enumeration is preserved | PARTIAL | v10.24 live output preserved the source's explicit `two issues`, but a later run regressed despite tests. v10.29 adds verifiable per-sentence critic coverage while retaining the deterministic final announced-count blocker. Fresh live evidence is required before restoring `PROTECTED`. |
 | R02 | Refiner may reject critic suggestions | PROTECTED | Full candidates and local edits are independently gated; rejected edits do not become memory. |
 | R03 | Page headers do not split or contaminate prose | PROTECTED | “Third” and “Fourth” paragraphs remain separate despite page boundaries. |
 | R04 | Exact adjacent duplicated phrases are blocked | PROTECTED | Earlier repetitions such as duplicated “complementarity” remain absent. |
@@ -250,7 +249,7 @@ new evidence so later patches cannot silently revive an earlier defect.
 | R09 | Academic Persian is readable without semantic weakening | PARTIAL | Review exists, but opaque calques and broken matrix clauses still pass or valid repairs are rolled back. |
 | R10 | Singular/plural agreement is correct | PROTECTED | The v10.17 output uses `تاریخ‌های دولت‌ها و نظام‌های دولت‌ها ... دارند`; the prior agreement defect did not return. |
 | R11 | First-occurrence English anchors are complete and non-duplicated | PARTIAL | `methodological individualism` is now anchored, but final QA still reports a missing `apparatus` anchor in structural contents material. Reconciliation must distinguish prose, tables, contents, citations, and abbreviations without duplicating English originals. |
-| R12 | Citations, ISBNs, superscripts, and source identifiers survive | PROTECTED | Current output preserves these structures; future typography changes must retain this gate. |
+| R12 | Citations, ISBNs, superscripts, and source identifiers survive | PARTIAL | v10.27 canonical DB text damaged `CB2 1UR`, `JC11.J47`, `politybooks.com`, and `RES-051-27-0303` even though the deterministic restorer could repair them. v10.29 performs and verifies exact source-bound restoration at final canonical admission. Live output is required. |
 | R13 | Persian typography mechanism does not corrupt citations or model-authored diacritics | PROTECTED | Hazm `می` splitting, authored ezafe/tanwin preservation, and Latin citation protection remain covered. This row protects preservation mechanics; R59 separately tracks whether model output uses enough academic ezafe marking. |
 | R14 | Contextual phrases cannot become canonical terminology | PARTIAL | Authority classes remain present, but v10.26 retained automatic mappings whose observed Persian span included local syntax or failed to represent every coordinated source member. v10.27 strips only recognized context syntax and rejects incomplete coordination before reusable admission. |
 | R15 | Accepted terminology cannot add source-external scope | PARTIAL | Reviewed/curated authority separation remains, but context-expanded observed targets show that lexical boundary evidence still needs live v10.27 confirmation. |
@@ -272,7 +271,7 @@ new evidence so later patches cannot silently revive an earlier defect.
 | R31 | Latin scholarly abbreviations survive Persian typography | PROTECTED | Fresh v10.18 DOCX evidence preserves bounded forms such as `e.g.`, `i.e.`, `cf.`, `ibid.`, and `viz.` together with their citation tails; paired tests still protect ordinary mixed Latin punctuation. |
 | R32 | Objective readability defects can reach bounded repair regardless of reviewer severity labels | MONITOR | The route is deployed, but this run produced zero qualifying live minor promotions. Keep the bounded exact-span route and refiner veto; require a future positive live event before marking it protected. |
 | R33 | Low-quality prose cannot become active style authority merely because it is complete | PARTIAL | Below-floor and unresolved-objective samples remain inactive, but v10.26 shows that quality alone is insufficient when role/genre provenance is implicit. v10.27 adds representative/fallback evidence without removing any sample from continuity memory. |
-| R34 | Every material source proposition survives translation and final admission | MONITOR | v10.24 live output restores the previously omitted `dynamics of state and civilization`, and source-obligation tests remain green. The final bounded route is extended in v10.25 to objective predicate/governor/attachment defects under the same source-monotonic admission; broader live adverse evidence is still required. |
+| R34 | Every material source proposition survives translation and final admission | OPEN | v10.27 paragraph 96 omitted the source's postwar western revival and European reconstruction proposition. v10.29 makes the existing critic return a complete stable source-segment inventory and requires every uncovered segment to produce a grounded accuracy/omission issue; no extra unconditional LLM stage is added. |
 | R35 | Terminology memory is scoped by sense and structural role | OPEN | Front-matter publisher `polity` was correctly rendered as the brand `پولیتی`, then reused for conceptual `polity` in `polity / politics / policy`. Brand, title, person, citation, and lexical-concept senses must not share automatic authority merely because their normalized source surface matches. |
 | R36 | Reliable retrieval excludes known unresolved objective defects | OPEN | `at most -> به‌نهایت` entered a reliable long-term entry even though the final fluency score was below threshold and the defect remained unresolved. A chunk may remain useful as advisory continuity, but cannot become reliable/style authority while a grounded objective defect is unresolved. |
 | R37 | Worker ownership, pause acknowledgement, and supersession are persistent and auditable | OPEN | UI chunk 12 accumulated nine successful obsolete calls and was then fully reprocessed. Record a persistent worker generation/lease, pause-request and pause-acknowledgement states, heartbeats, stage boundaries, and a supersession reason; never expose an acknowledged `paused` state while the worker is still silently advancing. |
@@ -304,13 +303,18 @@ new evidence so later patches cannot silently revive an earlier defect.
 | R63 | Long active quality calls identify their chunk and remain distinguishable from stops | PARTIAL | v10.22 had one uninterrupted worker but database chunks 11 and 13 took about 23.8 and 18.8 minutes. Persist and report database/UI chunk number, operation, stage, worker generation, and elapsed time without counting a long call as a failure. |
 | R64 | Runtime audit markers test capabilities rather than incidental prose | MONITOR | v10.24 produced a false hard failure from a stale comment-text assertion. v10.25 directly probes aligned note recovery and citation normalization and uses paired function/event contracts for new repair, memory, and style behavior; deployment must fail only on a real missing capability. |
 | R65 | Unique internal sentence-terminal note markers recover without guessing | MONITOR | v10.24 stopped on one source marker at an internal sentence boundary. v10.25 restores it only when source/target paragraph and sentence counts align and the marker occurrence and ordinal boundary are unique. Reused, split, merged, or ambiguous cases remain blocking. |
-| R66 | Layer-3 text is the exact canonical text admitted before export | PARTIAL | Pre-memory canonical hashes exist, but v10.26 exposed an unexplained difference between memory evidence and one final rendered identifier surface. v10.27 proves whitespace-only lexical identity between persisted chunks and the assembled pre-render document and blocks export on unexplained mutation; intentional notes/anchors remain separately audited presentation changes. |
+| R66 | Layer-3 text is the exact canonical text admitted before export | OPEN | v10.27 correctly blocked export when independently inferred paragraph boundaries changed canonical assembly, but it left no downloadable checkpoint DOCX. v10.29 persists source and target paragraph identity with each chunk checkpoint and consumes that exact mapping in normal and re-export assembly; uncertain legacy reconstruction is review-only and cannot enter trusted memory. |
 | R67 | First-person dedication prose cannot become style authority | MONITOR | v10.24 admitted `I dedicate this book...` as an active sample. v10.25 excludes source-anchored `I/we dedicate [this book/volume/work] to...` paragraphs from style only; ordinary analytical uses of `dedicated to` and `thanks to` remain eligible. |
 | R68 | Structure evidence is typed and cannot bind unrelated quantities | MONITOR | v10.26 falsely paired `eight sources` with `chapter 5`. v10.27 binds only count-before-noun announcements to matching semantic categories; exact typed mismatches block, while ambiguous episode evidence is retained for review and cannot stop sequential progress. |
 | R69 | Automatic Layer-1 mappings preserve clean lexical boundaries and coordinated meaning | MONITOR | v10.27 removes only independently recognized leading context syntax before organization heads, lets source-derived entity roles override an LLM mislabel, and rejects a target that omits a source `and/or` member. Context remains available in Layers 3/4 even when Layer-1 authority is denied. |
 | R70 | Style memory records representative genre dimensions without becoming terminology authority | MONITOR | v10.27 migrates old samples as fallback evidence and records role, genre, source indices, quality, and representative status. Academic guidance preserves argument structure; literary guidance preserves voice/POV. Three representative samples establish a profile; no extra LLM call is added. |
 | R71 | Model comparisons are isolated, transparent, and source-disqualification aware | MONITOR | v10.27 adds an offline frozen-suite CLI benchmark that records requested and 9router-served models, weighted quality, latency, tokens, failures, and deterministic source disqualifications. It writes standalone reports and never changes jobs, memory, or runtime model configuration. |
 | R72 | Deployment audits consume a stable runtime capability contract | MONITOR | v10.27 exposes a versioned capability manifest and pairs critical declarations with behavioral probes. Comment wording and incidental source strings are no longer release identity. |
+| R73 | Every finished chunk has one verifiable canonical paragraph map | MONITOR | v10.29 records source hashes, target offsets/hashes, paragraph indices, and canonical target hash in the same transaction as chunk and memory checkpointing. Missing or invalid maps hard-fail the audit; legacy reconstruction is explicitly reported. |
+| R74 | Critic completeness is machine-verifiable rather than prompt-only | MONITOR | v10.29 requires every stable source sentence ID exactly once in the existing critic response and requires every uncovered ID to have a grounded omission/accuracy issue. Invalid inventories receive only the existing bounded JSON repair. |
+| R75 | Final canonical text cannot retain a recoverable damaged source identifier | MONITOR | v10.29 runs source-bound identifier/note reconciliation after final typography/citation normalization and blocks final admission if the source identifier counters or labeled surfaces remain incomplete. |
+| R76 | Repeated Persian wording does not hide a grounded local repair | MONITOR | v10.29 resolves a critic quote inside its source-corresponding target paragraph. Identical wording elsewhere no longer defeats salvage, while ambiguity inside that paragraph, overlap, predicate loss, source-structure drift, and integrity failure still reject the edit. |
+| R77 | Audit output and job selection are truthful | MONITOR | v10.29 wrappers use function-local `${1:-LATEST}`, runtime v10.29 scripts, exact file validation (`is_file`), paragraph-map hashes, critic coverage, memory/style/research authority, and active/lifetime LLM failure accounting. |
 
 ## Validated v10.17 External Audit Notes
 
@@ -1038,6 +1042,9 @@ push, and fresh VPS evidence.
 | v10.26 (`pending`) | awaiting VPS run | PENDING | Transactional second-stage replay, typed dash/attachment evidence, source-scoped originals, role- and scope-safe terminology memory, normalized English Layer-2 digits, evidence-bound research metadata, and long-call progress events are locally implemented; live evidence is required. |
 | v10.26 | `7eb03e1025a7` | REVIEW | Checkpoint run with 120 active and 126 lifetime attempts. One incomplete stream recovered. Typed dash, source scope, summary digit, research, and worker evidence held, but an untyped count/category collision caused a false terminal stop; foreign-expression retention, automatic mapping boundaries, representative style evidence, and canonical render identity remain partial. |
 | v10.27 (`pending`) | awaiting VPS run | PENDING | Typed nonterminal structure evidence, source-grounded foreign-expression anchors, Layer-1 coordination/boundary safety, genre-aware style records, canonical assembly identity, stable runtime capabilities, and an isolated 9router-aware model benchmark are implemented locally. Live validation is required. |
+| v10.27 | `e622b56eec7c` | REVIEW | Stable 112-call checkpoint run with no LLM failure. Memory trust and advisory research held, but one material proposition was omitted, canonical identifiers drifted, style had one warming-up sample, and checkpoint export failed on an 82-source/81-target paragraph reconstruction. Genre metadata was useful but not established; the offline model benchmark was not run. |
+| v10.28 (`0cf1bb3`) | not separately translated | HOTFIX | Checkpoint output is published before visible pause and export failure becomes resumable `paused_error`. It fixes state ordering but does not by itself repair v10.27's paragraph-identity mismatch. |
+| v10.29 (`pending`) | awaiting VPS run | PENDING | Canonical chunk paragraph identity, verifiable critic sentence coverage, final identifier admission, paragraph-scoped repeated-span salvage, truthful v10.29 audits, and a shared-layer low-space deployment pass all 927 local tests. Inferred paragraph boundaries are review-only before memory/style admission. No pipeline stage, memory layer, refiner veto, or model configuration was removed. |
 
 ## v10.24 Live Validation
 
@@ -1228,6 +1235,34 @@ pending a fresh v10.25 VPS run.
   and their embedded Python pass. Ruff remains at the exact v10.27 baseline of
   `235` findings; mypy remains at `88` errors in 17 files. Live checkpoint and
   container evidence remain pending deployment.
+
+## v10.29 Pending Live Validation
+
+- Every newly completed chunk stores one atomic source/target paragraph-identity
+  record beside its translation and memory checkpoint. Exact persisted boundaries
+  drive normal assembly, checkpoint DOCX generation, and later re-export.
+- Legacy text may be partitioned only without lexical change. An inferred mapping is
+  marked `NEEDS_REVIEW` before memory/style admission: it remains available as
+  advisory continuity but cannot teach reliable terminology or active style.
+- The existing critic call must account for every stable source sentence ID exactly
+  once. Any uncovered meaning requires a grounded omission/accuracy issue. Invalid
+  coverage uses only the existing bounded structured-response repair; no unconditional
+  LLM stage or model-setting change was added.
+- Final canonical admission reruns deterministic source-bound artifact restoration
+  after typography and citation normalization, then blocks unresolved exact identifier
+  or labeled-identifier loss. It never invents identifiers absent from the source.
+- A refiner repair whose Persian quote appears elsewhere may be localized by its
+  grounded source-paragraph ID. Ambiguity within that paragraph, overlap, source
+  structure drift, predicate loss, repetition, integrity failure, or refiner veto
+  still rejects the edit.
+- Runtime probes and both audits verify paragraph hashes/offsets, critic coverage,
+  source identifiers, four-layer memory/style authority, research isolation, active
+  and lifetime LLM failures, output-file validity, and unchanged 9router identity.
+- Local release verification: all `927` tests pass. Source/test compilation, all three
+  v10.29 Bash scripts, their embedded Python, runtime behavior probes, and external
+  wrappers pass. Ruff improves from `235` to `233` findings; mypy remains at the exact
+  v10.28 baseline of `88` errors. Live checkpoint DOCX and VPS audit evidence remain
+  required before any `MONITOR`/`PARTIAL` row is promoted.
 
 ## Update Procedure
 

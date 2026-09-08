@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-RUNTIME_RELEASE = "v10.28.0"
+RUNTIME_RELEASE = "v10.29.0"
 RUNTIME_REVISION = 1
 
 
@@ -32,6 +32,11 @@ def runtime_capabilities() -> dict[str, Any]:
             "offline_model_benchmark": True,
             "durable_worker_lease": True,
             "checkpoint_preview_atomic_publish": True,
+            "canonical_paragraph_identity": True,
+            "reconstructed_identity_review_only": True,
+            "verified_source_coverage": True,
+            "final_identifier_admission": True,
+            "paragraph_scoped_refiner_salvage": True,
         },
         "policy_versions": {
             "structure_evidence": 2,
@@ -40,6 +45,9 @@ def runtime_capabilities() -> dict[str, Any]:
             "style_evidence": 2,
             "benchmark_schema": 1,
             "checkpoint_export": 2,
+            "paragraph_identity": 1,
+            "critic_source_coverage": 1,
+            "final_identifier_admission": 1,
         },
     }
 
@@ -52,12 +60,18 @@ def runtime_behavior_probes() -> dict[str, bool]:
     from tarjomeh.core.config import TarjomehConfig
     from tarjomeh.core.pipeline import (
         _blocking_structure_findings,
+        _canonical_chunk_paragraph_identity,
+        _chunk_needs_review,
+        _record_reconstructed_paragraph_identity_review,
         _source_foreign_expression_inventory,
+        _target_units_from_identity,
         audit_canonical_document_identity,
     )
     from tarjomeh.exporters.base import TranslatedDocument, TranslatedParagraph
     from tarjomeh.memory.manager import MemoryManager
     from tarjomeh.memory.proper_nouns import automatic_terminology_risk_reasons
+    from tarjomeh.quality.critique import TranslationCritique
+    from tarjomeh.quality.integrity import restore_source_identifiers
     from tarjomeh.quality.model_benchmark import load_benchmark_suite
     from tarjomeh.quality.structure_audit import (
         announced_count_evidence,
@@ -101,6 +115,56 @@ def runtime_behavior_probes() -> dict[str, bool]:
     suite = load_benchmark_suite(
         Path("/__installed__/benchmarks/suites/academic-core.json")
     )
+    identity_chunk = Chunk(
+        index=0,
+        text="First.\n\nSecond.",
+        chapter_title="",
+        section_title="",
+        metadata={
+            "paragraph_indices": [0, 1],
+            "paragraph_protocol_version": 1,
+        },
+    )
+    canonical_units, paragraph_identity = _canonical_chunk_paragraph_identity(
+        identity_chunk,
+        "اول. دوم.",
+    )
+    class _ProbeDB:
+        def __init__(self) -> None:
+            self.events: list[dict[str, Any]] = []
+
+        def log_chunk_event(
+            self,
+            _job_id: str,
+            _chunk_index: int,
+            event_type: str,
+            payload: dict[str, Any],
+        ) -> None:
+            self.events.append({"event_type": event_type, "payload": payload})
+
+        def get_chunk_events(
+            self, _job_id: str, _chunk_index: int
+        ) -> list[dict[str, Any]]:
+            return self.events
+
+    probe_db = _ProbeDB()
+    probe_db.log_chunk_event("probe", 0, "chunk_started", {})
+    _record_reconstructed_paragraph_identity_review(
+        probe_db, "probe", 0, paragraph_identity
+    )
+    coverage = TranslationCritique._parse_response(
+        '{"scores":{"accuracy":9,"fluency":9,"terminology":9,'
+        '"register":9},"source_coverage":{"checked_source_segment_ids":'
+        '["p1:s1","p1:s2"],"uncovered_source_segment_ids":[],'
+        '"complete":true},"issues":[]}',
+        "First. Second.",
+        "اول. دوم.",
+        require_coverage=True,
+    )
+    restored_identifier, _identifier_report = restore_source_identifiers(
+        "Write to example.org, AB1 2CD.",
+        "به example. org، AB1 ۲CD بنویسید.",
+    )
     return {
         "manifest_enabled": bool(
             manifest["release"] == RUNTIME_RELEASE
@@ -133,5 +197,21 @@ def runtime_behavior_probes() -> dict[str, bool]:
         ),
         "default_benchmark_is_installed": bool(
             suite["id"] == "academic-core-v1" and len(suite["passages"]) == 4
+        ),
+        "canonical_paragraph_identity_round_trips": bool(
+            len(_target_units_from_identity(
+                canonical_units, paragraph_identity
+            ) or []) == 2
+        ),
+        "reconstructed_identity_is_review_only": bool(
+            paragraph_identity.get("reconstructed")
+            and _chunk_needs_review(probe_db, "probe", 0)
+        ),
+        "critic_source_coverage_is_verified": bool(
+            coverage.valid and coverage.coverage_complete
+        ),
+        "source_identifiers_are_restored": bool(
+            "example.org" in restored_identifier
+            and "AB1 2CD" in restored_identifier
         ),
     }

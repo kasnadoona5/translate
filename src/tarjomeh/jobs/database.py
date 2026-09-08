@@ -1104,6 +1104,7 @@ class JobDatabase:
         translation: str | None,
         memory_state: dict[str, Any],
         search_state: dict[str, Any] | None = None,
+        paragraph_identity: dict[str, Any] | None = None,
     ) -> None:
         """Persist chunk completion and its memory snapshot in ONE transaction.
 
@@ -1142,6 +1143,40 @@ class JobDatabase:
                         job_id,
                         "web_search_state",
                         json.dumps(search_state, ensure_ascii=False, sort_keys=True),
+                        timestamp,
+                    ),
+                )
+            if paragraph_identity is not None:
+                row = conn.execute(
+                    "SELECT payload FROM job_artifacts "
+                    "WHERE job_id = ? AND artifact_key = ?",
+                    (job_id, "canonical_chunk_paragraphs_v1"),
+                ).fetchone()
+                try:
+                    identity_state = json.loads(row["payload"]) if row else {}
+                except (json.JSONDecodeError, TypeError):
+                    identity_state = {}
+                if not isinstance(identity_state, dict):
+                    identity_state = {}
+                chunks = identity_state.get("chunks", {})
+                if not isinstance(chunks, dict):
+                    chunks = {}
+                chunks[str(chunk_index)] = paragraph_identity
+                identity_state = {"version": 1, "chunks": chunks}
+                conn.execute(
+                    """
+                    INSERT INTO job_artifacts (job_id, artifact_key, payload, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(job_id, artifact_key) DO UPDATE SET
+                        payload = excluded.payload,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        job_id,
+                        "canonical_chunk_paragraphs_v1",
+                        json.dumps(
+                            identity_state, ensure_ascii=False, sort_keys=True
+                        ),
                         timestamp,
                     ),
                 )

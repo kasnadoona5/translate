@@ -226,6 +226,11 @@ Return a JSON object with exactly this schema:
     "register": <1-10>
   }},
   "overall": <1-10>,
+  "source_coverage": {{
+    "checked_source_segment_ids": ["<every source label exactly once>"],
+    "uncovered_source_segment_ids": ["<labels with missing meaning>"],
+    "complete": <true only when uncovered_source_segment_ids is empty>
+  }},
   "issues": [
     {{
       "category": "accuracy" | "omission" | "addition" | "terminology" |
@@ -266,6 +271,12 @@ MQM rules:
   coordinated parallel terms, and accidental duplication of one meaning in two
   Persian predicates. A fluent alternative is acceptable only if all source content
   and technical precision remain unchanged.
+- Put every stable source label exactly once in checked_source_segment_ids. If any
+  proposition, participant, qualification, contrast, or explicit source wording is
+  absent from the Persian, put that sentence label in uncovered_source_segment_ids
+  and report a grounded accuracy or omission issue for the same label. Do not repair
+  a source inconsistency silently; preservation of the explicit source wording is
+  part of coverage.
 - Build a compact proposition checklist for each source sentence before assigning
   scores: matrix action, coordinated actions, participants, negation/modality,
   content-bearing nominal heads and complements, explicit quantities, contrasts,

@@ -18,10 +18,15 @@ def marker_for(index: int) -> str:
 
 
 def encode_paragraphs(text: str) -> tuple[str, list[str]]:
-    paragraphs = split_paragraphs(text)
+    return encode_paragraph_units(split_paragraphs(text))
+
+
+def encode_paragraph_units(paragraphs: list[str]) -> tuple[str, list[str]]:
+    """Encode an already authoritative ordered paragraph sequence."""
     markers = [marker_for(index) for index in range(len(paragraphs))]
     encoded = "\n\n".join(
-        f"{marker}\n{paragraph}" for marker, paragraph in zip(markers, paragraphs)
+        f"{marker}\n{paragraph}"
+        for marker, paragraph in zip(markers, paragraphs, strict=True)
     )
     return encoded, markers
 

@@ -27,6 +27,7 @@ from tarjomeh.quality.grounding import (
     concept_risks,
     indexed_source,
     resolve_source_segment,
+    source_segments,
 )
 
 
@@ -71,6 +72,9 @@ class CritiqueResult:
     issues: list[str] = field(default_factory=list)
     issue_details: list[dict[str, Any]] = field(default_factory=list)
     ignored_issue_details: list[dict[str, Any]] = field(default_factory=list)
+    coverage_checked_segment_ids: list[str] = field(default_factory=list)
+    uncovered_source_segment_ids: list[str] = field(default_factory=list)
+    coverage_complete: bool = True
     raw_response: str = ""
     valid: bool = True
     validation_errors: list[str] = field(default_factory=list)
@@ -91,6 +95,9 @@ class CritiqueResult:
             "issues": self.issues,
             "issue_details": self.issue_details,
             "ignored_issue_details": self.ignored_issue_details,
+            "coverage_checked_segment_ids": self.coverage_checked_segment_ids,
+            "uncovered_source_segment_ids": self.uncovered_source_segment_ids,
+            "coverage_complete": self.coverage_complete,
             "raw_response": self.raw_response,
             "valid": self.valid,
             "validation_errors": self.validation_errors,
@@ -109,6 +116,13 @@ class CritiqueResult:
             issues=list(data.get("issues", [])),
             issue_details=list(data.get("issue_details", [])),
             ignored_issue_details=list(data.get("ignored_issue_details", [])),
+            coverage_checked_segment_ids=list(
+                data.get("coverage_checked_segment_ids", [])
+            ),
+            uncovered_source_segment_ids=list(
+                data.get("uncovered_source_segment_ids", [])
+            ),
+            coverage_complete=bool(data.get("coverage_complete", True)),
             raw_response=str(data.get("raw_response", "")),
             valid=bool(data.get("valid", True)),
             validation_errors=list(data.get("validation_errors", [])),
@@ -185,7 +199,9 @@ class TranslationCritique:
         if hasattr(self._llm, "set_operation"):
             self._llm.set_operation("critique")
         raw = await self._llm.chat(prompt)
-        result = self._parse_response(raw, source_text, translation)
+        result = self._parse_response(
+            raw, source_text, translation, require_coverage=True
+        )
         result.attempts = 1
         all_errors = list(result.validation_errors)
         for retry in range(self.max_parse_retries):
@@ -200,7 +216,9 @@ class TranslationCritique:
             if hasattr(self._llm, "set_operation"):
                 self._llm.set_operation("critique_json_repair")
             raw = await self._llm.chat(repair_prompt)
-            result = self._parse_response(raw, source_text, translation)
+            result = self._parse_response(
+                raw, source_text, translation, require_coverage=True
+            )
             result.attempts = retry + 2
             all_errors.extend(result.validation_errors)
         if result.attempts > 1:
@@ -307,7 +325,10 @@ fluency, terminology, and register; an optional numeric overall score; and at
 most {_MAX_MQM_ISSUES} compact MQM issues. Every issue must contain category,
 severity, confidence (0-1), an exact source_quote, its source_segment_id, an
 exact current_persian_quote, suggested_correction, and rationale. Do not add praise,
-markdown fences, or commentary."""
+markdown fences, or commentary. Also return source_coverage with every stable
+source label exactly once in checked_source_segment_ids, any meaning not represented
+in uncovered_source_segment_ids, and complete=true only when that uncovered list is
+empty. Every uncovered label needs a grounded omission or accuracy issue."""
 
     # ── response parsing ─────────────────────────────────────────────
 
@@ -316,6 +337,8 @@ markdown fences, or commentary."""
         raw: str,
         source_text: str = "",
         translation: str = "",
+        *,
+        require_coverage: bool = False,
     ) -> CritiqueResult:
         """Parse a JSON response from the LLM into a CritiqueResult.
 
@@ -565,6 +588,56 @@ markdown fences, or commentary."""
             ignored_issue_details = []
             errors.append("issues_must_be_array")
 
+        coverage_checked_segment_ids: list[str] = []
+        uncovered_source_segment_ids: list[str] = []
+        coverage_complete = True
+        coverage = data.get("source_coverage")
+        if isinstance(coverage, dict):
+            raw_checked = coverage.get("checked_source_segment_ids", [])
+            raw_uncovered = coverage.get("uncovered_source_segment_ids", [])
+            coverage_complete = bool(coverage.get("complete", False))
+            if isinstance(raw_checked, list):
+                coverage_checked_segment_ids = [
+                    str(value).strip() for value in raw_checked
+                    if str(value).strip()
+                ]
+            else:
+                errors.append("coverage_checked_ids_must_be_array")
+            if isinstance(raw_uncovered, list):
+                uncovered_source_segment_ids = [
+                    str(value).strip() for value in raw_uncovered
+                    if str(value).strip()
+                ]
+            else:
+                errors.append("coverage_uncovered_ids_must_be_array")
+        elif require_coverage:
+            coverage_complete = False
+            errors.append("source_coverage_required")
+
+        if require_coverage:
+            expected_ids = [
+                str(segment["segment_id"])
+                for segment in source_segments(source_text)
+            ]
+            if (
+                len(coverage_checked_segment_ids)
+                != len(set(coverage_checked_segment_ids))
+            ):
+                errors.append("coverage_checked_ids_duplicated")
+            if set(coverage_checked_segment_ids) != set(expected_ids):
+                errors.append("coverage_checked_ids_incomplete")
+            if not set(uncovered_source_segment_ids) <= set(expected_ids):
+                errors.append("coverage_uncovered_ids_unknown")
+            issue_segment_ids = {
+                str(detail.get("source_segment_id", ""))
+                for detail in issue_details
+                if str(detail.get("category", "")) in {"omission", "accuracy"}
+            }
+            if not set(uncovered_source_segment_ids) <= issue_segment_ids:
+                errors.append("coverage_gap_without_grounded_issue")
+            if coverage_complete == bool(uncovered_source_segment_ids):
+                errors.append("coverage_complete_flag_inconsistent")
+
         return CritiqueResult(
             accuracy=accuracy,
             fluency=fluency,
@@ -574,6 +647,9 @@ markdown fences, or commentary."""
             issues=issues,
             issue_details=issue_details,
             ignored_issue_details=ignored_issue_details,
+            coverage_checked_segment_ids=coverage_checked_segment_ids,
+            uncovered_source_segment_ids=uncovered_source_segment_ids,
+            coverage_complete=coverage_complete,
             raw_response=raw,
             valid=not errors,
             validation_errors=errors,

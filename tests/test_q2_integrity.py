@@ -119,6 +119,11 @@ def test_critic_repairs_malformed_json_and_preserves_decimal_scores() -> None:
                     },
                     "overall": 8.65,
                     "issues": [],
+                    "source_coverage": {
+                        "checked_source_segment_ids": ["p1:s1"],
+                        "uncovered_source_segment_ids": [],
+                        "complete": True,
+                    },
                 }),
             ])
 

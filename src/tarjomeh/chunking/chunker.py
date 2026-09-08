@@ -13,6 +13,7 @@ translation pipeline.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Protocol
@@ -159,7 +160,7 @@ class SemanticChunker:
         """
         chunks: list[Chunk] = []
         previous_sentences: list[str] = []
-        
+
         para_to_idx = {id(p): i for i, p in enumerate(document.all_paragraphs)}
 
         for chapter_position, chapter in enumerate(document.chapters, 1):
@@ -283,11 +284,22 @@ class SemanticChunker:
         style_eligibility: list[bool],
     ) -> Chunk:
         combined = "\n\n".join(texts)
+        source_spans: list[list[int]] = []
+        source_hashes: list[str] = []
+        cursor = 0
+        for text in texts:
+            source_spans.append([cursor, cursor + len(text)])
+            source_hashes.append(
+                hashlib.sha256(text.encode("utf-8")).hexdigest()
+            )
+            cursor += len(text) + 2
         metadata: dict[str, object] = {}
         if previous_sentences and self.overlap_sentences > 0:
             metadata["overlap_prefix"] = " ".join(previous_sentences)
         metadata["paragraph_indices"] = list(para_indices)
         metadata["paragraph_protocol_version"] = 1
+        metadata["source_paragraph_spans"] = source_spans
+        metadata["source_paragraph_hashes"] = source_hashes
         metadata["structural_roles"] = list(structural_roles)
         metadata["style_eligible"] = bool(
             style_eligibility and all(style_eligibility)
@@ -381,6 +393,10 @@ class FixedChunker:
                     )
                     for c in sub_chunks:
                         c.metadata["paragraph_indices"] = [para_to_idx[id(para)]]
+                        c.metadata["source_paragraph_spans"] = [[0, len(c.text)]]
+                        c.metadata["source_paragraph_hashes"] = [
+                            hashlib.sha256(c.text.encode("utf-8")).hexdigest()
+                        ]
                         c.metadata["chapter_position"] = original_position
                         c.metadata["chapter_number"] = chapter_number
                         c.metadata["structural_roles"] = [para_role]

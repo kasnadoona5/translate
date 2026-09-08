@@ -316,6 +316,11 @@ def test_critic_source_is_indexed_once_without_extra_llm_call() -> None:
         },
         "overall": 10,
         "issues": [],
+        "source_coverage": {
+            "checked_source_segment_ids": ["p1:s1", "p1:s2"],
+            "uncovered_source_segment_ids": [],
+            "complete": True,
+        },
     })
     source = "First sentence. Second sentence."
     result = asyncio.run(TranslationCritique(llm).critique(source, "ترجمه."))

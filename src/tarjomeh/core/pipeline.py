@@ -30,6 +30,7 @@ from tarjomeh.core.structured_output import (
 from tarjomeh.core.paragraph_protocol import (
     decode_paragraphs,
     encode_paragraphs,
+    encode_paragraph_units,
     protocol_instruction,
     repair_prompt as paragraph_repair_prompt,
     split_paragraphs,
@@ -874,6 +875,233 @@ def _target_paragraphs_for_alignment(
     if len(lines) == expected_count:
         return lines, "table_line_boundaries"
     return paragraphs, "paragraph_boundaries"
+
+
+def _chunk_source_paragraphs(chunk: Chunk) -> list[str]:
+    """Return the paragraph sequence recorded when the chunk was created."""
+    indices = chunk.metadata.get("paragraph_indices")
+    expected = len(indices) if isinstance(indices, list) else 0
+    spans = chunk.metadata.get("source_paragraph_spans")
+    hashes = chunk.metadata.get("source_paragraph_hashes")
+    if (
+        isinstance(spans, list)
+        and spans
+        and len(spans) == expected
+        and isinstance(hashes, list)
+        and len(hashes) == expected
+    ):
+        units: list[str] = []
+        for position, raw_span in enumerate(spans):
+            if (
+                not isinstance(raw_span, list)
+                or len(raw_span) != 2
+                or not all(isinstance(value, int) for value in raw_span)
+            ):
+                units = []
+                break
+            start, end = raw_span
+            if start < 0 or end < start or end > len(chunk.text):
+                units = []
+                break
+            unit = chunk.text[start:end]
+            if str(hashes[position]) != hashlib.sha256(
+                unit.encode("utf-8")
+            ).hexdigest():
+                units = []
+                break
+            units.append(unit)
+        if len(units) == expected:
+            return units
+    return split_paragraphs(chunk.text)
+
+
+def _safe_target_unit_partition(
+    translation: str,
+    expected_count: int,
+    *,
+    table_like: bool = False,
+) -> tuple[list[str], str]:
+    """Recover paragraph boundaries without changing target lexical content."""
+    if expected_count <= 0:
+        return ([translation.strip()] if translation.strip() else []), "unmapped"
+    units, boundary = _target_paragraphs_for_alignment(
+        translation,
+        expected_count=expected_count,
+        table_like=table_like,
+    )
+    if len(units) == expected_count:
+        return units, boundary
+    if not units:
+        return [""] * expected_count, "empty_reconstruction"
+
+    units = list(units)
+    while len(units) > expected_count:
+        pair = min(
+            range(len(units) - 1),
+            key=lambda index: len(units[index]) + len(units[index + 1]),
+        )
+        units[pair:pair + 2] = [
+            f"{units[pair].rstrip()} {units[pair + 1].lstrip()}".strip()
+        ]
+
+    split_patterns = (
+        re.compile(r"(?<=[.!?؟…])\s+"),
+        re.compile(r"(?<=[؛;:])\s+"),
+        re.compile(r"\s+"),
+    )
+    while len(units) < expected_count:
+        selected: tuple[int, int] | None = None
+        for index in sorted(
+            range(len(units)),
+            key=lambda value: len(units[value]),
+            reverse=True,
+        ):
+            text = units[index]
+            for pattern in split_patterns:
+                candidates = [match for match in pattern.finditer(text)]
+                if not candidates:
+                    continue
+                midpoint = len(text) / 2
+                match = min(candidates, key=lambda item: abs(item.start() - midpoint))
+                selected = (index, match.end())
+                break
+            if selected is not None:
+                break
+        if selected is None:
+            units.extend([""] * (expected_count - len(units)))
+            break
+        index, offset = selected
+        left = units[index][:offset].strip()
+        right = units[index][offset:].strip()
+        if not left or not right:
+            units.extend([""] * (expected_count - len(units)))
+            break
+        units[index:index + 1] = [left, right]
+
+    if _canonical_surface("\n\n".join(units)) != _canonical_surface(translation):
+        raise ParagraphIdentityError(
+            "Boundary reconstruction changed canonical target text."
+        )
+    return units, "lexical_boundary_reconstruction"
+
+
+def _canonical_chunk_paragraph_identity(
+    chunk: Chunk,
+    translation: str,
+) -> tuple[str, dict[str, Any]]:
+    """Return canonical text plus compact source/target paragraph evidence."""
+    raw_indices = chunk.metadata.get("paragraph_indices")
+    paragraph_indices = (
+        [int(value) for value in raw_indices]
+        if isinstance(raw_indices, list) else []
+    )
+    source_units = _chunk_source_paragraphs(chunk)
+    expected_count = len(paragraph_indices) or len(source_units) or 1
+    raw_roles = chunk.metadata.get("structural_roles")
+    iterable_roles = raw_roles if isinstance(raw_roles, list) else []
+    roles = {
+        str(value).strip().casefold()
+        for value in iterable_roles
+        if str(value).strip()
+    }
+    units, boundary = _safe_target_unit_partition(
+        translation,
+        expected_count,
+        table_like=bool(roles) and roles <= {"table"},
+    )
+    canonical = "\n\n".join(units)
+    offsets: list[list[int]] = []
+    cursor = 0
+    for unit in units:
+        offsets.append([cursor, cursor + len(unit)])
+        cursor += len(unit) + 2
+    payload = {
+        "version": 1,
+        "paragraph_indices": paragraph_indices,
+        "source_count": len(source_units),
+        "target_count": len(units),
+        "source_hashes": [
+            hashlib.sha256(value.encode("utf-8")).hexdigest()
+            for value in source_units
+        ],
+        "target_offsets": offsets,
+        "target_hashes": [
+            hashlib.sha256(value.encode("utf-8")).hexdigest()
+            for value in units
+        ],
+        "canonical_target_hash": hashlib.sha256(
+            canonical.encode("utf-8")
+        ).hexdigest(),
+        "boundary": boundary,
+        "reconstructed": boundary in {
+            "empty_reconstruction", "lexical_boundary_reconstruction"
+        },
+    }
+    return canonical, payload
+
+
+def _target_units_from_identity(
+    translation: str,
+    identity: dict[str, Any] | None,
+) -> list[str] | None:
+    """Read and verify target units from a persisted compact identity record."""
+    if not isinstance(identity, dict):
+        return None
+    if str(identity.get("canonical_target_hash", "")) != hashlib.sha256(
+        translation.encode("utf-8")
+    ).hexdigest():
+        return None
+    offsets = identity.get("target_offsets")
+    hashes = identity.get("target_hashes")
+    if not isinstance(offsets, list) or not isinstance(hashes, list):
+        return None
+    units: list[str] = []
+    for position, raw_span in enumerate(offsets):
+        if (
+            not isinstance(raw_span, list)
+            or len(raw_span) != 2
+            or not all(isinstance(value, int) for value in raw_span)
+            or position >= len(hashes)
+        ):
+            return None
+        start, end = raw_span
+        if start < 0 or end < start or end > len(translation):
+            return None
+        unit = translation[start:end]
+        if hashlib.sha256(unit.encode("utf-8")).hexdigest() != str(hashes[position]):
+            return None
+        units.append(unit)
+    return units
+
+
+def _record_reconstructed_paragraph_identity_review(
+    db: Any,
+    job_id: str,
+    chunk_index: int,
+    identity: dict[str, Any],
+) -> None:
+    """Keep uncertain paragraph reconstruction out of durable memory authority."""
+    db.log_chunk_event(
+        job_id,
+        chunk_index,
+        "paragraph_identity_reconstructed",
+        identity,
+    )
+    db.log_chunk_event(
+        job_id,
+        chunk_index,
+        "chunk_review_required",
+        _explicit_chunk_review_payload(
+            "paragraph_identity_reconstructed",
+            detail=str(identity.get("boundary", "unknown")),
+            message=(
+                "Target paragraph boundaries were reconstructed without changing "
+                "lexical content; durable terminology and style authority are held "
+                "until review."
+            ),
+            paragraph_identity=identity,
+        ),
+    )
 
 
 def _table_recovery_groups(
@@ -2142,11 +2370,18 @@ def _replace_local_span_with_boundary_guard(
     text: str,
     current_span: str,
     resulting_span: str,
+    *,
+    span_start: int | None = None,
 ) -> tuple[str, str, dict[str, Any] | None]:
     """Remove one unsupported duplicated function word at an edit boundary."""
-    if text.count(current_span) != 1:
-        return text, resulting_span, None
-    start = text.find(current_span)
+    if span_start is None:
+        if text.count(current_span) != 1:
+            return text, resulting_span, None
+        start = text.find(current_span)
+    else:
+        start = span_start
+        if text[start:start + len(current_span)] != current_span:
+            return text, resulting_span, None
     raw_candidate = text[:start] + resulting_span + text[start + len(current_span):]
     prefix_words = list(_PERSIAN_BOUNDARY_WORD_RE.finditer(text[:start]))
     first = _PERSIAN_BOUNDARY_WORD_RE.match(resulting_span)
@@ -2186,6 +2421,30 @@ def _replace_local_span_with_boundary_guard(
     }
 
 
+def _paragraph_scoped_span_start(
+    text: str,
+    source_segment_id: str,
+    span: str,
+) -> tuple[int, int] | None:
+    """Locate a quote uniquely in its source-corresponding target paragraph."""
+    match = re.fullmatch(r"p(\d+):s\d+", source_segment_id or "")
+    paragraph_number = int(match.group(1)) if match else 0
+    paragraphs = list(re.finditer(
+        r"(?:\A|\n\n)(.*?)(?=\n\n|\Z)", text or "", re.DOTALL
+    ))
+    if 1 <= paragraph_number <= len(paragraphs):
+        paragraph_match = paragraphs[paragraph_number - 1]
+        paragraph = paragraph_match.group(1)
+        if paragraph.count(span) == 1:
+            start = paragraph_match.start(1) + paragraph.find(span)
+            return start, paragraph_number - 1
+        return None
+    if (text or "").count(span) == 1:
+        start = (text or "").find(span)
+        return start, (text or "").count("\n\n", 0, start)
+    return None
+
+
 def _salvage_local_refinement_edits(
     *,
     source: str,
@@ -2212,11 +2471,17 @@ def _salvage_local_refinement_edits(
     spans: dict[str, tuple[int, int]] = {}
     for raw in issue_decisions:
         issue_id = str(raw.get("issue_id", "")).strip()
+        source_segment_id = str(
+            issues.get(issue_id, {}).get("source_segment_id", "")
+        ).strip()
         current_span = str(
             issues.get(issue_id, {}).get("current_persian_quote", "")
         ).strip()
-        if current_span and previous.count(current_span) == 1:
-            start = previous.find(current_span)
+        scoped = _paragraph_scoped_span_start(
+            previous, source_segment_id, current_span
+        ) if current_span else None
+        if scoped is not None:
+            start, _paragraph = scoped
             spans[issue_id] = (start, start + len(current_span))
     overlapping_ids: set[str] = set()
     ordered_spans = sorted(spans.items(), key=lambda item: item[1])
@@ -2242,6 +2507,9 @@ def _salvage_local_refinement_edits(
         source_quote = str(
             issues.get(issue_id, {}).get("source_quote", "")
         ).strip()
+        source_segment_id = str(
+            issues.get(issue_id, {}).get("source_segment_id", "")
+        ).strip()
         resulting_span = apply_safe_persian_orthography(
             str(decision.get("resulting_span", "")).strip()
         )[0]
@@ -2254,8 +2522,11 @@ def _salvage_local_refinement_edits(
             reason = "no_textual_change"
         elif issue_id in overlapping_ids:
             reason = "overlapping_local_span"
-        elif previous.count(current_span) != 1:
-            reason = "current_span_not_unique"
+        scoped = _paragraph_scoped_span_start(
+            previous, source_segment_id, current_span
+        ) if current_span else None
+        if not reason and scoped is None:
+            reason = "current_span_not_unique_in_source_paragraph"
         elif resulting_span not in proposed:
             reason = "resulting_span_not_in_candidate"
         elif "\n\n" in current_span or "\n\n" in resulting_span:
@@ -2271,6 +2542,7 @@ def _salvage_local_refinement_edits(
             "choice": choice,
             "current_span": current_span,
             "source_quote": source_quote,
+            "source_segment_id": source_segment_id,
             "resulting_span": resulting_span,
             "proposed_resulting_span": resulting_span,
             "boundary_deduplication": None,
@@ -2280,8 +2552,7 @@ def _salvage_local_refinement_edits(
         }
         prepared.append(item)
         if not reason:
-            start = previous.find(current_span)
-            paragraph = previous.count("\n\n", 0, start)
+            _start, paragraph = cast(tuple[int, int], scoped)
             paragraph_groups.setdefault(paragraph, []).append(item)
 
     # Admit non-overlapping edits monotonically. Every retained step is checked
@@ -2294,7 +2565,12 @@ def _salvage_local_refinement_edits(
         coherent_applied: dict[str, tuple[str, dict[str, Any] | None]] = {}
         for item in sorted(group, key=lambda value: int(value["order"])):
             current_span = str(item["current_span"])
-            if coherent_candidate.count(current_span) != 1:
+            scoped = _paragraph_scoped_span_start(
+                coherent_candidate,
+                str(item["source_segment_id"]),
+                current_span,
+            )
+            if scoped is None:
                 coherent_reason = "group_span_not_unique"
                 break
             (
@@ -2306,6 +2582,7 @@ def _salvage_local_refinement_edits(
                 coherent_candidate,
                 current_span,
                 str(item["proposed_resulting_span"]),
+                span_start=scoped[0],
             )
             coherent_applied[str(item["issue_id"])] = (
                 applied_span,
@@ -2372,7 +2649,12 @@ def _salvage_local_refinement_edits(
             candidate = current
             failed_reason = ""
             current_span = str(item["current_span"])
-            if candidate.count(current_span) != 1:
+            scoped = _paragraph_scoped_span_start(
+                candidate,
+                str(item["source_segment_id"]),
+                current_span,
+            )
+            if scoped is None:
                 failed_reason = "group_span_not_unique"
             else:
                 (
@@ -2384,6 +2666,7 @@ def _salvage_local_refinement_edits(
                     candidate,
                     current_span,
                     str(item["proposed_resulting_span"]),
+                    span_start=scoped[0],
                 )
                 item["resulting_span"] = applied_span
                 item["boundary_deduplication"] = boundary_deduplication
@@ -3027,6 +3310,15 @@ def _critique_for_event(critique: Any, threshold: float, iteration: int) -> dict
         "issue_count": len(critique.issues),
         "blocking_issue_count": len(blocking_issues),
         "blocking_issues": [_truncate_for_event(str(issue), 1000) for issue in blocking_issues],
+        "coverage_complete": bool(
+            getattr(critique, "coverage_complete", False)
+        ),
+        "coverage_checked_segment_ids": list(
+            getattr(critique, "coverage_checked_segment_ids", []) or []
+        ),
+        "uncovered_source_segment_ids": list(
+            getattr(critique, "uncovered_source_segment_ids", []) or []
+        ),
         "issues": [_truncate_for_event(str(issue), 1000) for issue in critique.issues],
         "issue_details": [
             {
@@ -4500,7 +4792,7 @@ def _used_paragraph_protocol(chunk: Chunk) -> bool:
     # A non-integer version falls back to 0, i.e. NOT strict. That is the
     # fail-safe direction: lenient alignment degrades, strict alignment aborts.
     version = raw_version if isinstance(raw_version, int) else 0
-    return bool(len(split_paragraphs(chunk.text)) > 1 and version >= 1)
+    return bool(len(_chunk_source_paragraphs(chunk)) > 1 and version >= 1)
 
 
 def _align_chunk_translation(
@@ -5618,6 +5910,16 @@ class TranslationPipeline:
                     translation = self._canonicalize_final_translation(
                         job_id, idx, chunk, translation
                     )
+                    translation, paragraph_identity = (
+                        _canonical_chunk_paragraph_identity(chunk, translation)
+                    )
+                    if paragraph_identity["reconstructed"]:
+                        _record_reconstructed_paragraph_identity_review(
+                            self.db,
+                            job_id,
+                            idx,
+                            paragraph_identity,
+                        )
 
                     # Update shared memory and database safely under lock
                     with lock:
@@ -5807,6 +6109,7 @@ class TranslationPipeline:
                             translation,
                             memory_manager.to_dict(),
                             search_state=web_searcher.export_state(),
+                            paragraph_identity=paragraph_identity,
                         )
                         self._pause_if_requested(
                             job_id,
@@ -5902,6 +6205,16 @@ class TranslationPipeline:
                         translation = self._canonicalize_final_translation(
                             job_id, idx, chunk, translation
                         )
+                        translation, paragraph_identity = (
+                            _canonical_chunk_paragraph_identity(chunk, translation)
+                        )
+                        if paragraph_identity["reconstructed"]:
+                            _record_reconstructed_paragraph_identity_review(
+                                self.db,
+                                job_id,
+                                idx,
+                                paragraph_identity,
+                            )
 
                         # Successful translation updates
                         translations[idx] = translation
@@ -6092,6 +6405,7 @@ class TranslationPipeline:
                             translation,
                             memory_manager.to_dict(),
                             search_state=web_searcher.export_state(),
+                            paragraph_identity=paragraph_identity,
                         )
                         self._pause_if_requested(
                             job_id,
@@ -6239,6 +6553,12 @@ class TranslationPipeline:
             progress_callback("Assembly", 0.90, "Reassembling translated paragraphs...")
 
         original_paragraphs = document.all_paragraphs
+        paragraph_identity_artifact = self.db.get_job_artifact(
+            job_id, "canonical_chunk_paragraphs_v1"
+        ) or {}
+        paragraph_identities = paragraph_identity_artifact.get("chunks", {})
+        if not isinstance(paragraph_identities, dict):
+            paragraph_identities = {}
         # Pre-populate translated paragraphs list
         translated_paragraphs: list[TranslatedParagraph | None] = [None] * len(original_paragraphs)
 
@@ -6255,19 +6575,48 @@ class TranslationPipeline:
                 [int(value) for value in _raw_indices]
                 if isinstance(_raw_indices, list) else []
             )
-            table_like = bool(
-                para_indices
-                and all(
-                    pid < len(original_paragraphs)
-                    and bool(original_paragraphs[pid].metadata.get("is_table"))
-                    for pid in para_indices
-                )
-            )
-            tgt_paras, alignment_boundary = _target_paragraphs_for_alignment(
+            tgt_paras = _target_units_from_identity(
                 chunk_translation,
-                expected_count=len(para_indices),
-                table_like=table_like,
+                paragraph_identities.get(str(idx)),
             )
+            alignment_boundary = "persisted_identity"
+            if tgt_paras is None:
+                canonical_translation, reconstructed_identity = (
+                    _canonical_chunk_paragraph_identity(chunk, chunk_translation)
+                )
+                chunk_translation = canonical_translation
+                translations[idx] = canonical_translation
+                tgt_paras = _target_units_from_identity(
+                    canonical_translation, reconstructed_identity
+                ) or []
+                alignment_boundary = str(
+                    reconstructed_identity.get("boundary", "reconstructed")
+                )
+                paragraph_identities[str(idx)] = reconstructed_identity
+                self.db.save_job_artifact(
+                    job_id,
+                    "canonical_chunk_paragraphs_v1",
+                    {"version": 1, "chunks": paragraph_identities},
+                )
+                if reconstructed_identity["reconstructed"]:
+                    self.db.update_chunk(
+                        job_id, idx, ChunkStatus.NEEDS_REVIEW,
+                        canonical_translation,
+                    )
+                self.db.log_chunk_event(
+                    job_id,
+                    idx,
+                    (
+                        "paragraph_identity_reconstructed"
+                        if reconstructed_identity["reconstructed"]
+                        else "paragraph_identity_migrated"
+                    ),
+                    {
+                        **reconstructed_identity,
+                        "stage": "assembly_legacy_recovery",
+                        "memory_eligible": False,
+                    },
+                )
             degraded_alignment = bool(
                 para_indices and len(para_indices) != len(tgt_paras)
             )
@@ -6293,7 +6642,7 @@ class TranslationPipeline:
                         para_indices=para_indices,
                         tgt_paras=tgt_paras,
                         chunk_translation=chunk_translation,
-                        strict_paragraph_identity=_used_paragraph_protocol(chunk),
+                        strict_paragraph_identity=True,
                     )
                 except ParagraphIdentityError as exc:
                     # Never discard fully-paid translations over a formatting
@@ -6814,7 +7163,9 @@ class TranslationPipeline:
                 + ", ".join(str(i) for i in missing[:20])
             )
 
-        trans_doc = self._assemble_translated_document(document, chunks, translations)
+        trans_doc = self._assemble_translated_document(
+            document, chunks, translations, job_id=job_id
+        )
         _save_canonical_document_identity(
             self.db, job_id, trans_doc, chunks, translations
         )
@@ -7180,6 +7531,20 @@ class TranslationPipeline:
         translation = self._canonicalize_final_translation(
             job_id, chunk_index, chunks[chunk_index], translation
         )
+        translation, paragraph_identity = _canonical_chunk_paragraph_identity(
+            chunks[chunk_index], translation
+        )
+        identity_artifact = self.db.get_job_artifact(
+            job_id, "canonical_chunk_paragraphs_v1"
+        ) or {"version": 1, "chunks": {}}
+        identities = identity_artifact.setdefault("chunks", {})
+        if not isinstance(identities, dict):
+            identities = {}
+            identity_artifact["chunks"] = identities
+        identities[str(chunk_index)] = paragraph_identity
+        self.db.save_job_artifact(
+            job_id, "canonical_chunk_paragraphs_v1", identity_artifact
+        )
         _ensure_chunk_review_reason(self.db, job_id, chunk_index)
         final_status = (
             ChunkStatus.NEEDS_REVIEW
@@ -7290,6 +7655,9 @@ class TranslationPipeline:
         canonical, citation_house_style_changes = (
             normalize_citation_house_style_text(canonical)
         )
+        canonical, final_source_artifact_report = (
+            _restore_source_bound_artifacts(chunk.text, canonical)
+        )
         structure_conflicts = _introduced_structure_conflicts(
             chunk.text, translation, canonical
         )
@@ -7297,6 +7665,22 @@ class TranslationPipeline:
             canonical = translation
             repair_accepted = False
             citation_house_style_changes = []
+            canonical, final_source_artifact_report = (
+                _restore_source_bound_artifacts(chunk.text, canonical)
+            )
+        missing_identifiers = extract_identifiers(chunk.text) - extract_identifiers(
+            canonical
+        )
+        missing_labeled_identifiers = (
+            extract_labeled_identifier_surfaces(chunk.text)
+            - extract_labeled_identifier_surfaces(canonical)
+        )
+        if missing_identifiers or missing_labeled_identifiers:
+            raise ValueError(
+                "Final source-identifier admission failed after deterministic "
+                f"repair: identifiers={dict(missing_identifiers)}, "
+                f"labeled={dict(missing_labeled_identifiers)}"
+            )
         canonical_target_hash = hashlib.sha256(
             canonical.strip().encode("utf-8")
         ).hexdigest()
@@ -7314,11 +7698,15 @@ class TranslationPipeline:
                 "source_grounded_repair_proposed": repair_proposed,
                 "source_grounded_repair_accepted": repair_accepted,
                 "source_grounded_repairs": repair_report.get("repairs", []),
+                "final_source_artifact_reconciliation": (
+                    final_source_artifact_report
+                ),
                 "citation_house_style_changes": citation_house_style_changes,
                 "canonical_target_hash": canonical_target_hash,
                 "source_structure_conflicts": structure_conflicts,
                 "policy": (
-                    "The exact idempotent exporter typography and only "
+                    "The exact idempotent exporter typography, exact source "
+                    "identifiers and only "
                     "identifier-preserving, monotonically improving deterministic "
                     "repairs are stored in DB continuity and all four memory layers."
                 ),
@@ -7413,11 +7801,20 @@ class TranslationPipeline:
         document: Document,
         chunks: list[Chunk],
         translations: dict[int, str],
+        *,
+        job_id: str | None = None,
     ) -> TranslatedDocument:
         """Assemble translated chunks into document paragraphs."""
         original_paragraphs = document.all_paragraphs
         translated_paragraphs: list[TranslatedParagraph | None] = [None] * len(original_paragraphs)
         fallback_idx = 0
+        identity_artifact = (
+            self.db.get_job_artifact(job_id, "canonical_chunk_paragraphs_v1")
+            if job_id else None
+        ) or {}
+        identities = identity_artifact.get("chunks", {})
+        if not isinstance(identities, dict):
+            identities = {}
 
         for idx, chunk in enumerate(chunks):
             chunk_translation = translations.get(idx, "")
@@ -7428,19 +7825,44 @@ class TranslationPipeline:
                 [int(value) for value in _raw_indices]
                 if isinstance(_raw_indices, list) else []
             )
-            table_like = bool(
-                para_indices
-                and all(
-                    pid < len(original_paragraphs)
-                    and bool(original_paragraphs[pid].metadata.get("is_table"))
-                    for pid in para_indices
+            tgt_paras = _target_units_from_identity(
+                chunk_translation, identities.get(str(idx))
+            )
+            if tgt_paras is None:
+                canonical_translation, reconstructed_identity = (
+                    _canonical_chunk_paragraph_identity(chunk, chunk_translation)
                 )
-            )
-            tgt_paras, _alignment_boundary = _target_paragraphs_for_alignment(
-                chunk_translation,
-                expected_count=len(para_indices),
-                table_like=table_like,
-            )
+                chunk_translation = canonical_translation
+                translations[idx] = canonical_translation
+                tgt_paras = _target_units_from_identity(
+                    canonical_translation, reconstructed_identity
+                ) or []
+                identities[str(idx)] = reconstructed_identity
+                if job_id:
+                    self.db.save_job_artifact(
+                        job_id,
+                        "canonical_chunk_paragraphs_v1",
+                        {"version": 1, "chunks": identities},
+                    )
+                    if reconstructed_identity["reconstructed"]:
+                        self.db.update_chunk(
+                            job_id, idx, ChunkStatus.NEEDS_REVIEW,
+                            canonical_translation,
+                        )
+                    self.db.log_chunk_event(
+                        job_id,
+                        idx,
+                        (
+                            "paragraph_identity_reconstructed"
+                            if reconstructed_identity["reconstructed"]
+                            else "paragraph_identity_migrated"
+                        ),
+                        {
+                            **reconstructed_identity,
+                            "stage": "reexport_legacy_recovery",
+                            "memory_eligible": False,
+                        },
+                    )
             degraded_alignment = bool(
                 para_indices and len(para_indices) != len(tgt_paras)
             )
@@ -7452,7 +7874,7 @@ class TranslationPipeline:
                         para_indices=para_indices,
                         tgt_paras=tgt_paras,
                         chunk_translation=chunk_translation,
-                        strict_paragraph_identity=_used_paragraph_protocol(chunk),
+                        strict_paragraph_identity=True,
                     )
                 except ParagraphIdentityError as exc:
                     # No job_id in scope here, so this path only warns and
@@ -7922,14 +8344,12 @@ class TranslationPipeline:
             country=self.config.translation.country,
             term_notes_instruction=term_notes_instruction,
         )
-        source_paragraphs = [
-            paragraph.strip()
-            for paragraph in chunk.text.split("\n\n")
-            if paragraph.strip()
-        ]
+        source_paragraphs = _chunk_source_paragraphs(chunk)
         n_source_paras = len(chunk.metadata.get("paragraph_indices", [])) or \
             len(source_paragraphs)
-        encoded_source, paragraph_markers = encode_paragraphs(chunk.text)
+        encoded_source, paragraph_markers = encode_paragraph_units(
+            source_paragraphs
+        )
         use_paragraph_protocol = bool(
             len(paragraph_markers) > 1
             and int(chunk.metadata.get("paragraph_protocol_version", 0)) >= 1
@@ -9575,7 +9995,7 @@ class TranslationPipeline:
                 refinement_context = qa_context
                 refinement_markers: list[str] = []
                 source_for_refinement, source_refinement_markers = (
-                    encode_paragraphs(chunk.text)
+                    encode_paragraph_units(_chunk_source_paragraphs(chunk))
                 )
                 translation_for_refinement, target_refinement_markers = (
                     encode_paragraphs(translation)
