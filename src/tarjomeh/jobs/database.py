@@ -60,6 +60,55 @@ def _decode_payload_row(row: sqlite3.Row) -> dict[str, Any]:
     return item
 
 
+def _checkpoint_state(
+    conn: sqlite3.Connection,
+    job_id: str,
+) -> dict[str, Any]:
+    """Load a backward-compatible chapter-checkpoint artifact."""
+    row = conn.execute(
+        "SELECT payload FROM job_artifacts "
+        "WHERE job_id=? AND artifact_key='chapter_checkpoints'",
+        (job_id,),
+    ).fetchone()
+    try:
+        state = json.loads(row["payload"]) if row else {}
+    except (json.JSONDecodeError, TypeError):
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+    reached: list[int] = []
+    for value in state.get("reached_positions", []):
+        try:
+            reached.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    state["version"] = 3
+    state["reached_positions"] = sorted(set(reached))
+    return state
+
+
+def _write_checkpoint_state(
+    conn: sqlite3.Connection,
+    job_id: str,
+    state: dict[str, Any],
+    timestamp: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO job_artifacts (job_id, artifact_key, payload, updated_at)
+        VALUES (?, 'chapter_checkpoints', ?, ?)
+        ON CONFLICT(job_id, artifact_key) DO UPDATE SET
+            payload=excluded.payload,
+            updated_at=excluded.updated_at
+        """,
+        (
+            job_id,
+            json.dumps(state, ensure_ascii=False, sort_keys=True),
+            timestamp,
+        ),
+    )
+
+
 class JobStatus:
     PENDING = "pending"
     RUNNING = "running"
@@ -1105,6 +1154,7 @@ class JobDatabase:
         memory_state: dict[str, Any],
         search_state: dict[str, Any] | None = None,
         paragraph_identity: dict[str, Any] | None = None,
+        chapter_checkpoint: dict[str, Any] | None = None,
     ) -> None:
         """Persist chunk completion and its memory snapshot in ONE transaction.
 
@@ -1180,7 +1230,139 @@ class JobDatabase:
                         timestamp,
                     ),
                 )
+            if chapter_checkpoint is not None:
+                checkpoint_state = _checkpoint_state(conn, job_id)
+                position = int(chapter_checkpoint["chapter_position"])
+                if position not in checkpoint_state["reached_positions"]:
+                    pending = dict(chapter_checkpoint)
+                    pending.update({
+                        "chapter_position": position,
+                        "boundary_chunk_index": int(
+                            chapter_checkpoint["boundary_chunk_index"]
+                        ),
+                        "state": "pending_export",
+                        "created_at": str(
+                            chapter_checkpoint.get("created_at") or timestamp
+                        ),
+                    })
+                    checkpoint_state["pending"] = pending
+                    _write_checkpoint_state(
+                        conn, job_id, checkpoint_state, timestamp
+                    )
             conn.commit()
+
+    def save_pending_chapter_checkpoint(
+        self,
+        job_id: str,
+        checkpoint: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist a recovered checkpoint intent without changing chunk data."""
+        timestamp = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            state = _checkpoint_state(conn, job_id)
+            position = int(checkpoint["chapter_position"])
+            if position not in state["reached_positions"]:
+                pending = dict(checkpoint)
+                pending.update({
+                    "chapter_position": position,
+                    "boundary_chunk_index": int(
+                        checkpoint["boundary_chunk_index"]
+                    ),
+                    "state": "pending_export",
+                    "created_at": str(
+                        checkpoint.get("created_at") or timestamp
+                    ),
+                })
+                state["pending"] = pending
+                _write_checkpoint_state(conn, job_id, state, timestamp)
+            conn.commit()
+        return state
+
+    def complete_chapter_checkpoint(
+        self,
+        job_id: str,
+        checkpoint: dict[str, Any],
+        output_path: str | Path,
+        *,
+        output_sha256: str,
+        output_bytes: int,
+    ) -> dict[str, Any]:
+        """Publish checkpoint metadata and PAUSED status in one transaction."""
+        timestamp = datetime.utcnow().isoformat()
+        position = int(checkpoint["chapter_position"])
+        with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            state = _checkpoint_state(conn, job_id)
+            reached = set(state["reached_positions"])
+            reached.add(position)
+            publication = {
+                **checkpoint,
+                "chapter_position": position,
+                "boundary_chunk_index": int(
+                    checkpoint["boundary_chunk_index"]
+                ),
+                "state": "published",
+                "published_at": timestamp,
+                "output_path": str(output_path),
+                "output_sha256": output_sha256,
+                "output_bytes": int(output_bytes),
+            }
+            history: list[dict[str, Any]] = []
+            for item in state.get("publications", []):
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    item_position = int(
+                        item.get("chapter_position", -1) or -1
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if item_position != position:
+                    history.append(item)
+            history.append(publication)
+            state.update({
+                "version": 3,
+                "pending": None,
+                "reached_positions": sorted(reached),
+                "latest_position": position,
+                "latest_title": str(checkpoint.get("chapter_title", "")),
+                "latest_publication": publication,
+                "publications": history,
+            })
+            _write_checkpoint_state(conn, job_id, state, timestamp)
+            conn.execute(
+                "UPDATE jobs SET status=?, error_message=NULL, "
+                "output_path=? WHERE id=?",
+                (JobStatus.PAUSED, str(output_path), job_id),
+            )
+            conn.commit()
+        return state
+
+    def fail_chapter_checkpoint(
+        self,
+        job_id: str,
+        checkpoint: dict[str, Any],
+        error_message: str,
+    ) -> dict[str, Any]:
+        """Keep checkpoint intent retryable while recording export failure."""
+        timestamp = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            state = _checkpoint_state(conn, job_id)
+            pending = dict(state.get("pending") or checkpoint)
+            pending["state"] = "pending_export"
+            pending["last_failure_at"] = timestamp
+            pending["last_error"] = error_message
+            pending["failure_count"] = int(pending.get("failure_count", 0)) + 1
+            state["pending"] = pending
+            _write_checkpoint_state(conn, job_id, state, timestamp)
+            conn.execute(
+                "UPDATE jobs SET status=?, error_message=? WHERE id=?",
+                (JobStatus.PAUSED_ERROR, error_message, job_id),
+            )
+            conn.commit()
+        return state
 
     def get_chunks(self, job_id: str) -> list[dict[str, Any]]:
         """Retrieve all chunk records for a job."""

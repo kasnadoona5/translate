@@ -223,11 +223,13 @@ class SourceStructureAdmissionError(ValueError):
 class ChapterCheckpointReached(PipelinePausedException):
     """Raised after an intentional chapter-boundary review checkpoint."""
 
-    def __init__(self, chapter_position: int, chapter_title: str) -> None:
-        self.chapter_position = chapter_position
-        self.chapter_title = chapter_title
+    def __init__(self, checkpoint: dict[str, Any]) -> None:
+        self.checkpoint = dict(checkpoint)
+        self.chapter_position = int(checkpoint["chapter_position"])
+        self.chapter_title = str(checkpoint.get("chapter_title", ""))
         super().__init__(
-            f"Chapter {chapter_position} checkpoint reached: {chapter_title}"
+            f"Chapter {self.chapter_position} checkpoint reached: "
+            f"{self.chapter_title}"
         )
 
 
@@ -5668,6 +5670,21 @@ class TranslationPipeline:
         if total_chunks == 0:
             raise ValueError("Document contains no translatable content.")
 
+        translations: dict[int, str] = {}
+        if is_resume:
+            for c_record in self.db.get_chunks(job_id):
+                if c_record["status"] in (
+                    ChunkStatus.COMPLETED,
+                    ChunkStatus.NEEDS_REVIEW,
+                ):
+                    translations[c_record["chunk_index"]] = c_record["translation"]
+        pending_checkpoint = (
+            self._recover_pending_chapter_checkpoint(
+                job_id, chunks, translations
+            )
+            if is_resume else None
+        )
+
         # 3. Setup Glossary
         glossary_manager = GlossaryManager()
         glossary_paths: list[Path] = []
@@ -5829,11 +5846,16 @@ class TranslationPipeline:
                     provenance="curated_glossary",
                 )
 
-        research_artifact = self._prepare_book_research(
-            job_id,
-            research_document,
-            progress_callback,
-        )
+        if pending_checkpoint is not None:
+            research_artifact = self.db.get_job_artifact(
+                job_id, "book_research"
+            )
+        else:
+            research_artifact = self._prepare_book_research(
+                job_id,
+                research_document,
+                progress_callback,
+            )
         if research_artifact and research_artifact.get("status") in {
             "completed", "completed_without_suggestions", "degraded", "partial"
         }:
@@ -5842,14 +5864,6 @@ class TranslationPipeline:
             )
 
         # 6. Translate Chunks (Sequential or Concurrent)
-        translations: dict[int, str] = {}
-        
-        # Load existing translations if resuming
-        if is_resume:
-            for c_record in self.db.get_chunks(job_id):
-                if c_record["status"] in (ChunkStatus.COMPLETED, ChunkStatus.NEEDS_REVIEW):
-                    translations[c_record["chunk_index"]] = c_record["translation"]
-
         # Run translation loop
         consecutive_errors = 0
         max_errors = self.config.retry.max_consecutive_errors
@@ -5876,6 +5890,9 @@ class TranslationPipeline:
         back_translator = BackTranslator(llm_client=self.critic_client, sample_pct=self.config.translation.back_translation_sample_pct)
 
         try:
+            if pending_checkpoint is not None:
+                raise ChapterCheckpointReached(pending_checkpoint)
+
             # Separate execution paths based on workers
             workers = self.config.translation.parallel_workers
             if (
@@ -6099,6 +6116,9 @@ class TranslationPipeline:
                             if _chunk_needs_review(self.db, job_id, idx)
                             else ChunkStatus.COMPLETED
                         )
+                        chapter_checkpoint = self._chapter_checkpoint_intent(
+                            job_id, chunks, idx
+                        )
                         # One transaction: a crash between these three
                         # writes used to leave a COMPLETED chunk whose memory
                         # contribution was missing on resume.
@@ -6110,7 +6130,16 @@ class TranslationPipeline:
                             memory_manager.to_dict(),
                             search_state=web_searcher.export_state(),
                             paragraph_identity=paragraph_identity,
+                            chapter_checkpoint=chapter_checkpoint,
                         )
+                        if chapter_checkpoint is not None:
+                            self.db.log_chunk_event(
+                                job_id,
+                                idx,
+                                "chapter_checkpoint_pending",
+                                chapter_checkpoint,
+                            )
+                            raise ChapterCheckpointReached(chapter_checkpoint)
                         self._pause_if_requested(
                             job_id,
                             stage="chunk_checkpoint_committed",
@@ -6395,6 +6424,9 @@ class TranslationPipeline:
                             if _chunk_needs_review(self.db, job_id, idx)
                             else ChunkStatus.COMPLETED
                         )
+                        chapter_checkpoint = self._chapter_checkpoint_intent(
+                            job_id, chunks, idx
+                        )
                         # One transaction: a crash between these three
                         # writes used to leave a COMPLETED chunk whose memory
                         # contribution was missing on resume.
@@ -6406,18 +6438,21 @@ class TranslationPipeline:
                             memory_manager.to_dict(),
                             search_state=web_searcher.export_state(),
                             paragraph_identity=paragraph_identity,
+                            chapter_checkpoint=chapter_checkpoint,
                         )
+                        if chapter_checkpoint is not None:
+                            self.db.log_chunk_event(
+                                job_id,
+                                idx,
+                                "chapter_checkpoint_pending",
+                                chapter_checkpoint,
+                            )
+                            raise ChapterCheckpointReached(chapter_checkpoint)
                         self._pause_if_requested(
                             job_id,
                             stage="chunk_checkpoint_committed",
                             chunk_index=idx,
                         )
-
-                        if self._chapter_checkpoint_due(job_id, chunks, idx):
-                            raise ChapterCheckpointReached(
-                                self._chunk_chapter_position(chunk),
-                                chunk.chapter_title,
-                            )
 
                     except PipelinePausedException as e:
                         raise e
@@ -6461,44 +6496,8 @@ class TranslationPipeline:
                                 )
                             ) from e
         except ChapterCheckpointReached as checkpoint:
-            selected_positions = list(
-                self.config.translation.chapter_selection
-            )
-            preview_positions = (
-                [
-                    position for position in selected_positions
-                    if position <= checkpoint.chapter_position
-                ]
-                if selected_positions
-                else list(range(1, checkpoint.chapter_position + 1))
-            )
-            try:
-                partial_path = self.export_completed_job(
-                    job_id,
-                    output_path,
-                    chapter_positions=preview_positions,
-                )
-            except Exception as exc:
-                self.db.update_job_status(
-                    job_id,
-                    JobStatus.PAUSED_ERROR,
-                    error_message=(
-                        "Chapter checkpoint preview export failed: "
-                        f"{type(exc).__name__}: {exc}"
-                    ),
-                )
-                raise
-            # A visible PAUSED state promises that its review artifact is ready.
-            # Export first so the UI cannot race ahead and hide the download.
-            self._record_chapter_checkpoint(
-                job_id,
-                checkpoint.chapter_position,
-                checkpoint.chapter_title,
-            )
-            self.db.update_job_status(
-                job_id,
-                JobStatus.PAUSED,
-                output_path=partial_path,
+            partial_path = self._publish_chapter_checkpoint(
+                job_id, checkpoint.checkpoint, output_path
             )
             message = (
                 f"Review checkpoint after chapter {checkpoint.chapter_position}: "
@@ -7124,6 +7123,7 @@ class TranslationPipeline:
         output_format: str | None = None,
         bilingual_mode: str | None = None,
         chapter_positions: list[int] | None = None,
+        persist_job_output: bool = True,
     ) -> Path:
         """Re-export a completed/partially-reviewed job without LLM calls."""
         job = self.db.get_job(job_id)
@@ -7389,12 +7389,13 @@ class TranslationPipeline:
             output_path=output_path,
             bilingual_mode=self.config.output.bilingual_mode,
         )
-        self.db.update_job_status(
-            job_id,
-            job.get("raw_status", job["status"]),
-            output_path=output_path,
-        )
-        self.db.log_event(job_id, "INFO", f"Re-exported job to {output_path}")
+        if persist_job_output:
+            self.db.update_job_status(
+                job_id,
+                job.get("raw_status", job["status"]),
+                output_path=output_path,
+            )
+            self.db.log_event(job_id, "INFO", f"Re-exported job to {output_path}")
         return output_path
 
     def retranslate_chunk(self, job_id: str, chunk_index: int) -> str:
@@ -7718,50 +7719,223 @@ class TranslationPipeline:
     def _chunk_chapter_position(chunk: Chunk) -> int:
         return int(chunk.metadata.get("chapter_position", 1))
 
-    def _chapter_checkpoint_due(
+    def _chapter_checkpoint_intent(
         self,
         job_id: str,
         chunks: list[Chunk],
         chunk_index: int,
-    ) -> bool:
-        """Return whether a completed boundary still needs its checkpoint."""
+        *,
+        recovery: str = "normal_boundary",
+    ) -> dict[str, Any] | None:
+        """Describe a requested, unreached chapter boundary without claiming it."""
         if chunk_index >= len(chunks) - 1:
-            return False
+            return None
         current = self._chunk_chapter_position(chunks[chunk_index])
         following = self._chunk_chapter_position(chunks[chunk_index + 1])
         if current == following:
-            return False
+            return None
 
         requested = (
             self.config.translation.pause_after_each_chapter
             or self.config.translation.stop_after_chapter == current
         )
         if not requested:
-            return False
+            return None
 
         artifact = self.db.get_job_artifact(job_id, "chapter_checkpoints") or {}
         reached = {
             int(value) for value in artifact.get("reached_positions", [])
         }
-        return current not in reached
+        if current in reached:
+            return None
+        manifest = self.db.get_job_artifact(job_id, "chapter_manifest") or {}
+        manifest_title = next(
+            (
+                str(item.get("title", ""))
+                for item in manifest.get("chapters", [])
+                if isinstance(item, dict)
+                and int(item.get("position", 0) or 0) == current
+            ),
+            "",
+        )
+        selected_positions = list(self.config.translation.chapter_selection)
+        preview_positions = (
+            [position for position in selected_positions if position <= current]
+            if selected_positions else list(range(1, current + 1))
+        )
+        return {
+            "chapter_position": current,
+            "chapter_title": manifest_title or chunks[chunk_index].chapter_title,
+            "boundary_chunk_index": int(chunk_index),
+            "following_chapter_position": following,
+            "preview_positions": preview_positions,
+            "recovery": recovery,
+        }
 
-    def _record_chapter_checkpoint(
+    def _recover_pending_chapter_checkpoint(
         self,
         job_id: str,
-        chapter_position: int,
-        chapter_title: str,
-    ) -> None:
-        """Persist a checkpoint only after its review artifact was exported."""
+        chunks: list[Chunk],
+        translations: dict[int, str],
+    ) -> dict[str, Any] | None:
+        """Return durable or inferred legacy checkpoint work before translation."""
         artifact = self.db.get_job_artifact(job_id, "chapter_checkpoints") or {}
         reached = {
             int(value) for value in artifact.get("reached_positions", [])
         }
-        reached.add(chapter_position)
-        self.db.save_job_artifact(job_id, "chapter_checkpoints", {
-            "reached_positions": sorted(reached),
-            "latest_position": chapter_position,
-            "latest_title": chapter_title,
-        })
+        pending = artifact.get("pending")
+        if isinstance(pending, dict):
+            try:
+                position = int(pending["chapter_position"])
+                boundary = int(pending["boundary_chunk_index"])
+            except (KeyError, TypeError, ValueError):
+                pending = None
+            else:
+                if (
+                    position not in reached
+                    and 0 <= boundary < len(chunks) - 1
+                    and boundary in translations
+                    and self._chunk_chapter_position(chunks[boundary]) == position
+                    and self._chunk_chapter_position(chunks[boundary + 1]) != position
+                ):
+                    fresh = self._chapter_checkpoint_intent(
+                        job_id,
+                        chunks,
+                        boundary,
+                        recovery=str(pending.get("recovery", "pending_retry")),
+                    )
+                    if fresh is not None:
+                        for key in (
+                            "created_at",
+                            "failure_count",
+                            "last_error",
+                            "last_failure_at",
+                            "late_recovery",
+                        ):
+                            if key in pending:
+                                fresh[key] = pending[key]
+                        return fresh
+
+        for index in range(len(chunks) - 1):
+            if index not in translations:
+                continue
+            intent = self._chapter_checkpoint_intent(
+                job_id,
+                chunks,
+                index,
+                recovery="legacy_completed_boundary",
+            )
+            if intent is None:
+                continue
+            later_completed = any(
+                later_index in translations
+                for later_index in range(index + 1, len(chunks))
+            )
+            intent["late_recovery"] = later_completed
+            self.db.save_pending_chapter_checkpoint(job_id, intent)
+            self.db.log_chunk_event(
+                job_id,
+                index,
+                "legacy_checkpoint_recovered",
+                {
+                    **intent,
+                    "message": (
+                        "A completed requested chapter boundary had no durable "
+                        "publication record. Preview publication was recovered "
+                        "before any additional work in this worker generation."
+                    ),
+                },
+            )
+            if later_completed:
+                self.db.log_chunk_event(
+                    job_id,
+                    index,
+                    "late_chapter_checkpoint_recovery",
+                    {
+                        **intent,
+                        "message": (
+                            "Later completed chunks were preserved, but the "
+                            "missed chapter preview is being published before "
+                            "this worker can perform any new translation work."
+                        ),
+                    },
+                )
+            return intent
+        return None
+
+    def _publish_chapter_checkpoint(
+        self,
+        job_id: str,
+        checkpoint: dict[str, Any],
+        output_path: Path,
+    ) -> Path:
+        """Idempotently publish a verified preview before exposing PAUSED."""
+        output_path = Path(output_path)
+        suffix = output_path.suffix
+        temporary_path = output_path.with_name(
+            f".{output_path.stem}.checkpoint-{uuid.uuid4().hex}.tmp{suffix}"
+        )
+        chunk_index = int(checkpoint["boundary_chunk_index"])
+        self.db.log_chunk_event(
+            job_id,
+            chunk_index,
+            "chapter_checkpoint_preview_export_started",
+            {**checkpoint, "temporary_path": str(temporary_path)},
+        )
+        try:
+            partial_path = self.export_completed_job(
+                job_id,
+                temporary_path,
+                chapter_positions=[
+                    int(value)
+                    for value in checkpoint.get("preview_positions", [])
+                ],
+                persist_job_output=False,
+            )
+            if not partial_path.is_file() or partial_path.stat().st_size <= 0:
+                raise RuntimeError(
+                    "Checkpoint exporter returned without a non-empty preview."
+                )
+            output_bytes = partial_path.stat().st_size
+            output_digest = hashlib.sha256()
+            with partial_path.open("rb") as preview_file:
+                for block in iter(lambda: preview_file.read(1024 * 1024), b""):
+                    output_digest.update(block)
+            output_sha256 = output_digest.hexdigest()
+            partial_path.replace(output_path)
+            self.db.complete_chapter_checkpoint(
+                job_id,
+                checkpoint,
+                output_path,
+                output_sha256=output_sha256,
+                output_bytes=output_bytes,
+            )
+        except Exception as exc:
+            temporary_path.unlink(missing_ok=True)
+            message = (
+                "Chapter checkpoint preview export failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            self.db.fail_chapter_checkpoint(job_id, checkpoint, message)
+            self.db.log_chunk_event(
+                job_id,
+                chunk_index,
+                "chapter_checkpoint_preview_export_failed",
+                {**checkpoint, "error": message, "retryable": True},
+            )
+            raise
+        self.db.log_chunk_event(
+            job_id,
+            chunk_index,
+            "chapter_checkpoint_preview_published",
+            {
+                **checkpoint,
+                "output_path": str(output_path),
+                "output_sha256": output_sha256,
+                "output_bytes": output_bytes,
+            },
+        )
+        return output_path
 
     def _parse_and_chunk(
         self,

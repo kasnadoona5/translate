@@ -1078,12 +1078,36 @@ def _register_api(app: Flask) -> None:
         chapter_manifest = db.get_job_artifact(job_id, "chapter_manifest")
         chapter_checkpoints = db.get_job_artifact(job_id, "chapter_checkpoints")
         if chapter_manifest is not None:
+            checkpoint_state = chapter_checkpoints or {}
+            pending_checkpoint = checkpoint_state.get("pending")
+            latest_publication = checkpoint_state.get("latest_publication")
             lines.extend([
                 "Chapter Scope:",
                 f"  detected={len(chapter_manifest.get('chapters', []))}",
                 f"  selected={chapter_manifest.get('selected_positions') or 'all'}",
                 "  checkpoints_reached="
-                + str((chapter_checkpoints or {}).get("reached_positions", [])),
+                + str(checkpoint_state.get("reached_positions", [])),
+                f"  checkpoint_state_version={checkpoint_state.get('version', 1)}",
+                "  pending_checkpoint="
+                + (
+                    json.dumps(
+                        pending_checkpoint,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                    if isinstance(pending_checkpoint, dict)
+                    else "none"
+                ),
+                "  latest_publication="
+                + (
+                    json.dumps(
+                        latest_publication,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                    if isinstance(latest_publication, dict)
+                    else "none"
+                ),
                 "",
             ])
         if research is not None:
@@ -1958,8 +1982,9 @@ def _register_api(app: Flask) -> None:
                 "job_id": job_id,
                 "worker_id": pause.get("worker_id"),
                 "message": (
-                    "Pause requested. The owning worker will acknowledge it "
-                    "after the current atomic chunk checkpoint."
+                    "Pause requested. The worker will finish the current "
+                    "chunk's complete quality pipeline and persist its atomic "
+                    "checkpoint before pausing; no active LLM call is cancelled."
                 ),
             })
         return jsonify({"status": "paused", "job_id": job_id})
@@ -1983,7 +2008,11 @@ def _register_api(app: Flask) -> None:
                 "error": "Job is still pausing",
                 "status": "pausing",
                 "job_id": job_id,
-                "message": "Wait until the current LLM call finishes, then resume again.",
+                "message": (
+                    "Wait until the current chunk's complete quality pipeline "
+                    "is persisted, then resume again. Active LLM calls are not "
+                    "cancelled."
+                ),
             }), 409
 
         # Update DB status to RUNNING

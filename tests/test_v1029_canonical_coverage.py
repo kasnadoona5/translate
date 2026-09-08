@@ -261,7 +261,7 @@ def test_v1029_release_contract_and_scripts_are_valid() -> None:
     ]
     scripts = [path.read_text(encoding="utf-8") for path in paths]
 
-    assert runtime_capabilities()["release"] == "v10.29.0"
+    assert runtime_capabilities()["release"] == "v10.30.0"
     assert 'TAG="v10.29.1"' in scripts[0]
     assert 'git diff --quiet v10.27.0 "$TAG"' in scripts[0]
     assert 'ARG BASE_IMAGE' in scripts[0]

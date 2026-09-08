@@ -274,7 +274,7 @@ new evidence so later patches cannot silently revive an earlier defect.
 | R34 | Every material source proposition survives translation and final admission | OPEN | v10.27 paragraph 96 omitted the source's postwar western revival and European reconstruction proposition. v10.29 makes the existing critic return a complete stable source-segment inventory and requires every uncovered segment to produce a grounded accuracy/omission issue; no extra unconditional LLM stage is added. |
 | R35 | Terminology memory is scoped by sense and structural role | OPEN | Front-matter publisher `polity` was correctly rendered as the brand `پولیتی`, then reused for conceptual `polity` in `polity / politics / policy`. Brand, title, person, citation, and lexical-concept senses must not share automatic authority merely because their normalized source surface matches. |
 | R36 | Reliable retrieval excludes known unresolved objective defects | OPEN | `at most -> به‌نهایت` entered a reliable long-term entry even though the final fluency score was below threshold and the defect remained unresolved. A chunk may remain useful as advisory continuity, but cannot become reliable/style authority while a grounded objective defect is unresolved. |
-| R37 | Worker ownership, pause acknowledgement, and supersession are persistent and auditable | OPEN | UI chunk 12 accumulated nine successful obsolete calls and was then fully reprocessed. Record a persistent worker generation/lease, pause-request and pause-acknowledgement states, heartbeats, stage boundaries, and a supersession reason; never expose an acknowledged `paused` state while the worker is still silently advancing. |
+| R37 | Worker ownership, pause acknowledgement, and supersession are persistent and auditable | OPEN | UI chunk 12 accumulated nine successful obsolete calls and was then fully reprocessed. Record a persistent worker generation/lease, pause-request and pause-acknowledgement states, heartbeats, stage boundaries, and a supersession reason; never expose an acknowledged `paused` state while the worker is still silently advancing. A manual pause remains cooperative: the active chunk finishes its full quality pipeline and atomic chunk/memory checkpoint before acknowledgement. |
 | R38 | Source text stored in retrieval memory is de-hyphenated consistently | OPEN | Delivered Persian no longer exposes `Profes-sorial`, but the source side of long-term memory still stores the PDF line-break artifact. Normalize source retrieval text using parser provenance while preserving real lexical hyphens. |
 | R39 | Reusable entity memory separates the lexical target from display annotation | MONITOR | `Manuela Tecusan` is stored with an embedded English parenthetical in the target. Keep the reusable Persian name separate from first-occurrence English rendering metadata so later uses cannot duplicate the original. |
 | R40 | Audit conclusions use final-export evidence and expose unknowns honestly | OPEN | v10.18 companion output reported native RTL as unknown despite valid OOXML and could not explain the obsolete worker generation. Reports must distinguish `pass`, `fail`, `not applicable`, and `unknown`, and must not infer a root cause without a persisted event. |
@@ -315,6 +315,7 @@ new evidence so later patches cannot silently revive an earlier defect.
 | R75 | Final canonical text cannot retain a recoverable damaged source identifier | MONITOR | v10.29 runs source-bound identifier/note reconciliation after final typography/citation normalization and blocks final admission if the source identifier counters or labeled surfaces remain incomplete. |
 | R76 | Repeated Persian wording does not hide a grounded local repair | MONITOR | v10.29 resolves a critic quote inside its source-corresponding target paragraph. Identical wording elsewhere no longer defeats salvage, while ambiguity inside that paragraph, overlap, predicate loss, source-structure drift, and integrity failure still reject the edit. |
 | R77 | Audit output and job selection are truthful | MONITOR | v10.29 wrappers use function-local `${1:-LATEST}`, runtime v10.29 scripts, exact file validation (`is_file`), paragraph-map hashes, critic coverage, memory/style/research authority, and active/lifetime LLM failure accounting. |
+| R78 | Requested chapter-boundary intent survives process death and is recovered before later work | MONITOR | v10.28 could commit the boundary chunk and lose the worker before export or reached-state recording; resume then advanced into the next chapter. v10.30 stores `pending_export` atomically with chunk, memory, search, and paragraph identity; publishes through a verified temporary sibling and atomic replace; then commits reached state, output path, and `paused` together. Resume retries durable or legacy inferred pending work before any new LLM call. Live VPS confirmation is required. |
 
 ## Validated v10.17 External Audit Notes
 
@@ -1263,6 +1264,39 @@ pending a fresh v10.25 VPS run.
   wrappers pass. Ruff improves from `235` to `233` findings; mypy remains at the exact
   v10.28 baseline of `88` errors. Live checkpoint DOCX and VPS audit evidence remain
   required before any `MONITOR`/`PARTIAL` row is promoted.
+
+## v10.30 Pending Live Validation
+
+- A requested chapter boundary must store a version-3 `pending_export` intent in
+  the same transaction as the completed chunk, four-layer memory snapshot, search
+  state, and canonical paragraph identity. A crash before preview publication must
+  leave that intent retryable rather than silently marking the boundary reached.
+- Preview export must target a temporary sibling that is never exposed as the job
+  output. Only a non-empty export is hashed and atomically renamed to the stable
+  output path. Reached position, publication metadata, output path, and visible
+  `paused` status are then committed together.
+- Resume must process a durable pending intent before any new translation call. For
+  legacy jobs, the earliest completed requested-but-unreached chapter boundary is
+  reconstructed from persisted chunk/config evidence and published first. Later
+  completed chunks are preserved and reported as late recovery; they are not erased,
+  repeated, or admitted with greater authority.
+- Manual pause remains cooperative and quality-safe. It does not cancel an active
+  LLM call or bypass critique, refinement, integrity, memory, style, or research
+  stages; acknowledgement occurs only after the current atomic chunk checkpoint.
+- Audits must hard-fail a paused checkpoint with a missing preview, unresolved
+  pending intent, mismatched publication path/size/hash, or a completed requested
+  boundary with neither reached nor pending state. Pending retry history and late
+  recovery remain visible without being misclassified as LLM failures.
+- No translation prompt, model setting, quality threshold, refiner veto, research
+  authority, memory layer, style authority, or export format is removed or weakened.
+  Regression coverage must include failed export retry, process-death-shaped legacy
+  recovery, idempotent publication, trusted preview scope, real checkpoint formats,
+  release scripts, and all historical tests.
+- Local release verification: all `934` tests pass. Source/test compilation, all
+  three v10.30 Bash scripts, their embedded Python, runtime capability checks, and
+  both external wrappers pass. Ruff improves from `233` to `232` findings; mypy
+  remains at the established `88` errors in 17 files. Live VPS recovery and preview
+  evidence remain required before R78 can be promoted from `MONITOR`.
 
 ## Update Procedure
 
