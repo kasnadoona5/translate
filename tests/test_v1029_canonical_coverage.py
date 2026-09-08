@@ -262,8 +262,13 @@ def test_v1029_release_contract_and_scripts_are_valid() -> None:
     scripts = [path.read_text(encoding="utf-8") for path in paths]
 
     assert runtime_capabilities()["release"] == "v10.29.0"
-    assert 'TAG="v10.29.0"' in scripts[0]
-    assert 'git diff --quiet v10.28.0 "$TAG"' in scripts[0]
+    assert 'TAG="v10.29.1"' in scripts[0]
+    assert 'git diff --quiet v10.27.0 "$TAG"' in scripts[0]
+    assert 'ARG BASE_IMAGE' in scripts[0]
+    assert 'FROM ${BASE_IMAGE}' in scripts[0]
+    assert '--build-arg "BASE_IMAGE=$ROLLBACK"' in scripts[0]
+    assert 'RUN pip install --no-cache-dir --no-deps .' in scripts[0]
+    assert 'docker build --pull=false -t "$CANDIDATE" .' not in scripts[0]
     assert "RUNNING_V1029_CONFIRMED" in scripts[0]
     assert "canonical_chunk_paragraphs_v1" in scripts[0]
     assert "checked_source_segment_ids" in scripts[0]

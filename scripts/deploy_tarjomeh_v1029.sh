@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 cd /opt/translate
 
-TAG="v10.29.0"
+TAG="v10.29.1"
 CONTAINER="translate_tarjomeh_1"
 SERVICE="tarjomeh"
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -11,6 +11,7 @@ BACKUP_ROOT="/root/tarjomeh-backups"
 BACKUP="$BACKUP_ROOT/v1029-$STAMP"
 ROLLBACK="translate_tarjomeh:rollback-v1029-$STAMP"
 CANDIDATE="translate_tarjomeh:candidate-v1029-$STAMP"
+OVERLAY_DOCKERFILE=""
 
 if docker compose version >/dev/null 2>&1; then
     COMPOSE=(docker compose)
@@ -21,6 +22,7 @@ fi
 REPLACED=0
 rollback_tarjomeh_on_error() {
     exit_code=$?
+    [ -z "$OVERLAY_DOCKERFILE" ] || rm -f -- "$OVERLAY_DOCKERFILE"
     if [ "$REPLACED" -eq 1 ]; then
         echo "========== AUTOMATIC TARJOMEH ROLLBACK =========="
         docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
@@ -179,14 +181,35 @@ if [ "$AVAILABLE_KB" -lt 350000 ]; then
 fi
 
 echo "========== BUILD SHARED-LAYER TARJOMEH CANDIDATE =========="
-# v10.28 is code-only. Keeping the running image allows Docker to reuse its
-# dependency layers, so the small VPS never needs a second 1.38 GB dependency
-# tree. If dependency metadata changed, stop instead of attempting this path.
-git diff --quiet v10.28.0 "$TAG" -- Dockerfile pyproject.toml || {
-    echo "STOPPED: dependency metadata changed; shared-layer build is unsafe."
+# v10.29 is code-only. Build explicitly on the exact running image instead of
+# depending on Docker's optional build cache. This creates only a small code
+# layer and remains safe after an unrelated 9router update removes cache layers.
+# Refuse the overlay path if runtime dependency metadata changed since the
+# release currently running on this VPS.
+git diff --quiet v10.27.0 "$TAG" -- Dockerfile pyproject.toml || {
+    echo "STOPPED: dependency metadata changed; overlay build is unsafe."
     exit 1
 }
-docker build --pull=false -t "$CANDIDATE" .
+OVERLAY_DOCKERFILE="$(mktemp /tmp/tarjomeh-v1029-overlay.XXXXXX.Dockerfile)"
+cat > "$OVERLAY_DOCKERFILE" <<'DOCKERFILE'
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+WORKDIR /app
+COPY pyproject.toml README.md LICENSE ./
+COPY src/ src/
+COPY glossary/ glossary/
+COPY config.example.toml ./
+RUN pip install --no-cache-dir --no-deps .
+RUN mkdir -p /app/jobs /app/output
+EXPOSE 8080
+CMD ["tarjomeh", "serve", "--host", "0.0.0.0", "--port", "8080"]
+DOCKERFILE
+docker build --pull=false \
+    --build-arg "BASE_IMAGE=$ROLLBACK" \
+    -f "$OVERLAY_DOCKERFILE" \
+    -t "$CANDIDATE" .
+rm -f -- "$OVERLAY_DOCKERFILE"
+OVERLAY_DOCKERFILE=""
 
 echo "========== VERIFY IMAGE =========="
 docker run --rm "$CANDIDATE" tarjomeh capabilities --verify --json
