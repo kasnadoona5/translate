@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v10.30.0"
+RUNTIME_RELEASE = "v10.31.0"
 RUNTIME_REVISION = 1
 
 
@@ -38,10 +39,15 @@ def runtime_capabilities() -> dict[str, Any]:
             "verified_source_coverage": True,
             "final_identifier_admission": True,
             "paragraph_scoped_refiner_salvage": True,
+            "canonical_export_is_lexically_pure": True,
+            "final_canonical_admission_event": True,
+            "resumable_split_recovery_segments": True,
+            "paragraph_scoped_language_repair_roles": True,
+            "conservative_summary_stutter_rejection": True,
         },
         "policy_versions": {
             "structure_evidence": 2,
-            "canonical_text": 2,
+            "canonical_text": 3,
             "layer1_admission": 4,
             "style_evidence": 2,
             "benchmark_schema": 1,
@@ -49,6 +55,8 @@ def runtime_capabilities() -> dict[str, Any]:
             "paragraph_identity": 1,
             "critic_source_coverage": 1,
             "final_identifier_admission": 1,
+            "recovery_segments": 1,
+            "summary_admission": 2,
         },
     }
 
@@ -63,7 +71,10 @@ def runtime_behavior_probes() -> dict[str, bool]:
         _blocking_structure_findings,
         _canonical_chunk_paragraph_identity,
         _chunk_needs_review,
+        _final_canonical_admission_payload,
+        _paragraph_structural_roles,
         _record_reconstructed_paragraph_identity_review,
+        _role_aware_recovery_groups,
         _source_foreign_expression_inventory,
         _target_units_from_identity,
         audit_canonical_document_identity,
@@ -129,6 +140,19 @@ def runtime_behavior_probes() -> dict[str, bool]:
     canonical_units, paragraph_identity = _canonical_chunk_paragraph_identity(
         identity_chunk,
         "اول. دوم.",
+    )
+    role_chunk = Chunk(
+        index=1,
+        text="Prose.\n\nRow one\n\nRow two",
+        chapter_title="",
+        section_title="",
+        metadata={"structural_roles": ["body", "table", "table"]},
+    )
+    role_units = role_chunk.text.split("\n\n")
+    role_values = _paragraph_structural_roles(role_chunk, len(role_units))
+    role_groups = _role_aware_recovery_groups(role_units, role_values)
+    admission = _final_canonical_admission_payload(
+        canonical_units, paragraph_identity
     )
     class _ProbeDB:
         def __init__(self) -> None:
@@ -214,5 +238,15 @@ def runtime_behavior_probes() -> dict[str, bool]:
         "source_identifiers_are_restored": bool(
             "example.org" in restored_identifier
             and "AB1 2CD" in restored_identifier
+        ),
+        "canonical_admission_matches_final_text": bool(
+            admission["canonical_target_hash"]
+            == hashlib.sha256(canonical_units.encode("utf-8")).hexdigest()
+        ),
+        "mixed_roles_are_paragraph_scoped": bool(
+            role_groups == [
+                (0, ["Prose."], "body"),
+                (1, ["Row one", "Row two"], "table"),
+            ]
         ),
     }

@@ -109,6 +109,32 @@ def _summary_lexical_near_misses(
     return findings[:12]
 
 
+def _summary_english_prefix_stutters(
+    candidate_english: str,
+    evidence_english: str,
+) -> list[dict[str, str]]:
+    """Detect adjacent partial-word restarts absent from source evidence."""
+    words = re.findall(r"[A-Za-z][A-Za-z'-]{3,}", candidate_english or "")
+    evidence = " ".join((evidence_english or "").casefold().split())
+    findings: list[dict[str, str]] = []
+    for left, right in zip(words, words[1:], strict=False):
+        first = left.casefold().strip("'-")
+        second = right.casefold().strip("'-")
+        shorter, longer = sorted((first, second), key=len)
+        phrase = f"{first} {second}"
+        if (
+            len(shorter) >= 5
+            and shorter != longer
+            and longer.startswith(shorter)
+            and phrase not in evidence
+        ):
+            findings.append({
+                "candidate": f"{left} {right}",
+                "reason": "adjacent_prefix_restart_absent_from_source",
+            })
+    return findings[:12]
+
+
 def _clean_style_sample(text: str) -> str:
     """Return a safe style-only sample without mutating persisted memory."""
     sample = _complete_style_sample(text)
@@ -1069,6 +1095,10 @@ class MemoryManager:
                 candidate.persian_summary,
                 self.bilingual_summary.persian_summary + "\n" + translation,
             )
+            english_prefix_stutters = _summary_english_prefix_stutters(
+                candidate.english_summary,
+                self.bilingual_summary.english_summary + "\n" + new_content,
+            )
             extra_reasons: list[str] = []
             if "translation_structure_mismatch" in set(
                 alignment.get("classifications", []) or []
@@ -1076,6 +1106,8 @@ class MemoryManager:
                 extra_reasons.append("bilingual_summary_structure_mismatch")
             if lexical_near_misses:
                 extra_reasons.append("persian_summary_lexical_near_miss")
+            if english_prefix_stutters:
+                extra_reasons.append("english_summary_lexical_stutter")
             if extra_reasons:
                 prior_reasons = candidate_quality.get("reasons", [])
                 if not isinstance(prior_reasons, list):
@@ -1087,6 +1119,9 @@ class MemoryManager:
                 ))
             candidate_quality["bilingual_alignment"] = alignment
             candidate_quality["lexical_near_misses"] = lexical_near_misses
+            candidate_quality["english_prefix_stutters"] = (
+                english_prefix_stutters
+            )
             if not candidate_quality["accepted"]:
                 return {
                     "replacement_count": 0,

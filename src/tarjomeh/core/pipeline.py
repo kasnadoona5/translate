@@ -1042,6 +1042,33 @@ def _canonical_chunk_paragraph_identity(
     return canonical, payload
 
 
+def _final_canonical_admission_payload(
+    translation: str,
+    paragraph_identity: dict[str, Any],
+) -> dict[str, Any]:
+    """Describe the exact lexical text committed to DB, memory, and export."""
+    canonical_hash = hashlib.sha256(translation.encode("utf-8")).hexdigest()
+    identity_hash = str(paragraph_identity.get("canonical_target_hash", ""))
+    if identity_hash and identity_hash != canonical_hash:
+        raise ParagraphIdentityError(
+            "Final canonical text does not match its paragraph identity."
+        )
+    return {
+        "stage": "final_canonical_admission",
+        "canonical_target_hash": canonical_hash,
+        "canonical_characters": len(translation),
+        "paragraph_count": int(
+            paragraph_identity.get("target_count", 0) or 0
+        ),
+        "paragraph_identity_version": int(
+            paragraph_identity.get("version", 0) or 0
+        ),
+        "paragraph_boundary": str(paragraph_identity.get("boundary", "")),
+        "reconstructed": bool(paragraph_identity.get("reconstructed", False)),
+        "authority": "exact_db_memory_and_export_text",
+    }
+
+
 def _target_units_from_identity(
     translation: str,
     identity: dict[str, Any] | None,
@@ -1126,6 +1153,95 @@ def _table_recovery_groups(
         paragraphs[start:start + group_size]
         for start in range(0, len(paragraphs), group_size)
     ]
+
+
+def _paragraph_structural_roles(chunk: Chunk, paragraph_count: int) -> list[str]:
+    """Return one conservative structural role for every source paragraph."""
+    raw_roles = chunk.metadata.get("structural_roles")
+    roles = (
+        [str(role).strip().casefold() or "body" for role in raw_roles]
+        if isinstance(raw_roles, list)
+        else []
+    )
+    if len(roles) == paragraph_count:
+        return roles
+    unique = {role for role in roles if role}
+    fallback = next(iter(unique)) if len(unique) == 1 else "body"
+    return [fallback] * paragraph_count
+
+
+def _role_aware_recovery_groups(
+    paragraphs: list[str],
+    roles: list[str],
+    *,
+    max_table_rows: int = 12,
+) -> list[tuple[int, list[str], str]]:
+    """Group contiguous table rows while retaining paragraph-local roles."""
+    if len(roles) != len(paragraphs):
+        roles = ["body"] * len(paragraphs)
+    groups: list[tuple[int, list[str], str]] = []
+    index = 0
+    while index < len(paragraphs):
+        role = roles[index]
+        if role != "table":
+            groups.append((index, [paragraphs[index]], role))
+            index += 1
+            continue
+        end = index
+        while (
+            end < len(paragraphs)
+            and roles[end] == "table"
+            and end - index < max(2, int(max_table_rows))
+        ):
+            end += 1
+        groups.append((index, paragraphs[index:end], "table"))
+        index = end
+    return groups
+
+
+_RECOVERY_SEGMENT_CACHE_KEY = "translation_recovery_segments_v1"
+
+
+def _recovery_segment_cache_identity(
+    *,
+    segment_id: str,
+    source: str,
+    prompt: str,
+    system_prompt: str,
+    structural_role: str,
+    request_profile: str,
+) -> str:
+    """Bind a reusable recovery result to its exact request and source role."""
+    payload = json.dumps(
+        {
+            "segment_id": segment_id,
+            "source": source,
+            "prompt": prompt,
+            "system_prompt": system_prompt,
+            "structural_role": structural_role,
+            "request_profile": request_profile,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _cached_recovery_candidate(
+    artifact: dict[str, Any] | None,
+    cache_identity: str,
+) -> str:
+    """Read only a hash-verified candidate from the persisted recovery cache."""
+    entries = (artifact or {}).get("entries", {})
+    entry = entries.get(cache_identity, {}) if isinstance(entries, dict) else {}
+    if not isinstance(entry, dict):
+        return ""
+    candidate = str(entry.get("candidate", ""))
+    expected = str(entry.get("candidate_sha256", ""))
+    if not candidate or expected != hashlib.sha256(candidate.encode("utf-8")).hexdigest():
+        return ""
+    return candidate
 
 
 def _translated_paragraph_metadata(
@@ -1684,6 +1800,9 @@ Requirements:
    do not rewrite unrelated correct wording.
 7. Restructure English-order modifier stacks into transparent academic Persian when
    requested, but never simplify, merge, omit, or reinterpret a source proposition.
+8. Copy every unaffected clause from the accepted Persian paragraph verbatim. If an
+   exact current Persian quote is supplied, confine the lexical edit to that quote
+   and the smallest grammatical context needed to make the repair coherent.
 """
 
 
@@ -3000,7 +3119,11 @@ def _unresolved_grounded_memory_issues(critique: Any) -> list[dict[str, Any]]:
         semantic_minor = bool(
             severity == "minor"
             and category in _SOURCE_FIDELITY_CATEGORIES
-            and confidence >= 0.75
+            and confidence >= 0.60
+            and source_quote
+            and current
+            and suggested
+            and current != suggested
         )
         evidence = " ".join(
             str(detail.get(field, ""))
@@ -4140,12 +4263,6 @@ def _chunk_style_policy(
 ) -> dict[str, Any]:
     """Select clean paragraph-level style evidence from finalized prose."""
     final_quality = _canonical_final_quality_record(db, job_id, chunk_index)
-    if final_quality["review_required"]:
-        return {
-            "approved": False,
-            "excluded_paragraphs": [],
-            "reason": "chunk_needs_review",
-        }
     events = db.get_chunk_events(job_id, chunk_index)
     last_start = 0
     for index, event in enumerate(events):
@@ -4157,6 +4274,12 @@ def _chunk_style_policy(
         if event.get("event_type") == "critique_completed"
     ]
     if not critiques:
+        if final_quality["review_required"]:
+            return {
+                "approved": False,
+                "excluded_paragraphs": [],
+                "reason": "chunk_needs_review_without_paragraph_evidence",
+            }
         return {
             "approved": True,
             "excluded_paragraphs": [],
@@ -4175,10 +4298,8 @@ def _chunk_style_policy(
             "excluded_paragraphs": [],
             "reason": "blocking_final_critique",
         }
-    # Minor, non-blocking observations should not leave a long book without a
-    # voice anchor. Major or critical unresolved issues still disqualify the
-    # sample, while continuity memory remains available under its own trust.
     issue_details = list(latest.get("issue_details", []) or [])
+    excluded: set[int] = set()
     if not final_quality["durable_authority"]:
         statuses = final_quality["issue_status_counts"]
         reason = (
@@ -4188,12 +4309,45 @@ def _chunk_style_policy(
             if final_quality["unresolved_grounded_issue_ids"]
             else "final_quality_authority_withheld"
         )
-        return {
-            "approved": False,
-            "excluded_paragraphs": [],
-            "reason": reason,
-            "issue_ids": final_quality["unresolved_grounded_issue_ids"],
+        unresolved_ids = set(final_quality["unresolved_grounded_issue_ids"])
+        review_event_types = {
+            str(event.get("event_type", ""))
+            for event in events[last_start:]
+            if str(event.get("event_type", "")) in {
+                "qa_unavailable", "integrity_edit_rejected",
+                "integrity_final_failed", "language_quality_review",
+                "back_translation_flagged", "glossary_needs_review",
+                "chunk_review_required", "critique_needs_review",
+            }
         }
+        issue_paragraphs: dict[str, int] = {}
+        for detail in issue_details:
+            if not isinstance(detail, dict):
+                continue
+            match = re.fullmatch(
+                r"p(?P<paragraph>\d+):s\d+",
+                str(detail.get("source_segment_id", "")).strip(),
+                re.IGNORECASE,
+            )
+            issue_id = str(detail.get("issue_id", "")).strip()
+            if issue_id and match:
+                issue_paragraphs[issue_id] = max(
+                    0, int(match.group("paragraph")) - 1
+                )
+        paragraph_scoped = bool(
+            unresolved_ids
+            and not final_quality.get("blocking_issue_count")
+            and unresolved_ids <= set(issue_paragraphs)
+            and review_event_types <= {"critique_needs_review"}
+        )
+        if not paragraph_scoped:
+            return {
+                "approved": False,
+                "excluded_paragraphs": [],
+                "reason": reason,
+                "issue_ids": sorted(unresolved_ids),
+            }
+        excluded.update(issue_paragraphs[issue_id] for issue_id in unresolved_ids)
     has_routed_issue_policy = (
         "high_confidence_minor_refinement_issue_ids" in latest
     )
@@ -4204,7 +4358,6 @@ def _chunk_style_policy(
         )
         if value
     }
-    excluded: set[int] = set()
     for detail in issue_details:
         if not isinstance(detail, dict):
             continue
@@ -6130,6 +6283,11 @@ class TranslationPipeline:
                             memory_manager.to_dict(),
                             search_state=web_searcher.export_state(),
                             paragraph_identity=paragraph_identity,
+                            canonical_admission=(
+                                _final_canonical_admission_payload(
+                                    translation, paragraph_identity
+                                )
+                            ),
                             chapter_checkpoint=chapter_checkpoint,
                         )
                         if chapter_checkpoint is not None:
@@ -6438,6 +6596,11 @@ class TranslationPipeline:
                             memory_manager.to_dict(),
                             search_state=web_searcher.export_state(),
                             paragraph_identity=paragraph_identity,
+                            canonical_admission=(
+                                _final_canonical_admission_payload(
+                                    translation, paragraph_identity
+                                )
+                            ),
                             chapter_checkpoint=chapter_checkpoint,
                         )
                         if chapter_checkpoint is not None:
@@ -6785,21 +6948,16 @@ class TranslationPipeline:
             },
         )
 
-        # 8. Persian Typography Post-Processing
+        # 8. Verify the already-canonical Persian text. Typography is applied
+        # once per chunk before DB/memory admission; assembly must not rewrite it.
         if progress_callback:
-            progress_callback("Typography", 0.95, "Applying Persian typography rules...")
+            progress_callback(
+                "Typography", 0.95,
+                "Verifying canonical Persian typography...",
+            )
 
         typographer = PersianTypographer(self.config.to_dict().get("persian"))
         final_orthography_edits: list[dict[str, Any]] = []
-        for p in trans_doc.paragraphs:
-            p.translated_text, edits = typographer.process_with_report(
-                p.translated_text
-            )
-            for edit in edits:
-                final_orthography_edits.append({
-                    "paragraph_index": p.index,
-                    **edit,
-                })
         remaining_orthography_issues = sum(
             orthography_issue_count(p.translated_text)
             for p in trans_doc.paragraphs
@@ -7552,7 +7710,14 @@ class TranslationPipeline:
             if _chunk_needs_review(self.db, job_id, chunk_index)
             else ChunkStatus.COMPLETED
         )
-        self.db.update_chunk(job_id, chunk_index, final_status, translation)
+        self.db.update_chunk_with_event(
+            job_id,
+            chunk_index,
+            final_status,
+            translation,
+            "final_canonical_admission",
+            _final_canonical_admission_payload(translation, paragraph_identity),
+        )
         memory_admission = _chunk_memory_admission(
             self.db,
             job_id,
@@ -8124,10 +8289,6 @@ class TranslationPipeline:
                 )
             )
 
-        typographer = PersianTypographer(self.config.to_dict().get("persian"))
-        for p in final_translated_paragraphs:
-            p.translated_text = typographer.process(p.translated_text)
-
         return TranslatedDocument(
             title=document.title,
             author=document.author,
@@ -8528,16 +8689,17 @@ class TranslationPipeline:
             len(paragraph_markers) > 1
             and int(chunk.metadata.get("paragraph_protocol_version", 0)) >= 1
         )
-        structural_roles = {
-            str(role).strip().casefold()
-            for role in list(chunk.metadata.get("structural_roles", []) or [])
-            if str(role).strip()
-        }
-        table_like_recovery = bool(structural_roles) and structural_roles <= {"table"}
-        recovery_structural_role = (
-            next(iter(structural_roles))
-            if len(structural_roles) == 1
-            else "body"
+        paragraph_structural_roles = _paragraph_structural_roles(
+            chunk, len(source_paragraphs)
+        )
+        recovery_request_profile = json.dumps(
+            {
+                "provider": self.config.llm.provider,
+                "model": self.config.llm.model,
+                "api_base": self.config.llm.openrouter.api_base,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
         )
 
         def build_translation_prompt(
@@ -8695,6 +8857,7 @@ class TranslationPipeline:
                 previous: str,
                 segment_id: str,
                 source_context: str = "",
+                structural_role: str = "body",
             ) -> str:
                 last_diagnostics: dict[str, Any] = {}
                 for validation_attempt in range(2):
@@ -8706,6 +8869,42 @@ class TranslationPipeline:
                         recovery_context=effective_context,
                         recovery_segment_id=segment_id,
                     )
+                    cache_identity = _recovery_segment_cache_identity(
+                        segment_id=segment_id,
+                        source=source_text,
+                        prompt=prompt,
+                        system_prompt=sys_prompt,
+                        structural_role=structural_role,
+                        request_profile=recovery_request_profile,
+                    )
+                    cache_artifact = self.db.get_job_artifact(
+                        job_id, _RECOVERY_SEGMENT_CACHE_KEY
+                    ) or {}
+                    cached = _cached_recovery_candidate(
+                        cache_artifact, cache_identity
+                    )
+                    if cached:
+                        cached_check = _validate_recovery_part(
+                            source_text,
+                            cached,
+                            previous_target=previous,
+                            source_context=effective_context,
+                            structural_role=structural_role,
+                        )
+                        self.db.log_chunk_event(
+                            job_id,
+                            idx,
+                            "translation_recovery_part_reused",
+                            {
+                                **cached_check,
+                                "segment_id": segment_id,
+                                "cache_identity": cache_identity,
+                                "validation_attempt": validation_attempt + 1,
+                                "valid": bool(cached_check.get("valid")),
+                            },
+                        )
+                        if cached_check.get("valid"):
+                            return cached
                     raw = self.llm_client.complete(
                         messages=[{"role": "user", "content": prompt}],
                         system_prompt=sys_prompt,
@@ -8718,7 +8917,7 @@ class TranslationPipeline:
                         candidate,
                         previous_target=previous,
                         source_context=effective_context,
-                        structural_role=recovery_structural_role,
+                        structural_role=structural_role,
                     )
                     errors = list(envelope.get("errors", []))
                     errors.extend(content_check.get("errors", []))
@@ -8738,6 +8937,29 @@ class TranslationPipeline:
                         last_diagnostics,
                     )
                     if not errors:
+                        cache_entry = {
+                            "segment_id": segment_id,
+                            "chunk_index": idx,
+                            "structural_role": structural_role,
+                            "source_sha256": hashlib.sha256(
+                                source_text.encode("utf-8")
+                            ).hexdigest(),
+                            "prompt_sha256": hashlib.sha256(
+                                prompt.encode("utf-8")
+                            ).hexdigest(),
+                            "candidate": candidate,
+                            "candidate_sha256": hashlib.sha256(
+                                candidate.encode("utf-8")
+                            ).hexdigest(),
+                        }
+                        self.db.merge_job_artifact_entry(
+                            job_id,
+                            _RECOVERY_SEGMENT_CACHE_KEY,
+                            "entries",
+                            cache_identity,
+                            cache_entry,
+                            version=1,
+                        )
                         return candidate
                 raise ValueError(
                     f"Adaptive recovery segment {segment_id} failed validation: "
@@ -8750,6 +8972,7 @@ class TranslationPipeline:
                 paragraph_index: int,
                 reason: str,
                 strict_target_only: bool = False,
+                structural_role: str = "body",
             ) -> str:
                 sentence_groups = _split_source_recovery_groups(source_paragraph)
                 if len(sentence_groups) <= 1:
@@ -8788,6 +9011,7 @@ class TranslationPipeline:
                         sentence_continuity,
                         f"c{idx}.p{paragraph_index}.s{sentence_index}",
                         neighbors,
+                        structural_role,
                     )
                     sentence_translations.append(sentence_translation)
                     sentence_continuity = sentence_translation
@@ -8796,13 +9020,14 @@ class TranslationPipeline:
             def recover_all_parts(strict_target_only: bool = False) -> str:
                 recovered_parts: list[str] = []
                 continuity = prev_trans
-                recovery_groups = _table_recovery_groups(
+                recovery_groups = _role_aware_recovery_groups(
                     recovery_paragraphs,
-                    table_like=table_like_recovery,
+                    paragraph_structural_roles,
                 )
-                source_offset = 0
-                for group_index, source_group in enumerate(recovery_groups):
-                    if len(source_group) > 1:
+                for group_index, (
+                    source_offset, source_group, group_role
+                ) in enumerate(recovery_groups):
+                    if group_role == "table" and len(source_group) > 1:
                         group_source = "\n\n".join(source_group)
                         encoded_group, group_markers = encode_paragraphs(group_source)
                         group_previous = "" if strict_target_only else continuity
@@ -8870,6 +9095,7 @@ class TranslationPipeline:
                                     source_paragraph,
                                     "" if strict_target_only else row_continuity,
                                     f"c{idx}.p{part_index}",
+                                    structural_role="table",
                                 )
                                 recovered_group.append(recovered)
                                 row_continuity = recovered
@@ -8881,7 +9107,6 @@ class TranslationPipeline:
                         )
                         recovered_parts.extend(recovered_group)
                         continuity = recovered_group[-1]
-                        source_offset += len(source_group)
                         continue
 
                     part_index = source_offset
@@ -8896,6 +9121,7 @@ class TranslationPipeline:
                                 part_index,
                                 "single_paragraph_chunk_exhausted_output_budget",
                                 strict_target_only,
+                                group_role,
                             )
                             recovered_parts.append(recovered)
                             continuity = recovered
@@ -8905,18 +9131,19 @@ class TranslationPipeline:
                             source_paragraph,
                             part_previous,
                             f"c{idx}.p{part_index}",
+                            structural_role=group_role,
                         )
-                    except TruncatedCompletionError:
+                    except (TruncatedCompletionError, ValueError):
                         recovered = translate_sentence_groups(
                             source_paragraph,
                             part_previous,
                             part_index,
                             "paragraph_recovery_exhausted_output_budget",
                             strict_target_only,
+                            group_role,
                         )
                     recovered_parts.append(recovered)
                     continuity = recovered
-                    source_offset += 1
                 assembled = "\n\n".join(recovered_parts)
                 if _paragraph_count(assembled) != len(recovery_paragraphs):
                     raise ValueError(
@@ -11320,10 +11547,14 @@ Output ONLY the corrected Persian translation.
             targeted_language_repair["source_paragraphs"] = len(source_parts)
             targeted_language_repair["target_paragraphs"] = len(target_parts)
             if len(source_parts) == len(target_parts):
+                final_paragraph_roles = _paragraph_structural_roles(
+                    chunk, len(source_parts)
+                )
                 repaired_parts = list(target_parts)
                 for paragraph_index, (source_part, target_part) in enumerate(
                     zip(source_parts, target_parts, strict=True)
                 ):
+                    paragraph_role = final_paragraph_roles[paragraph_index]
                     paragraph_source_findings: list[dict[str, Any]] = []
                     for finding in final_source_fidelity_findings:
                         segment = str(
@@ -11364,7 +11595,7 @@ Output ONLY the corrected Persian translation.
                         source_part,
                         target_part,
                         allowed_originals=allowed_language_originals,
-                        structural_role=language_role,
+                        structural_role=paragraph_role,
                         chapter_title=chunk.chapter_title,
                     )
                     paragraph_repairable = any(
@@ -11413,7 +11644,7 @@ Output ONLY the corrected Persian translation.
                                     source_part,
                                     target_part,
                                     paragraph_quality,
-                                    structural_role=language_role,
+                                    structural_role=paragraph_role,
                                     source_fidelity_findings=(
                                         paragraph_source_findings
                                     ),
@@ -11435,7 +11666,7 @@ Output ONLY the corrected Persian translation.
                             source_part,
                             candidate_part,
                             allowed_originals=allowed_language_originals,
-                            structural_role=language_role,
+                            structural_role=paragraph_role,
                             chapter_title=chunk.chapter_title,
                         )
                         candidate_parts = list(repaired_parts)
@@ -11611,7 +11842,7 @@ Output ONLY the corrected Persian translation.
                             "local_edit": _language_repair_is_local(
                                 target_part,
                                 candidate_part,
-                                structural_role=language_role,
+                                structural_role=paragraph_role,
                             ),
                             "source_bound_repairs": paragraph_source_repairs,
                         })

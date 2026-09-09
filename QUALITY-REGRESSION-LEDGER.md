@@ -35,19 +35,20 @@ new evidence so later patches cannot silently revive an earlier defect.
 
 ## Current Baseline
 
-- Deployed evidence baseline: `v10.27.0`, commit `b45c3f2`
-- Test job: `e622b56eec7c`
+- Deployed evidence baseline: `v10.30.0`, commit `f8b5ea3`
+- Test job: `2f100b509493`
 - Source: *The State: Past, Present, Future* (Bob Jessop, 2016)
-- Runtime result: the configured checkpoint finished 16 of 222 chunks (10 completed,
-  6 needs review). All 112 recorded LLM calls completed successfully, but critique and
-  readability dominated latency and token use.
+- Runtime result: the configured checkpoint finished 16 of 222 chunks (13 completed,
+  3 needs review). The durable chapter intent exists, but normal DOCX publication is
+  retrying because assembly rewrote already-canonical identifiers after their hashes
+  were committed.
 - Translation verdict: worker ownership, refiner veto, four-layer trust separation,
-  advisory research authority, and earlier mechanical typography protections held.
-  The run remains `REVIEW`: one material postwar-revival proposition was omitted;
-  several sentences remained opaque or semantically weak; exact source identifiers
-  drifted in canonical DB text; style had only one warming-up sample; and normal
-  checkpoint DOCX export failed because chunk 10 independently reconstructed 81 target
-  blocks for 82 source paragraph identities.
+  representative style selection, advisory research, and source coverage held. The run
+  remains `REVIEW`: chunk 9 retained a duplicate predicate, a mixed prose/table chunk
+  retained Cyrillic table text, two grounded minor accuracy concerns were admitted too
+  generously to durable memory, and Layer 2 contains an English partial-word restart.
+  Historical recovery failure was database chunk 10/UI chunk 11 (`c10.p44`), not chunk
+  12; valid earlier split segments were not reusable on resume.
 
 ## v10.26 Live Result
 
@@ -316,6 +317,11 @@ new evidence so later patches cannot silently revive an earlier defect.
 | R76 | Repeated Persian wording does not hide a grounded local repair | MONITOR | v10.29 resolves a critic quote inside its source-corresponding target paragraph. Identical wording elsewhere no longer defeats salvage, while ambiguity inside that paragraph, overlap, predicate loss, source-structure drift, and integrity failure still reject the edit. |
 | R77 | Audit output and job selection are truthful | MONITOR | v10.29 wrappers use function-local `${1:-LATEST}`, runtime v10.29 scripts, exact file validation (`is_file`), paragraph-map hashes, critic coverage, memory/style/research authority, and active/lifetime LLM failure accounting. |
 | R78 | Requested chapter-boundary intent survives process death and is recovered before later work | MONITOR | v10.28 could commit the boundary chunk and lose the worker before export or reached-state recording; resume then advanced into the next chapter. v10.30 stores `pending_export` atomically with chunk, memory, search, and paragraph identity; publishes through a verified temporary sibling and atomic replace; then commits reached state, output path, and `paused` together. Resume retries durable or legacy inferred pending work before any new LLM call. Live VPS confirmation is required. |
+| R79 | Assembly cannot lexically rewrite canonical chunk text | MONITOR | v10.30 applied Persian typography again during document assembly, changing postal/catalog identifiers and blocking checkpoint DOCX export. v10.31 makes assembly lexical-pass-through and verifies the canonical document identity before export. Live normal checkpoint publication is required. |
+| R80 | Valid adaptive-recovery segments survive resume without repeated LLM calls | MONITOR | v10.30 lost validated split work when a later segment failed, so resume repeated expensive calls. v10.31 stores only hash-bound, validation-passing segment candidates as job artifacts and revalidates them before reuse. Memory authority is unchanged. |
+| R81 | Mixed prose/table chunks use paragraph-local structural policy | MONITOR | v10.30 collapsed mixed roles to `body`, weakening table recovery and preventing a safe short-row language repair. v10.31 aligns roles to source paragraph identity, groups only contiguous table rows, and retains the stricter prose threshold elsewhere. |
+| R82 | The exact DB/memory/export candidate has an atomic admission event | MONITOR | Earlier `final_candidate_typography` evidence could precede later canonical reconciliation. v10.31 commits `final_canonical_admission` with the chunk, memory snapshot, and paragraph identity; audits compare this exact hash with stored text. |
+| R83 | Malformed bilingual-summary word restarts cannot replace valid Layer 2 | MONITOR | v10.30 admitted `epistem epistemological`. v10.31 rejects only adjacent prefix restarts absent from source/prior English evidence, preserves the previous summary transactionally, and leaves Layer 2 advisory. |
 
 ## Validated v10.17 External Audit Notes
 
@@ -1297,6 +1303,45 @@ pending a fresh v10.25 VPS run.
   both external wrappers pass. Ruff improves from `233` to `232` findings; mypy
   remains at the established `88` errors in 17 files. Live VPS recovery and preview
   evidence remain required before R78 can be promoted from `MONITOR`.
+
+## v10.31 Pending Live Validation
+
+- Checkpoint and final assembly must consume persisted canonical paragraph text
+  without a second typography mutation. Postal codes, catalog identifiers, domains,
+  and research identifiers must remain byte-identical to the committed chunk text;
+  a genuine unexplained mismatch still blocks export.
+- `final_canonical_admission` must be stored in the same transaction as each finished
+  chunk, canonical paragraph identity, memory snapshot, search state, and checkpoint
+  intent. Audits compare that event hash with the DB and Layer-3 text.
+- Adaptive split recovery may reuse only a candidate bound to the exact source,
+  prompt, system prompt, segment ID, model context, and paragraph role. Its stored
+  hash and all recovery validation rules are rerun before reuse; stale or damaged
+  entries are ignored. It grants no terminology or style authority.
+- Mixed chunks retain one structural role per canonical source paragraph. Only
+  contiguous table rows are grouped; body prose keeps stricter recovery and local-edit
+  limits. Final language repair copies unaffected clauses and paragraphs verbatim.
+- A grounded minor source-fidelity issue with complete source/current/suggested spans
+  and confidence at least 0.60 withholds durable Layer-3 authority. Clean paragraphs
+  may still teach style only when every unresolved issue maps unambiguously to another
+  paragraph and no global QA, integrity, glossary, back-translation, or language
+  failure exists.
+- Layer-2 summary candidates with an adjacent partial-word restart absent from source
+  and prior English evidence are rejected transactionally. The accepted prior summary
+  remains available; research stays attributable and advisory-only.
+- R38 remains `OPEN`: broad PDF de-hyphenation is deliberately not included because
+  removing real lexical hyphens would violate source fidelity. Full scholarly-table
+  reconstruction also remains deferred.
+- No production model, temperature, reasoning setting, LLM stage, refiner veto,
+  memory layer, style layer, research authority, or output format is removed or
+  weakened. Local and live verification results must be appended before promotion.
+- Local release verification: all `945` tests pass. Source/test compilation, all
+  three v10.31 Bash scripts and their embedded Python, both external wrappers, and
+  runtime capability/behavior verification pass. The one mock HTTP concurrency test
+  produced a transient `httpx.ReadError` during the first full run, then passed three
+  consecutive isolated runs and the clean full rerun. Ruff remains at the established
+  `232` findings; mypy improves from `88` to `83` errors in 17 files. Live checkpoint
+  publication and recovery-cache evidence remain required before R79-R83 can move
+  from `MONITOR`.
 
 ## Update Procedure
 

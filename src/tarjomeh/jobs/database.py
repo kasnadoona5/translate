@@ -925,6 +925,88 @@ class JobDatabase:
             return None
         return value if isinstance(value, dict) else None
 
+    def merge_job_artifact_entry(
+        self,
+        job_id: str,
+        artifact_key: str,
+        collection_key: str,
+        entry_key: str,
+        entry: dict[str, Any],
+        *,
+        version: int = 1,
+    ) -> None:
+        """Merge one JSON artifact entry without losing concurrent writers."""
+        timestamp = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT payload FROM job_artifacts "
+                "WHERE job_id=? AND artifact_key=?",
+                (job_id, artifact_key),
+            ).fetchone()
+            try:
+                payload = json.loads(row["payload"]) if row else {}
+            except (json.JSONDecodeError, TypeError):
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            collection = payload.get(collection_key, {})
+            if not isinstance(collection, dict):
+                collection = {}
+            collection[entry_key] = entry
+            payload["version"] = int(version)
+            payload[collection_key] = collection
+            conn.execute(
+                """
+                INSERT INTO job_artifacts (job_id, artifact_key, payload, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(job_id, artifact_key) DO UPDATE SET
+                    payload=excluded.payload,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    job_id,
+                    artifact_key,
+                    json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                    timestamp,
+                ),
+            )
+            conn.commit()
+
+    def update_chunk_with_event(
+        self,
+        job_id: str,
+        chunk_index: int,
+        status: str,
+        translation: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Update canonical chunk text and its audit event atomically."""
+        timestamp = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE chunks SET status=?, translation=? "
+                "WHERE job_id=? AND chunk_index=?",
+                (status, translation, job_id, chunk_index),
+            )
+            conn.execute(
+                """
+                INSERT INTO chunk_events
+                    (job_id, chunk_index, timestamp, event_type, payload)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    chunk_index,
+                    timestamp,
+                    event_type,
+                    json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                ),
+            )
+            conn.commit()
+
     def log_chunk_event(
         self,
         job_id: str,
@@ -1154,6 +1236,7 @@ class JobDatabase:
         memory_state: dict[str, Any],
         search_state: dict[str, Any] | None = None,
         paragraph_identity: dict[str, Any] | None = None,
+        canonical_admission: dict[str, Any] | None = None,
         chapter_checkpoint: dict[str, Any] | None = None,
     ) -> None:
         """Persist chunk completion and its memory snapshot in ONE transaction.
@@ -1228,6 +1311,24 @@ class JobDatabase:
                             identity_state, ensure_ascii=False, sort_keys=True
                         ),
                         timestamp,
+                    ),
+                )
+            if canonical_admission is not None:
+                conn.execute(
+                    """
+                    INSERT INTO chunk_events
+                        (job_id, chunk_index, timestamp, event_type, payload)
+                    VALUES (?, ?, ?, 'final_canonical_admission', ?)
+                    """,
+                    (
+                        job_id,
+                        chunk_index,
+                        timestamp,
+                        json.dumps(
+                            canonical_admission,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
                     ),
                 )
             if chapter_checkpoint is not None:
