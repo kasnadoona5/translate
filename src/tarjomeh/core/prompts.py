@@ -266,6 +266,10 @@ MQM rules:
 - Treat source-order calques, opaque modifier stacks, unclear attachment or referents,
   excessive nominalization, malformed participles, and coordinated conceptual series
   whose distinctions or parallelism were lost as objective fluency issues.
+- Name objective syntax defects precisely in the rationale: missing matrix predicate,
+  interrupted head-complement dependency, unclosed appositive, coordination-scope
+  error, modifier-stack calque, or malformed clause linkage. Do not use these labels
+  for a merely preferable style.
 - Compare every source sentence with its Persian counterpart before scoring. Check
   predicate completeness, semantic roles and valency, scope and modifier attachment,
   coordinated parallel terms, and accidental duplication of one meaning in two
@@ -466,6 +470,8 @@ IMPORTANT — Identification method:
   Persian lexical equivalent. Do not use it for ordinary translated concepts.
 • For category "term", return only a minimal, reusable lexical equivalent. Never
   absorb a nearby subject, object, author, field, time, or other contextual modifier.
+  Do not include Persian ezafe, indefinite/adjectival suffixes, case markers, or
+  other morphology required only by the example sentence.
   Set context_independent to false when no context-neutral equivalent is evidenced.
 
 ### Text
@@ -503,6 +509,8 @@ IMPORTANT — Identification method:
   a transliteration rather than an established lexical translation.
 • For category "term", return only a minimal, reusable lexical equivalent. Never
   include a nearby subject, object, author, field, time, or contextual modifier.
+  Do not include Persian ezafe, indefinite/adjectival suffixes, case markers, or
+  other morphology required only by the example sentence.
   Set context_independent to false if the accepted Persian supplies only a
   context-bound rendering.
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v10.31.0"
+RUNTIME_RELEASE = "v10.32.0"
 RUNTIME_REVISION = 1
 
 
@@ -44,12 +44,16 @@ def runtime_capabilities() -> dict[str, Any]:
             "resumable_split_recovery_segments": True,
             "paragraph_scoped_language_repair_roles": True,
             "conservative_summary_stutter_rejection": True,
+            "post_rollback_final_evidence": True,
+            "objective_candidate_ranking": True,
+            "contextual_morphology_quarantine": True,
+            "representative_only_established_style": True,
         },
         "policy_versions": {
             "structure_evidence": 2,
             "canonical_text": 3,
-            "layer1_admission": 4,
-            "style_evidence": 2,
+            "layer1_admission": 5,
+            "style_evidence": 3,
             "benchmark_schema": 1,
             "checkpoint_export": 3,
             "paragraph_identity": 1,
@@ -57,6 +61,7 @@ def runtime_capabilities() -> dict[str, Any]:
             "final_identifier_admission": 1,
             "recovery_segments": 1,
             "summary_admission": 2,
+            "final_candidate_selection": 1,
         },
     }
 
@@ -81,7 +86,10 @@ def runtime_behavior_probes() -> dict[str, bool]:
     )
     from tarjomeh.exporters.base import TranslatedDocument, TranslatedParagraph
     from tarjomeh.memory.manager import MemoryManager
-    from tarjomeh.memory.proper_nouns import automatic_terminology_risk_reasons
+    from tarjomeh.memory.proper_nouns import (
+        automatic_terminology_risk_reasons,
+        low_authority_mapping_category,
+    )
     from tarjomeh.quality.critique import TranslationCritique
     from tarjomeh.quality.integrity import restore_source_identifiers
     from tarjomeh.quality.model_benchmark import load_benchmark_suite
@@ -124,6 +132,10 @@ def runtime_behavior_probes() -> dict[str, bool]:
     )
     manager = MemoryManager(TarjomehConfig())
     manager.from_dict({"style_samples": [legacy_style_sample]})
+    contextual_target = (
+        "\u067e\u0627\u0631\u0627\u062f\u0627\u06cc\u0645\u200c\u0647\u0627\u06cc "
+        "\u0633\u06cc\u0627\u0633\u062a\u200c\u06af\u0630\u0627\u0631\u06cc\u200c\u0627\u06cc"
+    )
     suite = load_benchmark_suite(
         Path("/__installed__/benchmarks/suites/academic-core.json")
     )
@@ -248,5 +260,16 @@ def runtime_behavior_probes() -> dict[str, bool]:
                 (0, ["Prose."], "body"),
                 (1, ["Row one", "Row two"], "table"),
             ]
+        ),
+        "contextual_morphology_is_quarantined": bool(
+            "contextual_productive_suffix"
+            in automatic_terminology_risk_reasons(
+                "policy paradigms", contextual_target
+            )
+        ),
+        "transliterated_terms_are_source_anchorable": bool(
+            low_authority_mapping_category(
+                "assemblage", "\u0622\u0633\u0627\u0645\u0628\u0644\u0627\u0698", "term"
+            ) == "technical_loanword"
         ),
     }

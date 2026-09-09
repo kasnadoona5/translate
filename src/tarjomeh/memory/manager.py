@@ -72,6 +72,14 @@ _LEADING_NOTE_MARKER_RE = re.compile(
 )
 
 
+def _numeric_score(value: Any) -> float:
+    """Coerce persisted quality metadata without trusting checkpoint types."""
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _summary_lexical_near_misses(
     candidate_persian: str,
     trusted_persian: str,
@@ -425,6 +433,7 @@ class MemoryManager:
         short_term_trust: str | None = None,
         reliability_reasons: list[str] | None = None,
         style_excluded_paragraphs: list[int] | None = None,
+        style_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Update synchronous memory layers with a new source-translation pair."""
         body_indices = list(
@@ -557,6 +566,12 @@ class MemoryManager:
                     "body", "academic_argument", "expository_nonfiction",
                     "narrative_prose", "dialogue",
                 },
+                final_scores=dict((style_evidence or {}).get("final_scores", {})),
+                unresolved_issue_paragraphs=dict(
+                    (style_evidence or {}).get(
+                        "unresolved_issue_paragraphs", {}
+                    ) or {}
+                ),
             )
             selected = style_sample_policy.get("selected", {}) or {}
             local_index = selected.get("paragraph_index")
@@ -638,6 +653,7 @@ class MemoryManager:
         representative = sum(
             bool(record.get("representative"))
             and bool(_clean_style_sample(str(record.get("text", ""))))
+            and _numeric_score(record.get("quality_score")) >= self._style_min_score
             for record in self.style_sample_records
         )
         if representative >= self._style_min_representative_samples:
@@ -653,6 +669,8 @@ class MemoryManager:
         book_genre: str = "general",
         source_chunk_index: int | None = None,
         representative: bool = True,
+        final_scores: dict[str, Any] | None = None,
+        unresolved_issue_paragraphs: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         """Maintain a compact book-level style guide from early translations."""
         candidates: list[dict[str, Any]] = []
@@ -662,8 +680,31 @@ class MemoryManager:
         ):
             if not paragraph.strip():
                 continue
+            source_paragraph_index = (
+                source_paragraph_indices[paragraph_index]
+                if source_paragraph_indices
+                and paragraph_index < len(source_paragraph_indices)
+                else paragraph_index
+            )
             quality = _style_sample_quality(paragraph)
             quality["paragraph_index"] = paragraph_index
+            unresolved_here = [
+                str(issue_id)
+                for issue_id, issue_paragraph in dict(
+                    unresolved_issue_paragraphs or {}
+                ).items()
+                if int(issue_paragraph) == source_paragraph_index
+            ]
+            if unresolved_here:
+                quality = {
+                    **quality,
+                    "approved": False,
+                    "reasons": list(quality.get("reasons", []) or [])
+                    + ["unresolved_final_quality_issue"],
+                    "unresolved_issue_ids": unresolved_here,
+                }
+                rejections.append(quality)
+                continue
             if (
                 quality.get("approved")
                 and float(quality.get("score", 0.0)) >= self._style_min_score
@@ -710,6 +751,21 @@ class MemoryManager:
                 "quality_score": float(selected.get("score", 0.0)),
                 "source_chunk_index": source_chunk_index,
                 "source_paragraph_index": source_paragraph_index,
+                "canonical_paragraph_hash": hashlib.sha256(
+                    text.encode("utf-8")
+                ).hexdigest(),
+                "final_scores": {
+                    key: _numeric_score(value)
+                    for key, value in dict(final_scores or {}).items()
+                    if key in {"accuracy", "fluency", "terminology", "register"}
+                },
+                "unresolved_issue_ids": [
+                    str(issue_id)
+                    for issue_id, issue_paragraph in dict(
+                        unresolved_issue_paragraphs or {}
+                    ).items()
+                    if int(issue_paragraph) == source_paragraph_index
+                ],
                 "reasons": [] if representative else [
                     "quality_approved_body_role_uncertain"
                 ],
@@ -757,13 +813,13 @@ class MemoryManager:
                 if replace_fallback:
                     weakest_index = min(
                         fallback_indices,
-                        key=lambda index: float(
+                        key=lambda index: _numeric_score(
                             self.style_sample_records[index].get(
                                 "quality_score", 0.0
                             )
                         ),
                     )
-                    weakest_score = float(
+                    weakest_score = _numeric_score(
                         self.style_sample_records[weakest_index].get(
                             "quality_score", 0.0
                         )
@@ -800,12 +856,23 @@ class MemoryManager:
             self.style_sample_records,
             key=lambda record: (
                 not bool(record.get("representative")),
-                -float(record.get("quality_score", 0.0)),
+                -_numeric_score(record.get("quality_score")),
             ),
+        )
+        representative_count = sum(
+            bool(record.get("representative"))
+            and bool(_clean_style_sample(str(record.get("text", ""))))
+            and _numeric_score(record.get("quality_score")) >= self._style_min_score
+            for record in ordered_records
+        )
+        active_records = (
+            [record for record in ordered_records if record.get("representative")]
+            if representative_count >= self._style_min_representative_samples
+            else ordered_records
         )
         clean_samples = [
             cleaned
-            for record in ordered_records
+            for record in active_records
             if (cleaned := _clean_style_sample(str(record.get("text", ""))))
             and float(_style_sample_quality(cleaned).get("score", 0.0))
             >= self._style_min_score

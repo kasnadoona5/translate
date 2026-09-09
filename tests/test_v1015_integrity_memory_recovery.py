@@ -209,11 +209,21 @@ def test_table_recovery_uses_one_marked_group_with_existing_quality_profile() ->
 
 
 def test_clean_paragraph_can_seed_style_without_becoming_durable_memory() -> None:
-    assert _chunk_style_policy(_StyleDB(), "job", 0) == {
+    policy = _chunk_style_policy(_StyleDB(), "job", 0)
+    assert {key: policy[key] for key in (
+        "approved", "excluded_paragraphs", "reason"
+    )} == {
         "approved": True,
         "excluded_paragraphs": [0],
         "reason": "clean_final_critique",
     }
+    assert policy["final_scores"] == {
+        "accuracy": 9.0,
+        "fluency": 9.0,
+        "terminology": 9.0,
+        "register": 9.0,
+    }
+    assert policy["unresolved_issue_paragraphs"] == {}
     manager = MemoryManager(TarjomehConfig())
     chunk = Chunk(
         index=0,

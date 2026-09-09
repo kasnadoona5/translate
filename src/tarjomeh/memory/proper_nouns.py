@@ -713,6 +713,16 @@ def automatic_terminology_risk_reasons(
         target,
     ):
         reasons.append("inflected_or_clausal_target")
+    # A second adjectival/indefinite suffix attached to a Persian ya is often
+    # required by the local sentence (for example before an ezafe complement),
+    # but is not part of a reusable dictionary form. Keep the accepted passage
+    # wording as evidence while deferring this target from book-wide authority.
+    if re.search(
+        r"\u06cc\u200c\u0627\u06cc(?:\u0650)?"
+        r"(?=$|\s|[\u060c\u061b\u061f,.!?;:])",
+        target,
+    ):
+        reasons.append("contextual_productive_suffix")
     source_tail = source_words[-1].casefold()
     source_looks_plural = bool(
         len(source_tail) > 3
@@ -769,6 +779,11 @@ def low_authority_mapping_category(
         and not looks_like_transliterated_loanword(english, persian)
     ):
         return "term"
+    if (
+        normalized == "term"
+        and looks_like_transliterated_loanword(english, persian)
+    ):
+        return "technical_loanword"
     return normalized
 
 

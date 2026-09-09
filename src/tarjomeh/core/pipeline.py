@@ -2992,8 +2992,11 @@ def _best_source_faithful_version(
             -float(len(_actionable_structure_findings(source, text))),
             -float(len(_grounded_source_fidelity_issues(critique))),
             -float(len(_blocking_critique_issues(critique))),
+            -float(len(_grounded_objective_language_issues(critique))),
             scores[0],
             scores[1],
+            scores[2],
+            scores[3],
             min(scores),
             float(getattr(critique, "average", 0.0) or 0.0),
             -float(index),
@@ -3248,6 +3251,17 @@ def _canonical_final_quality_record(
             "category": detail.get("category"),
             "severity": detail.get("severity"),
             "confidence": detail.get("confidence"),
+            "source_segment_id": detail.get("source_segment_id"),
+            "source_paragraph_index": (
+                int(match.group("paragraph")) - 1
+                if (
+                    match := re.fullmatch(
+                        r"p(?P<paragraph>\d+):s\d+",
+                        str(detail.get("source_segment_id", "")).strip(),
+                        re.IGNORECASE,
+                    )
+                ) else None
+            ),
             "status": status,
         })
 
@@ -4375,17 +4389,33 @@ def _chunk_style_policy(
             excluded.add(max(0, int(match.group("paragraph")) - 1))
     scores = latest.get("scores", {}) or {}
     dimensions = ("accuracy", "fluency", "terminology", "register")
-    try:
-        approved = (
-            all(float(scores.get(name, 0)) >= 8.0 for name in dimensions)
-            and float(scores.get("average", 0)) >= 9.0
-        )
-    except (TypeError, ValueError):
-        approved = False
+    normalized_scores: dict[str, float] = {}
+    scores_valid = True
+    for name in (*dimensions, "average"):
+        try:
+            normalized_scores[name] = float(scores.get(name, 0) or 0)
+        except (TypeError, ValueError):
+            normalized_scores[name] = 0.0
+            scores_valid = False
+    approved = bool(
+        scores_valid
+        and all(normalized_scores[name] >= 8.0 for name in dimensions)
+        and normalized_scores["average"] >= 9.0
+    )
     return {
         "approved": approved,
         "excluded_paragraphs": sorted(excluded),
         "reason": "clean_final_critique" if approved else "style_score_below_floor",
+        "final_scores": {
+            name: normalized_scores[name] for name in dimensions
+        },
+        "unresolved_issue_paragraphs": {
+            str(record.get("issue_id")): int(record["source_paragraph_index"])
+            for record in list(final_quality.get("issues", []) or [])
+            if str(record.get("status", "")).startswith("unresolved_")
+            and record.get("issue_id")
+            and isinstance(record.get("source_paragraph_index"), int)
+        },
     }
 
 
@@ -6120,6 +6150,7 @@ class TranslationPipeline:
                             style_excluded_paragraphs=style_policy[
                                 "excluded_paragraphs"
                             ],
+                            style_evidence=style_policy,
                         )
                         memory_policy["style_policy_reason"] = style_policy["reason"]
                         memory_policy["disqualifying_reliability_reasons"] = (
@@ -6433,6 +6464,7 @@ class TranslationPipeline:
                             style_excluded_paragraphs=style_policy[
                                 "excluded_paragraphs"
                             ],
+                            style_evidence=style_policy,
                         )
                         memory_policy["style_policy_reason"] = style_policy["reason"]
                         memory_policy["disqualifying_reliability_reasons"] = (
@@ -7740,6 +7772,7 @@ class TranslationPipeline:
             short_term_trust=memory_admission["short_term_trust"],
             reliability_reasons=memory_admission["reliability_reasons"],
             style_excluded_paragraphs=style_policy["excluded_paragraphs"],
+            style_evidence=style_policy,
         )
         memory_policy["style_policy_reason"] = style_policy["reason"]
         memory_policy["disqualifying_reliability_reasons"] = (
@@ -9494,11 +9527,11 @@ class TranslationPipeline:
 
         # Critique and Refine (judge scores against the terminology mandate)
         final_critique_rep: Any = None
+        evaluated_versions: list[tuple[str, Any]] = []
         if self.config.translation.enable_critique:
             threshold = getattr(self.config.translation, "critique_threshold", 9.0)
             current_integrity_accepted = baseline_integrity_accepted
             accepted_versions = [translation] if current_integrity_accepted else []
-            evaluated_versions: list[tuple[str, Any]] = []
             pending_salvage: dict[str, Any] | None = None
             pending_salvage_baseline = ""
             pending_candidate: dict[str, Any] | None = None
@@ -10079,13 +10112,26 @@ class TranslationPipeline:
                                     ) = _merge_readability_evidence(
                                         post_critique, readability_issues
                                     )
-                                objective_readability = (
-                                    _objective_unmatched_readability_issues(
-                                        unmatched_readability
-                                    )
-                                    if getattr(post_readability, "valid", True)
-                                    else []
-                                )
+                                objective_readability: list[dict[str, Any]] = []
+                                if getattr(post_readability, "valid", True):
+                                    if (
+                                        post_critique is not None
+                                        and getattr(post_critique, "valid", True)
+                                    ):
+                                        objective_readability = (
+                                            _promote_objective_readability_issues(
+                                                post_critique,
+                                                unmatched_readability,
+                                                translation,
+                                                source_text=chunk.text,
+                                            )
+                                        )
+                                    else:
+                                        objective_readability = (
+                                            _objective_unmatched_readability_issues(
+                                                unmatched_readability
+                                            )
+                                        )
                                 post_validation["readability_review"] = {
                                     "valid": bool(
                                         getattr(post_readability, "valid", True)
@@ -10116,6 +10162,12 @@ class TranslationPipeline:
                                 post_review_details.append(
                                     "post_rollback_readability_unavailable"
                                 )
+                        # The final repair and memory gates must inspect the text
+                        # actually retained after rollback, never the rejected
+                        # full candidate that happened to trigger this branch.
+                        if post_critique is not None:
+                            critique_rep = post_critique
+                            final_critique_rep = post_critique
                         post_validation["review_required"] = post_review_required
                         post_validation["review_details"] = post_review_details
                         self.db.log_chunk_event(
@@ -12030,6 +12082,35 @@ Output ONLY the corrected Persian translation.
                 job_id, idx, "integrity_final_failed", failure_payload
             )
             raise SourceStructureAdmissionError(failure_payload["message"])
+        self.db.log_chunk_event(
+            job_id,
+            idx,
+            "final_candidate_selection",
+            {
+                "policy_version": 1,
+                "selection_basis": (
+                    "source_fidelity_then_objective_persian_then_quality"
+                ),
+                "evaluated_version_count": len(evaluated_versions),
+                "canonical_target_hash": hashlib.sha256(
+                    translation.encode("utf-8")
+                ).hexdigest(),
+                "pre_repair_source_issue_count": len(
+                    final_source_fidelity_findings
+                ),
+                "pre_repair_objective_issue_count": len(
+                    final_objective_language_findings
+                ),
+                "targeted_repair_attempted": bool(
+                    targeted_language_repair.get("attempted")
+                ),
+                "targeted_repair_accepted_count": int(
+                    targeted_language_repair.get("accepted_count", 0) or 0
+                ),
+                "final_structure_issue_count": len(final_actionable_structure),
+                "final_blocking_structure_issue_count": 0,
+            },
+        )
         self.db.log_chunk_event(
             job_id, idx, "language_quality_checked", language_quality
         )
