@@ -14,6 +14,7 @@ from tarjomeh.core.pipeline import (
     _filter_critique_policy_conflicts,
     _parse_recovery_segment,
 )
+from tarjomeh.persian.typography import PersianTypographer
 from tarjomeh.quality.back_translator import BackTranslator
 from tarjomeh.quality.critique import CritiqueResult, TranslationCritique
 from tarjomeh.quality.integrity import PostEditIntegrityGate
@@ -701,8 +702,12 @@ def test_invalid_recovery_assembly_is_quarantined_until_refiner_repairs_it() -> 
         job_id="job-invalid-recovery",
     )
 
-    assert result == repaired
-    assert critic.calls == 2
+    assert result == PersianTypographer(config.to_dict().get("persian")).process(
+        repaired
+    )
+    # This isolated MagicMock does not persist candidate hashes, so the final
+    # canonical candidate must be reviewed directly rather than rebound.
+    assert critic.calls == 3
     event_types = [
         call.args[2] for call in pipeline.db.log_chunk_event.call_args_list
     ]

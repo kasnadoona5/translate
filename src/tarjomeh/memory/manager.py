@@ -870,18 +870,26 @@ class MemoryManager:
             if representative_count >= self._style_min_representative_samples
             else ordered_records
         )
-        clean_samples = [
-            cleaned
+        clean_records = [
+            (record, cleaned)
             for record in active_records
             if (cleaned := _clean_style_sample(str(record.get("text", ""))))
             and float(_style_sample_quality(cleaned).get("score", 0.0))
             >= self._style_min_score
         ][:5]
-        if not clean_samples:
+        if not clean_records:
             return ""
         samples = "\n".join(
-            f"{i + 1}. {sample}"
-            for i, sample in enumerate(clean_samples)
+            (
+                f"{i + 1}. "
+                + (
+                    "[representative] "
+                    if record.get("representative")
+                    else "[fallback continuity only; do not imitate defects] "
+                )
+                + sample
+            )
+            for i, (record, sample) in enumerate(clean_records)
         )
         genre = next((
             str(record.get("book_genre", "general"))
@@ -908,7 +916,7 @@ class MemoryManager:
             "curated glossary, and current context override every lexical choice. Do not copy "
             "transliteration artifacts or untranslated citation prose from a sample. "
             f"Genre focus: {genre_guidance} Profile status: {status}.\n\n"
-            f"Representative early translation samples:\n{samples}"
+            f"Early translation style evidence:\n{samples}"
         )
 
     def _legacy_style_profile_for_prompt(self) -> str:

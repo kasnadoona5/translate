@@ -15,6 +15,7 @@ import uuid
 import threading
 import json
 import httpx
+import unicodedata
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -1069,6 +1070,87 @@ def _final_canonical_admission_payload(
     }
 
 
+def _candidate_text_hash(text: str) -> str:
+    """Return the exact UTF-8 identity used by critique and admission events."""
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+_QUALITY_SURFACE_DIGITS = str.maketrans(
+    "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩يك",
+    "01234567890123456789یک",
+)
+
+
+def _quality_evidence_surface(text: str) -> str:
+    """Collapse only orthographic distinctions irrelevant to prose critique."""
+    normalized = unicodedata.normalize("NFKC", text or "").translate(
+        _QUALITY_SURFACE_DIGITS
+    )
+    return "".join(char.lower() for char in normalized if char.isalnum())
+
+
+def _critique_survives_canonicalization(before: str, after: str) -> bool:
+    """Prove canonicalization preserved every lexical token in source order."""
+    return bool(before and after) and (
+        _quality_evidence_surface(before) == _quality_evidence_surface(after)
+    )
+
+
+def _final_candidate_selection_payload(
+    translation: str,
+    paragraph_identity: dict[str, Any],
+    portfolio: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Bind candidate-selection evidence to the exact canonical checkpoint text."""
+    canonical_hash = _candidate_text_hash(translation)
+    identity_hash = str(paragraph_identity.get("canonical_target_hash", ""))
+    if identity_hash and identity_hash != canonical_hash:
+        raise ParagraphIdentityError(
+            "Final candidate selection does not match paragraph identity."
+        )
+    evidence = dict(portfolio or {})
+    evidence.update({
+        "policy_version": 2,
+        "stage": "atomic_final_candidate_selection",
+        "canonical_target_hash": canonical_hash,
+        "canonical_characters": len(translation),
+        "paragraph_count": int(
+            paragraph_identity.get("target_count", 0) or 0
+        ),
+        "paragraph_identity_version": int(
+            paragraph_identity.get("version", 0) or 0
+        ),
+        "authority": "exact_db_memory_and_export_text",
+    })
+    return evidence
+
+
+def _candidate_selection_for_checkpoint(
+    db: Any,
+    job_id: str,
+    chunk_index: int,
+    translation: str,
+    paragraph_identity: dict[str, Any],
+) -> dict[str, Any]:
+    """Promote the current generation's portfolio evidence at commit time."""
+    events = db.get_chunk_events(job_id, chunk_index)
+    last_start = 0
+    for index, event in enumerate(events):
+        if event.get("event_type") == "chunk_started":
+            last_start = index
+    portfolio = next(
+        (
+            event.get("payload", {}) or {}
+            for event in reversed(events[last_start:])
+            if event.get("event_type") == "candidate_portfolio_selected"
+        ),
+        {},
+    )
+    return _final_candidate_selection_payload(
+        translation, paragraph_identity, portfolio
+    )
+
+
 def _target_units_from_identity(
     translation: str,
     identity: dict[str, Any] | None,
@@ -2107,7 +2189,8 @@ def _required_anchor_repair_prompt(
     return f"""\
 The Persian translation is complete, but required first-occurrence English
 originals are missing. Insert only the exact parentheticals listed below after
-their corresponding Persian person name or named legal instrument.
+their corresponding Persian person name, named legal instrument, or compact
+source-authored foreign scholarly expression.
 
 ### English source
 {source}
@@ -2124,6 +2207,8 @@ Requirements:
 3. Do not add a parenthetical if the corresponding Persian rendering is absent.
 4. Do not change, remove, reorder, or re-punctuate any existing character.
 5. Preserve every paragraph boundary, citation, number, and source expression.
+6. A foreign expression remains an exact source original; do not translate,
+   expand, normalize, or reconstruct the text inside its parentheses.
 """
 
 
@@ -3160,6 +3245,7 @@ def _canonical_final_quality_record(
     db: Any,
     job_id: str,
     chunk_index: int,
+    candidate_text: str = "",
 ) -> dict[str, Any]:
     """Reconcile final critique, refiner veto, repair, and review authority.
 
@@ -3173,17 +3259,39 @@ def _canonical_final_quality_record(
         if event.get("event_type") == "chunk_started":
             last_start = index
     current_events = events[last_start:]
-    critique_events = [
+    all_critique_events = [
         (index, event.get("payload", {}) or {})
         for index, event in enumerate(current_events)
         if event.get("event_type") == "critique_completed"
     ]
+    candidate_hash = (
+        _candidate_text_hash(candidate_text) if candidate_text else ""
+    )
+    critique_events = [
+        (index, payload)
+        for index, payload in all_critique_events
+        if not candidate_hash
+        or str(payload.get("candidate_target_hash", "")) == candidate_hash
+    ]
     latest_index, latest = critique_events[-1] if critique_events else (-1, {})
+    candidate_match = bool(
+        not candidate_hash
+        or not all_critique_events
+        or (
+            critique_events
+            and str(latest.get("candidate_target_hash", "")) == candidate_hash
+        )
+    )
 
     resolved_source_ids: set[str] = set()
     resolved_objective_ids: set[str] = set()
-    for event in current_events:
+    for event_index, event in enumerate(current_events):
         if event.get("event_type") != "targeted_language_repair":
+            continue
+        # A later exact critique supersedes a repair's optimistic disposition.
+        # If the issue is still reported for the retained candidate, it remains
+        # unresolved regardless of a provider-reused issue id.
+        if event_index <= latest_index:
             continue
         payload = event.get("payload", {}) or {}
         resolved_source_ids.update(
@@ -3198,6 +3306,34 @@ def _canonical_final_quality_record(
             )
             if str(value).strip()
         )
+
+    issue_fingerprints_by_id: dict[str, str] = {}
+    rejected_decisions_by_fingerprint: dict[str, dict[str, Any]] = {}
+    for event in current_events:
+        payload = event.get("payload", {}) or {}
+        if event.get("event_type") == "critique_completed":
+            for detail in list(payload.get("issue_details", []) or []):
+                if not isinstance(detail, dict):
+                    continue
+                issue_id = str(detail.get("issue_id", "")).strip()
+                fingerprint = str(
+                    detail.get("issue_fingerprint")
+                    or _quality_issue_fingerprint(detail)
+                ).strip()
+                if issue_id and fingerprint:
+                    issue_fingerprints_by_id[issue_id] = fingerprint
+            continue
+        if event.get("event_type") != "refinement_completed":
+            continue
+        for decision in list(payload.get("issue_decisions", []) or []):
+            if not isinstance(decision, dict):
+                continue
+            issue_id = str(decision.get("issue_id", "")).strip()
+            if str(decision.get("decision", "")).strip().casefold() != "rejected":
+                continue
+            fingerprint = issue_fingerprints_by_id.get(issue_id, "")
+            if fingerprint:
+                rejected_decisions_by_fingerprint[fingerprint] = decision
 
     later_decisions: dict[str, dict[str, Any]] = {}
     for event in current_events[latest_index + 1:]:
@@ -3223,6 +3359,12 @@ def _canonical_final_quality_record(
             continue
         issue_id = str(detail.get("issue_id", "")).strip()
         decision = later_decisions.get(issue_id, {})
+        fingerprint = str(
+            detail.get("issue_fingerprint")
+            or _quality_issue_fingerprint(detail)
+        ).strip()
+        if not decision and fingerprint:
+            decision = rejected_decisions_by_fingerprint.get(fingerprint, {})
         disposition = str(decision.get("decision", "")).strip().casefold()
         commit_status = str(decision.get("commit_status", "")).strip()
         if issue_id and issue_id in resolved_source_ids:
@@ -3248,6 +3390,7 @@ def _canonical_final_quality_record(
             status = "advisory_only"
         issue_records.append({
             "issue_id": issue_id or None,
+            "issue_fingerprint": fingerprint or None,
             "category": detail.get("category"),
             "severity": detail.get("severity"),
             "confidence": detail.get("confidence"),
@@ -3295,6 +3438,7 @@ def _canonical_final_quality_record(
     ]
     durable_authority = bool(
         valid
+        and candidate_match
         and not blocking_count
         and not unresolved_ids
         and not unresolved_language_events
@@ -3302,8 +3446,11 @@ def _canonical_final_quality_record(
     )
     status_counts = Counter(record["status"] for record in issue_records)
     return {
-        "policy_version": 1,
-        "critique_present": bool(critique_events),
+        "policy_version": 2,
+        "critique_present": bool(all_critique_events),
+        "candidate_matched_critique_present": bool(critique_events),
+        "candidate_target_hash": candidate_hash or None,
+        "critique_candidate_match": candidate_match,
         "critique_valid": valid,
         "blocking_issue_count": blocking_count,
         "unresolved_blocking_issue_ids": unresolved_blocking_ids,
@@ -3423,11 +3570,33 @@ def _critique_requires_refinement(critique: Any, threshold: float) -> bool:
     )
 
 
-def _critique_for_event(critique: Any, threshold: float, iteration: int) -> dict[str, Any]:
+def _quality_issue_fingerprint(detail: dict[str, Any]) -> str:
+    """Identify grounded advice independently of provider-generated issue IDs."""
+    material = "\0".join(
+        normalize_for_match(str(detail.get(key, "")))
+        for key in (
+            "source_segment_id", "category", "source_quote",
+            "current_persian_quote",
+        )
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
+def _critique_for_event(
+    critique: Any,
+    threshold: float,
+    iteration: int,
+    *,
+    candidate_text: str = "",
+    candidate_stage: str = "",
+) -> dict[str, Any]:
     blocking_issues = _blocking_critique_issues(critique)
     routed_minor_issues = _high_confidence_minor_issues(critique)
+    candidate_hash = _candidate_text_hash(candidate_text) if candidate_text else ""
     return {
         "iteration": iteration,
+        "candidate_target_hash": candidate_hash,
+        "candidate_stage": candidate_stage or None,
         "valid": bool(getattr(critique, "valid", True)),
         "attempts": int(getattr(critique, "attempts", 1)),
         "validation_errors": list(getattr(critique, "validation_errors", []) or []),
@@ -3461,15 +3630,19 @@ def _critique_for_event(critique: Any, threshold: float, iteration: int) -> dict
         "issues": [_truncate_for_event(str(issue), 1000) for issue in critique.issues],
         "issue_details": [
             {
-                key: detail.get(key)
-                for key in (
-                    "issue_id", "category", "severity", "confidence",
-                    "source_segment_id", "source_quote", "current_persian_quote",
-                    "suggested_correction", "rationale", "risk_flags",
-                    "suggestion_orthography_normalized",
-                    "source_segment_id_corrected",
-                    "readability_advisory",
-                )
+                **{
+                    key: detail.get(key)
+                    for key in (
+                        "issue_id", "category", "severity", "confidence",
+                        "source_segment_id", "source_quote",
+                        "current_persian_quote", "suggested_correction",
+                        "rationale", "risk_flags",
+                        "suggestion_orthography_normalized",
+                        "source_segment_id_corrected",
+                        "readability_advisory",
+                    )
+                },
+                "issue_fingerprint": _quality_issue_fingerprint(detail),
             }
             for detail in list(getattr(critique, "issue_details", []) or [])
         ],
@@ -3667,6 +3840,29 @@ _READABILITY_EXCLUDED_ROLES = frozenset({
 })
 
 
+def _readability_review_text(chunk: Any, candidate_text: str) -> str:
+    """Return only canonically aligned body prose for target-side review."""
+    target_parts = split_paragraphs(candidate_text or "")
+    if not target_parts:
+        return ""
+    raw_roles = (getattr(chunk, "metadata", None) or {}).get(
+        "structural_roles"
+    )
+    if isinstance(raw_roles, list) and raw_roles and len(raw_roles) != len(
+        target_parts
+    ):
+        return ""
+    roles = _paragraph_structural_roles(chunk, len(target_parts))
+    if len(roles) != len(target_parts):
+        return ""
+    eligible = [
+        part
+        for part, role in zip(target_parts, roles, strict=True)
+        if str(role).strip().casefold() not in _READABILITY_EXCLUDED_ROLES
+    ]
+    return "\n\n".join(eligible)
+
+
 def _readability_review_eligible(
     chunk: Any,
     critique: Any,
@@ -3674,6 +3870,7 @@ def _readability_review_eligible(
     *,
     candidate_changed: bool = False,
     final_candidate: bool = False,
+    candidate_text: str = "",
 ) -> bool:
     """Use one advisory target-only pass on each final body-prose candidate."""
     if _is_front_matter(chunk):
@@ -3683,7 +3880,9 @@ def _readability_review_eligible(
         str(role).strip().casefold()
         for role in list(metadata.get("structural_roles", []) or [])
     }
-    if roles.intersection(_READABILITY_EXCLUDED_ROLES):
+    if roles and roles <= _READABILITY_EXCLUDED_ROLES:
+        return False
+    if candidate_text and not _readability_review_text(chunk, candidate_text):
         return False
     return bool(
         getattr(critique, "valid", True)
@@ -4274,20 +4473,42 @@ def _chunk_style_policy(
     db: Any,
     job_id: str,
     chunk_index: int,
+    candidate_text: str = "",
 ) -> dict[str, Any]:
     """Select clean paragraph-level style evidence from finalized prose."""
-    final_quality = _canonical_final_quality_record(db, job_id, chunk_index)
+    final_quality = _canonical_final_quality_record(
+        db, job_id, chunk_index, candidate_text
+    )
     events = db.get_chunk_events(job_id, chunk_index)
     last_start = 0
     for index, event in enumerate(events):
         if event.get("event_type") == "chunk_started":
             last_start = index
+    candidate_hash = (
+        _candidate_text_hash(candidate_text) if candidate_text else ""
+    )
     critiques = [
         event.get("payload", {}) or {}
         for event in events[last_start:]
         if event.get("event_type") == "critique_completed"
+        and (
+            not candidate_hash
+            or str(
+                (event.get("payload", {}) or {}).get(
+                    "candidate_target_hash", ""
+                )
+            ) == candidate_hash
+        )
     ]
     if not critiques:
+        if final_quality.get("critique_present") and not final_quality.get(
+            "critique_candidate_match", True
+        ):
+            return {
+                "approved": False,
+                "excluded_paragraphs": [],
+                "reason": "final_critique_candidate_mismatch",
+            }
         if final_quality["review_required"]:
             return {
                 "approved": False,
@@ -4429,6 +4650,7 @@ def _chunk_memory_admission(
     job_id: str,
     chunk_index: int,
     critique_threshold: float = 9.0,
+    candidate_text: str = "",
 ) -> dict[str, Any]:
     """Separate continuity context from durable wording/style authority."""
     events = db.get_chunk_events(job_id, chunk_index)
@@ -4437,7 +4659,9 @@ def _chunk_memory_admission(
         if event.get("event_type") == "chunk_started":
             last_start = index
     current_events = events[last_start:]
-    final_quality = _canonical_final_quality_record(db, job_id, chunk_index)
+    final_quality = _canonical_final_quality_record(
+        db, job_id, chunk_index, candidate_text
+    )
     needs_review = _chunk_needs_review(db, job_id, chunk_index)
     reasons: list[str] = []
     if needs_review:
@@ -4449,10 +4673,21 @@ def _chunk_memory_admission(
     ):
         reasons.append("deferred_mqm_advice")
 
+    candidate_hash = (
+        _candidate_text_hash(candidate_text) if candidate_text else ""
+    )
     critiques = [
         event.get("payload", {}) or {}
         for event in current_events
         if event.get("event_type") == "critique_completed"
+        and (
+            not candidate_hash
+            or str(
+                (event.get("payload", {}) or {}).get(
+                    "candidate_target_hash", ""
+                )
+            ) == candidate_hash
+        )
     ]
     if critiques:
         latest = critiques[-1]
@@ -6129,9 +6364,10 @@ class TranslationPipeline:
                             job_id,
                             idx,
                             self.config.translation.critique_threshold,
+                            candidate_text=translation,
                         )
                         style_policy = _chunk_style_policy(
-                            self.db, job_id, idx
+                            self.db, job_id, idx, candidate_text=translation
                         )
                         self.db.log_chunk_event(
                             job_id,
@@ -6314,6 +6550,15 @@ class TranslationPipeline:
                             memory_manager.to_dict(),
                             search_state=web_searcher.export_state(),
                             paragraph_identity=paragraph_identity,
+                            candidate_selection=(
+                                _candidate_selection_for_checkpoint(
+                                    self.db,
+                                    job_id,
+                                    idx,
+                                    translation,
+                                    paragraph_identity,
+                                )
+                            ),
                             canonical_admission=(
                                 _final_canonical_admission_payload(
                                     translation, paragraph_identity
@@ -6443,9 +6688,10 @@ class TranslationPipeline:
                             job_id,
                             idx,
                             self.config.translation.critique_threshold,
+                            candidate_text=translation,
                         )
                         style_policy = _chunk_style_policy(
-                            self.db, job_id, idx
+                            self.db, job_id, idx, candidate_text=translation
                         )
                         self.db.log_chunk_event(
                             job_id,
@@ -6628,6 +6874,15 @@ class TranslationPipeline:
                             memory_manager.to_dict(),
                             search_state=web_searcher.export_state(),
                             paragraph_identity=paragraph_identity,
+                            candidate_selection=(
+                                _candidate_selection_for_checkpoint(
+                                    self.db,
+                                    job_id,
+                                    idx,
+                                    translation,
+                                    paragraph_identity,
+                                )
+                            ),
                             canonical_admission=(
                                 _final_canonical_admission_payload(
                                     translation, paragraph_identity
@@ -7749,14 +8004,27 @@ class TranslationPipeline:
             translation,
             "final_canonical_admission",
             _final_canonical_admission_payload(translation, paragraph_identity),
+            additional_events=[(
+                "final_candidate_selection",
+                _candidate_selection_for_checkpoint(
+                    self.db,
+                    job_id,
+                    chunk_index,
+                    translation,
+                    paragraph_identity,
+                ),
+            )],
         )
         memory_admission = _chunk_memory_admission(
             self.db,
             job_id,
             chunk_index,
             self.config.translation.critique_threshold,
+            candidate_text=translation,
         )
-        style_policy = _chunk_style_policy(self.db, job_id, chunk_index)
+        style_policy = _chunk_style_policy(
+            self.db, job_id, chunk_index, candidate_text=translation
+        )
         self.db.log_chunk_event(
             job_id,
             chunk_index,
@@ -9653,6 +9921,9 @@ class TranslationPipeline:
                     ref_iter < self.config.translation.max_refine_iterations
                     and _critique_requires_refinement(critique_rep, threshold)
                 )
+                readability_candidate = _readability_review_text(
+                    chunk, translation
+                )
                 if (
                     not readability_reviewed
                     and not candidate_regressions
@@ -9663,6 +9934,7 @@ class TranslationPipeline:
                         threshold,
                         candidate_changed=candidate_changed,
                         final_candidate=not will_refine,
+                        candidate_text=translation,
                     )
                 ):
                     readability_reviewed = True
@@ -9673,7 +9945,9 @@ class TranslationPipeline:
                     }
                     try:
                         readability = self._run_async(
-                            critique_tool.review_persian_readability(translation)
+                            critique_tool.review_persian_readability(
+                                readability_candidate
+                            )
                         )
                         readability_issues = list(
                             getattr(readability, "issues", []) or []
@@ -9818,7 +10092,13 @@ class TranslationPipeline:
                     job_id,
                     idx,
                     "critique_completed",
-                    _critique_for_event(critique_rep, threshold, ref_iter),
+                    _critique_for_event(
+                        critique_rep,
+                        threshold,
+                        ref_iter,
+                        candidate_text=translation,
+                        candidate_stage="quality_iteration",
+                    ),
                 )
                 if pending_candidate is not None:
                     if candidate_regressions:
@@ -9920,7 +10200,11 @@ class TranslationPipeline:
                                     include_auto=enforce_auto_terms,
                                 )
                             post_critique_event = _critique_for_event(
-                                post_critique, threshold, ref_iter
+                                post_critique,
+                                threshold,
+                                ref_iter,
+                                candidate_text=translation,
+                                candidate_stage="post_rollback_final_validation",
                             )
                             post_critique_event["stage"] = (
                                 "post_rollback_final_validation"
@@ -10045,8 +10329,55 @@ class TranslationPipeline:
                                         ),
                                     },
                                 )
-                                critique_rep = baseline_critique
-                                post_critique = baseline_critique
+                                # The first post-rollback critique reviewed the
+                                # candidate that has just been rejected. Review
+                                # the exact text retained after this second
+                                # rollback instead of rebinding stale baseline
+                                # evidence to it.
+                                post_validation[
+                                    "secondary_source_review_attempted"
+                                ] = True
+                                post_critique = self._run_async(
+                                    critique_tool.critique(
+                                        chunk.text,
+                                        translation,
+                                        terminology=terminology_ctx,
+                                        review_context=qa_context,
+                                    )
+                                )
+                                if getattr(post_critique, "valid", True):
+                                    _filter_critique_policy_conflicts(
+                                        post_critique,
+                                        chunk.text,
+                                        allowed_inline_originals,
+                                    )
+                                    _filter_critique_glossary_conflicts(
+                                        post_critique,
+                                        enforced_entries,
+                                        include_auto=enforce_auto_terms,
+                                    )
+                                retained_event = _critique_for_event(
+                                    post_critique,
+                                    threshold,
+                                    ref_iter,
+                                    candidate_text=translation,
+                                    candidate_stage=(
+                                        "post_secondary_rollback_validation"
+                                    ),
+                                )
+                                retained_event["stage"] = (
+                                    "post_secondary_rollback_validation"
+                                )
+                                post_validation["retained_source_review"] = (
+                                    retained_event
+                                )
+                                self.db.log_chunk_event(
+                                    job_id,
+                                    idx,
+                                    "critique_completed",
+                                    retained_event,
+                                )
+                                critique_rep = post_critique
                                 post_review_required = True
                                 post_review_details.append(
                                     "atomic_recovery_source_regression"
@@ -10079,6 +10410,9 @@ class TranslationPipeline:
                                 "post_rollback_source_review_unavailable"
                             )
 
+                        post_readability_candidate = _readability_review_text(
+                            chunk, translation
+                        )
                         if (
                             hasattr(critique_tool, "review_persian_readability")
                             and _readability_review_eligible(
@@ -10087,13 +10421,14 @@ class TranslationPipeline:
                                 threshold,
                                 candidate_changed=True,
                                 final_candidate=True,
+                                candidate_text=translation,
                             )
                         ):
                             post_validation["readability_review_attempted"] = True
                             try:
                                 post_readability = self._run_async(
                                     critique_tool.review_persian_readability(
-                                        translation
+                                        post_readability_candidate
                                     )
                                 )
                                 readability_issues = list(
@@ -10400,7 +10735,11 @@ class TranslationPipeline:
                                     },
                                 )
                                 restored_critique_event = _critique_for_event(
-                                    selected_critique, threshold, ref_iter
+                                    selected_critique,
+                                    threshold,
+                                    ref_iter,
+                                    candidate_text=translation,
+                                    candidate_stage="restored_source_faithful_version",
                                 )
                                 restored_critique_event["stage"] = (
                                     "restored_source_faithful_version"
@@ -11881,6 +12220,8 @@ Output ONLY the corrected Persian translation.
                                     validation_critique,
                                     self.config.translation.critique_threshold,
                                     -1,
+                                    candidate_text=candidate_part,
+                                    candidate_stage="paragraph_repair_validation",
                                 ),
                             })
                         paragraph_event.update({
@@ -12082,10 +12423,154 @@ Output ONLY the corrected Persian translation.
                 job_id, idx, "integrity_final_failed", failure_payload
             )
             raise SourceStructureAdmissionError(failure_payload["message"])
+
+        # Canonical typography and source-bound restoration can change the
+        # exact string after the ordinary critique loop. Make that operation
+        # idempotent here so the final quality authority is always attached to
+        # the same text later committed by the caller.
+        precanonical_translation = translation
+        translation = self._canonicalize_final_translation(
+            job_id, idx, chunk, translation
+        )
+        canonical_candidate_hash = _candidate_text_hash(translation)
+        current_events = self.db.get_chunk_events(job_id, idx)
+        last_start = 0
+        for event_index, event in enumerate(current_events):
+            if event.get("event_type") == "chunk_started":
+                last_start = event_index
+        matching_final_critique = next(
+            (
+                event.get("payload", {}) or {}
+                for event in reversed(current_events[last_start:])
+                if event.get("event_type") == "critique_completed"
+                and str(
+                    (event.get("payload", {}) or {}).get(
+                        "candidate_target_hash", ""
+                    )
+                ) == canonical_candidate_hash
+            ),
+            None,
+        )
+        latest_candidate_critique = next(
+            (
+                event.get("payload", {}) or {}
+                for event in reversed(current_events[last_start:])
+                if event.get("event_type") == "critique_completed"
+            ),
+            None,
+        )
+        if (
+            self.config.translation.enable_critique
+            and matching_final_critique is None
+            and latest_candidate_critique
+            and str(
+                latest_candidate_critique.get("candidate_target_hash", "")
+            ) == _candidate_text_hash(precanonical_translation)
+            and _critique_survives_canonicalization(
+                precanonical_translation, translation
+            )
+        ):
+            matching_final_critique = dict(latest_candidate_critique)
+            matching_final_critique.update({
+                "iteration": -1,
+                "candidate_target_hash": canonical_candidate_hash,
+                "candidate_stage": "final_retained_candidate_validation",
+                "stage": "final_retained_candidate_validation",
+                "evidence_origin": "lexically_identical_canonical_rebind",
+                "rebound_from_candidate_target_hash": str(
+                    latest_candidate_critique.get("candidate_target_hash", "")
+                ),
+                "lexical_order_preserved": True,
+            })
+            self.db.log_chunk_event(
+                job_id,
+                idx,
+                "critique_completed",
+                matching_final_critique,
+            )
+        if (
+            self.config.translation.enable_critique
+            and matching_final_critique is None
+        ):
+            try:
+                final_critique_rep = self._run_async(
+                    critique_tool.critique(
+                        chunk.text,
+                        translation,
+                        terminology=terminology_ctx,
+                        review_context=qa_context,
+                    )
+                )
+                if getattr(final_critique_rep, "valid", True):
+                    _filter_critique_policy_conflicts(
+                        final_critique_rep,
+                        chunk.text,
+                        allowed_inline_originals,
+                    )
+                    _filter_critique_glossary_conflicts(
+                        final_critique_rep,
+                        enforced_entries,
+                        include_auto=enforce_auto_terms,
+                    )
+                exact_event = _critique_for_event(
+                    final_critique_rep,
+                    threshold,
+                    -1,
+                    candidate_text=translation,
+                    candidate_stage="final_retained_candidate_validation",
+                )
+                exact_event["stage"] = "final_retained_candidate_validation"
+                self.db.log_chunk_event(
+                    job_id, idx, "critique_completed", exact_event
+                )
+                if getattr(final_critique_rep, "valid", True):
+                    self.db.save_qa_issues(
+                        job_id,
+                        idx,
+                        -1,
+                        list(
+                            getattr(final_critique_rep, "issue_details", [])
+                            or []
+                        ),
+                    )
+                if _critique_requires_refinement(final_critique_rep, threshold):
+                    self.db.log_chunk_event(
+                        job_id,
+                        idx,
+                        "critique_needs_review",
+                        _explicit_chunk_review_payload(
+                            "final_retained_candidate_quality",
+                            detail="candidate_hash_matched_final_critique",
+                            message=(
+                                "The exact canonical candidate still has grounded "
+                                "source or Persian-quality concerns after bounded "
+                                "repair. It remains advisory rather than teaching "
+                                "trusted memory or style."
+                            ),
+                        ),
+                    )
+            except _QUALITY_STAGE_ERRORS as exc:
+                failure = _qa_provider_failure_payload(
+                    "critic",
+                    "final_retained_candidate_validation",
+                    critic_client,
+                    exc,
+                )
+                failure["candidate_target_hash"] = canonical_candidate_hash
+                self.db.log_chunk_event(job_id, idx, "qa_unavailable", failure)
+                self.db.log_chunk_event(
+                    job_id,
+                    idx,
+                    "critique_needs_review",
+                    _explicit_chunk_review_payload(
+                        "final_retained_candidate_review_unavailable",
+                        detail="candidate_hash_matched_final_critique",
+                    ),
+                )
         self.db.log_chunk_event(
             job_id,
             idx,
-            "final_candidate_selection",
+            "candidate_portfolio_selected",
             {
                 "policy_version": 1,
                 "selection_basis": (

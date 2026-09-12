@@ -981,6 +981,7 @@ class JobDatabase:
         translation: str,
         event_type: str,
         payload: dict[str, Any],
+        additional_events: list[tuple[str, dict[str, Any]]] | None = None,
     ) -> None:
         """Update canonical chunk text and its audit event atomically."""
         timestamp = datetime.utcnow().isoformat()
@@ -1005,6 +1006,25 @@ class JobDatabase:
                     json.dumps(payload, ensure_ascii=False, sort_keys=True),
                 ),
             )
+            for additional_type, additional_payload in additional_events or []:
+                conn.execute(
+                    """
+                    INSERT INTO chunk_events
+                        (job_id, chunk_index, timestamp, event_type, payload)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        job_id,
+                        chunk_index,
+                        timestamp,
+                        additional_type,
+                        json.dumps(
+                            additional_payload,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                    ),
+                )
             conn.commit()
 
     def log_chunk_event(
@@ -1236,6 +1256,7 @@ class JobDatabase:
         memory_state: dict[str, Any],
         search_state: dict[str, Any] | None = None,
         paragraph_identity: dict[str, Any] | None = None,
+        candidate_selection: dict[str, Any] | None = None,
         canonical_admission: dict[str, Any] | None = None,
         chapter_checkpoint: dict[str, Any] | None = None,
     ) -> None:
@@ -1311,6 +1332,24 @@ class JobDatabase:
                             identity_state, ensure_ascii=False, sort_keys=True
                         ),
                         timestamp,
+                    ),
+                )
+            if candidate_selection is not None:
+                conn.execute(
+                    """
+                    INSERT INTO chunk_events
+                        (job_id, chunk_index, timestamp, event_type, payload)
+                    VALUES (?, ?, ?, 'final_candidate_selection', ?)
+                    """,
+                    (
+                        job_id,
+                        chunk_index,
+                        timestamp,
+                        json.dumps(
+                            candidate_selection,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
                     ),
                 )
             if canonical_admission is not None:

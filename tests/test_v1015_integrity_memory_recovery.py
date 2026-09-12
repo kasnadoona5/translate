@@ -196,7 +196,10 @@ def test_table_recovery_uses_one_marked_group_with_existing_quality_profile() ->
         job_id="job-table-group",
     )
 
-    assert result.split("\n\n") == [f"ردیف {index}" for index in range(1, 5)]
+    typographer = PersianTypographer(config.to_dict().get("persian"))
+    assert result.split("\n\n") == [
+        typographer.process(f"ردیف {index}") for index in range(1, 5)
+    ]
     assert [
         call.kwargs.get("_operation")
         for call in pipeline.llm_client.complete.call_args_list

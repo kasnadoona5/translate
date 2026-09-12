@@ -697,13 +697,6 @@ def restore_source_note_markers(
     missing = required - available_note_markers(repaired, required)
     repairs: list[dict[str, Any]] = []
     ambiguous: list[dict[str, Any]] = []
-    if not missing:
-        return repaired, {
-            "repair_count": 0,
-            "repairs": [],
-            "ambiguous": [],
-            "unresolved": [],
-        }
 
     def marker_pattern(marker: str) -> str:
         variants: list[str] = []
@@ -751,6 +744,92 @@ def restore_source_note_markers(
             if ordinal >= 0:
                 marked.append((ordinal, match.end("terminal")))
         return marked
+
+    # A marker can survive while drifting to an adjacent sentence. Relocate it
+    # only when one source marker, one target marker, and equal sentence counts
+    # prove a single source-aligned destination within the same paragraph.
+    source_paragraphs = _paragraphs(source)
+    target_paragraphs = _paragraphs(repaired)
+    if len(source_paragraphs) == len(target_paragraphs):
+        for marker, count in required.items():
+            if count != 1 or available_note_markers(repaired, required)[marker] != 1:
+                continue
+            token = marker_pattern(marker)
+            source_locations: list[tuple[int, int]] = []
+            target_locations: list[tuple[int, int]] = []
+            for paragraph_index, (source_part, target_part) in enumerate(
+                zip(source_paragraphs, target_paragraphs, strict=True)
+            ):
+                source_locations.extend(
+                    (paragraph_index, ordinal)
+                    for ordinal, _offset in marked_sentence_boundaries(source_part, token)
+                )
+                target_locations.extend(
+                    (paragraph_index, ordinal)
+                    for ordinal, _offset in marked_sentence_boundaries(target_part, token)
+                )
+            if len(source_locations) != 1 or len(target_locations) != 1:
+                continue
+            source_location = source_locations[0]
+            target_location = target_locations[0]
+            if source_location == target_location:
+                continue
+            source_paragraph, source_ordinal = source_location
+            target_paragraph, _target_ordinal = target_location
+            if source_paragraph != target_paragraph:
+                ambiguous.append({
+                    "marker": marker,
+                    "reason": "marker_changed_paragraph",
+                    "source_paragraph_index": source_paragraph,
+                    "target_paragraph_index": target_paragraph,
+                })
+                continue
+            source_part = source_paragraphs[source_paragraph]
+            target_part = target_paragraphs[target_paragraph]
+            source_boundaries = sentence_boundaries(
+                remove_sentence_marker(source_part, token)
+            )
+            target_without_marker = remove_sentence_marker(target_part, token)
+            target_boundaries = sentence_boundaries(target_without_marker)
+            if (
+                len(source_boundaries) < 2
+                or len(source_boundaries) != len(target_boundaries)
+                or source_ordinal >= len(target_boundaries)
+            ):
+                ambiguous.append({
+                    "marker": marker,
+                    "reason": "sentence_alignment_not_unique",
+                    "paragraph_index": source_paragraph,
+                })
+                continue
+            offset = target_boundaries[source_ordinal]
+            rendered = marker.translate(_ASCII_TO_SUPERSCRIPT)
+            target_paragraphs[target_paragraph] = (
+                target_without_marker[:offset]
+                + rendered
+                + target_without_marker[offset:]
+            )
+            repaired = "\n\n".join(target_paragraphs)
+            repairs.append({
+                "type": "relocated_aligned_sentence_terminal_note_marker",
+                "marker": marker,
+                "paragraph_index": source_paragraph,
+                "sentence_index": source_ordinal,
+                "rendered": rendered,
+            })
+
+    missing = required - available_note_markers(repaired, required)
+    if not missing:
+        return repaired, {
+            "repair_count": len(repairs),
+            "repairs": repairs,
+            "ambiguous": ambiguous,
+            "unresolved": [],
+            "policy": (
+                "source-confirmed unique anchors only; ambiguous note positions "
+                "remain blocking"
+            ),
+        }
 
     for marker in list(missing.elements()):
         token = marker_pattern(marker)

@@ -117,6 +117,9 @@ _ENTITY_CONNECTORS = frozenset({
     "and", "de", "del", "der", "di", "du", "la", "le", "of", "the",
     "van", "von",
 })
+_PERSON_NAME_CONNECTORS = frozenset({
+    "da", "de", "del", "della", "der", "di", "du", "la", "le", "van", "von",
+})
 _AUTOMATIC_ENTITY_CATEGORIES = frozenset({
     "proper_noun", "person", "place", "institution", "organization",
     "publication", "product", "legal_instrument", "source_entity_candidate",
@@ -670,7 +673,15 @@ def automatic_terminology_risk_reasons(
     """
     source = " ".join((english or "").split()).strip()
     target = " ".join((persian or "").split()).strip()
-    source_words = re.findall(r"[A-Za-z][A-Za-z'\-]*", source)
+    source_words = re.findall(
+        r"[A-Za-z\u00c0-\u024f\u1e00-\u1eff]"
+        r"[A-Za-z\u00c0-\u024f\u1e00-\u1eff'\u2019\-]*",
+        source,
+    )
+    source_content_words = [
+        word for word in source_words
+        if word.casefold() not in _ENTITY_CONNECTORS
+    ]
     target_words = _PERSIAN_WORD_RE.findall(target)
     reasons: list[str] = []
     if not source_words or not target_words:
@@ -682,6 +693,27 @@ def automatic_terminology_risk_reasons(
     # conservative but still admits ordinary ezafe and light-noun renderings.
     if len(target_words) > len(source_words) + 1:
         reasons.append("target_scope_wider_than_source")
+    if (
+        len(source_content_words) > 1
+        and len(target_words) < len(source_content_words)
+        and any(
+            looks_like_transliterated_loanword(word, target)
+            for word in source_content_words
+        )
+    ):
+        reasons.append("target_omits_source_lexical_member")
+    source_has_latin_diacritic = bool(re.search(
+        r"[\u00c0-\u024f\u1e00-\u1eff]", source
+    ))
+    source_has_internal_apostrophe = bool(
+        re.search(r"[A-Za-z]['\u2019][A-Za-z]", source)
+        and not re.search(r"['\u2019]s\b", source, re.IGNORECASE)
+    )
+    if (
+        (source_has_latin_diacritic or source_has_internal_apostrophe)
+        and not looks_like_transliterated_loanword(source, target)
+    ):
+        reasons.append("foreign_expression_requires_review")
     if _CONTEXTUAL_TARGET_TOKEN_RE.search(target):
         reasons.append("context_bound_target")
     if _TRAILING_CONNECTIVE_RE.search(target):
@@ -774,6 +806,30 @@ def low_authority_mapping_category(
 ) -> str:
     """Downgrade translated concepts mislabeled as phonetic loanwords."""
     normalized = _normalise_category(category)
+    source_words = re.findall(
+        r"[A-Za-z\u00c0-\u024f\u1e00-\u1eff]+",
+        " ".join((english or "").split()),
+    )
+    source_tokens = " ".join((english or "").split()).split()
+    person_like = bool(
+        2 <= len(source_words) <= 5
+        and source_tokens
+        and source_tokens[0][:1].isupper()
+        and source_tokens[-1][:1].isupper()
+        and any(
+            token.casefold() in _PERSON_NAME_CONNECTORS
+            for token in source_tokens
+        )
+        and all(
+            token.casefold() in _PERSON_NAME_CONNECTORS
+            or token[:1].isupper()
+            for token in source_tokens
+        )
+        and source_words[-1].casefold()
+        not in _SOURCE_ORGANIZATION_TERMINALS
+    )
+    if normalized == "technical_loanword" and person_like:
+        return "person"
     if (
         normalized == "technical_loanword"
         and not looks_like_transliterated_loanword(english, persian)

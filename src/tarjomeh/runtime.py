@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v10.32.0"
+RUNTIME_RELEASE = "v10.33.0"
 RUNTIME_REVISION = 1
 
 
@@ -48,12 +48,18 @@ def runtime_capabilities() -> dict[str, Any]:
             "objective_candidate_ranking": True,
             "contextual_morphology_quarantine": True,
             "representative_only_established_style": True,
+            "candidate_bound_final_quality": True,
+            "atomic_candidate_selection": True,
+            "paragraph_scoped_readability": True,
+            "lexical_scope_memory_quarantine": True,
+            "source_aligned_note_marker_relocation": True,
+            "lexically_safe_critique_rebind": True,
         },
         "policy_versions": {
             "structure_evidence": 2,
             "canonical_text": 3,
-            "layer1_admission": 5,
-            "style_evidence": 3,
+            "layer1_admission": 6,
+            "style_evidence": 4,
             "benchmark_schema": 1,
             "checkpoint_export": 3,
             "paragraph_identity": 1,
@@ -61,7 +67,10 @@ def runtime_capabilities() -> dict[str, Any]:
             "final_identifier_admission": 1,
             "recovery_segments": 1,
             "summary_admission": 2,
-            "final_candidate_selection": 1,
+            "final_candidate_selection": 2,
+            "final_quality_authority": 1,
+            "note_marker_recovery": 2,
+            "critique_canonical_rebind": 1,
         },
     }
 
@@ -75,9 +84,12 @@ def runtime_behavior_probes() -> dict[str, bool]:
     from tarjomeh.core.pipeline import (
         _blocking_structure_findings,
         _canonical_chunk_paragraph_identity,
+        _critique_survives_canonicalization,
         _chunk_needs_review,
         _final_canonical_admission_payload,
+        _final_candidate_selection_payload,
         _paragraph_structural_roles,
+        _readability_review_text,
         _record_reconstructed_paragraph_identity_review,
         _role_aware_recovery_groups,
         _source_foreign_expression_inventory,
@@ -91,7 +103,10 @@ def runtime_behavior_probes() -> dict[str, bool]:
         low_authority_mapping_category,
     )
     from tarjomeh.quality.critique import TranslationCritique
-    from tarjomeh.quality.integrity import restore_source_identifiers
+    from tarjomeh.quality.integrity import (
+        restore_source_identifiers,
+        restore_source_note_markers,
+    )
     from tarjomeh.quality.model_benchmark import load_benchmark_suite
     from tarjomeh.quality.structure_audit import (
         announced_count_evidence,
@@ -165,6 +180,21 @@ def runtime_behavior_probes() -> dict[str, bool]:
     role_groups = _role_aware_recovery_groups(role_units, role_values)
     admission = _final_canonical_admission_payload(
         canonical_units, paragraph_identity
+    )
+    selection = _final_candidate_selection_payload(
+        canonical_units, paragraph_identity
+    )
+    readability_text = _readability_review_text(
+        role_chunk,
+        "\u0645\u062a\u0646 \u0627\u0633\u062a\u062f\u0644\u0627\u0644\u06cc.\n\n"
+        "\u0631\u062f\u06cc\u0641 \u06cc\u06a9\n\n\u0631\u062f\u06cc\u0641 \u062f\u0648",
+    )
+    restored_note, note_report = restore_source_note_markers(
+        "First sentence.2 Second sentence.",
+        (
+            "\u062c\u0645\u0644\u0647 \u0646\u062e\u0633\u062a. "
+            "\u062c\u0645\u0644\u0647 \u062f\u0648\u0645.2"
+        ),
     )
     class _ProbeDB:
         def __init__(self) -> None:
@@ -271,5 +301,39 @@ def runtime_behavior_probes() -> dict[str, bool]:
             low_authority_mapping_category(
                 "assemblage", "\u0622\u0633\u0627\u0645\u0628\u0644\u0627\u0698", "term"
             ) == "technical_loanword"
+        ),
+        "candidate_selection_matches_canonical": bool(
+            selection["policy_version"] == 2
+            and selection["canonical_target_hash"]
+            == admission["canonical_target_hash"]
+        ),
+        "mixed_role_readability_is_body_only": bool(
+            readability_text
+            == "\u0645\u062a\u0646 \u0627\u0633\u062a\u062f\u0644\u0627\u0644\u06cc."
+        ),
+        "partial_compound_memory_is_quarantined": bool(
+            "target_omits_source_lexical_member"
+            in automatic_terminology_risk_reasons(
+                "state apparatus", "\u0622\u067e\u0627\u0631\u0627\u062a\u0648\u0633"
+            )
+        ),
+        "moved_note_marker_is_source_aligned": bool(
+            restored_note
+            == (
+                "\u062c\u0645\u0644\u0647 \u0646\u062e\u0633\u062a.\u00b2 "
+                "\u062c\u0645\u0644\u0647 \u062f\u0648\u0645."
+            )
+            and note_report.get("repairs", [{}])[0].get("type")
+            == "relocated_aligned_sentence_terminal_note_marker"
+        ),
+        "canonical_typography_preserves_critique": bool(
+            _critique_survives_canonicalization(
+                "در سال 1973، مقدار 40% بود.",
+                "در سال ۱۹۷۳، مقدار ۴۰ ٪ بود.",
+            )
+            and not _critique_survives_canonicalization(
+                "The first target proposition.",
+                "The second target proposition.",
+            )
         ),
     }

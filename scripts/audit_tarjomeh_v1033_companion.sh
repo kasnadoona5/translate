@@ -1,4 +1,4 @@
-audit_tarjomeh_v1032_companion() {
+audit_tarjomeh_v1033_companion() {
     cd /opt/translate || {
         echo "ERROR: /opt/translate not found"
         return 1
@@ -14,13 +14,13 @@ audit_tarjomeh_v1032_companion() {
     df -h /
 
     echo
-    echo "========== V10.32 COMPANION AUDIT =========="
+    echo "========== V10.33 COMPANION AUDIT =========="
     docker exec -i translate_tarjomeh_1 \
       tarjomeh capabilities --verify --json \
-      | tee /root/tarjomeh_v1032_companion_audit.txt
+      | tee /root/tarjomeh_v1033_companion_audit.txt
     [ "${PIPESTATUS[0]}" -eq 0 ] || return 1
     docker exec -i translate_tarjomeh_1 env PYTHONIOENCODING=utf-8 \
-      python - "$JOB" <<'PY' | tee -a /root/tarjomeh_v1032_companion_audit.txt
+      python - "$JOB" <<'PY' | tee -a /root/tarjomeh_v1033_companion_audit.txt
 import collections
 import hashlib
 import json
@@ -495,6 +495,29 @@ final_candidate_hash_mismatches = [
         str(chunk.get("translation", "")).encode("utf-8")
     ).hexdigest()
 ]
+final_candidate_policy_mismatches = sorted(
+    int(chunk["chunk_index"])
+    for chunk in finished
+    if int(chunk["chunk_index"]) in final_candidate_by_chunk
+    and int(final_candidate_by_chunk[int(chunk["chunk_index"])].get(
+        "policy_version", 0
+    ) or 0) != 2
+)
+candidate_quality_hash_mismatches = sorted(
+    int(chunk["chunk_index"])
+    for chunk in finished
+    if (
+        (quality := final_quality_by_chunk.get(int(chunk["chunk_index"]), {}))
+        and quality.get("critique_present") is True
+        and (
+            quality.get("critique_candidate_match") is not True
+            or str(quality.get("candidate_target_hash", ""))
+            != hashlib.sha256(
+                str(chunk.get("translation", "")).encode("utf-8")
+            ).hexdigest()
+        )
+    )
+)
 authority_violations = []
 for item in memory_policy_events:
     chunk_index = int(item["chunk_index"])
@@ -1212,7 +1235,7 @@ malformed_latin_scholarly_abbreviations = sorted(set(
     )
 ))
 
-# Confirm the running container, not merely Git, contains v10.32 behavior.
+# Confirm the running container, not merely Git, contains v10.33 behavior.
 root = Path(tarjomeh.__file__).resolve().parent
 pipeline_source = (root / "core" / "pipeline.py").read_text(encoding="utf-8")
 client_source = (root / "core" / "llm_client.py").read_text(encoding="utf-8")
@@ -1253,7 +1276,7 @@ citation_probe_text, citation_probe_changes = normalize_citation_house_style_tex
     "(see Jessop 1990, 2002)"
 )
 runtime_markers = {
-    "runtime_release_contract": runtime_manifest.get("release") == "v10.32.0",
+    "runtime_release_contract": runtime_manifest.get("release") == "v10.33.0",
     "runtime_behavior_contract": all(runtime_probes.values()),
     "canonical_paragraph_identity": (
         "canonical_paragraph_identity" in runtime_manifest.get("capabilities", {})
@@ -1751,7 +1774,7 @@ runtime_markers = {
 hard = []
 review = []
 if not all(runtime_markers.values()):
-    hard.append("running_container_is_not_complete_v1032")
+    hard.append("running_container_is_not_complete_v1033")
 if checkpoint_preview_missing:
     hard.append("paused_checkpoint_preview_missing")
 if job.get("status") == "paused" and checkpoint_pending:
@@ -1784,6 +1807,10 @@ if missing_final_candidate_selection:
     hard.append("missing_final_candidate_selection")
 if final_candidate_hash_mismatches:
     hard.append("final_candidate_selection_hash_mismatch")
+if final_candidate_policy_mismatches:
+    hard.append("final_candidate_selection_not_atomic_policy_v2")
+if candidate_quality_hash_mismatches:
+    hard.append("final_quality_not_bound_to_canonical_candidate")
 if unsafe_admission:
     hard.append("quarantined_translation_entered_memory")
 if unsafe_grounded_memory:
@@ -1929,6 +1956,8 @@ summary_payload = {
         "final_candidate_selections": final_candidate_events,
         "missing_final_candidate_selection": missing_final_candidate_selection,
         "final_candidate_hash_mismatches": final_candidate_hash_mismatches,
+        "final_candidate_policy_mismatches": final_candidate_policy_mismatches,
+        "candidate_quality_hash_mismatches": candidate_quality_hash_mismatches,
         "canonical_paragraph_identity": paragraph_identity,
         "missing_paragraph_identity": missing_paragraph_identity,
         "invalid_paragraph_identity": invalid_paragraph_identity,
@@ -2081,7 +2110,7 @@ summary_payload = {
     "hard_failures": hard,
     "review_signals": review,
 }
-json_path = Path(f"/app/jobs/uploads/{job_id}_v1032_companion_audit.json")
+json_path = Path(f"/app/jobs/uploads/{job_id}_v1033_companion_audit.json")
 json_path.write_text(
     json.dumps(
         {
@@ -2095,10 +2124,10 @@ json_path.write_text(
     ),
     encoding="utf-8",
 )
-txt_path = Path(f"/app/jobs/uploads/{job_id}_v1032_companion_audit.txt")
+txt_path = Path(f"/app/jobs/uploads/{job_id}_v1033_companion_audit.txt")
 
 lines = [
-    "Tarjomeh v10.32 Independent Companion Audit",
+    "Tarjomeh v10.33 Independent Companion Audit",
     f"Job: {job_id}",
     f"Status: {job.get('status')}",
     "",
@@ -2119,6 +2148,10 @@ lines = [
     f"{missing_final_candidate_selection or 'none'}",
     "Final candidate hash mismatches: "
     f"{final_candidate_hash_mismatches or 'none'}",
+    "Final candidate policy mismatches: "
+    f"{final_candidate_policy_mismatches or 'none'}",
+    "Final quality/candidate hash mismatches: "
+    f"{candidate_quality_hash_mismatches or 'none'}",
     f"Canonical event/hash mismatches: "
     f"{canonical_event_hash_mismatches or 'none'}",
     f"Canonical Layer-3 mismatches: {canonical_memory_mismatches or 'none'}",
@@ -2278,19 +2311,19 @@ PY
 
     RESULT=$?
     if [ "$RESULT" -ne 0 ]; then
-        echo "ERROR: v10.32 companion audit failed"
+        echo "ERROR: v10.33 companion audit failed"
         return "$RESULT"
     fi
 
     echo
     echo "========== GENERATED FILES =========="
     find jobs/uploads -maxdepth 1 -type f \
-      \( -name '*_v1032_companion_audit.txt' \
-         -o -name '*_v1032_companion_audit.json' \) \
+      \( -name '*_v1033_companion_audit.txt' \
+         -o -name '*_v1033_companion_audit.json' \) \
       -printf '%TY-%Tm-%Td %TH:%TM %10s %p\n' | sort | tail -4
-    echo "Root console copy: /root/tarjomeh_v1032_companion_audit.txt"
-    echo "Read-only v10.32 companion audit completed. Nothing was changed."
+    echo "Root console copy: /root/tarjomeh_v1033_companion_audit.txt"
+    echo "Read-only v10.33 companion audit completed. Nothing was changed."
 }
 
-audit_tarjomeh_v1032_companion "${1:-LATEST}"
-unset -f audit_tarjomeh_v1032_companion
+audit_tarjomeh_v1033_companion "${1:-LATEST}"
+unset -f audit_tarjomeh_v1033_companion

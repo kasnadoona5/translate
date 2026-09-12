@@ -197,20 +197,24 @@ def test_malformed_final_score_withholds_style_without_crashing() -> None:
     assert manager._style_profile_status() == "warming_up"
 
 
-def test_v1032_runtime_and_release_scripts_are_complete() -> None:
+def test_v1033_runtime_and_release_scripts_are_complete() -> None:
     manifest = runtime_capabilities()
     probes = runtime_behavior_probes()
 
-    assert manifest["release"] == "v10.32.0"
+    assert manifest["release"] == "v10.33.0"
     assert manifest["capabilities"]["post_rollback_final_evidence"] is True
     assert manifest["capabilities"]["objective_candidate_ranking"] is True
     assert manifest["capabilities"]["contextual_morphology_quarantine"] is True
     assert probes["contextual_morphology_is_quarantined"] is True
     assert probes["transliterated_terms_are_source_anchorable"] is True
+    assert probes["candidate_selection_matches_canonical"] is True
+    assert probes["mixed_role_readability_is_body_only"] is True
+    assert probes["partial_compound_memory_is_quarantined"] is True
+    assert probes["moved_note_marker_is_source_aligned"] is True
 
     for relative in (
-        "scripts/audit_tarjomeh_v1032_reports.sh",
-        "scripts/audit_tarjomeh_v1032_companion.sh",
+        "scripts/audit_tarjomeh_v1033_reports.sh",
+        "scripts/audit_tarjomeh_v1033_companion.sh",
     ):
         source = Path(relative).read_text(encoding="utf-8")
         blocks = re.findall(r"<<'PY'[^\n]*\n(.*?)\nPY(?:\r?\n|$)", source, re.S)
@@ -220,11 +224,11 @@ def test_v1032_runtime_and_release_scripts_are_complete() -> None:
         assert "final_candidate_selection" in source
         assert "missing_final_candidate_selection" in source
 
-    deployment = Path("scripts/deploy_tarjomeh_v1032.sh").read_text(
+    deployment = Path("scripts/deploy_tarjomeh_v1033.sh").read_text(
         encoding="utf-8"
     )
-    assert 'TAG="v10.32.0"' in deployment
-    assert "RUNNING_V1032_CONFIRMED" in deployment
+    assert 'TAG="v10.33.0"' in deployment
+    assert "RUNNING_V1033_CONFIRMED" in deployment
     assert "VERIFY 9ROUTER UNCHANGED" in deployment
     assert "NINE_MOUNTS" in deployment
     for unsafe in (
