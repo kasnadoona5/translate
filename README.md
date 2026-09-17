@@ -3,7 +3,12 @@
 English-to-Persian academic book translation with persistent terminology,
 book-level memory, independent quality review, and RTL document export.
 
-This README documents release **v9.8.0**. Tarjomeh is licensed under AGPL-3.0.
+This README documents release **v10.33.0**. Tarjomeh is licensed under AGPL-3.0.
+
+Source mirrors:
+
+- GitHub: <https://github.com/kasnadoona5/translate>
+- GitLab: <https://gitlab.com/personal-group4462928/translate>
 
 ## What Tarjomeh Does
 
@@ -34,11 +39,17 @@ Current capabilities include:
 - Geometry-aware single/two-column PDF reading order and stable chapter headings
 - Stable paragraph identity through translation, refinement, and correction
 - Trust-aware short-term continuity and QA-approved body-prose style memory
+- Genre-aware style evidence for academic argument structure and literary voice
+- Offline, source-grounded model benchmarking without changing production models
 - Correct Persian RTL DOCX/PDF/EPUB formatting
 - Optional new-page starts for detected chapters in DOCX
-- SQLite checkpoints, pause/resume, and incomplete-export protection
+- Durable chapter checkpoints with atomic preview publication and safe resume
+- Canonical paragraph identity and final candidate admission across export/memory
+- Verified source obligations for identifiers, note markers, and explicit structure
+- SQLite checkpoints, worker leases, pause/resume, and incomplete-export protection
 - Web review, chunk retranslation, QA reports, glossary approval, and re-export
 - Quality regression comparison between completed jobs
+- Runtime capability manifests and read-only release-specific audit scripts
 - OpenRouter, 9router/OpenAI-compatible gateways, and Ollama
 - Normal JSON and SSE chat-completion response compatibility
 
@@ -59,10 +70,12 @@ Document
        per-issue balanced refinement decisions
        glossary compliance and guarded correction
        optional back-translation
-       memory update and SQLite checkpoint
+       canonical candidate selection
+       evidence-gated memory/style update and SQLite checkpoint
   -> completeness gate
-  -> document assembly
+  -> canonical document assembly and identity verification
   -> Persian typography and English-original audit
+  -> final source-obligation and integrity admission
   -> RTL export
   -> review and QA report
 ```
@@ -450,7 +463,8 @@ apt-get update
 apt-get install -y git docker.io docker-compose
 systemctl enable --now docker
 
-git clone https://gitlab.com/personal-group4462928/translate.git /opt/translate
+# Either source mirror may be used.
+git clone https://github.com/kasnadoona5/translate.git /opt/translate
 cd /opt/translate
 
 cp .env.example .env
@@ -491,41 +505,46 @@ Back up `jobs`, `glossary`, `.env`, `config.toml`, and `/root/.9router`.
 
 Do not use `docker-compose down`, `docker system prune -a`, or
 `docker volume prune`. Do not remove or recreate 9router while updating
-Tarjomeh.
+Tarjomeh. For v10.33, use the guarded release script rather than manually
+rebuilding or replacing containers:
 
 ```bash
 cd /opt/translate
-
-# Inspect first. Untracked config.toml is expected on older installations.
-git status --short
-git checkout main
 git fetch origin main --tags
-git pull --ff-only origin main
+git show v10.33.0:scripts/deploy_tarjomeh_v1033.sh \
+  > /root/deploy_tarjomeh_v1033.sh
+chmod 700 /root/deploy_tarjomeh_v1033.sh
 
-# Reclaim only safe build/dangling-image space.
-docker builder prune -f
-docker image prune -f
-
-# Build before removing the currently working app container.
-docker-compose build tarjomeh
-
-# Compose 1.29 may raise KeyError: ContainerConfig during recreation.
-# Remove only Tarjomeh, never 9router.
-docker rm -f translate_tarjomeh_1 2>/dev/null || true
-docker-compose up -d --no-deps tarjomeh
-
-docker builder prune -f
-docker image prune -f
-
-git rev-parse --short HEAD
-git tag --points-at HEAD
-docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
-df -h /
+LOG=/root/deploy_tarjomeh_v1033.log
+: > "$LOG"
+nohup bash /root/deploy_tarjomeh_v1033.sh \
+  > "$LOG" 2>&1 </dev/null &
+echo "Deployment PID: $!"
+tail --retry -F "$LOG"
 ```
 
-The Git update does not overwrite `.env`, jobs, outputs, or glossary data.
-Do not copy `config.example.toml` over an existing `config.toml` during an
-update. Review and merge new options deliberately.
+`Ctrl+C` stops following the log, not the background deployment. A successful
+run ends with `Deployment v10.33.0 completed. Running 9router was unchanged.`
+The script backs up persistent Tarjomeh state, preserves the local glossary,
+performs guarded Tarjomeh-only space cleanup, verifies the candidate and running
+capability manifests, waits for health, and verifies that the 9router container
+ID, image, start time, and mounts did not change. It stops before replacement
+when tracked files (other than the local glossary), active jobs, version
+identity, dependency compatibility, or free-space requirements are unsafe.
+
+The update does not overwrite `.env`, jobs, outputs, or glossary data. Do not
+copy `config.example.toml` over an existing `config.toml`; review and merge new
+options deliberately.
+
+Verify the loaded release:
+
+```bash
+git rev-parse HEAD
+git tag --points-at HEAD
+docker exec translate_tarjomeh_1 \
+  tarjomeh capabilities --verify --json
+docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+```
 
 ## Applying `.env` or `config.toml` Changes on the VPS
 
@@ -780,6 +799,23 @@ tarjomeh eval BASELINE_JOB_ID CANDIDATE_JOB_ID \
 tarjomeh eval BASELINE_JOB_ID CANDIDATE_JOB_ID --fail-on-regression
 ```
 
+### Full v10.33 job audit
+
+The release includes two read-only audit collectors. Pass a job ID, or omit it
+to inspect the latest job:
+
+```bash
+cd /opt/translate
+bash scripts/audit_tarjomeh_v1033_reports.sh JOB_ID
+bash scripts/audit_tarjomeh_v1033_companion.sh JOB_ID
+```
+
+The report audit regenerates the normal QA report and writes memory audit TXT
+and JSON files under `jobs/uploads`. The companion audit checks runtime
+capabilities, pipeline stages, canonical/export evidence, worker lifecycle,
+four-layer memory, style authority, research provenance, LLM attempts and
+failure rates, and prior regression obligations. It does not alter the job.
+
 ## Monitoring and Troubleshooting
 
 ### Health and logs
@@ -899,6 +935,22 @@ releases.
 
 ## Release History
 
+- v10.33: canonical final-candidate quality evidence, paragraph-scoped style
+  authority, safer contextual morphology/terminology quarantine, monotonic
+  source obligations, and guarded low-space deployment that proves 9router is
+  unchanged
+- v10.32: objective candidate ranking, post-rollback final evidence,
+  resumable split-recovery segments, canonical export purity, and stricter
+  representative style admission
+- v10.31: canonical checkpoint/export recovery, source-grounded identifier and
+  note-marker preservation, and stronger final admission observability
+- v10.30: durable chapter-checkpoint recovery, canonical paragraph identity,
+  verified source coverage, and paragraph-scoped refiner salvage
+- v10.29: canonical source-coverage and export-identity enforcement plus
+  small-VPS deployment recovery
+- v10.28: atomic checkpoint preview publication before intentional pause
+- v10.27: evidence-safe quality controls, genre-aware style records, and an
+  offline model benchmark that does not change configured production models
 - v9.12: conservative identifier restoration, mixed-script corruption gates,
   morphology-safe first-occurrence originals, citation-only name exemptions,
   memory-reconciled back-translation entities, advisory document terminology
