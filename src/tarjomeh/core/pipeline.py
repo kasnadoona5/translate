@@ -1282,6 +1282,7 @@ def _role_aware_recovery_groups(
 
 
 _RECOVERY_SEGMENT_CACHE_KEY = "translation_recovery_segments_v1"
+_SOURCE_OBLIGATION_RECOVERY_KEY = "source_obligation_recovery_v1"
 
 
 def _recovery_segment_cache_identity(
@@ -1324,6 +1325,80 @@ def _cached_recovery_candidate(
     if not candidate or expected != hashlib.sha256(candidate.encode("utf-8")).hexdigest():
         return ""
     return candidate
+
+
+def _cached_source_obligation_candidate(
+    db: Any,
+    job_id: str,
+    chunk_index: int,
+    source: str,
+) -> tuple[str, dict[str, Any]]:
+    """Return a hash-bound, review-only candidate from a prior structure stop."""
+    artifact = db.get_job_artifact(job_id, _SOURCE_OBLIGATION_RECOVERY_KEY) or {}
+    entries = artifact.get("entries", {})
+    entry = entries.get(str(chunk_index), {}) if isinstance(entries, dict) else {}
+    if not isinstance(entry, dict) or entry.get("status") != "pending":
+        return "", {}
+    source_hash = hashlib.sha256((source or "").encode("utf-8")).hexdigest()
+    candidate = str(entry.get("candidate", ""))
+    candidate_hash = hashlib.sha256(candidate.encode("utf-8")).hexdigest()
+    if (
+        not candidate
+        or str(entry.get("source_sha256", "")) != source_hash
+        or str(entry.get("candidate_sha256", "")) != candidate_hash
+    ):
+        return "", {}
+    return candidate, entry
+
+
+def _persist_source_obligation_candidate(
+    db: Any,
+    job_id: str,
+    chunk_index: int,
+    source: str,
+    candidate: str,
+    findings: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Persist an integrity-valid structure failure for bounded resume repair."""
+    previous = db.get_job_artifact(job_id, _SOURCE_OBLIGATION_RECOVERY_KEY) or {}
+    entries = previous.get("entries", {})
+    old = entries.get(str(chunk_index), {}) if isinstance(entries, dict) else {}
+    attempts = (
+        int(old.get("failure_count", 0) or 0) + 1
+        if isinstance(old, dict) else 1
+    )
+    entry = {
+        "status": "pending",
+        "chunk_index": chunk_index,
+        "source_sha256": hashlib.sha256((source or "").encode("utf-8")).hexdigest(),
+        "candidate": candidate,
+        "candidate_sha256": hashlib.sha256(candidate.encode("utf-8")).hexdigest(),
+        "failure_count": attempts,
+        "findings": findings,
+        "authority": "review_only_resume_input",
+    }
+    db.merge_job_artifact_entry(
+        job_id,
+        _SOURCE_OBLIGATION_RECOVERY_KEY,
+        "entries",
+        str(chunk_index),
+        entry,
+        version=1,
+    )
+    return entry
+
+
+def _source_obligation_resolution_payload(
+    source: str,
+    candidate: str,
+) -> dict[str, Any]:
+    """Bind recovery resolution to the exact source and admitted candidate."""
+    return {
+        "policy_version": 1,
+        "source_sha256": _candidate_text_hash(source),
+        "candidate_sha256": _candidate_text_hash(candidate),
+        "authority": "atomic_checkpoint_resolution",
+    }
 
 
 def _translated_paragraph_metadata(
@@ -1885,6 +1960,9 @@ Requirements:
 8. Copy every unaffected clause from the accepted Persian paragraph verbatim. If an
    exact current Persian quote is supplied, confine the lexical edit to that quote
    and the smallest grammatical context needed to make the repair coherent.
+9. Preserve the technical force of methodological labels and every content-bearing
+   modifier. Localize an ordinary structural cross-reference in Persian prose only
+   when the evidence identifies it; do not alter bibliographic titles or citations.
 """
 
 
@@ -6342,20 +6420,14 @@ class TranslationPipeline:
                         lock=lock,
                         adjacent_source_context=_adjacent_source_context(chunks, idx),
                     )
-                    translation = self._canonicalize_final_translation(
-                        job_id, idx, chunk, translation
-                    )
-                    translation, paragraph_identity = (
+                    checkpoint_translation, paragraph_identity = (
                         _canonical_chunk_paragraph_identity(chunk, translation)
                     )
-                    if paragraph_identity["reconstructed"]:
-                        _record_reconstructed_paragraph_identity_review(
-                            self.db,
-                            job_id,
-                            idx,
-                            paragraph_identity,
+                    if checkpoint_translation != translation:
+                        raise ParagraphIdentityError(
+                            "Reviewed final candidate changed during checkpoint "
+                            "paragraph identity reconstruction."
                         )
-
                     # Update shared memory and database safely under lock
                     with lock:
                         translations[idx] = translation
@@ -6368,12 +6440,6 @@ class TranslationPipeline:
                         )
                         style_policy = _chunk_style_policy(
                             self.db, job_id, idx, candidate_text=translation
-                        )
-                        self.db.log_chunk_event(
-                            job_id,
-                            idx,
-                            "final_quality_admission",
-                            memory_admission["final_quality"],
                         )
                         memory_policy = memory_manager.update_after_translation(
                             chunk,
@@ -6564,6 +6630,14 @@ class TranslationPipeline:
                                     translation, paragraph_identity
                                 )
                             ),
+                            final_quality_admission=(
+                                memory_admission["final_quality"]
+                            ),
+                            source_obligation_resolution=(
+                                _source_obligation_resolution_payload(
+                                    chunk.text, translation
+                                )
+                            ),
                             chapter_checkpoint=chapter_checkpoint,
                         )
                         if chapter_checkpoint is not None:
@@ -6665,20 +6739,14 @@ class TranslationPipeline:
                             job_id=job_id,
                             adjacent_source_context=_adjacent_source_context(chunks, idx),
                         )
-                        translation = self._canonicalize_final_translation(
-                            job_id, idx, chunk, translation
-                        )
-                        translation, paragraph_identity = (
+                        checkpoint_translation, paragraph_identity = (
                             _canonical_chunk_paragraph_identity(chunk, translation)
                         )
-                        if paragraph_identity["reconstructed"]:
-                            _record_reconstructed_paragraph_identity_review(
-                                self.db,
-                                job_id,
-                                idx,
-                                paragraph_identity,
+                        if checkpoint_translation != translation:
+                            raise ParagraphIdentityError(
+                                "Reviewed final candidate changed during checkpoint "
+                                "paragraph identity reconstruction."
                             )
-
                         # Successful translation updates
                         translations[idx] = translation
                         consecutive_errors = 0
@@ -6692,12 +6760,6 @@ class TranslationPipeline:
                         )
                         style_policy = _chunk_style_policy(
                             self.db, job_id, idx, candidate_text=translation
-                        )
-                        self.db.log_chunk_event(
-                            job_id,
-                            idx,
-                            "final_quality_admission",
-                            memory_admission["final_quality"],
                         )
                         memory_policy = memory_manager.update_after_translation(
                             chunk,
@@ -6886,6 +6948,14 @@ class TranslationPipeline:
                             canonical_admission=(
                                 _final_canonical_admission_payload(
                                     translation, paragraph_identity
+                                )
+                            ),
+                            final_quality_admission=(
+                                memory_admission["final_quality"]
+                            ),
+                            source_obligation_resolution=(
+                                _source_obligation_resolution_payload(
+                                    chunk.text, translation
                                 )
                             ),
                             chapter_checkpoint=chapter_checkpoint,
@@ -7974,46 +8044,21 @@ class TranslationPipeline:
                     manual_result.to_dict(),
                 )
                 translation = previous_translation
-        translation = self._canonicalize_final_translation(
-            job_id, chunk_index, chunks[chunk_index], translation
+        checkpoint_translation, paragraph_identity = (
+            _canonical_chunk_paragraph_identity(
+                chunks[chunk_index], translation
+            )
         )
-        translation, paragraph_identity = _canonical_chunk_paragraph_identity(
-            chunks[chunk_index], translation
-        )
-        identity_artifact = self.db.get_job_artifact(
-            job_id, "canonical_chunk_paragraphs_v1"
-        ) or {"version": 1, "chunks": {}}
-        identities = identity_artifact.setdefault("chunks", {})
-        if not isinstance(identities, dict):
-            identities = {}
-            identity_artifact["chunks"] = identities
-        identities[str(chunk_index)] = paragraph_identity
-        self.db.save_job_artifact(
-            job_id, "canonical_chunk_paragraphs_v1", identity_artifact
-        )
+        if checkpoint_translation != translation:
+            raise ParagraphIdentityError(
+                "Reviewed manual candidate changed during checkpoint paragraph "
+                "identity reconstruction."
+            )
         _ensure_chunk_review_reason(self.db, job_id, chunk_index)
         final_status = (
             ChunkStatus.NEEDS_REVIEW
             if _chunk_needs_review(self.db, job_id, chunk_index)
             else ChunkStatus.COMPLETED
-        )
-        self.db.update_chunk_with_event(
-            job_id,
-            chunk_index,
-            final_status,
-            translation,
-            "final_canonical_admission",
-            _final_canonical_admission_payload(translation, paragraph_identity),
-            additional_events=[(
-                "final_candidate_selection",
-                _candidate_selection_for_checkpoint(
-                    self.db,
-                    job_id,
-                    chunk_index,
-                    translation,
-                    paragraph_identity,
-                ),
-            )],
         )
         memory_admission = _chunk_memory_admission(
             self.db,
@@ -8024,12 +8069,6 @@ class TranslationPipeline:
         )
         style_policy = _chunk_style_policy(
             self.db, job_id, chunk_index, candidate_text=translation
-        )
-        self.db.log_chunk_event(
-            job_id,
-            chunk_index,
-            "final_quality_admission",
-            memory_admission["final_quality"],
         )
         memory_policy = memory_manager.update_after_translation(
             chunks[chunk_index],
@@ -8061,7 +8100,29 @@ class TranslationPipeline:
         self.db.log_chunk_event(
             job_id, chunk_index, "memory_update_policy", memory_policy
         )
-        self.db.save_memory_state(job_id, memory_manager.to_dict())
+        self.db.commit_chunk_checkpoint(
+            job_id,
+            chunk_index,
+            final_status,
+            translation,
+            memory_manager.to_dict(),
+            search_state=web_searcher.export_state(),
+            paragraph_identity=paragraph_identity,
+            candidate_selection=_candidate_selection_for_checkpoint(
+                self.db,
+                job_id,
+                chunk_index,
+                translation,
+                paragraph_identity,
+            ),
+            canonical_admission=_final_canonical_admission_payload(
+                translation, paragraph_identity
+            ),
+            final_quality_admission=memory_admission["final_quality"],
+            source_obligation_resolution=_source_obligation_resolution_payload(
+                chunks[chunk_index].text, translation
+            ),
+        )
         self.db.log_event(job_id, "INFO", f"Retranslated chunk {chunk_index}.")
         return translation
 
@@ -9072,14 +9133,43 @@ class TranslationPipeline:
         # Translate
         self.db.update_chunk(job_id, idx, ChunkStatus.TRANSLATING)
         initial_integrity = None
-        try:
-            translation = self.llm_client.complete(
-                messages=[{"role": "user", "content": user_content}],
-                system_prompt=sys_prompt,
-                _operation="translation",
-                _recovery_source_text=chunk.text,
+        obligation_recovery, obligation_recovery_evidence = (
+            _cached_source_obligation_candidate(
+                self.db, job_id, idx, chunk.text
             )
-            if use_paragraph_protocol:
+        )
+        try:
+            if obligation_recovery:
+                translation = obligation_recovery
+                self.db.log_chunk_event(
+                    job_id,
+                    idx,
+                    "source_obligation_recovery_reused",
+                    {
+                        "candidate_sha256": _candidate_text_hash(translation),
+                        "source_sha256": hashlib.sha256(
+                            chunk.text.encode("utf-8")
+                        ).hexdigest(),
+                        "prior_failure_count": int(
+                            obligation_recovery_evidence.get("failure_count", 0) or 0
+                        ),
+                        "authority": "review_only_resume_input",
+                        "message": (
+                            "Reused the integrity-valid candidate that reached the "
+                            "prior source-structure gate; translation generation was "
+                            "not repeated, and every quality/admission gate will run "
+                            "again before persistence."
+                        ),
+                    },
+                )
+            else:
+                translation = self.llm_client.complete(
+                    messages=[{"role": "user", "content": user_content}],
+                    system_prompt=sys_prompt,
+                    _operation="translation",
+                    _recovery_source_text=chunk.text,
+                )
+            if use_paragraph_protocol and not obligation_recovery:
                 protocol_result = decode_paragraphs(
                     translation, paragraph_markers
                 )
@@ -12419,6 +12509,20 @@ Output ONLY the corrected Persian translation.
                     "not committed."
                 ),
             }
+            recovery_entry = _persist_source_obligation_candidate(
+                self.db,
+                job_id,
+                idx,
+                chunk.text,
+                translation,
+                blocking_structure,
+            )
+            failure_payload["recovery_candidate_sha256"] = recovery_entry[
+                "candidate_sha256"
+            ]
+            failure_payload["recovery_failure_count"] = recovery_entry[
+                "failure_count"
+            ]
             self.db.log_chunk_event(
                 job_id, idx, "integrity_final_failed", failure_payload
             )
@@ -12432,6 +12536,18 @@ Output ONLY the corrected Persian translation.
         translation = self._canonicalize_final_translation(
             job_id, idx, chunk, translation
         )
+        # Paragraph identity is part of the exact candidate. Final quality,
+        # memory, DB continuity, and export must all see this same string.
+        translation, final_paragraph_identity = (
+            _canonical_chunk_paragraph_identity(chunk, translation)
+        )
+        if final_paragraph_identity["reconstructed"]:
+            _record_reconstructed_paragraph_identity_review(
+                self.db,
+                job_id,
+                idx,
+                final_paragraph_identity,
+            )
         canonical_candidate_hash = _candidate_text_hash(translation)
         current_events = self.db.get_chunk_events(job_id, idx)
         last_start = 0

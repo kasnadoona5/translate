@@ -401,8 +401,8 @@ _CITATION_WRAPPER_RE = re.compile(
 )
 _YEAR_LIST_CONJUNCTION_RE = re.compile(
     r"\((?P<body>(?:1[5-9]|20)\d{2}[a-z]?"
-    r"(?:\s*,\s*(?:(?:1[5-9]|20)\d{2}[a-z]?|and\s+"
-    r"(?:1[5-9]|20)\d{2}[a-z]?)){1,12})\)",
+    r"(?:(?:\s*[,\u060c]\s*(?:1[5-9]|20)\d{2}[a-z]?)|"
+    r"(?:\s*[,\u060c]?\s*(?:and|\u0648)\s+(?:1[5-9]|20)\d{2}[a-z]?)){1,12})\)",
     re.IGNORECASE,
 )
 _STRUCTURAL_REFERENCE_RE = re.compile(
@@ -489,8 +489,9 @@ def normalize_citation_house_style_text(
     result = re.sub(r"\u0631\s*\.\s*\u06a9\s*\.", "\u0631.\u06a9.", result)
 
     def year_list(match: re.Match[str]) -> str:
+        body = match.group("body").replace("\u060c", ",")
         body = re.sub(
-            r",\s*and\s+", ", ", match.group("body"), flags=re.IGNORECASE
+            r"(?:,\s*)?\s+(?:and|\u0648)\s+", ", ", body, flags=re.IGNORECASE
         )
         replacement = f"({body})"
         if replacement != match.group(0):

@@ -11,6 +11,7 @@ from tarjomeh.core.config import TarjomehConfig
 from tarjomeh.core.llm_client import TruncatedCompletionError
 from tarjomeh.core.pipeline import (
     TranslationPipeline,
+    _canonical_chunk_paragraph_identity,
     _filter_critique_policy_conflicts,
     _parse_recovery_segment,
 )
@@ -702,9 +703,11 @@ def test_invalid_recovery_assembly_is_quarantined_until_refiner_repairs_it() -> 
         job_id="job-invalid-recovery",
     )
 
-    assert result == PersianTypographer(config.to_dict().get("persian")).process(
-        repaired
+    expected, _identity = _canonical_chunk_paragraph_identity(
+        Chunk(0, source, "", ""),
+        PersianTypographer(config.to_dict().get("persian")).process(repaired),
     )
+    assert result == expected
     # This isolated MagicMock does not persist candidate hashes, so the final
     # canonical candidate must be reviewed directly rather than rebound.
     assert critic.calls == 3

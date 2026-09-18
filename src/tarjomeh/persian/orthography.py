@@ -18,6 +18,15 @@ _PERSIAN_LETTERS = (
 
 _SAFE_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     (
+        "standard_ba_in_hal_spacing",
+        re.compile(
+            rf"(?<![{_PERSIAN_LETTERS}])"
+            rf"با(?:\u200c|\s*)این(?:\u200c|\s*)حال"
+            rf"(?![{_PERSIAN_LETTERS}])"
+        ),
+        "با این حال",
+    ),
+    (
         "verb_prefix_zwnj",
         re.compile(
             rf"(?<![{_PERSIAN_LETTERS}\u200c])(ن?می)\s+(?=[{_PERSIAN_LETTERS}])"

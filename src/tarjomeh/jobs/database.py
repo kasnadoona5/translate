@@ -1258,6 +1258,8 @@ class JobDatabase:
         paragraph_identity: dict[str, Any] | None = None,
         candidate_selection: dict[str, Any] | None = None,
         canonical_admission: dict[str, Any] | None = None,
+        final_quality_admission: dict[str, Any] | None = None,
+        source_obligation_resolution: dict[str, Any] | None = None,
         chapter_checkpoint: dict[str, Any] | None = None,
     ) -> None:
         """Persist chunk completion and its memory snapshot in ONE transaction.
@@ -1370,6 +1372,96 @@ class JobDatabase:
                         ),
                     ),
                 )
+            if final_quality_admission is not None:
+                conn.execute(
+                    """
+                    INSERT INTO chunk_events
+                        (job_id, chunk_index, timestamp, event_type, payload)
+                    VALUES (?, ?, ?, 'final_quality_admission', ?)
+                    """,
+                    (
+                        job_id,
+                        chunk_index,
+                        timestamp,
+                        json.dumps(
+                            final_quality_admission,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                    ),
+                )
+            if source_obligation_resolution is not None:
+                row = conn.execute(
+                    "SELECT payload FROM job_artifacts "
+                    "WHERE job_id = ? AND artifact_key = ?",
+                    (job_id, "source_obligation_recovery_v1"),
+                ).fetchone()
+                try:
+                    recovery_state = json.loads(row["payload"]) if row else {}
+                except (json.JSONDecodeError, TypeError):
+                    recovery_state = {}
+                if not isinstance(recovery_state, dict):
+                    recovery_state = {}
+                entries = recovery_state.get("entries", {})
+                if not isinstance(entries, dict):
+                    entries = {}
+                entry = entries.get(str(chunk_index))
+                if (
+                    isinstance(entry, dict)
+                    and entry.get("status") == "pending"
+                    and entry.get("source_sha256")
+                    == source_obligation_resolution.get("source_sha256")
+                    and entry.get("candidate_sha256")
+                    == source_obligation_resolution.get("candidate_sha256")
+                ):
+                    resolved_entry = dict(entry)
+                    resolved_entry.update({
+                        "status": "resolved",
+                        "resolved_at": timestamp,
+                        "resolved_candidate_sha256": (
+                            source_obligation_resolution.get("candidate_sha256")
+                        ),
+                    })
+                    resolved_entry.pop("candidate", None)
+                    entries[str(chunk_index)] = resolved_entry
+                    recovery_state.update({"version": 1, "entries": entries})
+                    conn.execute(
+                        """
+                        INSERT INTO job_artifacts
+                            (job_id, artifact_key, payload, updated_at)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(job_id, artifact_key) DO UPDATE SET
+                            payload = excluded.payload,
+                            updated_at = excluded.updated_at
+                        """,
+                        (
+                            job_id,
+                            "source_obligation_recovery_v1",
+                            json.dumps(
+                                recovery_state,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            ),
+                            timestamp,
+                        ),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO chunk_events
+                            (job_id, chunk_index, timestamp, event_type, payload)
+                        VALUES (?, ?, ?, 'source_obligation_recovery_resolved', ?)
+                        """,
+                        (
+                            job_id,
+                            chunk_index,
+                            timestamp,
+                            json.dumps(
+                                source_obligation_resolution,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            ),
+                        ),
+                    )
             if chapter_checkpoint is not None:
                 checkpoint_state = _checkpoint_state(conn, job_id)
                 position = int(chapter_checkpoint["chapter_position"])

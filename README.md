@@ -3,7 +3,7 @@
 English-to-Persian academic book translation with persistent terminology,
 book-level memory, independent quality review, and RTL document export.
 
-This README documents release **v10.33.0**. Tarjomeh is licensed under AGPL-3.0.
+This README documents release **v10.34.0**. Tarjomeh is licensed under AGPL-3.0.
 
 Source mirrors:
 
@@ -497,38 +497,40 @@ Persistent host data:
 | `/opt/translate/output` | `/app/output` | explicit CLI output |
 | `/opt/translate/config.toml` | `/app/config.toml` | read-only app configuration |
 | `/opt/translate/.env` | Compose environment | secrets and endpoints |
-| `/root/.9router` | `/app/data` in 9router | 9router database/configuration |
+| `/opt/translate/9router-data` | `/app/data` in 9router | 9router database/configuration |
 
-Back up `jobs`, `glossary`, `.env`, `config.toml`, and `/root/.9router`.
+Back up `jobs`, `glossary`, `.env`, `config.toml`, and `9router-data`.
 
 ## Safely Updating Tarjomeh on a Small VPS
 
 Do not use `docker-compose down`, `docker system prune -a`, or
 `docker volume prune`. Do not remove or recreate 9router while updating
-Tarjomeh. For v10.33, use the guarded release script rather than manually
+Tarjomeh. For v10.34, use the guarded release script rather than manually
 rebuilding or replacing containers:
 
 ```bash
 cd /opt/translate
 git fetch origin main --tags
-git show v10.33.0:scripts/deploy_tarjomeh_v1033.sh \
-  > /root/deploy_tarjomeh_v1033.sh
-chmod 700 /root/deploy_tarjomeh_v1033.sh
+git show v10.34.0:scripts/deploy_tarjomeh_v1034.sh \
+  > /root/deploy_tarjomeh_v1034.sh
+chmod 700 /root/deploy_tarjomeh_v1034.sh
 
-LOG=/root/deploy_tarjomeh_v1033.log
+LOG=/root/deploy_tarjomeh_v1034.log
 : > "$LOG"
-nohup bash /root/deploy_tarjomeh_v1033.sh \
+nohup bash /root/deploy_tarjomeh_v1034.sh \
   > "$LOG" 2>&1 </dev/null &
 echo "Deployment PID: $!"
 tail --retry -F "$LOG"
 ```
 
 `Ctrl+C` stops following the log, not the background deployment. A successful
-run ends with `Deployment v10.33.0 completed. Running 9router was unchanged.`
+run ends with `Deployment v10.34.0 completed. Running 9router was unchanged.`
 The script backs up persistent Tarjomeh state, preserves the local glossary,
-performs guarded Tarjomeh-only space cleanup, verifies the candidate and running
-capability manifests, waits for health, and verifies that the 9router container
-ID, image, start time, and mounts did not change. It stops before replacement
+performs guarded low-space cleanup, verifies the candidate and running capability
+manifests, waits for health, and verifies that the 9router container ID, active
+image, start time, and mounts did not change. Cleanup may remove an unreferenced
+historical 9router image left by an earlier 9router update, but never the running
+container or its image. It stops before replacement
 when tracked files (other than the local glossary), active jobs, version
 identity, dependency compatibility, or free-space requirements are unsafe.
 
@@ -799,15 +801,15 @@ tarjomeh eval BASELINE_JOB_ID CANDIDATE_JOB_ID \
 tarjomeh eval BASELINE_JOB_ID CANDIDATE_JOB_ID --fail-on-regression
 ```
 
-### Full v10.33 job audit
+### Full v10.34 job audit
 
 The release includes two read-only audit collectors. Pass a job ID, or omit it
 to inspect the latest job:
 
 ```bash
 cd /opt/translate
-bash scripts/audit_tarjomeh_v1033_reports.sh JOB_ID
-bash scripts/audit_tarjomeh_v1033_companion.sh JOB_ID
+bash scripts/audit_tarjomeh_v1034_reports.sh JOB_ID
+bash scripts/audit_tarjomeh_v1034_companion.sh JOB_ID
 ```
 
 The report audit regenerates the normal QA report and writes memory audit TXT
@@ -935,6 +937,9 @@ releases.
 
 ## Release History
 
+- v10.34: paragraph identity before exact final review, atomic final-quality
+  checkpoint admission, resumable source-obligation candidates, conservative
+  academic citation/orthography repair, and stronger audit evidence
 - v10.33: canonical final-candidate quality evidence, paragraph-scoped style
   authority, safer contextual morphology/terminology quarantine, monotonic
   source obligations, and guarded low-space deployment that proves 9router is

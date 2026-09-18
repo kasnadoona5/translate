@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v10.33.0"
+RUNTIME_RELEASE = "v10.34.0"
 RUNTIME_REVISION = 1
 
 
@@ -54,6 +54,9 @@ def runtime_capabilities() -> dict[str, Any]:
             "lexical_scope_memory_quarantine": True,
             "source_aligned_note_marker_relocation": True,
             "lexically_safe_critique_rebind": True,
+            "identity_before_final_quality": True,
+            "atomic_final_quality_checkpoint": True,
+            "resumable_source_obligation_repair": True,
         },
         "policy_versions": {
             "structure_evidence": 2,
@@ -71,6 +74,8 @@ def runtime_capabilities() -> dict[str, Any]:
             "final_quality_authority": 1,
             "note_marker_recovery": 2,
             "critique_canonical_rebind": 1,
+            "final_quality_checkpoint": 2,
+            "source_obligation_recovery": 1,
         },
     }
 

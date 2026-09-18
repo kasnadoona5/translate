@@ -136,6 +136,8 @@ Instructions:
    Treat every content-bearing source head and its complements as an obligation:
    a fluent paraphrase may reorganize them, but it must retain the governing
    concept, action or relation as well as every modifier that limits its scope.
+   Preserve the technical force of methodological nouns and adjectives instead of
+   replacing them with a generic word merely to make the sentence sound smoother.
    Treat coordinated source members separately: preserve every verb, complement,
    contrast, and qualification in pairs such as "extended and qualified" rather
    than allowing one fluent Persian phrase to swallow the other member.

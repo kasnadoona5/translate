@@ -46,6 +46,6 @@ def test_v1028_deployment_is_scoped_and_checks_checkpoint_publish() -> None:
 
 def test_v1028_runtime_contract_declares_checkpoint_publish() -> None:
     manifest = runtime_capabilities()
-    assert manifest["release"] == "v10.33.0"
+    assert manifest["release"] == "v10.34.0"
     assert manifest["capabilities"]["checkpoint_preview_atomic_publish"] is True
     assert manifest["policy_versions"]["checkpoint_export"] == 3
