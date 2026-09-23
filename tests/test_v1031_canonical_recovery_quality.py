@@ -281,7 +281,7 @@ def test_v1031_runtime_contract_exercises_new_boundaries() -> None:
     manifest = runtime_capabilities()
     probes = runtime_behavior_probes()
 
-    assert manifest["release"] == "v10.34.0"
+    assert manifest["release"] == "v10.35.0"
     assert manifest["capabilities"]["canonical_export_is_lexically_pure"] is True
     assert manifest["capabilities"]["resumable_split_recovery_segments"] is True
     assert probes["canonical_admission_matches_final_text"] is True

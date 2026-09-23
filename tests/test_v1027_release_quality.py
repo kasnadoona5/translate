@@ -177,6 +177,12 @@ _STYLE_SAMPLE_C = (
     "این رویکرد، ضمن حفظ دقت مفهومی، پیوند میان ساختارهای نهادی و راهبردهای "
     "کنشگران را در بستر تاریخی گسترده‌تری بررسی می‌کند."
 )
+_STYLE_SCORES = {
+    "accuracy": 9.5,
+    "fluency": 9.5,
+    "terminology": 9.5,
+    "register": 9.5,
+}
 
 
 def test_legacy_style_checkpoint_migrates_as_fallback_evidence() -> None:
@@ -203,12 +209,14 @@ def test_only_representative_body_prose_establishes_style_profile() -> None:
         paragraph_role="body",
         book_genre="academic",
         representative=True,
+        final_scores=_STYLE_SCORES,
     )
     final = manager._update_style_profile(
         _STYLE_SAMPLE_C,
         paragraph_role="body",
         book_genre="academic",
         representative=True,
+        final_scores=_STYLE_SCORES,
     )
 
     assert fallback["profile_status"] == "warming_up"
@@ -221,6 +229,7 @@ def test_only_representative_body_prose_establishes_style_profile() -> None:
         paragraph_role="body",
         book_genre="academic",
         representative=True,
+        final_scores=_STYLE_SCORES,
     )
     assert fourth["profile_status"] == "established"
 
@@ -232,6 +241,7 @@ def test_genre_guidance_changes_style_dimensions_not_terminology_authority() -> 
         paragraph_role="body",
         book_genre="academic",
         representative=True,
+        final_scores=_STYLE_SCORES,
     )
 
     literary_config = TarjomehConfig()
@@ -242,6 +252,7 @@ def test_genre_guidance_changes_style_dimensions_not_terminology_authority() -> 
         paragraph_role="body",
         book_genre="literary",
         representative=True,
+        final_scores=_STYLE_SCORES,
     )
 
     assert "argument structure" in academic.style_profile
@@ -253,7 +264,7 @@ def test_genre_guidance_changes_style_dimensions_not_terminology_authority() -> 
 def test_runtime_capability_manifest_is_versioned_and_complete() -> None:
     manifest = runtime_capabilities()
 
-    assert manifest["release"] == "v10.34.0"
+    assert manifest["release"] == "v10.35.0"
     assert manifest["revision"] >= 1
     assert all(manifest["capabilities"].values())
     assert manifest["capabilities"]["four_layer_memory"] is True

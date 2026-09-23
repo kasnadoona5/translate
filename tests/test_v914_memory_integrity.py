@@ -86,7 +86,8 @@ def test_existing_contextual_correction_is_quarantined_without_deletion() -> Non
     assert nouns.all_nouns()["Constitution"] == "ساختار دولت به‌مثابه شکلی از"
     assert nouns.is_context_deferred("Constitution")
     assert "Constitution" not in nouns.get_context()
-    assert "state system" in nouns.get_context()
+    assert "state system" not in nouns.get_context()
+    assert nouns.is_context_deferred("state system")
 
 
 def test_layer_one_prompt_contains_only_terms_in_current_source() -> None:

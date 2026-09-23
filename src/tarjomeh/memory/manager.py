@@ -38,6 +38,7 @@ from tarjomeh.quality.integrity import (
     repeated_persian_word_artifacts,
     tatweel_separator_artifacts,
 )
+from tarjomeh.quality.structure_audit import audit_payload as structure_audit_payload
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,13 @@ _AUTHOR_YEAR_CITATION_RE = re.compile(
 _LEADING_NOTE_MARKER_RE = re.compile(
     r"^(?:\[?\d{1,3}\]?|[\u00b9\u00b2\u00b3\u2070-\u2079])\s+"
 )
+_STYLE_SURFACE_ARTIFACT_RE = re.compile(
+    r"\u200c{2,}|"
+    r"(?<=[\u0600-\u06ff])\s+\((?:ها|های|ان|ات|تر|ترین)\)(?!\w)|"
+    r"(?<=[\u0600-\u06ff])\u200c\s|\s\u200c(?=[\u0600-\u06ff])"
+)
+_STYLE_AUTHORITY_DIMENSIONS = ("accuracy", "fluency", "terminology", "register")
+_STYLE_AUTHORITY_FLOOR = 9.0
 
 
 def _numeric_score(value: Any) -> float:
@@ -146,7 +154,11 @@ def _summary_english_prefix_stutters(
 def _clean_style_sample(text: str) -> str:
     """Return a safe style-only sample without mutating persisted memory."""
     sample = _complete_style_sample(text)
-    if not sample or _STYLE_PROTOCOL_RE.search(sample):
+    if (
+        not sample
+        or _STYLE_PROTOCOL_RE.search(sample)
+        or _STYLE_SURFACE_ARTIFACT_RE.search(sample)
+    ):
         return ""
     if sample.lstrip().startswith(("...", "\u2026")) or sample.rstrip().endswith(
         ("...", "\u2026")
@@ -171,6 +183,41 @@ def _clean_style_sample(text: str) -> str:
     if persian_chars < 8 or latin_words > max(12, persian_chars // 18):
         return ""
     return sample
+
+
+def _style_record_is_authoritative(record: dict[str, Any]) -> bool:
+    """Return whether persisted evidence may actively teach book-level style."""
+    if not bool(record.get("representative")):
+        return False
+    cleaned = _clean_style_sample(str(record.get("text", "")))
+    if not cleaned:
+        return False
+    if _numeric_score(record.get("quality_score")) < 75.0:
+        return False
+    scores = dict(record.get("final_scores", {}) or {})
+    return bool(
+        all(name in scores for name in _STYLE_AUTHORITY_DIMENSIONS)
+        and all(
+            _numeric_score(scores.get(name)) >= _STYLE_AUTHORITY_FLOOR
+            for name in _STYLE_AUTHORITY_DIMENSIONS
+        )
+    )
+
+
+def _source_style_contradiction(source: str, target: str) -> list[str]:
+    """Return source-structure findings that disqualify a style exemplar only."""
+    findings = list(structure_audit_payload(source or "", target or "").get(
+        "findings", []
+    ) or [])
+    return [
+        str(finding.get("check_id", ""))
+        for finding in findings
+        if str(finding.get("check_id", "")) in {
+            "announced_count_lexical_mismatch",
+            "announced_count_mismatch",
+            "announced_count_source_corrected",
+        }
+    ]
 
 
 def _style_sample_quality(text: str) -> dict[str, Any]:
@@ -558,6 +605,7 @@ class MemoryManager:
         if style_eligible:
             style_sample_policy = self._update_style_profile(
                 style_translation,
+                source_paragraphs=source_paragraphs,
                 source_paragraph_indices=style_source_indices,
                 paragraph_role=primary_role,
                 book_genre=self._book_genre(),
@@ -651,9 +699,7 @@ class MemoryManager:
     def _style_profile_status(self) -> str:
         self._ensure_style_sample_records()
         representative = sum(
-            bool(record.get("representative"))
-            and bool(_clean_style_sample(str(record.get("text", ""))))
-            and _numeric_score(record.get("quality_score")) >= self._style_min_score
+            _style_record_is_authoritative(record)
             for record in self.style_sample_records
         )
         if representative >= self._style_min_representative_samples:
@@ -664,6 +710,7 @@ class MemoryManager:
         self,
         translation: str,
         *,
+        source_paragraphs: list[str] | None = None,
         source_paragraph_indices: list[int] | None = None,
         paragraph_role: str = "body",
         book_genre: str = "general",
@@ -688,6 +735,25 @@ class MemoryManager:
             )
             quality = _style_sample_quality(paragraph)
             quality["paragraph_index"] = paragraph_index
+            source_paragraph = (
+                source_paragraphs[source_paragraph_index]
+                if source_paragraphs
+                and 0 <= source_paragraph_index < len(source_paragraphs)
+                else ""
+            )
+            structural_contradictions = _source_style_contradiction(
+                source_paragraph, paragraph
+            ) if source_paragraph else []
+            if structural_contradictions:
+                quality = {
+                    **quality,
+                    "approved": False,
+                    "reasons": list(quality.get("reasons", []) or [])
+                    + ["source_structure_contradiction"],
+                    "structure_findings": structural_contradictions,
+                }
+                rejections.append(quality)
+                continue
             unresolved_here = [
                 str(issue_id)
                 for issue_id, issue_paragraph in dict(
@@ -860,13 +926,11 @@ class MemoryManager:
             ),
         )
         representative_count = sum(
-            bool(record.get("representative"))
-            and bool(_clean_style_sample(str(record.get("text", ""))))
-            and _numeric_score(record.get("quality_score")) >= self._style_min_score
+            _style_record_is_authoritative(record)
             for record in ordered_records
         )
         active_records = (
-            [record for record in ordered_records if record.get("representative")]
+            [record for record in ordered_records if _style_record_is_authoritative(record)]
             if representative_count >= self._style_min_representative_samples
             else ordered_records
         )
@@ -884,7 +948,7 @@ class MemoryManager:
                 f"{i + 1}. "
                 + (
                     "[representative] "
-                    if record.get("representative")
+                    if _style_record_is_authoritative(record)
                     else "[fallback continuity only; do not imitate defects] "
                 )
                 + sample

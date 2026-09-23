@@ -197,6 +197,8 @@ class TestPhase7Persistence(unittest.TestCase):
                     "source": "capital",
                     "target": "پایتخت",
                     "status": "suggested",
+                    "identity_supported": True,
+                    "term_supported": True,
                 },
                 {
                     "source": "state",

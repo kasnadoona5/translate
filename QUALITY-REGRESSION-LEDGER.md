@@ -35,20 +35,85 @@ new evidence so later patches cannot silently revive an earlier defect.
 
 ## Current Baseline
 
-- Deployed evidence baseline: `v10.30.0`, commit `f8b5ea3`
-- Test job: `2f100b509493`
+- Latest supplied live evidence: `v10.34.0`, job `72802cf838c3`
+- Prior fully reconciled baseline: `v10.33.0`, commit `fddc2b6`, job `96851204419f`
 - Source: *The State: Past, Present, Future* (Bob Jessop, 2016)
-- Runtime result: the configured checkpoint finished 16 of 222 chunks (13 completed,
-  3 needs review). The durable chapter intent exists, but normal DOCX publication is
-  retrying because assembly rewrote already-canonical identifiers after their hashes
-  were committed.
-- Translation verdict: worker ownership, refiner veto, four-layer trust separation,
-  representative style selection, advisory research, and source coverage held. The run
-  remains `REVIEW`: chunk 9 retained a duplicate predicate, a mixed prose/table chunk
-  retained Cyrillic table text, two grounded minor accuracy concerns were admitted too
-  generously to durable memory, and Layer 2 contains an English partial-word restart.
-  Historical recovery failure was database chunk 10/UI chunk 11 (`c10.p44`), not chunk
-  12; valid earlier split segments were not reusable on resume.
+- Runtime result: the configured chapter checkpoint persisted 16 of 222 chunks. The
+  user-visible chunk 10 stop was database chunk 9: three source-structure admissions
+  rejected candidates that omitted the explicit `three key claims` obligation before a
+  later resume succeeded. This was a content-admission stop, not a provider failure.
+- Translation verdict: policy-v2 final candidate selection, DB text, Layer 3, assembly,
+  and DOCX remained aligned, and memory/style/research authority failed closed where
+  required. The run remains `REVIEW`: 10 of 16 exact final-quality records were bound
+  to text before paragraph-identity reconstruction, residual body prose was opaque or
+  incomplete, and several conservative Persian typography/citation repairs remained.
+  Full scholarly-table reconstruction remains deferred.
+
+## v10.33 Live Result
+
+- Candidate selection and canonical export stayed aligned, so the v10.32 stale
+  selection-hash defect did not return. The remaining mismatch was later in the flow:
+  exact final critique preceded paragraph-identity reconstruction in 10 of 16 chunks.
+- The repeated stop occurred at database chunk 9, displayed as the tenth chunk. Three
+  candidates failed the same explicit source obligation before a resumed attempt passed.
+  Failure evidence was durable, but the integrity-valid candidate itself was not reused,
+  causing avoidable translation work on resume.
+- Four-layer memory, paragraph-scoped style authority, and advisory research isolation
+  remained intact. The mismatched final-quality hashes correctly prevented stale evidence
+  from becoming durable authority.
+- Earlier count, identifier, note-marker, foreign-expression, citation, and typography
+  protections did not broadly regress. Residual output defects include opaque modifier
+  attachment, one missing predicate, an untranslated structural reference, weakened
+  methodological wording, and inconsistent year-list/transition typography.
+
+## v10.32 Live Result
+
+- Pipeline/transport: 120 LLM calls completed with zero transport, empty-completion,
+  or lifetime failures. The configured checkpoint paused normally. Five structured
+  helper responses required bounded JSON repair; all remained observable.
+- Canonical export: stored chunk text, Layer 3, assembled text, and delivered DOCX
+  match. The companion hard failure is nevertheless valid: 13 of 16
+  `final_candidate_selection` hashes were logged before the final canonical text was
+  known, so selection evidence was stale even though export itself was correct.
+- Translation: explicit source counts and prior typography protections held, but the
+  central condensation sentence still has an English-order modifier stack and mixed
+  voice. The source-authored foreign expression `(raison d'etat)` is absent, one note
+  marker changed sentence, and `longue duree` remains awkwardly integrated.
+- Memory/style/research: all four memory layers remained populated and research stayed
+  attributable and advisory. `state apparatus -> apparatus` is lexically incomplete;
+  `longue duree -> very long` is not context-independent technical terminology; and a
+  person name was assigned the technical-loanword role. Style correctly remained
+  `warming_up`, with one representative and one fallback record, but the prompt did not
+  visibly distinguish fallback continuity from authoritative imitation evidence.
+- Audit tooling: the first v10.32 companion run failed with `NameError: os is not
+  defined`; adding the missing standard-library import is required before the audit can
+  be considered self-contained. The rerun artifacts otherwise provide the expected
+  report set.
+
+## v10.31 Live Result
+
+- Code/runtime: v10.31 reached the configured checkpoint, paused normally after
+  database chunk 15, and published a valid downloadable DOCX from canonical stored
+  translations. The v10.30 export-identity regression did not return.
+- Worker/LLM: no durable chunk-12 terminal failure is present. Three incomplete critic
+  streams recovered through the existing bounded retry policy; they remain visible in
+  lifetime and active-generation accounting rather than being hidden as successes.
+- Source fidelity and Persian quality: explicit counts, identifiers, citations,
+  first-occurrence controls, and previously protected typography held. The output is
+  not publication-ready: chunks 8-11 include opaque modifier stacks, weak attachment,
+  or awkward academic Persian that the final retained-candidate evidence did not
+  consistently govern after rollback.
+- Memory/style: all four layers remained available and trust-separated. The automatic
+  mapping `policy paradigms` retained sentence-bound Persian morphology and therefore
+  is unsafe as context-independent terminology. Once representative style evidence was
+  sufficient, fallback records still remained active in the prompt. Research remained
+  attributable, evidence-bound, and advisory-only.
+- Audit accuracy: the v10.31 style hard failure was too coarse because it compared a
+  selected clean paragraph with unresolved issues elsewhere in the chunk. Name evidence
+  comparison also treated harmless dash/tatweel variants as missing. These are audit
+  defects, not proof that bad text entered authority.
+- Full scholarly-table reconstruction remains `DEFERRED` by explicit user decision;
+  malformed table text remains review-only and must not teach terminology or style.
 
 ## v10.26 Live Result
 
@@ -322,6 +387,27 @@ new evidence so later patches cannot silently revive an earlier defect.
 | R81 | Mixed prose/table chunks use paragraph-local structural policy | MONITOR | v10.30 collapsed mixed roles to `body`, weakening table recovery and preventing a safe short-row language repair. v10.31 aligns roles to source paragraph identity, groups only contiguous table rows, and retains the stricter prose threshold elsewhere. |
 | R82 | The exact DB/memory/export candidate has an atomic admission event | MONITOR | Earlier `final_candidate_typography` evidence could precede later canonical reconciliation. v10.31 commits `final_canonical_admission` with the chunk, memory snapshot, and paragraph identity; audits compare this exact hash with stored text. |
 | R83 | Malformed bilingual-summary word restarts cannot replace valid Layer 2 | MONITOR | v10.30 admitted `epistem epistemological`. v10.31 rejects only adjacent prefix restarts absent from source/prior English evidence, preserves the previous summary transactionally, and leaves Layer 2 advisory. |
+| R84 | Final repair and memory inspect the actually retained post-rollback candidate | PARTIAL | v10.32 improved the immediate rollback critique, but 13 of 16 final-selection hashes did not identify the stored candidate. v10.33 binds every critique to an exact candidate hash, reruns the existing critic only when the canonical retained text lacks matching evidence, and fails memory/style authority closed on a mismatch. |
+| R85 | Automatic terminology excludes sentence-bound or lexically incomplete targets | PARTIAL | Contextual suffix quarantine held, but v10.32 retained `state apparatus` as a target representing only `apparatus` and treated a generic paraphrase of a foreign expression as reusable terminology. v10.33 adds general lexical-member and foreign-orthography boundaries; passage continuity remains intact while global authority is withheld. |
+| R86 | Established style memory uses only clean representative paragraphs | PARTIAL | v10.32 correctly remained `warming_up` with one representative and one fallback record, but both appeared as undifferentiated prompt examples. v10.33 explicitly labels fallback material as continuity-only and non-imitable; once established, the existing representative-only rule remains unchanged. |
+| R87 | Audit style authority is paragraph-scoped and current-state aware | MONITOR | v10.31 could hard-fail a clean selected paragraph because another paragraph in the same chunk had an unresolved issue, and could report a superseded style event. v10.32 compares unresolved IDs only to the selected source paragraph and requires the sample hash to remain active. |
+| R88 | First-occurrence evidence tolerates harmless Persian orthographic variants | MONITOR | v10.31 audit matching could treat dash, tatweel, spacing, or ZWNJ variants as missing target evidence. v10.32 normalizes only those orthographic forms for audit comparison; production text and source-grounded anchor requirements remain unchanged. |
+| R89 | Every finished chunk records the final candidate-selection basis and hash | PROTECTED | v10.33 live evidence confirms policy-v2 final selection hashes equal stored canonical text; v10.34 keeps selection, paragraph identity, final quality, memory, search state, and canonical admission in one transaction. |
+| R90 | Final quality evidence is bound to the exact canonical candidate | OPEN | v10.33 exposed 10 of 16 final-quality hashes bound before paragraph-identity reconstruction. v10.34 moves identity before exact final critique and rejects any later checkpoint rewrite instead of silently rebinding stale evidence. |
+| R91 | Target-only readability review is paragraph-role scoped in mixed chunks | MONITOR | v10.33 sends only canonically aligned body prose to the existing readability reviewer; headings, contents, references, lists, indexes, and table rows remain untouched. The source-aware critic/refiner and all admission gates remain authoritative. |
+| R92 | A surviving note marker cannot silently move to another sentence | MONITOR | v10.32 preserved marker count while one marker changed sentence. v10.33 relocates only one globally unique marker when source and target have equal paragraph/sentence counts and prove one destination in the same paragraph. Cross-paragraph, split, merged, reused, or ambiguous cases remain review/blocking evidence. |
+| R93 | Source-authored foreign scholarly expressions remain exact and source-bound | MONITOR | v10.32 omitted `(raison d'etat)` and stored an unsafe generic rendering of `longue duree`. v10.33 recognizes Latin-diacritic/internal-apostrophe expressions without a vocabulary list, requires exact parenthetical text through the existing bounded anchor path, and prevents generic paraphrases from becoming terminology authority. |
+| R94 | Release audits execute completely and verify candidate authority | MONITOR | The first v10.32 companion run crashed because `os` was used without import. v10.33 fixes the import and hard-fails missing policy-v2 final selection, selection/DB hash mismatch, or candidate/quality hash mismatch while retaining full pipeline, memory, research, worker, LLM, export, and 9router checks. |
+| R95 | Paragraph identity is fixed before exact final quality review | MONITOR | v10.34 canonicalizes paragraph identity before the retained-candidate critique. Parallel, sequential, and manual checkpoint paths perform an idempotence assertion and raise rather than rewrite reviewed text. Live hash evidence is required. |
+| R96 | Final quality, candidate selection, canonical admission, memory, and chunk completion commit atomically | MONITOR | v10.34 writes all three final events with one timestamp inside `commit_chunk_checkpoint`; audits hard-fail timestamp divergence or missing evidence. Manual retranslation now uses the same checkpoint path. Live crash/recovery evidence is required. |
+| R97 | A source-obligation stop resumes from the best integrity-valid candidate without granting authority | MONITOR | v10.34 persists a source- and candidate-hash-bound review-only candidate, reruns every quality/admission gate on resume, and resolves it inside the successful chunk transaction. Stale source/hash evidence is ignored and cannot enter memory by itself. |
+| R98 | Conservative academic transition and year-only citation typography are stable | MONITOR | v10.34 normalizes bounded `بااین‌حال` variants to `با این حال` and converts separators only inside parenthetical year-only citation lists. Ordinary Persian prose lists and bibliography text remain unchanged. Live DOCX evidence is required. |
+
+| R99 | Objective final Persian defect receives only bounded source-safe repair | OPEN | v10.34 kept a malformed verb after a full refiner candidate introduced a larger source regression and was correctly rolled back. v10.35 adds one conditional exact-candidate refiner pass, admits only independently validated paragraph-local edits, and reruns identity, source structure, integrity, critique, and regression checks. Rejected repairs cannot become final quality authority. Fresh DOCX evidence is required. |
+| R100 | Reviewed terminology requires exact local bilingual alignment | OPEN | v10.34 accepted a printer name mapped to a country because the review used an oversized source excerpt and a context-independent label. v10.35 requires unique source-local and target-local alignment, persists `alignment_status`, and defers legacy unaligned accepted corrections on load. Passage continuity remains available. Fresh memory audit is required. |
+| R101 | Representative style meets every academic quality dimension | OPEN | v10.34 could establish style from a sample with a strong average but a weak single dimension, including malformed joiners. v10.35 requires accuracy, fluency, terminology, and register individually at or above the academic threshold and excludes deterministic malformed joiners. Legacy samples remain fallback. Fresh style evidence is required. |
+| R102 | Duplicate source-note markers cannot be introduced | OPEN | v10.34 carried both rich and plain versions of one source note marker. v10.35 removes only one unambiguous extra plain trailing copy when the source requires exactly one and blocks remaining surplus markers. Ambiguous markers remain reviewable. Fresh DOCX and note audit are required. |
+| R103 | Prompted research suggestions have directly supporting evidence | OPEN | v10.34 retained advisory suggestions whose excerpts did not establish the proposed term or identity. v10.35 includes only identity- and term-supported single-choice suggestions in the translator prompt. Other attributable research remains audit-visible but cannot steer terminology. Fresh research audit is required. |
 
 ## Validated v10.17 External Audit Notes
 
@@ -1052,6 +1138,12 @@ push, and fresh VPS evidence.
 | v10.27 | `e622b56eec7c` | REVIEW | Stable 112-call checkpoint run with no LLM failure. Memory trust and advisory research held, but one material proposition was omitted, canonical identifiers drifted, style had one warming-up sample, and checkpoint export failed on an 82-source/81-target paragraph reconstruction. Genre metadata was useful but not established; the offline model benchmark was not run. |
 | v10.28 (`0cf1bb3`) | not separately translated | HOTFIX | Checkpoint output is published before visible pause and export failure becomes resumable `paused_error`. It fixes state ordering but does not by itself repair v10.27's paragraph-identity mismatch. |
 | v10.29 (`pending`) | awaiting VPS run | PENDING | Canonical chunk paragraph identity, verifiable critic sentence coverage, final identifier admission, paragraph-scoped repeated-span salvage, truthful v10.29 audits, and a shared-layer low-space deployment pass all 927 local tests. Inferred paragraph boundaries are review-only before memory/style admission. No pipeline stage, memory layer, refiner veto, or model configuration was removed. |
+| v10.30 | `2f100b509493` | REVIEW | Durable checkpoint recovery was present, but checkpoint export still blocked because assembled text differed from canonical chunk identity. |
+| v10.31 | `c7e48ea03388` | REVIEW | Canonical export and checkpoint pause recovered; long quality calls were visible and prior mechanical protections held, while final prose/memory/style authority still needed stronger retained-candidate evidence. |
+| v10.32 | `bb2a078b8ab0` | REVIEW | Stable 120-call checkpoint run with zero LLM failures and matching DB/Layer-3/DOCX text. Thirteen stale candidate-selection hashes, residual opaque prose, a moved note marker, unsafe low-authority mappings, and a companion-script `os` crash remain. |
+| v10.33 (`pending`) | awaiting VPS run | PENDING | Candidate-hash-bound final quality, atomic policy-v2 selection/admission, paragraph-scoped readability, lexical-scope memory quarantine, conservative note relocation, explicit fallback-style labels, and complete audits are implemented without changing model or pipeline configuration. Live evidence is required. |
+| v10.33 | `96851204419f` | REVIEW | Policy-v2 selection and canonical export aligned, memory/style/research authority failed closed, and prior mechanical protections held. Ten of sixteen final-quality hashes preceded paragraph-identity reconstruction; database chunk 9 stopped three times on an omitted explicit source obligation before resume succeeded. |
+| v10.34 (`pending`) | awaiting VPS run | PENDING | Identity-before-review, atomic final-quality checkpointing, hash-bound source-obligation resume, conservative transition/citation repair, complete v10.34 audits, and guarded low-space deployment pass all 974 local tests. No model, quality threshold, memory layer, style authority, research authority, or unconditional LLM stage changed. |
 
 ## v10.24 Live Validation
 
@@ -1342,6 +1434,140 @@ pending a fresh v10.25 VPS run.
   `232` findings; mypy improves from `88` to `83` errors in 17 files. Live checkpoint
   publication and recovery-cache evidence remain required before R79-R83 can move
   from `MONITOR`.
+
+## v10.32 Pending Live Validation
+
+- Candidate selection must remain monotonic: exact source structure and grounded
+  source-fidelity obligations outrank Persian fluency; among equally source-faithful
+  candidates, fewer objective grammar/readability defects outrank cosmetic score gain.
+- After any rejected full refinement, final targeted repair, durable Layer 3 admission,
+  and style admission must use a fresh critique of the text actually retained. The
+  `final_candidate_selection` event hash must equal the canonical stored translation.
+- Automatic terminology may keep context-inflected passage evidence but cannot grant it
+  reusable global authority. A genuinely transliterated technical term may follow the
+  existing source-grounded first-occurrence English-anchor path without a word list.
+- Once at least three clean representative style records exist, fallback/legacy records
+  remain stored but are excluded from the active style prompt. A paragraph with a
+  grounded unresolved final issue cannot become style evidence even when another
+  paragraph in its chunk is clean.
+- Reports must retain active/lifetime LLM attempts, recovered failures, worker lifecycle,
+  research isolation, four-layer trust, source coverage, checkpoint/export identity,
+  and unchanged 9router identity. Style authority checks are paragraph-scoped and only
+  evaluate records still active in the current memory state.
+- Full scholarly-table reconstruction and broad PDF de-hyphenation remain deferred.
+  No model, temperature, reasoning setting, production LLM stage, refiner veto, memory
+  layer, research authority, output format, or checkpoint behavior is removed.
+- Local release verification: all `953` tests pass. Source/test compilation, all three
+  v10.32 Bash scripts, embedded audit Python, runtime behavior probes, and external
+  wrappers pass. Live VPS and translation evidence remain required before any v10.32
+  `MONITOR` row is promoted.
+- Ruff and mypy are not installed in this local interpreter, so the established v10.31
+  static-analysis baselines were not recharacterized for this release.
+
+## v10.33 Pending Live Validation
+
+- Each finished chunk must atomically commit policy-v2 candidate selection whose hash
+  equals the DB translation, paragraph identity, canonical admission, and Layer-3 text.
+  Provisional portfolio evidence must never be reported as final selection.
+- Every enabled final-quality decision must be attached to the exact retained candidate
+  hash. Stale critiques cannot grant reliable Layer-3 or style authority. A source-aware
+  refiner veto may cross provider issue-ID changes only when the normalized evidence
+  fingerprint is identical; a later exact critique overrides an earlier claimed repair.
+- A critique may be rebound across final canonical typography without another LLM call
+  only when the stored pre-canonical hash matches exactly and normalized alphanumeric
+  content remains identical in the same order. Any lexical change requires a fresh
+  source-aware critic call; stale or unbound evidence remains non-authoritative.
+- Mixed-role chunks send only aligned body prose to the existing target-side readability
+  reviewer. Source-aware critique/refinement remains authoritative, and headings,
+  contents, citations, references, lists, indexes, and table rows are not rewritten by
+  this pass.
+- Low-authority terminology must quarantine a target that transliterates only one member
+  of a multiword source term or turns a source-authored foreign expression into a generic
+  context-bound paraphrase. Accepted passage text and all four memory layers remain;
+  only reusable/global authority is withheld. Clear source-derived person roles may
+  correct a technical-loanword mislabel without a name list.
+- A unique surviving note marker may be relocated only under equal source/target
+  paragraph and sentence counts with one same-paragraph destination. Ambiguous cases
+  remain review/blocking. Required source-authored foreign parentheticals use the
+  existing bounded insertion-only model call and exact integrity checks.
+- Warming style profiles label fallback samples as continuity-only and non-imitable.
+  Established profiles remain representative-only. Research stays attributable and
+  advisory; model, temperature, reasoning, critique, refinement, back-translation,
+  glossary, checkpoint, export, and recovery settings are unchanged.
+- Deployment must use the exact v10.33 tag, stop for active jobs, preserve the local
+  glossary, remove only old Tarjomeh backups/images under guarded paths, build from the
+  running Tarjomeh image, verify runtime behavior, and prove the 9router container ID,
+  image, start time, and mounts are unchanged. Both audits must complete without the
+  prior missing-`os` crash and retain full LLM failure accounting.
+- Full scholarly-table reconstruction and broad PDF de-hyphenation remain deferred.
+  Local release verification: all `965` tests pass; source/test compilation, all three
+  v10.33 Bash scripts, runtime capabilities and behavioral probes, and diff whitespace
+  checks pass. Fresh VPS/DOCX evidence is required before any new row is promoted beyond
+  `MONITOR`.
+
+## v10.34 Pending Live Validation
+
+- Exact paragraph identity must be established before the final retained-candidate
+  critique. For every finished chunk, the final-quality candidate hash, policy-v2
+  candidate-selection hash, paragraph-identity hash, canonical-admission hash, stored DB
+  translation, Layer-3 text, assembled text, and DOCX text must identify the same string.
+- Final quality, candidate selection, canonical admission, chunk status, memory snapshot,
+  search state, paragraph identity, and any matching source-obligation resolution must
+  commit in one SQLite transaction. Audits hard-fail timestamp divergence, missing final
+  evidence, or a finished chunk with pending source-obligation recovery.
+- A repeated source-structure stop may reuse only the exact integrity-valid candidate
+  bound to the same chunk source hash and candidate hash. It remains review-only input,
+  skips only repeated translation generation, and must pass critique, refinement,
+  integrity, glossary, typography, identifier, paragraph, memory, and style gates again.
+- Fluency repair remains source-aware and bounded. Technical force and content-bearing
+  modifiers cannot be weakened for smoothness. The existing reviewer/refiner veto,
+  critique threshold, model configuration, back translation, research, all four memory
+  layers, style memory, checkpoint behavior, and output formats remain unchanged.
+- Persian cleanup is deterministic only for bounded high-confidence forms: spacing of
+  `با این حال` and separators inside parenthetical year-only citation lists. It must not
+  rewrite ordinary prose lists, bibliography entries, identifiers, or source wording.
+- Deployment may remove only unreferenced historical image objects and Tarjomeh-owned
+  backups/candidates. The running 9router container ID, image, start time, and mounts must
+  remain byte-for-byte unchanged. Both audits retain active/lifetime LLM calls, failure
+  rates, worker lifecycle, memory/style/research authority, and export checks.
+- Full scholarly-table reconstruction and broad PDF de-hyphenation remain deferred.
+  Local release verification: all `974` tests pass; source/test compilation, v10.34 Bash
+  syntax, embedded audit Python, runtime contract, external wrappers, and diff whitespace
+  checks pass. Fresh VPS/DOCX evidence is required before R90 and R95-R98 can be promoted.
+
+## v10.35 Pending Live Validation
+
+- The v10.34 source/output audit found a retained malformed verb, a globally
+  unsafe reviewed entity mapping, weak representative style evidence, duplicate
+  note-marker rendering, and research suggestions without direct term support.
+  No chunk-12 terminal stop was present in the supplied v10.34 evidence; do not
+  attribute a new provider or worker failure without its log and generation.
+- Exact-final repair is conditional and bounded. The existing refiner may reject
+  the critic; only independent local changes that preserve all source obligations
+  and pass renewed exact critique, integrity, paragraph identity, and regression
+  checks can replace the retained text. Rejected trials remain observable but
+  cannot become final quality, reliable memory, or style authority.
+- Accepted terminology requires a uniquely aligned source phrase and target
+  phrase from the same local evidence. Legacy reviewed corrections without that
+  proof are prompt-deferred, never erased from continuity history. Research
+  remains advisory and must support both identity and term before inclusion in
+  the translator prompt.
+- Representative style must pass every final quality dimension, the established
+  threshold, paragraph role, and deterministic malformed-joiner screen. Lower
+  trust records remain available as labeled fallback continuity, not style to
+  imitate. The four-layer memory pipeline is unchanged.
+- Note cleanup removes only a provably surplus plain copy of a unique source
+  marker. Unclear or multiple marker mismatches remain blocked/reviewable.
+  General scholarly table reconstruction and broad PDF de-hyphenation remain
+  deferred. Translation model, critic, refiner, back-translation, checkpoint,
+  output formats, and all other established stages remain enabled.
+- Local verification: `984` tests passed, followed by `19` focused tests after
+  the final authority-record edit. Bash/embedded Python syntax and runtime
+  behavior probes pass. A normal VPS chapter-checkpoint translation is still
+  required before R99-R103 can be promoted beyond `OPEN`. The audit must
+  include active/lifetime LLM call and failure
+  rates, source/export identity, memory/style/research authority, and worker
+  lifecycle; deployment must prove the running 9router is unchanged.
 
 ## Update Procedure
 

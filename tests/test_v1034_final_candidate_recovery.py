@@ -180,7 +180,7 @@ def test_citation_rule_does_not_rewrite_persian_prose_list() -> None:
 
 def test_v1034_release_scripts_and_runtime_contract_are_complete() -> None:
     manifest = runtime_capabilities()
-    assert manifest["release"] == "v10.34.0"
+    assert manifest["release"] == "v10.35.0"
     for capability in (
         "identity_before_final_quality",
         "atomic_final_quality_checkpoint",

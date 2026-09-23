@@ -127,6 +127,12 @@ def test_established_style_profile_excludes_fallback_evidence() -> None:
             "representative": index < 3,
             "fallback": index == 3,
             "quality_score": 100.0,
+            "final_scores": {
+                "accuracy": 9.5,
+                "fluency": 9.5,
+                "terminology": 9.5,
+                "register": 9.5,
+            },
         }
         for index, sample in enumerate(samples)
     ]
@@ -201,7 +207,7 @@ def test_v1033_runtime_and_release_scripts_are_complete() -> None:
     manifest = runtime_capabilities()
     probes = runtime_behavior_probes()
 
-    assert manifest["release"] == "v10.34.0"
+    assert manifest["release"] == "v10.35.0"
     assert manifest["capabilities"]["post_rollback_final_evidence"] is True
     assert manifest["capabilities"]["objective_candidate_ranking"] is True
     assert manifest["capabilities"]["contextual_morphology_quarantine"] is True

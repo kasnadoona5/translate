@@ -40,6 +40,10 @@ _PLAIN_SPACED_NOTE_RE = re.compile(
     rf"(?=\s*(?:[-\u2010-\u2015\u060c\u061b\u061f,;.!?]|"
     rf"[A-Za-z\u0600-\u06ff]|$))"
 )
+_PLAIN_TRAILING_NOTE_RE = re.compile(
+    rf"(?P<gap>[ \t]+)(?P<marker>[{_PLAIN_NOTE_DIGITS}]{{1,3}})"
+    rf"(?=[ \t]*(?:\n\n|$))"
+)
 _PERSIAN_RE = re.compile(r"[\u0600-\u06ff]")
 _ASCII_WORD_RE = re.compile(r"[A-Za-z]{2,}")
 _JSON_LEAK_RE = re.compile(r'(^\s*\{|"(?:translation|decision|rationale)"\s*:)', re.IGNORECASE)
@@ -668,6 +672,11 @@ def extract_note_markers(text: str, *, allow_spaced: bool = False) -> list[str]:
     matcher = _PLAIN_SPACED_NOTE_RE if allow_spaced else _PLAIN_ATTACHED_NOTE_RE
     for match in matcher.finditer((text or "").translate(_DIGIT_MAP)):
         markers.append(match.group("marker"))
+    if allow_spaced:
+        for match in _PLAIN_TRAILING_NOTE_RE.finditer(
+            (text or "").translate(_DIGIT_MAP)
+        ):
+            markers.append(match.group("marker"))
     return markers
 
 
@@ -818,13 +827,87 @@ def restore_source_note_markers(
                 "rendered": rendered,
             })
 
+    # A model can preserve the canonical superscript and also append a localized
+    # plain copy. Remove only that uniquely proven duplicate; never choose among
+    # two equivalent superscripts or among multiple plain candidates.
+    for marker, required_count in required.items():
+        available_count = available_note_markers(repaired, required)[marker]
+        if required_count != 1 or available_count != 2:
+            continue
+        rich_matches = [
+            match for match in _NOTE_RE.finditer(repaired)
+            if (match.group(1) or match.group(2).translate(_SUPERSCRIPT_MAP)) == marker
+        ]
+        normalized_repaired = repaired.translate(_DIGIT_MAP)
+        plain_matches = [
+            match for match in _PLAIN_SPACED_NOTE_RE.finditer(normalized_repaired)
+            if match.group("marker") == marker
+            and not any(
+                rich.start() <= match.start("marker") < rich.end()
+                for rich in rich_matches
+            )
+        ]
+        plain_matches.extend(
+            match
+            for match in _PLAIN_TRAILING_NOTE_RE.finditer(normalized_repaired)
+            if match.group("marker") == marker
+        )
+        if len(rich_matches) != 1 or len(plain_matches) != 1:
+            ambiguous.append({
+                "marker": marker,
+                "reason": "surplus_note_marker_not_uniquely_removable",
+                "source_count": required_count,
+                "target_count": available_count,
+            })
+            continue
+        rich_match = rich_matches[0]
+        plain_match = plain_matches[0]
+        rich_paragraph = repaired.count("\n\n", 0, rich_match.start())
+        plain_paragraph = repaired.count("\n\n", 0, plain_match.start())
+        if rich_paragraph != plain_paragraph:
+            ambiguous.append({
+                "marker": marker,
+                "reason": "surplus_note_marker_changed_paragraph",
+                "source_count": required_count,
+                "target_count": available_count,
+            })
+            continue
+        marker_start, marker_end = plain_match.span("marker")
+        removal_start = marker_start
+        leader_end = (
+            plain_match.end("leader")
+            if "leader" in plain_match.groupdict()
+            else plain_match.start("gap")
+        )
+        while removal_start > leader_end and repaired[removal_start - 1].isspace():
+            removal_start -= 1
+        if "gap" in plain_match.groupdict():
+            removal_start = plain_match.start("gap")
+        candidate = repaired[:removal_start] + repaired[marker_end:]
+        if available_note_markers(candidate, required)[marker] != required_count:
+            ambiguous.append({
+                "marker": marker,
+                "reason": "surplus_note_marker_removal_not_cardinality_safe",
+                "source_count": required_count,
+                "target_count": available_count,
+            })
+            continue
+        repaired = candidate
+        repairs.append({
+            "type": "unique_plain_duplicate_note_marker_removed",
+            "marker": marker,
+            "paragraph_index": rich_paragraph,
+        })
+
     missing = required - available_note_markers(repaired, required)
     if not missing:
+        surplus = available_note_markers(repaired, required) - required
         return repaired, {
             "repair_count": len(repairs),
             "repairs": repairs,
             "ambiguous": ambiguous,
             "unresolved": [],
+            "surplus": list(surplus.elements()),
             "policy": (
                 "source-confirmed unique anchors only; ambiguous note positions "
                 "remain blocking"
@@ -986,11 +1069,15 @@ def restore_source_note_markers(
     unresolved = list(
         (required - available_note_markers(repaired, required)).elements()
     )
+    surplus = list(
+        (available_note_markers(repaired, required) - required).elements()
+    )
     return repaired, {
         "repair_count": len(repairs),
         "repairs": repairs,
         "ambiguous": ambiguous,
         "unresolved": unresolved,
+        "surplus": surplus,
         "policy": (
             "source-confirmed unique anchors only; ambiguous note positions "
             "remain blocking"
@@ -2918,6 +3005,29 @@ class PostEditIntegrityGate:
                 "note_markers_still_missing", "warning",
                 "The edit preserved all available note markers, but an earlier omission remains.",
                 missing=list(missing_note_counts.elements()),
+            )
+        surplus_note_counts = (
+            available_note_markers(candidate, required_notes) - required_notes
+        )
+        previous_surplus_note_counts = (
+            available_note_markers(previous, required_notes) - required_notes
+            if previous else Counter()
+        )
+        newly_surplus_note_counts = (
+            surplus_note_counts - previous_surplus_note_counts
+            if previous else surplus_note_counts
+        )
+        if newly_surplus_note_counts:
+            add(
+                "note_markers_surplus", "blocking",
+                "Footnote or endnote markers were duplicated.",
+                surplus=list(newly_surplus_note_counts.elements()),
+            )
+        elif surplus_note_counts:
+            add(
+                "note_markers_still_surplus", "warning",
+                "The edit preserved an earlier duplicate note marker.",
+                surplus=list(surplus_note_counts.elements()),
             )
 
         source_paragraphs = _paragraphs(source)

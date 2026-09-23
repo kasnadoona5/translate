@@ -1018,6 +1018,7 @@ class ProperNouns:
         context_independent: bool | None = None,
         source_surface: str = "",
         semantic_role: str = "",
+        alignment_status: str = "",
     ) -> dict[str, Any]:
         """Add or reconcile a proper noun mapping by source authority.
 
@@ -1122,6 +1123,10 @@ class ProperNouns:
                 "semantic_role": (
                     " ".join(semantic_role.split()).strip().casefold()
                     or str(prior.get("semantic_role", ""))
+                ),
+                "alignment_status": (
+                    " ".join(alignment_status.split()).strip().casefold()
+                    or str(prior.get("alignment_status", ""))
                 ),
                 "stripped_target_annotation": (
                     stripped_annotation
@@ -1317,8 +1322,11 @@ class ProperNouns:
             return True
         return bool(
             provenance.get("origin") == "accepted_correction"
-            and not is_reusable_terminology_mapping(
-                key, self._nouns.get(key, "")
+            and (
+                provenance.get("alignment_status") != "exact_local"
+                or not is_reusable_terminology_mapping(
+                    key, self._nouns.get(key, "")
+                )
             )
         )
 
@@ -1411,6 +1419,7 @@ class ProperNouns:
                     )
             elif authority_class in {
                 "contextual_advisory", "observed_entity_advisory",
+                "reviewed_advisory",
             }:
                 occurrence = (
                     "introduced" if en in self._introduced
@@ -1519,6 +1528,7 @@ class ProperNouns:
                 record.setdefault("context_independent", False)
                 record.setdefault("source_surface", "")
                 record.setdefault("semantic_role", "")
+                record.setdefault("alignment_status", "")
                 computed_authority = _mapping_authority_class(
                         source,
                         self._nouns[source],
@@ -1551,6 +1561,16 @@ class ProperNouns:
                                 "noncanonical_automatic_mapping"
                             ),
                         })
+                if (
+                    record.get("origin") == "accepted_correction"
+                    and record.get("alignment_status") != "exact_local"
+                ):
+                    record.update({
+                        "context_deferred": True,
+                        "context_deferred_reason": (
+                            "accepted_correction_without_exact_local_alignment"
+                        ),
+                    })
             stored_aliases = data.get("aliases", {})
             self._aliases = {
                 source: [

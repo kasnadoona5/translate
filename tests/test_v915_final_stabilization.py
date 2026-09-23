@@ -84,8 +84,8 @@ class _StyleDB:
         ]
 
 
-def test_clean_eight_point_prose_can_seed_style_memory() -> None:
-    assert _chunk_style_approved(_StyleDB(), "job", 0)
+def test_one_sub_nine_dimension_cannot_seed_style_memory() -> None:
+    assert not _chunk_style_approved(_StyleDB(), "job", 0)
 
 
 def test_long_grounded_fluency_issue_gets_one_bounded_review_pass() -> None:

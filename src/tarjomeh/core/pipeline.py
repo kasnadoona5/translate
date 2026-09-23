@@ -2304,7 +2304,13 @@ def _research_context_for_memory(artifact: dict[str, Any] | None) -> str:
             continue
         source = str(item.get("source", "")).strip()
         target = str(item.get("target", "")).strip()
-        if source and target:
+        ambiguous_target = bool(
+            re.search(r"\s(?:/|or|یا)\s|[؛;]", target, re.IGNORECASE)
+        )
+        evidence_bound = bool(
+            item.get("identity_supported") and item.get("term_supported")
+        )
+        if source and target and evidence_bound and not ambiguous_target:
             confidence = str(item.get("confidence", "unknown"))
             evidence = str(item.get("evidence_type", "unspecified"))
             identity = "supported" if item.get("identity_supported") else "unverified"
@@ -2729,6 +2735,44 @@ def _paragraph_scoped_span_start(
     return None
 
 
+def _minimal_unique_local_edit(
+    *,
+    previous: str,
+    proposed: str,
+    source_segment_id: str,
+    current_span: str,
+    resulting_span: str,
+) -> tuple[str, str] | None:
+    """Shrink one coherent replacement to a unique unchanged-context diff."""
+    matcher = difflib.SequenceMatcher(None, current_span, resulting_span)
+    changes = [opcode for opcode in matcher.get_opcodes() if opcode[0] != "equal"]
+    if len(changes) != 1:
+        return None
+    tag, current_start, current_end, result_start, result_end = changes[0]
+    if tag != "replace" or current_start == current_end or result_start == result_end:
+        return None
+    for context in range(0, min(48, len(current_span)) + 1):
+        left = max(0, current_start - context)
+        right = min(len(current_span), current_end + context)
+        result_left = max(0, result_start - (current_start - left))
+        result_right = min(
+            len(resulting_span), result_end + (right - current_end)
+        )
+        before = current_span[left:right]
+        after = resulting_span[result_left:result_right]
+        if (
+            before
+            and after
+            and before != after
+            and after in proposed
+            and _paragraph_scoped_span_start(
+                previous, source_segment_id, before
+            ) is not None
+        ):
+            return before, after
+    return None
+
+
 def _salvage_local_refinement_edits(
     *,
     source: str,
@@ -2753,6 +2797,8 @@ def _salvage_local_refinement_edits(
     committed = 0
 
     spans: dict[str, tuple[int, int]] = {}
+    equivalent_to: dict[str, str] = {}
+    seen_edits: dict[tuple[int, int, str], str] = {}
     for raw in issue_decisions:
         issue_id = str(raw.get("issue_id", "")).strip()
         source_segment_id = str(
@@ -2766,7 +2812,17 @@ def _salvage_local_refinement_edits(
         ) if current_span else None
         if scoped is not None:
             start, _paragraph = scoped
-            spans[issue_id] = (start, start + len(current_span))
+            end = start + len(current_span)
+            normalized_result = normalize_for_match(
+                str(raw.get("resulting_span", ""))
+            )
+            fingerprint = (start, end, normalized_result)
+            if normalized_result and fingerprint in seen_edits:
+                equivalent_to[issue_id] = seen_edits[fingerprint]
+            else:
+                spans[issue_id] = (start, end)
+                if normalized_result:
+                    seen_edits[fingerprint] = issue_id
     overlapping_ids: set[str] = set()
     ordered_spans = sorted(spans.items(), key=lambda item: item[1])
     for position, (issue_id, (start, end)) in enumerate(ordered_spans):
@@ -2804,21 +2860,43 @@ def _salvage_local_refinement_edits(
             reason = "missing_local_span"
         elif normalize_for_match(current_span) == normalize_for_match(resulting_span):
             reason = "no_textual_change"
+        elif issue_id in equivalent_to:
+            reason = "equivalent_duplicate_issue"
         elif issue_id in overlapping_ids:
             reason = "overlapping_local_span"
         scoped = _paragraph_scoped_span_start(
             previous, source_segment_id, current_span
         ) if current_span else None
-        if not reason and scoped is None:
-            reason = "current_span_not_unique_in_source_paragraph"
-        elif resulting_span not in proposed:
-            reason = "resulting_span_not_in_candidate"
-        elif "\n\n" in current_span or "\n\n" in resulting_span:
-            reason = "paragraph_boundary_edit"
-        elif len(current_span) > 320 or len(resulting_span) > 480:
-            reason = "edit_not_local"
-        elif not 0.5 <= len(resulting_span) / max(1, len(current_span)) <= 2.0:
-            reason = "local_size_ratio_out_of_bounds"
+        if not reason:
+            if scoped is None:
+                reason = "current_span_not_unique_in_source_paragraph"
+            elif resulting_span not in proposed:
+                reason = "resulting_span_not_in_candidate"
+            elif "\n\n" in current_span or "\n\n" in resulting_span:
+                reason = "paragraph_boundary_edit"
+            elif (
+                len(current_span) > 320
+                or len(resulting_span) > 480
+                or not 0.5 <= len(resulting_span) / max(1, len(current_span)) <= 2.0
+            ):
+                minimal = _minimal_unique_local_edit(
+                    previous=previous,
+                    proposed=proposed,
+                    source_segment_id=source_segment_id,
+                    current_span=current_span,
+                    resulting_span=resulting_span,
+                )
+                if minimal is None:
+                    reason = (
+                        "edit_not_local"
+                        if len(current_span) > 320 or len(resulting_span) > 480
+                        else "local_size_ratio_out_of_bounds"
+                    )
+                else:
+                    current_span, resulting_span = minimal
+                    scoped = _paragraph_scoped_span_start(
+                        previous, source_segment_id, current_span
+                    )
         item = {
             "order": order,
             "decision": decision,
@@ -2838,6 +2916,10 @@ def _salvage_local_refinement_edits(
         if not reason:
             _start, paragraph = cast(tuple[int, int], scoped)
             paragraph_groups.setdefault(paragraph, []).append(item)
+
+    prepared_by_id = {
+        str(item["issue_id"]): item for item in prepared
+    }
 
     # Admit non-overlapping edits monotonically. Every retained step is checked
     # against the already accepted candidate, so one bad correction cannot
@@ -3027,6 +3109,15 @@ def _salvage_local_refinement_edits(
                 committed += 1
 
     for item in sorted(prepared, key=lambda value: int(value["order"])):
+        duplicate_of = equivalent_to.get(str(item["issue_id"]))
+        if duplicate_of:
+            canonical = prepared_by_id.get(duplicate_of, {})
+            if bool(canonical.get("committed")):
+                item["committed"] = True
+                item["reason"] = "equivalent_duplicate_satisfied"
+                item["resulting_span"] = canonical.get(
+                    "resulting_span", item["resulting_span"]
+                )
         decision = dict(cast(dict[str, Any], item["decision"]))
         was_committed = bool(item["committed"])
         integrity_payload = cast(
@@ -3043,6 +3134,7 @@ def _salvage_local_refinement_edits(
                 else "not_applicable"
             ),
             "commit_reason": reason,
+            "equivalent_to_issue_id": duplicate_of,
         })
         enriched.append(decision)
         attempts.append({
@@ -4696,15 +4788,20 @@ def _chunk_style_policy(
         except (TypeError, ValueError):
             normalized_scores[name] = 0.0
             scores_valid = False
+    try:
+        style_floor = max(9.0, float(latest.get("threshold", 9.0) or 9.0))
+    except (TypeError, ValueError):
+        style_floor = 9.0
     approved = bool(
         scores_valid
-        and all(normalized_scores[name] >= 8.0 for name in dimensions)
-        and normalized_scores["average"] >= 9.0
+        and all(normalized_scores[name] >= style_floor for name in dimensions)
+        and normalized_scores["average"] >= style_floor
     )
     return {
         "approved": approved,
         "excluded_paragraphs": sorted(excluded),
         "reason": "clean_final_critique" if approved else "style_score_below_floor",
+        "minimum_dimension_score": style_floor,
         "final_scores": {
             name: normalized_scores[name] for name in dimensions
         },
@@ -4917,6 +5014,9 @@ def _reconcile_committed_terminology(
         if category not in {"accuracy", "terminology", "name"}:
             continue
         source_quote = " ".join(str(issue.get("source_quote", "")).split())
+        current_persian_quote = " ".join(
+            str(issue.get("current_persian_quote", "")).split()
+        )
         matching_sources = [
             source for source in known
             if re.search(
@@ -4933,7 +5033,31 @@ def _reconcile_committed_terminology(
         derived_source = False
         container_sources: list[str] = []
         if matching_sources:
-            source = max(matching_sources, key=len)
+            aligned_sources = [
+                candidate for candidate in matching_sources
+                if (
+                    normalize_for_match(source_quote)
+                    == normalize_for_match(candidate)
+                )
+                or (
+                    normalize_for_match(known.get(candidate, ""))
+                    and normalize_for_match(known.get(candidate, ""))
+                    in normalize_for_match(current_persian_quote)
+                )
+                or re.search(
+                    rf"(?<!\w){re.escape(candidate)}(?!\w)",
+                    current_persian_quote,
+                    flags=re.IGNORECASE,
+                )
+            ]
+            if len(aligned_sources) != 1:
+                report["context_deferred"].append({
+                    "issue_id": issue_id,
+                    "sources": sorted(matching_sources),
+                    "reason": "accepted_correction_source_alignment_not_unique",
+                })
+                continue
+            source = aligned_sources[0]
         else:
             quote_words = re.findall(r"[A-Za-z][A-Za-z'\-]*", source_quote)
             if not (
@@ -5004,11 +5128,21 @@ def _reconcile_committed_terminology(
             "publication", "product", "legal_instrument",
             "source_grounded_entity", "proper_noun",
         }
-        scope_risks = (
-            [] if memory_category in entity_categories
-            else automatic_terminology_risk_reasons(source, target)
+        scope_risks = automatic_terminology_risk_reasons(source, target)
+        reusable = (
+            is_safe_automatic_entity_mapping(
+                source,
+                target,
+                memory_category,
+                source_text,
+                translation=final_translation,
+            )
+            if memory_category in entity_categories
+            else is_reusable_terminology_mapping(source, target)
         )
-        if not is_reusable_terminology_mapping(source, target) or scope_risks:
+        if not reusable or (
+            memory_category not in entity_categories and scope_risks
+        ):
             report["context_deferred"].append({
                 "issue_id": issue_id,
                 "source": source,
@@ -5041,6 +5175,7 @@ def _reconcile_committed_terminology(
                 "terminology_correction"
                 if derived_source else category
             ),
+            alignment_status="exact_local",
         )
         if outcome.get("action") in {"replaced_lower_authority", "confirmed"}:
             report["reconciled"].append({"issue_id": issue_id, **outcome})
@@ -12649,7 +12784,246 @@ Output ONLY the corrected Persian translation.
                             or []
                         ),
                     )
-                if _critique_requires_refinement(final_critique_rep, threshold):
+                final_repair_accepted = False
+                final_repair_actionable = [
+                    *list(_grounded_source_fidelity_issues(final_critique_rep)),
+                    *list(_grounded_objective_language_issues(final_critique_rep)),
+                ]
+                actionable_ids = {
+                    str(item.get("issue_id", "")).strip()
+                    for item in final_repair_actionable
+                    if str(item.get("issue_id", "")).strip()
+                }
+                if (
+                    getattr(final_critique_rep, "valid", True)
+                    and _critique_requires_refinement(
+                        final_critique_rep, threshold
+                    )
+                    and actionable_ids
+                ):
+                    final_repair_event: dict[str, Any] = {
+                        "attempted": True,
+                        "accepted": False,
+                        "actionable_issue_ids": sorted(actionable_ids),
+                        "policy": (
+                            "one conditional exact-candidate pass; only independent "
+                            "local edits may survive and every final gate is rerun"
+                        ),
+                    }
+                    try:
+                        final_refinement = self._run_async(
+                            refiner_tool.refine_with_decision(
+                                chunk.text,
+                                translation,
+                                final_critique_rep,
+                                terminology=terminology_ctx,
+                                review_context=qa_context,
+                            )
+                        )
+                        final_repair_event.update({
+                            "refiner_valid": bool(
+                                getattr(final_refinement, "valid", True)
+                            ),
+                            "refiner_attempts": int(
+                                getattr(final_refinement, "attempts", 1) or 1
+                            ),
+                        })
+                        if getattr(final_refinement, "valid", True):
+                            scoped_decisions = [
+                                decision
+                                for decision in list(
+                                    getattr(
+                                        final_refinement,
+                                        "issue_decisions",
+                                        [],
+                                    ) or []
+                                )
+                                if str(decision.get("issue_id", "")).strip()
+                                in actionable_ids
+                            ]
+                            repaired_candidate, repaired_decisions, salvage = (
+                                _salvage_local_refinement_edits(
+                                    source=chunk.text,
+                                    previous=translation,
+                                    proposed=final_refinement.translation,
+                                    issue_details=final_repair_actionable,
+                                    issue_decisions=scoped_decisions,
+                                    integrity_gate=integrity_gate,
+                                    protected_terms=protected_targets,
+                                    protect_inline_english=protect_inline_english,
+                                    allowed_inline_originals=allowed_inline_originals,
+                                )
+                            )
+                            final_repair_event.update({
+                                "decisions": repaired_decisions,
+                                "salvage": salvage,
+                            })
+                            if repaired_candidate != translation:
+                                repaired_candidate = (
+                                    self._canonicalize_final_translation(
+                                        job_id, idx, chunk, repaired_candidate
+                                    )
+                                )
+                                repaired_candidate, repaired_identity = (
+                                    _canonical_chunk_paragraph_identity(
+                                        chunk, repaired_candidate
+                                    )
+                                )
+                                repaired_integrity = integrity_gate.evaluate(
+                                    chunk.text,
+                                    repaired_candidate,
+                                    previous=translation,
+                                    stage="exact_final_quality_repair",
+                                    protected_terms=protected_targets,
+                                    protect_inline_english=protect_inline_english,
+                                    allowed_inline_originals=allowed_inline_originals,
+                                    enforce_all_terms=bool(
+                                        self.config.glossary.enable_compliance_check
+                                    ),
+                                )
+                                repaired_structure = _actionable_structure_findings(
+                                    chunk.text, repaired_candidate
+                                )
+                                repaired_review = self._run_async(
+                                    critique_tool.critique(
+                                        chunk.text,
+                                        repaired_candidate,
+                                        terminology=terminology_ctx,
+                                        review_context=qa_context,
+                                    )
+                                )
+                                if getattr(repaired_review, "valid", True):
+                                    _filter_critique_policy_conflicts(
+                                        repaired_review,
+                                        chunk.text,
+                                        allowed_inline_originals,
+                                    )
+                                    _filter_critique_glossary_conflicts(
+                                        repaired_review,
+                                        enforced_entries,
+                                        include_auto=enforce_auto_terms,
+                                    )
+                                repaired_actionable = [
+                                    *_grounded_source_fidelity_issues(
+                                        repaired_review
+                                    ),
+                                    *_grounded_objective_language_issues(
+                                        repaired_review
+                                    ),
+                                ]
+                                regressions = _candidate_regression_details(
+                                    repaired_review,
+                                    final_critique_rep,
+                                    _changed_candidate_spans(
+                                        translation, repaired_candidate
+                                    ),
+                                )
+                                repaired_scores = [
+                                    float(
+                                        getattr(repaired_review, name, 0.0)
+                                        or 0.0
+                                    )
+                                    for name in (
+                                        "accuracy", "fluency",
+                                        "terminology", "register",
+                                    )
+                                ]
+                                final_repair_accepted = bool(
+                                    repaired_integrity.accepted
+                                    and not repaired_structure
+                                    and not repaired_identity.get("reconstructed")
+                                    and getattr(repaired_review, "valid", True)
+                                    and not _blocking_critique_issues(
+                                        repaired_review
+                                    )
+                                    and len(repaired_actionable)
+                                    < len(final_repair_actionable)
+                                    and not regressions
+                                    and min(repaired_scores, default=0.0) >= 8.0
+                                )
+                                repaired_event = _critique_for_event(
+                                    repaired_review,
+                                    threshold,
+                                    -2,
+                                    candidate_text=repaired_candidate,
+                                    candidate_stage=(
+                                        "exact_final_quality_repair_validation"
+                                    ),
+                                )
+                                repaired_event["stage"] = (
+                                    "exact_final_quality_repair_validation"
+                                )
+                                final_repair_event.update({
+                                    "accepted": final_repair_accepted,
+                                    "integrity": repaired_integrity.to_dict(),
+                                    "structure_findings": repaired_structure,
+                                    "paragraph_identity": repaired_identity,
+                                    "before_actionable_count": len(
+                                        final_repair_actionable
+                                    ),
+                                    "after_actionable_count": len(
+                                        repaired_actionable
+                                    ),
+                                    "regressions": regressions,
+                                    "candidate_target_hash": _candidate_text_hash(
+                                        repaired_candidate
+                                    ),
+                                })
+                                if final_repair_accepted:
+                                    self.db.log_chunk_event(
+                                        job_id,
+                                        idx,
+                                        "critique_completed",
+                                        repaired_event,
+                                    )
+                                    translation = repaired_candidate
+                                    language_quality = audit_translation_language(
+                                        chunk.text,
+                                        translation,
+                                        allowed_originals=allowed_language_originals,
+                                        structural_role=language_role,
+                                        chapter_title=chunk.chapter_title,
+                                    )
+                                    final_source_fidelity_findings = (
+                                        _grounded_source_fidelity_issues(
+                                            repaired_review
+                                        )
+                                    )
+                                    final_objective_language_findings = (
+                                        _grounded_objective_language_issues(
+                                            repaired_review
+                                        )
+                                    )
+                                    canonical_candidate_hash = (
+                                        _candidate_text_hash(translation)
+                                    )
+                                    final_critique_rep = repaired_review
+                                    self.db.save_qa_issues(
+                                        job_id,
+                                        idx,
+                                        -2,
+                                        list(
+                                            getattr(
+                                                repaired_review,
+                                                "issue_details",
+                                                [],
+                                            ) or []
+                                        ),
+                                    )
+                    except _QUALITY_STAGE_ERRORS as exc:
+                        final_repair_event.update({
+                            "failure_type": type(exc).__name__,
+                            "error": str(exc),
+                        })
+                    self.db.log_chunk_event(
+                        job_id,
+                        idx,
+                        "exact_final_quality_repair",
+                        final_repair_event,
+                    )
+                if _critique_requires_refinement(
+                    final_critique_rep, threshold
+                ):
                     self.db.log_chunk_event(
                         job_id,
                         idx,

@@ -338,5 +338,5 @@ def test_warming_style_profile_labels_fallback_as_non_authoritative() -> None:
 
     profile = manager._render_style_profile()
 
-    assert "[representative]" in profile
+    assert "[representative]" not in profile
     assert "[fallback continuity only; do not imitate defects]" in profile

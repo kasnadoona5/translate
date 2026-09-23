@@ -139,11 +139,12 @@ def test_committed_term_reconciliation_cannot_override_curated_authority() -> No
             return [{"event_type": "chunk_started", "payload": {}}]
 
         def get_qa_issues(self, _job: str, _chunk: int):
-            return [{
-                "issue_id": "term-1", "category": "terminology",
-                "source_quote": "strategic-relational approach",
-                "suggested_correction": "رویکرد راهبردی-رابطه‌ای",
-            }]
+                return [{
+                    "issue_id": "term-1", "category": "terminology",
+                    "source_quote": "strategic-relational approach",
+                    "current_persian_quote": "رویکرد راهبردی-رابطه‌ای",
+                    "suggested_correction": "رویکرد راهبردی-رابطه‌ای",
+                }]
 
         def get_issue_decisions(self, _job: str, _chunk: int):
             return [{

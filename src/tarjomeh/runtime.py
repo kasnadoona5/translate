@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v10.34.0"
+RUNTIME_RELEASE = "v10.35.0"
 RUNTIME_REVISION = 1
 
 
@@ -57,12 +57,18 @@ def runtime_capabilities() -> dict[str, Any]:
             "identity_before_final_quality": True,
             "atomic_final_quality_checkpoint": True,
             "resumable_source_obligation_repair": True,
+            "conditional_exact_final_quality_repair": True,
+            "equivalent_issue_deduplication": True,
+            "exact_local_correction_alignment": True,
+            "authoritative_style_dimension_floor": True,
+            "source_cardinality_note_repair": True,
+            "evidence_bound_research_prompt": True,
         },
         "policy_versions": {
             "structure_evidence": 2,
             "canonical_text": 3,
-            "layer1_admission": 6,
-            "style_evidence": 4,
+            "layer1_admission": 7,
+            "style_evidence": 5,
             "benchmark_schema": 1,
             "checkpoint_export": 3,
             "paragraph_identity": 1,
@@ -72,10 +78,12 @@ def runtime_capabilities() -> dict[str, Any]:
             "summary_admission": 2,
             "final_candidate_selection": 2,
             "final_quality_authority": 1,
-            "note_marker_recovery": 2,
+            "note_marker_recovery": 3,
             "critique_canonical_rebind": 1,
-            "final_quality_checkpoint": 2,
+            "final_quality_checkpoint": 3,
             "source_obligation_recovery": 1,
+            "local_refiner_salvage": 2,
+            "research_prompt_admission": 2,
         },
     }
 
@@ -95,6 +103,7 @@ def runtime_behavior_probes() -> dict[str, bool]:
         _final_candidate_selection_payload,
         _paragraph_structural_roles,
         _readability_review_text,
+        _research_context_for_memory,
         _record_reconstructed_paragraph_identity_review,
         _role_aware_recovery_groups,
         _source_foreign_expression_inventory,
@@ -102,8 +111,12 @@ def runtime_behavior_probes() -> dict[str, bool]:
         audit_canonical_document_identity,
     )
     from tarjomeh.exporters.base import TranslatedDocument, TranslatedParagraph
-    from tarjomeh.memory.manager import MemoryManager
+    from tarjomeh.memory.manager import (
+        MemoryManager,
+        _style_record_is_authoritative,
+    )
     from tarjomeh.memory.proper_nouns import (
+        ProperNouns,
         automatic_terminology_risk_reasons,
         low_authority_mapping_category,
     )
@@ -201,6 +214,55 @@ def runtime_behavior_probes() -> dict[str, bool]:
             "\u062c\u0645\u0644\u0647 \u062f\u0648\u0645.2"
         ),
     )
+    deduplicated_note, duplicate_note_report = restore_source_note_markers(
+        "Source sentence.1",
+        "\u062c\u0645\u0644\u0647\u0654 \u062a\u0631\u062c\u0645\u0647.\u00b9 \u06f1",
+    )
+    legacy_correction = ProperNouns()
+    legacy_correction.deserialize({
+        "nouns": {"Clays Ltd": "\u0628\u0631\u06cc\u062a\u0627\u0646\u06cc\u0627"},
+        "categories": {"Clays Ltd": "organization"},
+        "provenance": {
+            "Clays Ltd": {
+                "origin": "accepted_correction",
+                "authority": 80,
+                "context_independent": True,
+            }
+        },
+    })
+    weak_style_record = {
+        "text": (
+            "\u0627\u06cc\u0646 \u062a\u062d\u0644\u06cc\u0644 \u0631\u0627\u0628\u0637\u0647\u0654 \u0645\u06cc\u0627\u0646 "
+            "\u0646\u0647\u0627\u062f\u0647\u0627 \u0631\u0627 \u0628\u0631\u0631\u0633\u06cc \u0645\u06cc\u200c\u06a9\u0646\u062f."
+        ),
+        "representative": True,
+        "quality_score": 95.0,
+        "final_scores": {
+            "accuracy": 9.2,
+            "fluency": 8.9,
+            "terminology": 9.1,
+            "register": 9.3,
+        },
+    }
+    research_context = _research_context_for_memory({
+        "status": "completed",
+        "terms": [
+            {
+                "source": "safe term",
+                "target": "\u0627\u0635\u0637\u0644\u0627\u062d \u0627\u0645\u0646",
+                "status": "suggested",
+                "identity_supported": True,
+                "term_supported": True,
+            },
+            {
+                "source": "weak term",
+                "target": "\u062d\u062f\u0633 \u0636\u0639\u06cc\u0641",
+                "status": "suggested",
+                "identity_supported": True,
+                "term_supported": False,
+            },
+        ],
+    })
     class _ProbeDB:
         def __init__(self) -> None:
             self.events: list[dict[str, Any]] = []
@@ -340,5 +402,23 @@ def runtime_behavior_probes() -> dict[str, bool]:
                 "The first target proposition.",
                 "The second target proposition.",
             )
+        ),
+        "legacy_corrections_without_alignment_are_deferred": bool(
+            legacy_correction.is_context_deferred("Clays Ltd")
+        ),
+        "style_requires_all_dimensions_at_nine": bool(
+            not _style_record_is_authoritative(weak_style_record)
+        ),
+        "duplicate_note_marker_is_removed_by_source_cardinality": bool(
+            deduplicated_note.endswith("\u00b9")
+            and not duplicate_note_report.get("surplus")
+            and any(
+                item.get("type")
+                == "unique_plain_duplicate_note_marker_removed"
+                for item in duplicate_note_report.get("repairs", [])
+            )
+        ),
+        "research_prompt_requires_term_evidence": bool(
+            "safe term" in research_context and "weak term" not in research_context
         ),
     }
