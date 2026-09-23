@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v10.35.0"
+RUNTIME_RELEASE = "v10.36.0"
 RUNTIME_REVISION = 1
 
 
@@ -63,12 +64,16 @@ def runtime_capabilities() -> dict[str, Any]:
             "authoritative_style_dimension_floor": True,
             "source_cardinality_note_repair": True,
             "evidence_bound_research_prompt": True,
+            "distinct_note_marker_occurrences": True,
+            "unpaired_object_marker_dash_review": True,
+            "paragraph_scoped_objective_style_review": True,
+            "source_validated_language_repair": True,
         },
         "policy_versions": {
             "structure_evidence": 2,
             "canonical_text": 3,
             "layer1_admission": 7,
-            "style_evidence": 5,
+            "style_evidence": 6,
             "benchmark_schema": 1,
             "checkpoint_export": 3,
             "paragraph_identity": 1,
@@ -78,12 +83,13 @@ def runtime_capabilities() -> dict[str, Any]:
             "summary_admission": 2,
             "final_candidate_selection": 2,
             "final_quality_authority": 1,
-            "note_marker_recovery": 3,
+            "note_marker_recovery": 4,
             "critique_canonical_rebind": 1,
             "final_quality_checkpoint": 3,
             "source_obligation_recovery": 1,
             "local_refiner_salvage": 2,
             "research_prompt_admission": 2,
+            "targeted_language_repair": 2,
         },
     }
 
@@ -95,6 +101,7 @@ def runtime_behavior_probes() -> dict[str, bool]:
     from tarjomeh.chunking.chunker import Chunk
     from tarjomeh.core.config import TarjomehConfig
     from tarjomeh.core.pipeline import (
+        audit_translation_language,
         _blocking_structure_findings,
         _canonical_chunk_paragraph_identity,
         _critique_survives_canonicalization,
@@ -122,6 +129,8 @@ def runtime_behavior_probes() -> dict[str, bool]:
     )
     from tarjomeh.quality.critique import TranslationCritique
     from tarjomeh.quality.integrity import (
+        available_note_markers,
+        extract_note_markers,
         restore_source_identifiers,
         restore_source_note_markers,
     )
@@ -420,5 +429,17 @@ def runtime_behavior_probes() -> dict[str, bool]:
         ),
         "research_prompt_requires_term_evidence": bool(
             "safe term" in research_context and "weak term" not in research_context
+        ),
+        "spaced_note_is_one_occurrence": bool(
+            available_note_markers(
+                "(Cerny 2010.) \u06f4",
+                Counter(extract_note_markers("(Cerny 2010.)4")),
+            )["4"] == 1
+        ),
+        "unpaired_object_marker_dash_is_reviewed": bool(
+            audit_translation_language(
+                "They make history - their own - in context.",
+                "\u062a\u0627\u0631\u06cc\u062e\u2014\u0631\u0627 \u0645\u06cc\u200c\u0633\u0627\u0632\u0646\u062f.",
+            )["unbalanced_explanatory_dash_count"] == 1
         ),
     }

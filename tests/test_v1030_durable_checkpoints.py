@@ -259,7 +259,7 @@ def test_pending_retry_rederives_preview_scope_from_current_config() -> None:
 
 def test_v1030_runtime_declares_durable_checkpoint_policy() -> None:
     manifest = runtime_capabilities()
-    assert manifest["release"] == "v10.35.0"
+    assert manifest["release"] == "v10.36.0"
     assert manifest["capabilities"]["durable_chapter_checkpoint_recovery"] is True
     assert manifest["policy_versions"]["checkpoint_export"] == 3
 

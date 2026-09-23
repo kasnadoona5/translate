@@ -658,6 +658,21 @@ def classify_numbers(text: str) -> dict[str, Counter[str]]:
     return roles
 
 
+def _plain_note_matches(
+    text: str, *, allow_spaced: bool = False
+) -> list[re.Match[str]]:
+    """Return each physical plain marker once, even when patterns overlap."""
+    normalized = (text or "").translate(_DIGIT_MAP)
+    matcher = _PLAIN_SPACED_NOTE_RE if allow_spaced else _PLAIN_ATTACHED_NOTE_RE
+    matches = list(matcher.finditer(normalized))
+    if allow_spaced:
+        matches.extend(_PLAIN_TRAILING_NOTE_RE.finditer(normalized))
+    distinct: dict[tuple[int, int], re.Match[str]] = {}
+    for match in matches:
+        distinct.setdefault(match.span("marker"), match)
+    return sorted(distinct.values(), key=lambda match: match.start("marker"))
+
+
 def extract_note_markers(text: str, *, allow_spaced: bool = False) -> list[str]:
     """Extract note markers, including PDF-flattened source superscripts.
 
@@ -666,17 +681,14 @@ def extract_note_markers(text: str, *, allow_spaced: bool = False) -> list[str]:
     Attached punctuation is conservative source evidence. Spaced forms are
     accepted only when comparing a target against source-confirmed markers.
     """
-    markers = []
-    for bracketed, superscript in _NOTE_RE.findall(text or ""):
-        markers.append(bracketed or superscript.translate(_SUPERSCRIPT_MAP))
-    matcher = _PLAIN_SPACED_NOTE_RE if allow_spaced else _PLAIN_ATTACHED_NOTE_RE
-    for match in matcher.finditer((text or "").translate(_DIGIT_MAP)):
-        markers.append(match.group("marker"))
-    if allow_spaced:
-        for match in _PLAIN_TRAILING_NOTE_RE.finditer(
-            (text or "").translate(_DIGIT_MAP)
-        ):
-            markers.append(match.group("marker"))
+    markers = [
+        (match.group(1) or match.group(2).translate(_SUPERSCRIPT_MAP))
+        .translate(_DIGIT_MAP)
+        for match in _NOTE_RE.finditer(text or "")
+    ]
+    markers.extend(match.group("marker") for match in _plain_note_matches(
+        text, allow_spaced=allow_spaced
+    ))
     return markers
 
 
@@ -836,22 +848,17 @@ def restore_source_note_markers(
             continue
         rich_matches = [
             match for match in _NOTE_RE.finditer(repaired)
-            if (match.group(1) or match.group(2).translate(_SUPERSCRIPT_MAP)) == marker
+            if (match.group(1) or match.group(2).translate(_SUPERSCRIPT_MAP))
+            .translate(_DIGIT_MAP) == marker
         ]
-        normalized_repaired = repaired.translate(_DIGIT_MAP)
         plain_matches = [
-            match for match in _PLAIN_SPACED_NOTE_RE.finditer(normalized_repaired)
+            match for match in _plain_note_matches(repaired, allow_spaced=True)
             if match.group("marker") == marker
             and not any(
                 rich.start() <= match.start("marker") < rich.end()
                 for rich in rich_matches
             )
         ]
-        plain_matches.extend(
-            match
-            for match in _PLAIN_TRAILING_NOTE_RE.finditer(normalized_repaired)
-            if match.group("marker") == marker
-        )
         if len(rich_matches) != 1 or len(plain_matches) != 1:
             ambiguous.append({
                 "marker": marker,

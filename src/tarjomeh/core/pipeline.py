@@ -426,6 +426,9 @@ _SPACED_EN_DASH_RE = re.compile(r"(?<=\S)[ \t]+\u2013[ \t]+(?=\S)")
 _DANGLING_OBJECT_MARKER_DASH_RE = re.compile(
     r"(?:^|[\s\u060c\u061b])\u0631\u0627[ \t]+(?P<dash>[\u2013\u2014])[ \t]+"
 )
+_UNPAIRED_OBJECT_MARKER_DASH_RE = re.compile(
+    r"(?P<dash>\u2014)\u0631\u0627(?=$|[\s\u060c\u061b\u061f.!?:)\]])"
+)
 
 
 def _unbalanced_explanatory_dash_artifacts(
@@ -479,6 +482,23 @@ def _unbalanced_explanatory_dash_artifacts(
                 "target_preview": target_part[:500],
                 "target_offset": match.start(),
                 "reason": "persian_object_marker_detached_by_dash",
+            })
+        for match in _UNPAIRED_OBJECT_MARKER_DASH_RE.finditer(target_part):
+            sentence_start = max(
+                target_part.rfind(boundary, 0, match.start())
+                for boundary in ".!?\u061f"
+            ) + 1
+            if target_part[sentence_start:match.start()].count("\u2014") % 2:
+                continue
+            findings.append({
+                "paragraph_index": index,
+                "source_dash_count": source_count,
+                "target_dash_count": target_aside_count,
+                "target_em_dash_count": target_em_count,
+                "target_en_dash_count": target_en_count,
+                "target_preview": target_part[:500],
+                "target_offset": match.start("dash"),
+                "reason": "persian_object_marker_after_unmatched_dash",
             })
     return findings
 
@@ -4715,15 +4735,18 @@ def _chunk_style_policy(
             else "final_quality_authority_withheld"
         )
         unresolved_ids = set(final_quality["unresolved_grounded_issue_ids"])
-        review_event_types = {
-            str(event.get("event_type", ""))
-            for event in events[last_start:]
+        review_events = [
+            event for event in events[last_start:]
             if str(event.get("event_type", "")) in {
                 "qa_unavailable", "integrity_edit_rejected",
                 "integrity_final_failed", "language_quality_review",
                 "back_translation_flagged", "glossary_needs_review",
                 "chunk_review_required", "critique_needs_review",
             }
+        ]
+        review_event_types = {
+            str(event.get("event_type", ""))
+            for event in review_events
         }
         issue_paragraphs: dict[str, int] = {}
         for detail in issue_details:
@@ -4739,11 +4762,51 @@ def _chunk_style_policy(
                 issue_paragraphs[issue_id] = max(
                     0, int(match.group("paragraph")) - 1
                 )
+        scoped_language_paragraphs: set[int] = set()
+        language_scoped = True
+        for event in review_events:
+            if event.get("event_type") != "language_quality_review":
+                continue
+            payload = event.get("payload", {}) or {}
+            dash_findings = payload.get("unbalanced_explanatory_dash_artifacts", [])
+            if (
+                not candidate_hash
+                or payload.get("candidate_target_hash") != candidate_hash
+                or payload.get("review_reason") != "objective_final_language_artifact"
+                or not isinstance(dash_findings, list)
+                or len(dash_findings) != int(
+                    payload.get("unbalanced_explanatory_dash_count", 0) or 0
+                )
+                or not dash_findings
+                or any(
+                    int(payload.get(field, 0) or 0)
+                    for field in _LANGUAGE_QUALITY_COUNT_FIELDS
+                    if field != "unbalanced_explanatory_dash_count"
+                )
+                or any(
+                    not isinstance(item, dict)
+                    or not isinstance(item.get("paragraph_index"), int)
+                    or item["paragraph_index"] < 0
+                    for item in dash_findings
+                )
+            ):
+                language_scoped = False
+                break
+            scoped_language_paragraphs.update(
+                item["paragraph_index"] for item in dash_findings
+            )
         paragraph_scoped = bool(
-            unresolved_ids
-            and not final_quality.get("blocking_issue_count")
+            not final_quality.get("blocking_issue_count")
             and unresolved_ids <= set(issue_paragraphs)
-            and review_event_types <= {"critique_needs_review"}
+            and review_event_types <= {
+                "critique_needs_review", "language_quality_review"
+            }
+            and (
+                "critique_needs_review" not in review_event_types
+                or bool(unresolved_ids)
+            )
+            and language_scoped
+            and (unresolved_ids or scoped_language_paragraphs)
         )
         if not paragraph_scoped:
             return {
@@ -4753,6 +4816,7 @@ def _chunk_style_policy(
                 "issue_ids": sorted(unresolved_ids),
             }
         excluded.update(issue_paragraphs[issue_id] for issue_id in unresolved_ids)
+        excluded.update(scoped_language_paragraphs)
     has_routed_issue_policy = (
         "high_confidence_minor_refinement_issue_ids" in latest
     )
@@ -12318,10 +12382,7 @@ Output ONLY the corrected Persian translation.
                         validation_accepted = bool(
                             source_improved and objective_improved
                         )
-                        if (
-                            paragraph_source_findings
-                            or paragraph_objective_findings
-                        ):
+                        if candidate_part != target_part:
                             structure_issue_count = sum(
                                 bool(item.get("structure_classification"))
                                 for item in paragraph_source_findings
@@ -13096,6 +13157,7 @@ Output ONLY the corrected Persian translation.
                 "language_quality_review",
                 {
                     **language_quality,
+                    "candidate_target_hash": _candidate_text_hash(translation),
                     "review_reason": "objective_final_language_artifact",
                     "message": (
                         "Objective language artifacts remained after deterministic "

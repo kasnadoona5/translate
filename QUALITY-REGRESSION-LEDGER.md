@@ -35,19 +35,19 @@ new evidence so later patches cannot silently revive an earlier defect.
 
 ## Current Baseline
 
-- Latest supplied live evidence: `v10.34.0`, job `72802cf838c3`
+- Latest supplied live evidence: `v10.35.0`, job `5f347402c194`
 - Prior fully reconciled baseline: `v10.33.0`, commit `fddc2b6`, job `96851204419f`
 - Source: *The State: Past, Present, Future* (Bob Jessop, 2016)
-- Runtime result: the configured chapter checkpoint persisted 16 of 222 chunks. The
-  user-visible chunk 10 stop was database chunk 9: three source-structure admissions
-  rejected candidates that omitted the explicit `three key claims` obligation before a
-  later resume succeeded. This was a content-admission stop, not a provider failure.
-- Translation verdict: policy-v2 final candidate selection, DB text, Layer 3, assembly,
-  and DOCX remained aligned, and memory/style/research authority failed closed where
-  required. The run remains `REVIEW`: 10 of 16 exact final-quality records were bound
-  to text before paragraph-identity reconstruction, residual body prose was opaque or
-  incomplete, and several conservative Persian typography/citation repairs remained.
-  Full scholarly-table reconstruction remains deferred.
+- Runtime result: the chapter checkpoint persisted 16 of 222 chunks (13 completed,
+  3 needs review), with no terminal chunk stop. There were 123 LLM attempts, one
+  recovered critic failure (0.81%), and no transport failure.
+- Translation verdict: DOCX, canonical database text, and Layer 3 matched. The run
+  remains `REVIEW`: a physically single source note was counted twice in its target
+  representation, producing a false companion hard failure; an unmatched `--ra`
+  Persian object-marker dash survived; and central academic prose remains too opaque.
+  Research stayed advisory and representative style stayed separate from fallback.
+  The note counter is also used in production integrity checks, so this is not merely
+  an audit display defect. Full scholarly-table reconstruction remains deferred.
 
 ## v10.33 Live Result
 
@@ -404,10 +404,13 @@ new evidence so later patches cannot silently revive an earlier defect.
 | R98 | Conservative academic transition and year-only citation typography are stable | MONITOR | v10.34 normalizes bounded `بااین‌حال` variants to `با این حال` and converts separators only inside parenthetical year-only citation lists. Ordinary Persian prose lists and bibliography text remain unchanged. Live DOCX evidence is required. |
 
 | R99 | Objective final Persian defect receives only bounded source-safe repair | OPEN | v10.34 kept a malformed verb after a full refiner candidate introduced a larger source regression and was correctly rolled back. v10.35 adds one conditional exact-candidate refiner pass, admits only independently validated paragraph-local edits, and reruns identity, source structure, integrity, critique, and regression checks. Rejected repairs cannot become final quality authority. Fresh DOCX evidence is required. |
-| R100 | Reviewed terminology requires exact local bilingual alignment | OPEN | v10.34 accepted a printer name mapped to a country because the review used an oversized source excerpt and a context-independent label. v10.35 requires unique source-local and target-local alignment, persists `alignment_status`, and defers legacy unaligned accepted corrections on load. Passage continuity remains available. Fresh memory audit is required. |
-| R101 | Representative style meets every academic quality dimension | OPEN | v10.34 could establish style from a sample with a strong average but a weak single dimension, including malformed joiners. v10.35 requires accuracy, fluency, terminology, and register individually at or above the academic threshold and excludes deterministic malformed joiners. Legacy samples remain fallback. Fresh style evidence is required. |
-| R102 | Duplicate source-note markers cannot be introduced | OPEN | v10.34 carried both rich and plain versions of one source note marker. v10.35 removes only one unambiguous extra plain trailing copy when the source requires exactly one and blocks remaining surplus markers. Ambiguous markers remain reviewable. Fresh DOCX and note audit are required. |
-| R103 | Prompted research suggestions have directly supporting evidence | OPEN | v10.34 retained advisory suggestions whose excerpts did not establish the proposed term or identity. v10.35 includes only identity- and term-supported single-choice suggestions in the translator prompt. Other attributable research remains audit-visible but cannot steer terminology. Fresh research audit is required. |
+| R100 | Reviewed terminology requires exact local bilingual alignment | OPEN | v10.34 accepted a printer name mapped to a country because the review used an oversized source excerpt and a context-independent label. v10.35 requires unique source-local and target-local alignment, persists `alignment_status`, and defers legacy unaligned accepted corrections on load. The short v10.35 memory audit did not show this mapping recurring; longer cross-book evidence is still required. |
+| R101 | Representative style meets every academic quality dimension | OPEN | v10.34 could establish style from a sample with a strong average but a weak single dimension, including malformed joiners. v10.35 requires accuracy, fluency, terminology, and register individually at or above the academic threshold and excludes deterministic malformed joiners. The v10.35 audit found three representative and two fallback records; style quality in a longer run remains unproved. |
+| R102 | Duplicate source-note markers cannot be introduced | OPEN | v10.34 carried both rich and plain versions of one source note marker. v10.35 removes only one unambiguous extra plain trailing copy when the source requires exactly one and blocks remaining surplus markers. The v10.35 audit found a distinct false surplus caused by overlapping extractors (R104), so this row cannot be promoted yet. |
+| R103 | Prompted research suggestions have directly supporting evidence | OPEN | v10.34 retained advisory suggestions whose excerpts did not establish the proposed term or identity. v10.35 includes only identity- and term-supported single-choice suggestions in the translator prompt. The v10.35 audit found 22 attributable proposals and zero prompt-eligible terms; this supports the negative gate but not positive behavior across books. |
+| R104 | One physical note marker counts once across overlapping extraction patterns | OPEN | v10.35 source `(Cerny 2010.)4` and target `(Cerny 2010.) 4` caused a false surplus hard failure: two plain regexes counted the same target span. v10.36 deduplicates by marker span while still detecting and conservatively repairing a distinct rich-plus-plain duplicate. Production integrity and companion audits share this counter. Local regression tests pass; live audit pending. |
+| R105 | Unpaired Persian em dash must not detach the object marker `ra` | OPEN | v10.35 DOCX retained an unbalanced `--ra` construction despite a minor final quality label. v10.36 routes this objective paragraph-scoped artifact through the existing bounded language repair and review path; paired explanatory asides and headings stay outside the new trigger. Local tests pass; live source/output review pending. |
+| R106 | Targeted language edits require source validation and unresolved style review is scoped | OPEN | v10.36 requires the existing source-aware critique, structure, and regression admission on every changed targeted repair, not only edits with prior deterministic findings. A hash-bound objective dash review withholds reliable long-term memory but may exclude only its affected paragraph from style; ambiguous or unscoped reviews still exclude the whole chunk. Local tests pass; live evidence pending. |
 
 ## Validated v10.17 External Audit Notes
 
@@ -1144,6 +1147,9 @@ push, and fresh VPS evidence.
 | v10.33 (`pending`) | awaiting VPS run | PENDING | Candidate-hash-bound final quality, atomic policy-v2 selection/admission, paragraph-scoped readability, lexical-scope memory quarantine, conservative note relocation, explicit fallback-style labels, and complete audits are implemented without changing model or pipeline configuration. Live evidence is required. |
 | v10.33 | `96851204419f` | REVIEW | Policy-v2 selection and canonical export aligned, memory/style/research authority failed closed, and prior mechanical protections held. Ten of sixteen final-quality hashes preceded paragraph-identity reconstruction; database chunk 9 stopped three times on an omitted explicit source obligation before resume succeeded. |
 | v10.34 (`pending`) | awaiting VPS run | PENDING | Identity-before-review, atomic final-quality checkpointing, hash-bound source-obligation resume, conservative transition/citation repair, complete v10.34 audits, and guarded low-space deployment pass all 974 local tests. No model, quality threshold, memory layer, style authority, research authority, or unconditional LLM stage changed. |
+| v10.34 | `72802cf838c3` | REVIEW | Checkpoint export worked, but a malformed retained verb, unsafe reviewed mapping, weak representative style, duplicate note form, and insufficiently supported research suggestions motivated R99-R103. No supplied evidence established a chunk-12 terminal stop. |
+| v10.35 | `5f347402c194` | REVIEW | 16/222 checkpoint chunks (13 completed, 3 review), 123 LLM attempts, one recovered critic failure, no transport failure, matching DOCX/DB/Layer-3 text. R104 false note surplus and R105 unbalanced Persian dash remain; central academic prose still needs human review. |
+| v10.36 (`pending`) | awaiting VPS run | PENDING | Span-distinct note counting, objective dash review, source validation of changed targeted repairs, paragraph-scoped style exclusion, and Tarjomeh-only deployment cleanup pass 992 local tests. Live output, memory/style authority, LLM rate, and 9router identity are not yet verified. |
 
 ## v10.24 Live Validation
 
@@ -1568,6 +1574,35 @@ pending a fresh v10.25 VPS run.
   include active/lifetime LLM call and failure
   rates, source/export identity, memory/style/research authority, and worker
   lifecycle; deployment must prove the running 9router is unchanged.
+
+## v10.35 Live Result And v10.36 Pending Validation
+
+- Job `5f347402c194` reached its configured chapter checkpoint at 16/222 chunks
+  without a terminal chunk stop. Its 123 LLM attempts included one recovered
+  critic failure (0.81%) and no transport failure. The supplied DOCX, canonical
+  database text, and Layer 3 aligned. This is not a full-book quality verdict.
+- Four-layer memory remained populated and trust-separated. Three representative
+  style records and two fallback records were observed. Research yielded 22
+  proposals, none eligible to steer the translator prompt. The strict research
+  filter should remain in place; zero prompted terms alone is not a failure.
+- R102 exposed a new overlap in the note counter, recorded separately as R104.
+  A single physical target note span was counted twice and caused a false
+  companion hard failure. This also affects the production integrity gate.
+- R105 records an unbalanced Persian object-marker dash that reached the DOCX.
+  R07/R08/R09/R60 remain open for academic fluency and terminology stability;
+  v10.36 does not hardcode this book's preferred words or rewrite its argument.
+- v10.36 local verification: 992 full-suite tests passed; Bash syntax,
+  embedded audit Python, runtime behavior probes, and diff whitespace passed.
+  Ruff is unavailable locally. A fresh chapter run
+  must show the single-note false failure gone, distinct duplicate notes still
+  handled conservatively, the dash either repaired under source checks or
+  explicitly review-marked, and no decline in memory/style/research authority.
+  The companion audit must propagate Python failure through `tee`; report and
+  companion scripts must include job-specific active/lifetime LLM failures,
+  export identity, and worker/checkpoint state. The deploy script may clean
+  Tarjomeh-owned stale resources but must leave all 9router images, container,
+  mounts, and data untouched. Low disk space remains a guarded stop, not a
+  reason to remove 9router resources automatically.
 
 ## Update Procedure
 
