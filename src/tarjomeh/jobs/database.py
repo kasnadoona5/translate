@@ -5,6 +5,7 @@ Saves job configurations, chunk translation progress, and serialized memory stat
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -1406,13 +1407,39 @@ class JobDatabase:
                 if not isinstance(entries, dict):
                     entries = {}
                 entry = entries.get(str(chunk_index))
+                committed_hash = (
+                    hashlib.sha256(translation.encode("utf-8")).hexdigest()
+                    if translation is not None else ""
+                )
+                admitted_replacement = bool(
+                    isinstance(entry, dict)
+                    and entry.get("candidate_sha256") != committed_hash
+                    and paragraph_identity is not None
+                    and candidate_selection is not None
+                    and canonical_admission is not None
+                    and final_quality_admission is not None
+                    and all(
+                        record.get(key) == committed_hash
+                        for record, key in (
+                            (paragraph_identity, "canonical_target_hash"),
+                            (candidate_selection, "canonical_target_hash"),
+                            (canonical_admission, "canonical_target_hash"),
+                            (final_quality_admission, "candidate_target_hash"),
+                        )
+                    )
+                )
                 if (
                     isinstance(entry, dict)
                     and entry.get("status") == "pending"
+                    and status in {ChunkStatus.COMPLETED, ChunkStatus.NEEDS_REVIEW}
                     and entry.get("source_sha256")
                     == source_obligation_resolution.get("source_sha256")
-                    and entry.get("candidate_sha256")
+                    and committed_hash
                     == source_obligation_resolution.get("candidate_sha256")
+                    and (
+                        entry.get("candidate_sha256") == committed_hash
+                        or admitted_replacement
+                    )
                 ):
                     resolved_entry = dict(entry)
                     resolved_entry.update({
@@ -1420,6 +1447,10 @@ class JobDatabase:
                         "resolved_at": timestamp,
                         "resolved_candidate_sha256": (
                             source_obligation_resolution.get("candidate_sha256")
+                        ),
+                        "replaced_candidate_sha256": (
+                            entry.get("candidate_sha256")
+                            if admitted_replacement else None
                         ),
                     })
                     resolved_entry.pop("candidate", None)

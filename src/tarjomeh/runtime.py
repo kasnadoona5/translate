@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v10.36.0"
+RUNTIME_RELEASE = "v10.37.0"
 RUNTIME_REVISION = 1
 
 
@@ -68,6 +68,8 @@ def runtime_capabilities() -> dict[str, Any]:
             "unpaired_object_marker_dash_review": True,
             "paragraph_scoped_objective_style_review": True,
             "source_validated_language_repair": True,
+            "persian_argument_announcement_coverage": True,
+            "bounded_source_obligation_fresh_generation": True,
         },
         "policy_versions": {
             "structure_evidence": 2,
@@ -86,7 +88,7 @@ def runtime_capabilities() -> dict[str, Any]:
             "note_marker_recovery": 4,
             "critique_canonical_rebind": 1,
             "final_quality_checkpoint": 3,
-            "source_obligation_recovery": 1,
+            "source_obligation_recovery": 2,
             "local_refiner_salvage": 2,
             "research_prompt_admission": 2,
             "targeted_language_repair": 2,
@@ -102,6 +104,7 @@ def runtime_behavior_probes() -> dict[str, bool]:
     from tarjomeh.core.config import TarjomehConfig
     from tarjomeh.core.pipeline import (
         audit_translation_language,
+        _source_obligation_resume_action,
         _blocking_structure_findings,
         _canonical_chunk_paragraph_identity,
         _critique_survives_canonicalization,
@@ -164,6 +167,16 @@ def runtime_behavior_probes() -> dict[str, bool]:
     mismatch = audit_payload(
         "This chapter addresses two issues.",
         three_issues,
+    )["findings"]
+    claim_source = (
+        "The argument makes three claims. First, one; second, two; third, three."
+    )
+    claim_target = (
+        "این استدلال سه مدعای اصلی دارد. نخست، یک؛ دوم، دو؛ سوم، سه."
+    )
+    wrong_claim_target = claim_target.replace("سه مدعای", "دو مدعای")
+    wrong_claim_findings = audit_payload(
+        claim_source, wrong_claim_target
     )["findings"]
     canonical = audit_canonical_document_identity(
         TranslatedDocument(paragraphs=[
@@ -319,6 +332,26 @@ def runtime_behavior_probes() -> dict[str, bool]:
         ),
         "exact_structure_mismatch_blocks": bool(
             _blocking_structure_findings(mismatch)
+        ),
+        "persian_argument_announcement_is_typed": bool(
+            not audit_payload(claim_source, claim_target)["findings"]
+            and _blocking_structure_findings(
+                wrong_claim_findings
+            )
+        ),
+        "cached_obligation_is_rechecked_before_regeneration": bool(
+            _source_obligation_resume_action(
+                claim_source, claim_target, {"failure_count": 4}
+            ) == "recheck"
+            and _source_obligation_resume_action(
+                claim_source, wrong_claim_target,
+                {"same_candidate_failures": 2, "findings": wrong_claim_findings},
+            ) == "regenerate"
+            and _source_obligation_resume_action(
+                claim_source, wrong_claim_target,
+                {"same_candidate_failures": 3, "fresh_generation_count": 1,
+                 "findings": wrong_claim_findings},
+            ) == "stop"
         ),
         "coordinated_memory_is_quarantined": bool(
             "coordinated_source_target_incomplete"

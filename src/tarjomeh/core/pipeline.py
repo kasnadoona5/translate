@@ -1371,6 +1371,32 @@ def _cached_source_obligation_candidate(
     return candidate, entry
 
 
+def _source_obligation_finding_signature(
+    findings: list[dict[str, Any]],
+) -> str:
+    """Identify the typed failure without incidental excerpts or wording."""
+    records = []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        details = finding.get("details", {}) or {}
+        if not isinstance(details, dict):
+            details = {}
+        records.append({
+            "check_id": finding.get("check_id"),
+            "classification": finding.get("classification"),
+            "source_paragraph": details.get("source_paragraph"),
+            "semantic_category": details.get("semantic_category"),
+            "source_announced": details.get("source_announced"),
+            "source_items": details.get("source_items"),
+            "candidate_announced": details.get("candidate_announced"),
+            "candidate_items": details.get("candidate_items"),
+        })
+    return hashlib.sha256(
+        json.dumps(records, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
 def _persist_source_obligation_candidate(
     db: Any,
     job_id: str,
@@ -1378,22 +1404,50 @@ def _persist_source_obligation_candidate(
     source: str,
     candidate: str,
     findings: list[dict[str, Any]],
+    fresh_generation_count: int = 0,
 ) -> dict[str, Any]:
     """Persist an integrity-valid structure failure for bounded resume repair."""
     previous = db.get_job_artifact(job_id, _SOURCE_OBLIGATION_RECOVERY_KEY) or {}
     entries = previous.get("entries", {})
     old = entries.get(str(chunk_index), {}) if isinstance(entries, dict) else {}
+    if not isinstance(old, dict):
+        old = {}
+    source_hash = hashlib.sha256((source or "").encode("utf-8")).hexdigest()
+    candidate_hash = hashlib.sha256(candidate.encode("utf-8")).hexdigest()
+    finding_signature = _source_obligation_finding_signature(findings)
+    same_candidate = (
+        isinstance(old, dict)
+        and old.get("source_sha256") == source_hash
+        and old.get("candidate_sha256") == candidate_hash
+    )
+    old_findings = old.get("findings", [])
+    old_signature = (
+        str(old.get("finding_signature", ""))
+        or _source_obligation_finding_signature(old_findings)
+    ) if same_candidate and isinstance(old_findings, list) else ""
     attempts = (
         int(old.get("failure_count", 0) or 0) + 1
-        if isinstance(old, dict) else 1
+        if same_candidate else 1
+    )
+    repeated = (
+        int(old.get(
+            "same_candidate_failures", old.get("failure_count", 0)
+        ) or 0) + 1
+        if same_candidate and old_signature == finding_signature else 1
     )
     entry = {
         "status": "pending",
         "chunk_index": chunk_index,
-        "source_sha256": hashlib.sha256((source or "").encode("utf-8")).hexdigest(),
+        "source_sha256": source_hash,
         "candidate": candidate,
-        "candidate_sha256": hashlib.sha256(candidate.encode("utf-8")).hexdigest(),
+        "candidate_sha256": candidate_hash,
         "failure_count": attempts,
+        "same_candidate_failures": repeated,
+        "finding_signature": finding_signature,
+        "fresh_generation_count": max(
+            int(old.get("fresh_generation_count", 0) or 0),
+            fresh_generation_count,
+        ),
         "findings": findings,
         "authority": "review_only_resume_input",
     }
@@ -1406,6 +1460,36 @@ def _persist_source_obligation_candidate(
         version=1,
     )
     return entry
+
+
+def _source_obligation_resume_action(
+    source: str, candidate: str, evidence: dict[str, Any]
+) -> str:
+    """Recheck cached prose before spending another full quality pass on it."""
+    if not candidate:
+        return "translate"
+    blocking = _blocking_structure_findings(
+        _actionable_structure_findings(source, candidate)
+    )
+    if not blocking:
+        return "recheck"
+    previous_findings = evidence.get("findings", [])
+    if not isinstance(previous_findings, list) or not previous_findings:
+        return "recheck"
+    previous_signature = (
+        str(evidence.get("finding_signature", ""))
+        or _source_obligation_finding_signature(previous_findings)
+    )
+    if previous_signature != _source_obligation_finding_signature(blocking):
+        return "recheck"
+    failures = int(evidence.get(
+        "same_candidate_failures", evidence.get("failure_count", 0)
+    ) or 0)
+    if failures < 2:
+        return "recheck"
+    if int(evidence.get("fresh_generation_count", 0) or 0) >= 1:
+        return "stop"
+    return "regenerate"
 
 
 def _source_obligation_resolution_payload(
@@ -9337,6 +9421,52 @@ class TranslationPipeline:
                 self.db, job_id, idx, chunk.text
             )
         )
+        resume_action = _source_obligation_resume_action(
+            chunk.text, obligation_recovery, obligation_recovery_evidence
+        )
+        fresh_generation_count = int(
+            obligation_recovery_evidence.get("fresh_generation_count", 0) or 0
+        )
+        if resume_action == "stop":
+            self.db.log_chunk_event(
+                job_id, idx, "source_obligation_recovery_exhausted", {
+                    "candidate_sha256": _candidate_text_hash(obligation_recovery),
+                    "source_sha256": _candidate_text_hash(chunk.text),
+                    "same_candidate_failures": obligation_recovery_evidence.get(
+                        "same_candidate_failures", 0
+                    ),
+                    "message": (
+                        "The same source-structure defect survived bounded fresh "
+                        "generation and review. Human correction is required."
+                    ),
+                },
+            )
+            raise SourceStructureAdmissionError(
+                "The same source-structure defect survived bounded recovery; "
+                "human correction is required."
+            )
+        if resume_action == "regenerate":
+            fresh_generation_count += 1
+            self.db.log_chunk_event(
+                job_id, idx, "source_obligation_fresh_generation", {
+                    "prior_candidate_sha256": _candidate_text_hash(
+                        obligation_recovery
+                    ),
+                    "source_sha256": _candidate_text_hash(chunk.text),
+                    "prior_failure_count": obligation_recovery_evidence.get(
+                        "failure_count", 0
+                    ),
+                    "authority": "fresh_candidate_requires_full_admission",
+                },
+            )
+            obligation_recovery = ""
+            user_content += (
+                "\n\nThe previous candidate did not pass source-structure review. "
+                "Translate the complete source anew, preserving every explicit "
+                "claim, quantity, list item, and relationship. Do not resolve "
+                "any contradiction in the source. The normal quality and "
+                "paragraph-identity requirements still apply."
+            )
         try:
             if obligation_recovery:
                 translation = obligation_recovery
@@ -12712,6 +12842,7 @@ Output ONLY the corrected Persian translation.
                 chunk.text,
                 translation,
                 blocking_structure,
+                fresh_generation_count=fresh_generation_count,
             )
             failure_payload["recovery_candidate_sha256"] = recovery_entry[
                 "candidate_sha256"

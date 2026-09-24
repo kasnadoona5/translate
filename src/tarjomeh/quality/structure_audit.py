@@ -98,7 +98,8 @@ _ANNOUNCEMENT_CATEGORIES: dict[str, str] = {
         "issue", "issues", "objection", "objections", "point", "points",
         "reason", "reasons", "argument", "arguments", "question", "questions",
         "problem", "problems", "claim", "claims", "proposition", "propositions",
-        "theme", "themes", "مسئله", "ایراد", "نکته", "دلیل", "استدلال",
+        "theme", "themes", "مدعا", "مسئله", "ایراد", "نکته", "دلیل",
+        "استدلال",
         "پرسش", "مشکل", "ادعا", "گزاره", "مضمون",
     ), "argument_item"),
     **dict.fromkeys((
@@ -514,6 +515,11 @@ def audit_structure(source: str, candidate: str) -> list[StructureFinding]:
         candidate_episode = candidate_by_paragraph.get(
             source_episode.paragraph_index
         )
+        aligned_candidate_paragraph = (
+            candidate_paragraphs[source_episode.paragraph_index]
+            if source_episode.paragraph_index < len(candidate_paragraphs)
+            else ""
+        )
         candidate_announced = (
             candidate_episode.announced if candidate_episode else None
         )
@@ -527,6 +533,12 @@ def audit_structure(source: str, candidate: str) -> list[StructureFinding]:
             "source_paragraph_span": source_episode.paragraph_span,
             "candidate_paragraph": (
                 candidate_episode.paragraph_index if candidate_episode else None
+            ),
+            "candidate_episode_recognized": candidate_episode is not None,
+            "candidate_cardinal_tokens_untyped": (
+                [word for word in _words(aligned_candidate_paragraph)
+                 if word in _CARDINALS]
+                if candidate_episode is None else []
             ),
             "source_announcement_candidates": list(
                 source_episode.announcement_candidates
@@ -542,7 +554,7 @@ def audit_structure(source: str, candidate: str) -> list[StructureFinding]:
                 candidate_paragraphs[candidate_episode.paragraph_index][:360]
                 if candidate_episode
                 and candidate_episode.paragraph_index < len(candidate_paragraphs)
-                else ""
+                else aligned_candidate_paragraph[:360]
             ),
             "admission": (
                 "blocking"

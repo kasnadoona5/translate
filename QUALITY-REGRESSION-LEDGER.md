@@ -411,6 +411,8 @@ new evidence so later patches cannot silently revive an earlier defect.
 | R104 | One physical note marker counts once across overlapping extraction patterns | OPEN | v10.35 source `(Cerny 2010.)4` and target `(Cerny 2010.) 4` caused a false surplus hard failure: two plain regexes counted the same target span. v10.36 deduplicates by marker span while still detecting and conservatively repairing a distinct rich-plus-plain duplicate. Production integrity and companion audits share this counter. Local regression tests pass; live audit pending. |
 | R105 | Unpaired Persian em dash must not detach the object marker `ra` | OPEN | v10.35 DOCX retained an unbalanced `--ra` construction despite a minor final quality label. v10.36 routes this objective paragraph-scoped artifact through the existing bounded language repair and review path; paired explanatory asides and headings stay outside the new trigger. Local tests pass; live source/output review pending. |
 | R106 | Targeted language edits require source validation and unresolved style review is scoped | OPEN | v10.36 requires the existing source-aware critique, structure, and regression admission on every changed targeted repair, not only edits with prior deterministic findings. A hash-bound objective dash review withholds reliable long-term memory but may exclude only its affected paragraph from style; ambiguous or unscoped reviews still exclude the whole chunk. Local tests pass; live evidence pending. |
+| R107 | A faithful Persian argument announcement is recognized without waiving source counts | OPEN | v10.36 job `c31517e92d81` stopped four times on DB chunk 9/UI chunk 10: source `three key claims`, target `سه مدعای کلیدی` with `نخست/دوم/سوم`. The typed noun list recognized `ادعا` but not the ordinary synonym `مدعا`, inventing a zero-item mismatch. v10.37 adds this general argument-item noun and records aligned candidate text when no typed episode exists. Tests prove faithful three-item text passes and `three` to `دو مدعای` remains blocking. Live resume and DOCX evidence pending. |
+| R108 | A repeated, unchanged source-obligation failure cannot loop indefinitely or bypass quality gates | OPEN | v10.36 reused the same hash-bound candidate on each resume; `failure_count=4` and no fresh route existed. v10.37 rechecks the cached candidate under current policy, permits one full-pipeline replay, then one bounded fresh translation if the exact candidate still blocks, and stops explicitly if the fresh candidate also repeats the defect. A changed admitted candidate resolves recovery only in the atomic checkpoint when paragraph identity, selection, canonical admission, and final quality match the committed text. Focused tests pass; live validation pending. |
 
 ## Validated v10.17 External Audit Notes
 
@@ -1149,7 +1151,8 @@ push, and fresh VPS evidence.
 | v10.34 (`pending`) | awaiting VPS run | PENDING | Identity-before-review, atomic final-quality checkpointing, hash-bound source-obligation resume, conservative transition/citation repair, complete v10.34 audits, and guarded low-space deployment pass all 974 local tests. No model, quality threshold, memory layer, style authority, research authority, or unconditional LLM stage changed. |
 | v10.34 | `72802cf838c3` | REVIEW | Checkpoint export worked, but a malformed retained verb, unsafe reviewed mapping, weak representative style, duplicate note form, and insufficiently supported research suggestions motivated R99-R103. No supplied evidence established a chunk-12 terminal stop. |
 | v10.35 | `5f347402c194` | REVIEW | 16/222 checkpoint chunks (13 completed, 3 review), 123 LLM attempts, one recovered critic failure, no transport failure, matching DOCX/DB/Layer-3 text. R104 false note surplus and R105 unbalanced Persian dash remain; central academic prose still needs human review. |
-| v10.36 (`pending`) | awaiting VPS run | PENDING | Span-distinct note counting, objective dash review, source validation of changed targeted repairs, paragraph-scoped style exclusion, and Tarjomeh-only deployment cleanup pass 992 local tests. Live output, memory/style authority, LLM rate, and 9router identity are not yet verified. |
+| v10.36 | `c31517e92d81` | REVIEW | DB chunk 9/UI chunk 10 stopped four times on the same source-obligation candidate. The saved Persian text preserved all three explicit claims; the detector lacked `مدعا` and falsely reported an announcement mismatch. Supplied companion: 75 active LLM calls, no LLM/transport failures; no DOCX checkpoint was produced. Memory/style and later prose cannot be certified from this stopped run. R107-R108 remain open. |
+| v10.37 (`pending`) | awaiting VPS run | PENDING | General typed-announcement recognition, bounded repeated-failure recovery, exact checkpoint resolution, and expanded diagnostics/audits pass 1,000 local tests and runtime probes. A resumed v10.36 job and a fresh checkpoint still need live source/DOCX, four-layer memory, style, research, stage/LLM, and 9router verification. |
 
 ## v10.24 Live Validation
 
@@ -1603,6 +1606,31 @@ pending a fresh v10.25 VPS run.
   Tarjomeh-owned stale resources but must leave all 9router images, container,
   mounts, and data untouched. Low disk space remains a guarded stop, not a
   reason to remove 9router resources automatically.
+
+## v10.36 Failure And v10.37 Validation Target
+
+- The v10.36 job `c31517e92d81` saved a hash-bound Persian candidate that
+  faithfully announces and enumerates three claims. The structure detector
+  interpreted `سه مدعای کلیدی` as no typed announcement because its general
+  argument-item vocabulary lacked `مدعا`; four resumes repeated the same stop.
+  This is a detector false positive, not evidence that the translator changed
+  the source number or that 9router failed.
+- v10.37 first re-audits the saved candidate under the corrected detector.
+  Only a still-blocking, repeated candidate gets one fresh translation through
+  the unchanged critique/refinement, integrity, identity, final quality, and
+  memory/style gates. A remaining defect stops with an explicit reason; no
+  incorrect candidate is silently promoted.
+- A resumed success must produce a downloadable DOCX and resolve the pending
+  source-obligation artifact in the same exact-candidate checkpoint. Audit
+  both the current and lifetime LLM-call/failure counts, source and export
+  identity, research provenance, all four memory layers, style authority,
+  worker/chapter state, and the 9router identity/mounts. This one paragraph
+  does not establish book-wide academic fluency; inspect the PDF against the
+  output before calling the release production-ready.
+- Local release gate: 1,000 tests passed. All 29 runtime behavior probes
+  passed; Bash syntax, embedded audit/deploy Python syntax, and Git whitespace
+  checks passed. Ruff was unavailable in this environment. These are code
+  checks, not a live translation-quality or VPS deployment verdict.
 
 ## Update Procedure
 

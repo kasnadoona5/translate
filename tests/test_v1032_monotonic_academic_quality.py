@@ -207,7 +207,7 @@ def test_v1033_runtime_and_release_scripts_are_complete() -> None:
     manifest = runtime_capabilities()
     probes = runtime_behavior_probes()
 
-    assert manifest["release"] == "v10.36.0"
+    assert manifest["release"] == "v10.37.0"
     assert manifest["capabilities"]["post_rollback_final_evidence"] is True
     assert manifest["capabilities"]["objective_candidate_ranking"] is True
     assert manifest["capabilities"]["contextual_morphology_quarantine"] is True
