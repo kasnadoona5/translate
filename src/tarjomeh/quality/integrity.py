@@ -172,8 +172,14 @@ _MARKDOWN_EMPHASIS_RE = re.compile(
     r"(?<!\*)\*{1,2}\s*(?P<content>[^*\n]{1,240}?)\s*\*{1,2}(?!\*)"
 )
 _DETACHED_EZAFE_RE = re.compile(
-    r"\)\s+[\u06cc\u064a](?=\s|[\u060c\u061b:,.!?\u061f]|$)"
+    r"(?P<closing>[\)\u00bb])\s+[\u06cc\u064a]"
+    r"(?=\s|[\u060c\u061b:,.!?\u061f]|$)"
 )
+_SPACED_OPTIONAL_PLURAL_RE = re.compile(
+    r"(?P<stem>[\u0621-\u06ff]+(?:\u200c[\u0621-\u06ff]+)*)"
+    r"[ \t]+\(\u0647\u0627\)"
+)
+_SOURCE_OPTIONAL_PLURAL_RE = re.compile(r"\b[A-Za-z][A-Za-z-]*\(s\)")
 _TATWEEL_SEPARATOR_RE = re.compile(r"(?:(?<=\s)|^)\u0640{2,}(?=\s|$)")
 _PERSIAN_SUFFIX_AFTER_ORIGINAL_RE = re.compile(
     rf"(?P<anchor>[{_PERSIAN_LETTER_CLASS}]+"
@@ -1914,6 +1920,29 @@ def detached_ezafe_artifacts(text: str) -> list[dict[str, Any]]:
     ]
 
 
+def spaced_optional_plural_artifacts(
+    source: str,
+    text: str,
+    *,
+    structural_role: str = "body",
+) -> list[dict[str, Any]]:
+    """Report spaced Persian optional plurals without guessing their meaning."""
+    if structural_role != "body":
+        return []
+    source_has_optional_plural = bool(
+        _SOURCE_OPTIONAL_PLURAL_RE.search(source or "")
+    )
+    return [
+        {
+            "text": match.group(),
+            "offset": match.start(),
+            "source_optional_plural": source_has_optional_plural,
+        }
+        for match in _SPACED_OPTIONAL_PLURAL_RE.finditer(text or "")
+        if match.group() not in (source or "")
+    ]
+
+
 def tatweel_separator_artifacts(text: str) -> list[dict[str, Any]]:
     """Report elongation glyph runs used as punctuation in Persian prose."""
     target = text or ""
@@ -1930,6 +1959,8 @@ def tatweel_separator_artifacts(text: str) -> list[dict[str, Any]]:
 def repair_source_grounded_language_artifacts(
     source: str,
     translation: str,
+    *,
+    structural_role: str = "body",
 ) -> tuple[str, dict[str, Any]]:
     """Apply only language edits whose full evidence is present in the source.
 
@@ -2021,12 +2052,36 @@ def repair_source_grounded_language_artifacts(
         })
 
     for match in reversed(list(_DETACHED_EZAFE_RE.finditer(repaired))):
+        if match.group() in source:
+            continue
+        if match.group("closing") == "\u00bb" and structural_role != "body":
+            continue
         before = match.group()
         suffix = before[-1]
-        after = f"){suffix}"
+        after = f"{match.group('closing')}{suffix}"
         repaired = repaired[:match.start()] + after + repaired[match.end():]
         edits.append({
             "type": "detached_ezafe",
+            "before": before,
+            "after": after,
+            "offset": match.start(),
+        })
+
+    optional_source_count = len(_SOURCE_OPTIONAL_PLURAL_RE.findall(source))
+    optional_target_matches = list(_SPACED_OPTIONAL_PLURAL_RE.finditer(repaired))
+    if (
+        structural_role == "body"
+        and optional_source_count == 1
+        and len(optional_target_matches) == 1
+        and "\n" not in source.strip()
+        and "\n" not in repaired.strip()
+    ):
+        match = optional_target_matches[0]
+        before = match.group()
+        after = f"{match.group('stem')}(\u0647\u0627)"
+        repaired = repaired[:match.start()] + after + repaired[match.end():]
+        edits.append({
+            "type": "source_optional_plural_spacing",
             "before": before,
             "after": after,
             "offset": match.start(),

@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 from tarjomeh.core.prompts import (
     CRITIQUE_PROMPT,
+    FOCUSED_ATTACHMENT_REVIEW_PROMPT,
     PERSIAN_READABILITY_REVIEW_PROMPT,
 )
 from tarjomeh.core.structured_output import parse_structured_output
@@ -140,6 +141,17 @@ class ReadabilityReviewResult:
     validation_errors: list[str] = field(default_factory=list)
 
 
+@dataclass
+class AttachmentReviewResult:
+    """Source-grounded advisory evidence; never an independent edit authority."""
+
+    issues: list[dict[str, Any]] = field(default_factory=list)
+    reported_issue_count: int = 0
+    raw_response: str = ""
+    valid: bool = True
+    validation_errors: list[str] = field(default_factory=list)
+
+
 class TranslationCritique:
     """Evaluates translation quality via an LLM.
 
@@ -237,6 +249,133 @@ class TranslationCritique:
             self._llm.set_operation("persian_readability_review")
         raw = await self._llm.chat(prompt)
         return self._parse_readability_response(raw, translation)
+
+    async def review_attachment(
+        self,
+        source_text: str,
+        translation: str,
+        *,
+        terminology: str = "",
+        review_context: str = "",
+    ) -> AttachmentReviewResult:
+        """Review only attachment and scope against the exact source text."""
+        prompt = FOCUSED_ATTACHMENT_REVIEW_PROMPT.format(
+            source_text=indexed_source(source_text),
+            translation=translation,
+            terminology=terminology or "(none)",
+            review_context=review_context or "(none)",
+        )
+        if hasattr(self._llm, "set_operation"):
+            self._llm.set_operation("focused_attachment_review")
+        raw = await self._llm.chat(prompt)
+        return self._parse_attachment_response(raw, source_text, translation)
+
+    @staticmethod
+    def _parse_attachment_response(
+        raw: str, source_text: str, translation: str
+    ) -> AttachmentReviewResult:
+        try:
+            data = parse_structured_output(raw.strip(), expected=dict)
+        except (json.JSONDecodeError, ValueError) as exc:
+            return AttachmentReviewResult(
+                raw_response=raw, valid=False,
+                validation_errors=[f"invalid_json: {exc}"],
+            )
+        raw_issues = data.get("issues", [])
+        if not isinstance(raw_issues, list):
+            return AttachmentReviewResult(
+                raw_response=raw, valid=False,
+                validation_errors=["issues_must_be_array"],
+            )
+        issues: list[dict[str, Any]] = []
+        errors: list[str] = []
+        if len(raw_issues) > 4:
+            errors.append("too_many_issues")
+        for index, raw_issue in enumerate(raw_issues[:4]):
+            if not isinstance(raw_issue, dict):
+                errors.append(f"issue_{index}_must_be_object")
+                continue
+            item = {
+                key: str(raw_issue.get(key, "")).strip()
+                for key in (
+                    "category", "severity", "source_segment_id",
+                    "source_quote", "current_persian_quote", "source_head",
+                    "source_dependent", "persian_head", "persian_dependent",
+                    "suggested_correction", "rationale",
+                )
+            }
+            item["category"] = item["category"].lower()
+            item["severity"] = item["severity"].lower()
+            item_errors: list[str] = []
+            if item["category"] not in {"accuracy", "fluency"}:
+                item_errors.append("category_invalid")
+            if item["severity"] not in {"major", "minor"}:
+                item_errors.append("severity_invalid")
+            try:
+                confidence = float(raw_issue.get("confidence"))
+                if not 0 <= confidence <= 1:
+                    raise ValueError("outside 0-1")
+            except (TypeError, ValueError):
+                confidence = 0.0
+                item_errors.append("confidence_invalid")
+            for field, parent in (
+                ("source_quote", source_text),
+                ("current_persian_quote", translation),
+            ):
+                value = item[field]
+                if not value or len(value) > _MAX_QUOTE_CHARS:
+                    item_errors.append(f"{field}_invalid")
+                elif value not in parent:
+                    item_errors.append(f"{field}_not_found")
+            for field, parent in (
+                ("source_head", item["source_quote"]),
+                ("source_dependent", item["source_quote"]),
+                ("persian_head", item["current_persian_quote"]),
+                ("persian_dependent", item["current_persian_quote"]),
+            ):
+                if not item[field] or item[field] not in parent:
+                    item_errors.append(f"{field}_not_grounded")
+            if (
+                item["source_head"] == item["source_dependent"]
+                or item["persian_head"] == item["persian_dependent"]
+            ):
+                item_errors.append("head_and_dependent_identical")
+            if not item["suggested_correction"] or len(
+                item["suggested_correction"]
+            ) > _MAX_FIX_CHARS:
+                item_errors.append("suggestion_invalid")
+            if not item["rationale"] or len(item["rationale"]) > _MAX_RATIONALE_CHARS:
+                item_errors.append("rationale_invalid")
+            segment_id, segment_errors = resolve_source_segment(
+                source_text, item["source_quote"], item["source_segment_id"]
+            ) if item["source_quote"] else ("", ["segment_unresolved"])
+            item_errors.extend(
+                error for error in segment_errors
+                if error != "issue_source_segment_id_corrected"
+            )
+            if item_errors:
+                errors.extend(f"issue_{index}_{error}" for error in item_errors)
+                continue
+            item["source_segment_id"] = segment_id
+            item["confidence"] = confidence
+            item["issue_id"] = "attachment-" + hashlib.sha256(
+                (item["source_quote"] + "\0" + item["current_persian_quote"])
+                .encode("utf-8")
+            ).hexdigest()[:12]
+            item["formatted"] = (
+                f"[{item['severity'].upper()}/{item['category']}] "
+                f"source: {item['source_quote']} | current: "
+                f"{item['current_persian_quote']} | fix: "
+                f"{item['suggested_correction']}"
+            )
+            issues.append(item)
+        return AttachmentReviewResult(
+            issues=issues,
+            reported_issue_count=len(raw_issues),
+            raw_response=raw,
+            valid=not errors,
+            validation_errors=errors,
+        )
 
     @staticmethod
     def _parse_readability_response(

@@ -103,6 +103,7 @@ from tarjomeh.quality.integrity import (
     source_unjustified_repeated_governed_span_artifacts,
     source_unjustified_repeated_word_artifacts,
     detached_ezafe_artifacts,
+    spaced_optional_plural_artifacts,
     tatweel_separator_artifacts,
     foreign_script_artifacts,
     markup_wrapper_artifacts,
@@ -361,7 +362,9 @@ def repair_document_source_grounded_language_artifacts(
     for paragraph in document.paragraphs:
         before = paragraph.translated_text
         candidate, report = repair_source_grounded_language_artifacts(
-            paragraph.source_text, before
+            paragraph.source_text,
+            before,
+            structural_role=str(paragraph.metadata.get("structure_role", "body")),
         )
         if candidate == before:
             continue
@@ -533,7 +536,13 @@ def audit_translation_language(
     foreign_scripts = foreign_script_artifacts(source, translation)
     markup = markup_wrapper_artifacts(source, translation)
     parentheses = parenthesis_artifacts(source, translation)
-    detached_ezafe = detached_ezafe_artifacts(translation)
+    detached_ezafe = [
+        item for item in detached_ezafe_artifacts(translation)
+        if str(item.get("text", "")) not in source
+    ]
+    spaced_optional_plural = spaced_optional_plural_artifacts(
+        source, translation, structural_role=structural_role
+    )
     tatweel_separators = tatweel_separator_artifacts(translation)
     explanatory_dashes = _unbalanced_explanatory_dash_artifacts(
         source,
@@ -552,6 +561,7 @@ def audit_translation_language(
             or markup
             or parentheses
             or detached_ezafe
+            or spaced_optional_plural
             or tatweel_separators
             or explanatory_dashes
         ),
@@ -575,6 +585,8 @@ def audit_translation_language(
         "parenthesis_artifacts": parentheses,
         "detached_ezafe_count": len(detached_ezafe),
         "detached_ezafe_artifacts": detached_ezafe,
+        "spaced_optional_plural_count": len(spaced_optional_plural),
+        "spaced_optional_plural_artifacts": spaced_optional_plural,
         "tatweel_separator_count": len(tatweel_separators),
         "tatweel_separator_artifacts": tatweel_separators,
         "unbalanced_explanatory_dash_count": len(explanatory_dashes),
@@ -4256,10 +4268,71 @@ def _changed_candidate_spans(previous: str, candidate: str) -> list[str]:
     return unique
 
 
+def _proven_unchanged_issue(
+    detail: dict[str, Any],
+    *,
+    source_text: str,
+    previous_text: str,
+    candidate_text: str,
+) -> bool:
+    """Recognize only an independently located issue in untouched wording."""
+    source_parts = split_paragraphs(source_text)
+    previous_parts = split_paragraphs(previous_text)
+    candidate_parts = split_paragraphs(candidate_text)
+    if not (
+        source_parts
+        and len(source_parts) == len(previous_parts) == len(candidate_parts)
+    ):
+        return False
+    quote = str(detail.get("current_persian_quote", "")).strip()
+    source_quote = str(detail.get("source_quote", "")).strip()
+    segment = re.fullmatch(
+        r"p(?P<paragraph>\d+):s\d+",
+        str(detail.get("source_segment_id", "")).strip(),
+        re.IGNORECASE,
+    )
+    if not quote or not source_quote or segment is None:
+        return False
+    index = int(segment.group("paragraph")) - 1
+    if index < 0 or index >= len(source_parts):
+        return False
+    if (
+        source_quote not in source_parts[index]
+        or quote not in previous_parts[index]
+        or quote not in candidate_parts[index]
+        or previous_parts[index] != candidate_parts[index]
+        or sum(quote in part for part in candidate_parts) != 1
+    ):
+        return False
+    changed_elsewhere = any(
+        before != after
+        for part_index, (before, after) in enumerate(
+            zip(previous_parts, candidate_parts, strict=True)
+        )
+        if part_index != index
+    )
+    rationale = " ".join(
+        str(detail.get(key, ""))
+        for key in ("rationale", "explanation", "error_type")
+    ).casefold()
+    if changed_elsewhere and re.search(
+        r"\b(?:previous|next|adjacent|neighbou?r(?:ing)?|cross.paragraph|"
+        r"antecedent|preceding|following)\b",
+        rationale,
+    ):
+        return False
+    return True
+
+
 def _candidate_regression_details(
     critique: Any,
     baseline_critique: Any,
     changed_spans: list[str],
+    *,
+    source_text: str = "",
+    previous_text: str = "",
+    candidate_text: str = "",
+    newly_observed_unchanged: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Find new, grounded defects introduced by a complete refiner candidate."""
     baseline_keys = {
@@ -4321,7 +4394,24 @@ def _candidate_regression_details(
             and _source_obligation_identity(detail)
             not in baseline_source_obligations
         )
-        if serious and (overlaps_change or new_source_obligation):
+        if not serious:
+            continue
+        if (
+            source_text and previous_text and candidate_text
+            and _proven_unchanged_issue(
+                detail,
+                source_text=source_text,
+                previous_text=previous_text,
+                candidate_text=candidate_text,
+            )
+        ):
+            if newly_observed_unchanged is not None:
+                newly_observed_unchanged.append(detail)
+            continue
+        if (
+            overlaps_change or new_source_obligation
+            or (source_text and previous_text and candidate_text)
+        ):
             regressions.append(detail)
     return regressions
 
@@ -8423,7 +8513,13 @@ class TranslationPipeline:
         typography_changed = canonical != translation
         repair_candidate, repair_report = (
             repair_source_grounded_language_artifacts(
-                chunk.text, canonical
+                chunk.text,
+                canonical,
+                structural_role=(
+                    "body" if set(_paragraph_structural_roles(
+                        chunk, len(split_paragraphs(canonical))
+                    )) == {"body"} else "mixed"
+                ),
             )
         )
         repair_proposed = repair_candidate != canonical
@@ -10330,11 +10426,16 @@ class TranslationPipeline:
                     )
                 candidate_changed = bool(pending_candidate or pending_salvage)
                 candidate_regressions: list[dict[str, Any]] = []
+                newly_observed_unchanged: list[dict[str, Any]] = []
                 if pending_candidate is not None:
                     candidate_regressions = _candidate_regression_details(
                         critique_rep,
                         pending_candidate["baseline_critique"],
                         list(pending_candidate.get("changed_spans", []) or []),
+                        source_text=chunk.text,
+                        previous_text=str(pending_candidate["baseline"]),
+                        candidate_text=translation,
+                        newly_observed_unchanged=newly_observed_unchanged,
                     )
                 will_refine = bool(
                     ref_iter < self.config.translation.max_refine_iterations
@@ -10373,7 +10474,7 @@ class TranslationPipeline:
                         )
                         promoted_readability: list[dict[str, Any]] = []
                         suppressed_readability: list[dict[str, Any]] = []
-                        if getattr(readability, "valid", True):
+                        if readability_issues:
                             matched, unmatched = _merge_readability_evidence(
                                 critique_rep, readability_issues
                             )
@@ -10387,7 +10488,7 @@ class TranslationPipeline:
                                 )
                             )
                         else:
-                            matched, unmatched = 0, readability_issues
+                            matched, unmatched = 0, []
                         promoted_quotes = {
                             normalize_for_match(
                                 str(item.get("current_persian_quote", ""))
@@ -10406,6 +10507,9 @@ class TranslationPipeline:
                                 getattr(readability, "validation_errors", []) or []
                             ),
                             "issue_count": len(readability_issues),
+                            "individually_valid_issue_count": len(
+                                readability_issues
+                            ),
                             "matched_source_grounded_count": matched,
                             "promoted_major_count": len(promoted_readability),
                             "promoted_issue_ids": [
@@ -10520,6 +10624,36 @@ class TranslationPipeline:
                     ),
                 )
                 if pending_candidate is not None:
+                    for detail in newly_observed_unchanged:
+                        self.db.log_chunk_event(
+                            job_id, idx, "newly_observed_unchanged_issue",
+                            {
+                                "issue": detail,
+                                "candidate_target_hash": _candidate_text_hash(
+                                    translation
+                                ),
+                                "disposition": "review_without_vetoing_independent_edit",
+                            },
+                        )
+                    for detail in candidate_regressions:
+                        quote = normalize_for_match(str(
+                            detail.get("current_persian_quote", "")
+                        ))
+                        overlaps = any(
+                            span and (span in quote or quote in span)
+                            for span in pending_candidate.get("changed_spans", [])
+                        )
+                        prior_quote = normalize_for_match(str(
+                            detail.get("current_persian_quote", "")
+                        )) in normalize_for_match(str(
+                            pending_candidate.get("baseline", "")
+                        ))
+                        self.db.log_chunk_event(
+                            job_id, idx,
+                            "edit_introduced_issue" if overlaps and not prior_quote
+                            else "candidate_attribution_uncertain",
+                            {"issue": detail, "edit_blocked": True},
+                        )
                     if candidate_regressions:
                         rejected_translation = translation
                         baseline_translation = str(pending_candidate["baseline"])
@@ -12196,7 +12330,15 @@ Output ONLY the corrected Persian translation.
             )
 
         language_candidate, safe_language_repair = (
-            repair_source_grounded_language_artifacts(chunk.text, translation)
+            repair_source_grounded_language_artifacts(
+                chunk.text,
+                translation,
+                structural_role=(
+                    "body" if set(_paragraph_structural_roles(
+                        chunk, len(split_paragraphs(translation))
+                    )) == {"body"} else "mixed"
+                ),
+            )
         )
         language_candidate, source_bound_repairs = (
             _restore_source_bound_artifacts(chunk.text, language_candidate)
@@ -13002,6 +13144,8 @@ Output ONLY the corrected Persian translation.
                             "local edits may survive and every final gate is rerun"
                         ),
                     }
+                    final_repair_newly_observed: list[dict[str, Any]] = []
+                    final_repair_regressions: list[dict[str, Any]] = []
                     try:
                         final_refinement = self._run_async(
                             refiner_tool.refine_with_decision(
@@ -13103,13 +13247,40 @@ Output ONLY the corrected Persian translation.
                                         repaired_review
                                     ),
                                 ]
+                                newly_observed_unchanged: list[dict[str, Any]] = []
                                 regressions = _candidate_regression_details(
                                     repaired_review,
                                     final_critique_rep,
                                     _changed_candidate_spans(
                                         translation, repaired_candidate
                                     ),
+                                    source_text=chunk.text,
+                                    previous_text=translation,
+                                    candidate_text=repaired_candidate,
+                                    newly_observed_unchanged=(
+                                        newly_observed_unchanged
+                                    ),
                                 )
+                                final_repair_newly_observed = (
+                                    newly_observed_unchanged
+                                )
+                                final_repair_regressions = regressions
+                                old_issue_keys = {
+                                    _quality_issue_fingerprint(detail)
+                                    for detail in newly_observed_unchanged
+                                }
+                                old_blocking = {
+                                    str(
+                                        detail.get("formatted")
+                                        or detail.get("issue_id") or detail
+                                    )
+                                    for detail in newly_observed_unchanged
+                                }
+                                remaining_actionable = [
+                                    detail for detail in repaired_actionable
+                                    if _quality_issue_fingerprint(detail)
+                                    not in old_issue_keys
+                                ]
                                 repaired_scores = [
                                     float(
                                         getattr(repaired_review, name, 0.0)
@@ -13125,10 +13296,10 @@ Output ONLY the corrected Persian translation.
                                     and not repaired_structure
                                     and not repaired_identity.get("reconstructed")
                                     and getattr(repaired_review, "valid", True)
-                                    and not _blocking_critique_issues(
+                                    and set(_blocking_critique_issues(
                                         repaired_review
-                                    )
-                                    and len(repaired_actionable)
+                                    )) <= old_blocking
+                                    and len(remaining_actionable)
                                     < len(final_repair_actionable)
                                     and not regressions
                                     and min(repaired_scores, default=0.0) >= 8.0
@@ -13155,6 +13326,9 @@ Output ONLY the corrected Persian translation.
                                     ),
                                     "after_actionable_count": len(
                                         repaired_actionable
+                                    ),
+                                    "newly_observed_unchanged_issues": (
+                                        newly_observed_unchanged
                                     ),
                                     "regressions": regressions,
                                     "candidate_target_hash": _candidate_text_hash(
@@ -13213,6 +13387,24 @@ Output ONLY the corrected Persian translation.
                         "exact_final_quality_repair",
                         final_repair_event,
                     )
+                    for detail in final_repair_newly_observed:
+                        self.db.log_chunk_event(
+                            job_id, idx, "newly_observed_unchanged_issue",
+                            {
+                                "issue": detail,
+                                "stage": "exact_final_quality_repair",
+                                "disposition": "review_without_vetoing_independent_edit",
+                            },
+                        )
+                    for detail in final_repair_regressions:
+                        self.db.log_chunk_event(
+                            job_id, idx, "candidate_attribution_uncertain",
+                            {
+                                "issue": detail,
+                                "stage": "exact_final_quality_repair",
+                                "edit_blocked": True,
+                            },
+                        )
                 if _critique_requires_refinement(
                     final_critique_rep, threshold
                 ):

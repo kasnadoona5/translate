@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v10.37.0"
+RUNTIME_RELEASE = "v10.38.0"
 RUNTIME_REVISION = 1
 
 
@@ -70,6 +70,11 @@ def runtime_capabilities() -> dict[str, Any]:
             "source_validated_language_repair": True,
             "persian_argument_announcement_coverage": True,
             "bounded_source_obligation_fresh_generation": True,
+            "uncertain_post_edit_issue_blocks": True,
+            "unchanged_grounded_issue_is_review_only": True,
+            "partial_readability_evidence_survives_invalid_sibling": True,
+            "source_scoped_optional_plural_spacing": True,
+            "focused_attachment_trial_off_by_default": True,
         },
         "policy_versions": {
             "structure_evidence": 2,
@@ -92,6 +97,8 @@ def runtime_capabilities() -> dict[str, Any]:
             "local_refiner_salvage": 2,
             "research_prompt_admission": 2,
             "targeted_language_repair": 2,
+            "post_edit_issue_attribution": 1,
+            "attachment_trial": 1,
         },
     }
 
@@ -105,6 +112,7 @@ def runtime_behavior_probes() -> dict[str, bool]:
     from tarjomeh.core.pipeline import (
         audit_translation_language,
         _source_obligation_resume_action,
+        _candidate_regression_details,
         _blocking_structure_findings,
         _canonical_chunk_paragraph_identity,
         _critique_survives_canonicalization,
@@ -121,6 +129,8 @@ def runtime_behavior_probes() -> dict[str, bool]:
         audit_canonical_document_identity,
     )
     from tarjomeh.exporters.base import TranslatedDocument, TranslatedParagraph
+    from tarjomeh.quality.critique import CritiqueResult, TranslationCritique
+    from tarjomeh.quality.integrity import repair_source_grounded_language_artifacts
     from tarjomeh.memory.manager import (
         MemoryManager,
         _style_record_is_authoritative,
@@ -130,7 +140,6 @@ def runtime_behavior_probes() -> dict[str, bool]:
         automatic_terminology_risk_reasons,
         low_authority_mapping_category,
     )
-    from tarjomeh.quality.critique import TranslationCritique
     from tarjomeh.quality.integrity import (
         available_note_markers,
         extract_note_markers,
@@ -321,7 +330,55 @@ def runtime_behavior_probes() -> dict[str, bool]:
         "Write to example.org, AB1 2CD.",
         "به example. org، AB1 ۲CD بنویسید.",
     )
+    scope_source = "They act.\n\nOnly one institution has this name."
+    scope_previous = "\u0622\u0646\u200c\u0647\u0627 \u2014 \u0645\u06cc\u200c\u06a9\u0646\u0646\u062f.\n\n\u0646\u0647\u0627\u062f \u0646\u0627\u0645 \u062f\u0627\u0631\u062f."
+    scope_candidate = scope_previous.replace(" \u2014 ", " ")
+    scope_issue = {
+        "issue_id": "scope", "category": "accuracy", "severity": "major",
+        "confidence": 0.8, "source_segment_id": "p2:s1",
+        "source_quote": "Only one institution",
+        "current_persian_quote": "\u0646\u0647\u0627\u062f \u0646\u0627\u0645",
+    }
+    old_scope: list[dict[str, Any]] = []
+    old_regression = _candidate_regression_details(
+        CritiqueResult(issue_details=[scope_issue]), CritiqueResult(), [],
+        source_text=scope_source, previous_text=scope_previous,
+        candidate_text=scope_candidate, newly_observed_unchanged=old_scope,
+    )
+    uncertain_regression = _candidate_regression_details(
+        CritiqueResult(issue_details=[{**scope_issue, "source_segment_id": ""}]),
+        CritiqueResult(), [], source_text=scope_source,
+        previous_text=scope_previous, candidate_text=scope_candidate,
+    )
+    partial_readability = TranslationCritique._parse_readability_response(
+        '{"issues":[{"severity":"minor","current_persian_quote":'
+        '"\u0646\u0647\u0627\u062f","suggested_correction":"\u0646\u0647\u0627\u062f\u06cc",'
+        '"rationale":"Predicate attachment."},{"severity":"minor",'
+        '"current_persian_quote":"missing","suggested_correction":"x",'
+        '"rationale":"Invalid sibling."}]}',
+        "\u0646\u0647\u0627\u062f \u0646\u0627\u0645 \u062f\u0627\u0631\u062f.",
+    )
+    optional_repaired, _ = repair_source_grounded_language_artifacts(
+        "The discourse(s) matter.",
+        "\u06af\u0641\u062a\u0645\u0627\u0646 (\u0647\u0627) \u0645\u0647\u0645\u200c\u0627\u0646\u062f.",
+    )
+    optional_unrelated, _ = repair_source_grounded_language_artifacts(
+        "The discourse(s) matter.\nOther institutions.",
+        "\u06af\u0641\u062a\u0645\u0627\u0646 \u0645\u0647\u0645\u200c\u0627\u0646\u062f.\n\u0646\u0647\u0627\u062f (\u0647\u0627)",
+    )
     return {
+        "uncertain_post_edit_issue_blocks": bool(uncertain_regression),
+        "unchanged_grounded_issue_is_review_only": bool(
+            not old_regression and len(old_scope) == 1
+        ),
+        "partial_readability_evidence_survives_invalid_sibling": bool(
+            not partial_readability.valid and len(partial_readability.issues) == 1
+            and partial_readability.validation_errors
+        ),
+        "source_scoped_optional_plural_spacing": bool(
+            "\u06af\u0641\u062a\u0645\u0627\u0646(\u0647\u0627)" in optional_repaired
+            and "\u0646\u0647\u0627\u062f (\u0647\u0627)" in optional_unrelated
+        ),
         "manifest_enabled": bool(
             manifest["release"] == RUNTIME_RELEASE
             and all(manifest["capabilities"].values())

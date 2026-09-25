@@ -1254,7 +1254,9 @@ def _register_api(app: Flask) -> None:
                     f"foreign_scripts={finding.get('foreign_script_artifacts', [])} "
                     f"markup={finding.get('markup_wrapper_artifacts', [])} "
                     f"parentheses={finding.get('parenthesis_artifacts', [])} "
-                    f"detached_ezafe={finding.get('detached_ezafe_artifacts', [])}"
+                    f"detached_ezafe={finding.get('detached_ezafe_artifacts', [])} "
+                    f"spaced_optional_plural={finding.get('spaced_optional_plural_artifacts', [])} "
+                    f"unbalanced_dashes={finding.get('unbalanced_explanatory_dash_artifacts', [])}"
                 )
             for finding in final_text_audit.get("unresolved_identifiers", []) or []:
                 lines.append(
@@ -1686,8 +1688,17 @@ def _register_api(app: Flask) -> None:
                                 f"      {decision.get('rationale')}"
                             )
                 elif event["event_type"] == "critique_needs_review":
+                    raw_reasons = payload.get("reason_codes", []) or []
+                    reason_codes = (
+                        [raw_reasons] if isinstance(raw_reasons, str)
+                        else list(raw_reasons)
+                    )
+                    if not reason_codes and payload.get("reason"):
+                        reason_codes = [str(payload["reason"])]
+                    if not reason_codes and payload.get("review_reason"):
+                        reason_codes = [str(payload["review_reason"])]
                     lines.append(
-                        f"  NEEDS REVIEW: reason={payload.get('review_reason', 'legacy_unresolved')} "
+                        f"  NEEDS REVIEW: reason={','.join(reason_codes or ['legacy_unresolved'])} "
                         f"blocking={payload.get('blocking_issue_count')} "
                         f"after iteration={payload.get('iteration')}"
                     )
@@ -1700,13 +1711,31 @@ def _register_api(app: Flask) -> None:
                         f"issues={payload.get('issue_count', 0)} "
                         "source_grounded_matches="
                         f"{payload.get('matched_source_grounded_count', 0)} "
+                        "individually_valid="
+                        f"{payload.get('individually_valid_issue_count', 0)} "
                         "authority=target-only advisory"
                     )
+                    if payload.get("validation_errors"):
+                        lines.append(
+                            f"    Validation errors: {payload['validation_errors']}"
+                        )
                     if payload.get("failure_type"):
                         lines.append(
                             "    Non-blocking reviewer failure: "
                             f"{payload.get('failure_type')}"
                         )
+                elif event["event_type"] in {
+                    "newly_observed_unchanged_issue",
+                    "edit_introduced_issue",
+                    "candidate_attribution_uncertain",
+                }:
+                    issue = payload.get("issue", {}) or {}
+                    lines.append(
+                        f"  {event['event_type']}: "
+                        f"source={issue.get('source_quote', '')} "
+                        f"target={issue.get('current_persian_quote', '')} "
+                        f"edit_blocked={payload.get('edit_blocked', False)}"
+                    )
                 elif event["event_type"] == "refinement_salvage_rolled_back":
                     lines.append(
                         "  Refinement salvage rolled back: "

@@ -140,7 +140,7 @@ def test_unattested_replacement_cannot_resolve_pending_recovery(tmp_path) -> Non
 
 
 def test_v1037_runtime_and_operator_scripts_preserve_safety_contract() -> None:
-    assert runtime_capabilities()["release"] == "v10.37.0"
+    assert runtime_capabilities()["release"] == "v10.38.0"
     assert all(runtime_behavior_probes().values())
     deploy = Path("scripts/deploy_tarjomeh_v1037.sh").read_text(
         encoding="utf-8"

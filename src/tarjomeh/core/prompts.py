@@ -360,6 +360,34 @@ source-aware refiner will independently accept or reject it. Return an empty lis
 when the Persian is coherent. No markdown and no commentary.
 """
 
+FOCUSED_ATTACHMENT_REVIEW_PROMPT: str = """\
+You are checking one English-to-Persian academic translation for a specific
+source-fidelity or Persian-grammar error: the attachment or scope of a clause,
+modifier, appositive, parenthetical, antecedent, or governed complement.
+Do not suggest simpler terminology, omit complexity, change a number, or alter
+any source claim. A difficult but correct sentence is not an error. Return an
+empty issues list unless you can quote both exact texts and identify the head
+and dependent in each. A word-choice preference is outside this review.
+
+Indexed English source:
+{source_text}
+
+Persian candidate:
+{translation}
+
+Relevant terminology and review context:
+{terminology}
+{review_context}
+
+Return ONLY JSON with at most 4 issues. Every span must occur in its text:
+{{"issues":[{{"category":"accuracy|fluency","severity":"major|minor",
+"confidence":0.0,"source_segment_id":"p1:s1","source_quote":"...",
+"current_persian_quote":"...","source_head":"...",
+"source_dependent":"...","persian_head":"...",
+"persian_dependent":"...","suggested_correction":"...",
+"rationale":"Explain the exact attachment error and source consequence."}}]}}
+"""
+
 # ---------------------------------------------------------------------------
 # 4. Refinement prompt (applies critique feedback)
 # ---------------------------------------------------------------------------
