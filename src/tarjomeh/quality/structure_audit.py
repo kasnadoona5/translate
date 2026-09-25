@@ -105,7 +105,7 @@ _ANNOUNCEMENT_CATEGORIES: dict[str, str] = {
     **dict.fromkeys((
         "perspective", "perspectives", "approach", "approaches", "way", "ways",
         "axis", "axes", "منظر", "رویکرد", "شیوه", "محور", "جهت", "جهات",
-        "راه", "روش",
+        "راه", "روش", "وجه",
     ), "approach"),
     **dict.fromkeys((
         "element", "elements", "dimension", "dimensions", "factor", "factors",

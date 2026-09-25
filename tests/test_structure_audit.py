@@ -108,6 +108,35 @@ def test_a_faithful_translation_reports_nothing() -> None:
     assert audit_structure(EN_TWO, FA_TWO) == []
 
 
+def test_three_main_ways_rendered_as_three_aspects_is_recognized() -> None:
+    source = (
+        "It differs in three main ways from its precursors. "
+        "First, its scope is broader. Second, its framework is reusable. "
+        "Third, it synthesizes approaches."
+    )
+    candidate = (
+        "این کتاب در سه وجه اصلی با آثار پیشین خود تفاوت دارد. "
+        "نخست آنکه دامنه اش گسترده تر است. "
+        "دوم آنکه چارچوبش بازاستفاده پذیر است. "
+        "سوم آنکه رویکردها را ترکیب می کند."
+    )
+    assert announced_counts(candidate) == [3]
+    assert ordinal_sequence_length(candidate) == 3
+    assert audit_structure(source, candidate) == []
+
+
+def test_three_aspects_still_blocks_a_dropped_item() -> None:
+    source = "It differs in three main ways. First a; second b; third c."
+    candidate = "در سه وجه اصلی تفاوت دارد. نخست الف؛ دوم ب."
+    assert _classes(source, candidate) == [TRANSLATION_STRUCTURE_MISMATCH]
+
+
+def test_ways_to_aspects_direct_count_change_stays_blocked() -> None:
+    source = "It differs in two main ways from its precursors."
+    candidate = "در سه وجه اصلی با آثار پیشین خود تفاوت دارد."
+    assert _classes(source, candidate) == [TRANSLATION_STRUCTURE_MISMATCH]
+
+
 def test_prose_without_any_enumeration_reports_nothing() -> None:
     """Counting words are everywhere in ordinary prose."""
     source = "Two of them left, and three more followed later that year."
