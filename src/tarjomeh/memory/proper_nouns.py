@@ -639,6 +639,17 @@ def is_reusable_terminology_mapping(english: str, persian: str) -> bool:
     return not automatic_terminology_risk_reasons(source, target)
 
 
+def is_bounded_person_name_target(source: str, target: str) -> bool:
+    """Exclude surrounding Persian prose from reusable person names."""
+    source_words = re.findall(r"[A-Za-z\u00c0-\u024f]+", source or "")
+    target_words = _PERSIAN_WORD_RE.findall(target or "")
+    return bool(
+        source_words
+        and target_words
+        and len(target_words) <= max(3, len(source_words) + 1)
+    )
+
+
 def _context_bound_persian_target(value: str) -> bool:
     """Reject surrounding Persian syntax from low-authority lexical memory."""
     normalized = unicodedata.normalize("NFKC", value or "")
@@ -1327,6 +1338,12 @@ class ProperNouns:
                 or not is_reusable_terminology_mapping(
                     key, self._nouns.get(key, "")
                 )
+                or (
+                    self.category_for(key) == "person"
+                    and not is_bounded_person_name_target(
+                        key, self._nouns.get(key, "")
+                    )
+                )
             )
         )
 
@@ -1570,6 +1587,17 @@ class ProperNouns:
                         "context_deferred_reason": (
                             "accepted_correction_without_exact_local_alignment"
                         ),
+                    })
+                if (
+                    record.get("origin") == "accepted_correction"
+                    and self._categories.get(source) == "person"
+                    and not is_bounded_person_name_target(
+                        source, self._nouns[source]
+                    )
+                ):
+                    record.update({
+                        "context_deferred": True,
+                        "context_deferred_reason": "person_name_contains_context",
                     })
             stored_aliases = data.get("aliases", {})
             self._aliases = {

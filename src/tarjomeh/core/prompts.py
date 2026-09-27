@@ -298,6 +298,11 @@ MQM rules:
   head and do not interrupt or duplicate the finite predicate. Render reflection,
   restatement, or clarification as a grammatically integrated Persian relation rather
   than preserving English punctuation around an unattached phrase.
+- In a list such as "historical, network, and ideational (also called discursive)
+  approaches", the parenthetical qualifies only the final named approach. Flag a
+  Persian relative clause that instead describes every listed approach. Quote the
+  source qualifier and the exact Persian clause; do not flag a correctly scoped
+  rendering merely because its order differs from English.
 - A sentence may be formally worded yet still be unpublishable if a Persian reader
   must reconstruct its English syntax to understand it. Report that defect precisely.
 - A ZWNJ/spacing-only difference is not a terminology error. Use typography only

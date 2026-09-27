@@ -55,6 +55,7 @@ from tarjomeh.memory.proper_nouns import (
     is_safe_automatic_entity_mapping,
     is_safe_low_authority_mapping,
     is_reusable_terminology_mapping,
+    is_bounded_person_name_target,
     low_authority_mapping_category,
     looks_like_transliterated_loanword,
     observed_bilingual_target,
@@ -149,6 +150,46 @@ def _restore_source_bound_artifacts(
 def _canonical_surface(text: str) -> str:
     """Normalize layout whitespace without changing lexical content."""
     return re.sub(r"\s+", " ", text or "").strip()
+
+
+def _merge_approved_book_terms(
+    db: JobDatabase, job_id: str, glossary: GlossaryManager,
+) -> dict[str, Any]:
+    """Load human-approved terms only for the exact uploaded source bytes."""
+    source_hash = db.get_job_source_hash(job_id)
+    if not source_hash:
+        return {"source_sha256": "", "applied": [], "conflicts": []}
+    applied: list[dict[str, str]] = []
+    conflicts: list[dict[str, str]] = []
+    for term in db.get_approved_book_terms(job_id):
+        source = str(term.get("source", "")).strip()
+        target = str(term.get("target", "")).strip()
+        if not source or not target:
+            continue
+        existing = [
+            entry for entry in glossary.entries
+            if entry.source.casefold() == source.casefold()
+            and not entry.is_auto
+            and all(
+                str(getattr(entry, field, "")).casefold()
+                == str(term.get(field, "")).strip().casefold()
+                for field in ("sense", "author", "domain")
+            )
+        ]
+        if existing:
+            if any(entry.target != target for entry in existing):
+                conflicts.append({"source": source, "target": target})
+            continue
+        glossary.add_book_approved_term(term)
+        applied.append({"source": source, "target": target})
+    snapshot = {
+        "source_sha256": source_hash,
+        "applied": applied,
+        "conflicts": conflicts,
+        "policy": "exact_uploaded_source_book_approval_v1",
+    }
+    db.save_job_artifact(job_id, "book_term_snapshot_v1", snapshot)
+    return snapshot
 
 
 def audit_canonical_document_identity(
@@ -1940,6 +1981,7 @@ _LANGUAGE_QUALITY_COUNT_FIELDS = (
     "markup_wrapper_count",
     "parenthesis_artifact_count",
     "detached_ezafe_count",
+    "spaced_optional_plural_count",
     "tatweel_separator_count",
     "unbalanced_explanatory_dash_count",
 )
@@ -5378,6 +5420,10 @@ def _reconcile_committed_terminology(
             if memory_category in entity_categories
             else is_reusable_terminology_mapping(source, target)
         )
+        if memory_category == "person" and not is_bounded_person_name_target(
+            source, target
+        ):
+            reusable = False
         if not reusable or (
             memory_category not in entity_categories and scope_risks
         ):
@@ -6182,8 +6228,22 @@ class TranslationPipeline:
         progress_callback: Callable[[str, float, str], None] | None = None,
     ) -> dict[str, Any] | None:
         """Load or run the opt-in, one-time review-only research pass."""
+        from tarjomeh.context.book_term_candidates import collect_book_term_candidates
+
         artifact = self.db.get_job_artifact(job_id, "book_research")
         if artifact is not None or not self.config.translation.enable_book_research:
+            artifact = artifact or {"status": "disabled", "terms": []}
+            if "source_term_candidates_version" not in artifact:
+                existing = {
+                    str(term.get("source", "")).casefold()
+                    for term in artifact.get("terms", []) if isinstance(term, dict)
+                }
+                artifact["terms"].extend(
+                    term for term in collect_book_term_candidates(document)
+                    if term["source"].casefold() not in existing
+                )
+                artifact["source_term_candidates_version"] = 1
+                self.db.save_job_artifact(job_id, "book_research", artifact)
             return artifact
 
         if progress_callback:
@@ -6198,6 +6258,15 @@ class TranslationPipeline:
             BookResearcher(self.config, self.llm_client).research(document)
         )
         artifact = result.to_dict()
+        existing = {
+            str(term.get("source", "")).casefold()
+            for term in artifact.get("terms", []) if isinstance(term, dict)
+        }
+        artifact["terms"].extend(
+            term for term in collect_book_term_candidates(document)
+            if term["source"].casefold() not in existing
+        )
+        artifact["source_term_candidates_version"] = 1
         self.db.save_job_artifact(job_id, "book_research", artifact)
         if artifact.get("status") in {
             "completed", "completed_without_suggestions", "degraded", "partial"
@@ -6565,6 +6634,7 @@ class TranslationPipeline:
             if p not in glossary_paths:
                 glossary_paths.append(p)
         glossary_manager.load_many(glossary_paths, ignore_missing=True)
+        _merge_approved_book_terms(self.db, job_id, glossary_manager)
         if is_resume:
             extracted_artifact = self.db.get_job_artifact(
                 job_id, "auto_extracted_terms"
@@ -8319,6 +8389,7 @@ class TranslationPipeline:
             if p not in glossary_paths:
                 glossary_paths.append(p)
         glossary_manager.load_many(glossary_paths, ignore_missing=True)
+        _merge_approved_book_terms(self.db, job_id, glossary_manager)
 
         memory_manager = MemoryManager(self.config)
         saved_mem = self.db.get_memory_state(job_id)

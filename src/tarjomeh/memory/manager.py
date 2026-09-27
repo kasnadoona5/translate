@@ -36,6 +36,7 @@ from tarjomeh.quality.integrity import (
     parenthesis_artifacts,
     repeated_persian_clause_artifacts,
     repeated_persian_word_artifacts,
+    spaced_optional_plural_artifacts,
     tatweel_separator_artifacts,
 )
 from tarjomeh.quality.structure_audit import audit_payload as structure_audit_payload
@@ -193,6 +194,13 @@ def _style_record_is_authoritative(record: dict[str, Any]) -> bool:
     if not cleaned:
         return False
     if _numeric_score(record.get("quality_score")) < 75.0:
+        return False
+    source = str(record.get("source_text", ""))
+    if source and (
+        _source_style_contradiction(source, cleaned)
+        or spaced_optional_plural_artifacts(source, cleaned)
+        or re.search(r"\s[\u2013\u2014]\s+\u0631\u0627(?:\s|$)", cleaned)
+    ):
         return False
     scores = dict(record.get("final_scores", {}) or {})
     return bool(
@@ -744,6 +752,11 @@ class MemoryManager:
             structural_contradictions = _source_style_contradiction(
                 source_paragraph, paragraph
             ) if source_paragraph else []
+            if source_paragraph:
+                if spaced_optional_plural_artifacts(source_paragraph, paragraph):
+                    structural_contradictions.append("spaced_optional_plural")
+                if re.search(r"\s[\u2013\u2014]\s+\u0631\u0627(?:\s|$)", paragraph):
+                    structural_contradictions.append("detached_object_marker")
             if structural_contradictions:
                 quality = {
                     **quality,
@@ -809,6 +822,7 @@ class MemoryManager:
             )
             record = {
                 "text": text,
+                "source_text": source_paragraph,
                 "text_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
                 "paragraph_role": paragraph_role,
                 "book_genre": book_genre,

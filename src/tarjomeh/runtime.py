@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v10.38.0"
+RUNTIME_RELEASE = "v10.39.0"
 RUNTIME_REVISION = 1
 
 
@@ -75,11 +75,16 @@ def runtime_capabilities() -> dict[str, Any]:
             "partial_readability_evidence_survives_invalid_sibling": True,
             "source_scoped_optional_plural_spacing": True,
             "focused_attachment_trial_off_by_default": True,
+            "book_scoped_term_approval": True,
+            "source_family_candidates_review_only": True,
+            "final_optional_plural_admission": True,
+            "contextual_person_name_quarantine": True,
+            "orphan_object_marker_dash_repair": True,
         },
         "policy_versions": {
             "structure_evidence": 2,
             "canonical_text": 3,
-            "layer1_admission": 7,
+            "layer1_admission": 8,
             "style_evidence": 6,
             "benchmark_schema": 1,
             "checkpoint_export": 3,
@@ -99,6 +104,8 @@ def runtime_capabilities() -> dict[str, Any]:
             "targeted_language_repair": 2,
             "post_edit_issue_attribution": 1,
             "attachment_trial": 1,
+            "book_term_scope": 1,
+            "final_language_admission": 3,
         },
     }
 
@@ -111,6 +118,7 @@ def runtime_behavior_probes() -> dict[str, bool]:
     from tarjomeh.core.config import TarjomehConfig
     from tarjomeh.core.pipeline import (
         audit_translation_language,
+        _language_quality_strictly_improves,
         _source_obligation_resume_action,
         _candidate_regression_details,
         _blocking_structure_findings,
@@ -137,6 +145,7 @@ def runtime_behavior_probes() -> dict[str, bool]:
     )
     from tarjomeh.memory.proper_nouns import (
         ProperNouns,
+        is_bounded_person_name_target,
         automatic_terminology_risk_reasons,
         low_authority_mapping_category,
     )
@@ -366,7 +375,29 @@ def runtime_behavior_probes() -> dict[str, bool]:
         "The discourse(s) matter.\nOther institutions.",
         "\u06af\u0641\u062a\u0645\u0627\u0646 \u0645\u0647\u0645\u200c\u0627\u0646\u062f.\n\u0646\u0647\u0627\u062f (\u0647\u0627)",
     )
+    optional_before = audit_translation_language(
+        "The discourse(s) matter.", "\u06af\u0641\u062a\u0645\u0627\u0646 (\u0647\u0627) \u0645\u0647\u0645\u200c\u0627\u0646\u062f."
+    )
+    optional_after = audit_translation_language(
+        "The discourse(s) matter.", optional_repaired
+    )
+    dash_repaired, _ = repair_source_grounded_language_artifacts(
+        "They make history - their own and others' - in context.",
+        "\u062a\u0627\u0631\u06cc\u062e \u062e\u0648\u062f \u0648 \u062f\u06cc\u06af\u0631\u0627\u0646 \u2014 \u0631\u0627 \u0645\u06cc\u200c\u0633\u0627\u0632\u0646\u062f.",
+    )
     return {
+        "final_optional_plural_admission": bool(
+            _language_quality_strictly_improves(optional_before, optional_after)
+        ),
+        "contextual_person_name_quarantine": bool(
+            is_bounded_person_name_target(
+                "Manuela Tecusan", "\u0645\u0627\u0646\u0648\u0626\u0644\u0627 \u062a\u06a9\u0648\u0634\u0627\u0646"
+            )
+            and not is_bounded_person_name_target(
+                "Manuela Tecusan", "\u0648\u06cc\u0631\u0627\u0633\u062a\u0627\u0631\u06cc \u0639\u0627\u0644\u0645\u0627\u0646\u0647 \u0648 \u06a9\u0627\u0645\u0644\u0627 \u062a\u062e\u0635\u0635\u06cc \u0645\u0627\u0646\u0648\u0626\u0644\u0627 \u062a\u06a9\u0648\u0634\u0627\u0646"
+            )
+        ),
+        "orphan_object_marker_dash_repair": "\u2014 \u0631\u0627" not in dash_repaired,
         "uncertain_post_edit_issue_blocks": bool(uncertain_regression),
         "unchanged_grounded_issue_is_review_only": bool(
             not old_regression and len(old_scope) == 1

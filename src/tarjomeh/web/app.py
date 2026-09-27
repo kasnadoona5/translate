@@ -1074,6 +1074,7 @@ def _register_api(app: Flask) -> None:
             "",
         ])
         research = db.get_job_artifact(job_id, "book_research")
+        book_term_snapshot = db.get_job_artifact(job_id, "book_term_snapshot_v1")
         structure_audit = db.get_job_artifact(job_id, "pdf_structure_audit")
         chapter_manifest = db.get_job_artifact(job_id, "chapter_manifest")
         chapter_checkpoints = db.get_job_artifact(job_id, "chapter_checkpoints")
@@ -1119,6 +1120,10 @@ def _register_api(app: Flask) -> None:
                 term for term in research.get("terms", [])
                 if isinstance(term, dict) and term.get("status") == "approved"
             ]
+            candidates = [
+                term for term in research.get("terms", [])
+                if isinstance(term, dict) and term.get("status") == "candidate"
+            ]
             lines.extend([
                 "Book Research:",
                 f"  status={research.get('status')}",
@@ -1127,9 +1132,24 @@ def _register_api(app: Flask) -> None:
                 "  providers="
                 + ", ".join(research.get("providers_used", [])),
                 f"  suggestions={len(suggested)} approved={len(approved)}",
+                f"  source_family_candidates={len(candidates)}",
+                "  approved_book_terms_active="
+                + str(len((book_term_snapshot or {}).get("applied", []))),
+                "  curated_conflicts="
+                + str((book_term_snapshot or {}).get("conflicts", [])),
                 f"  context={research.get('book_context', '')}",
                 "",
             ])
+            for term in candidates[:30]:
+                lines.append(
+                    "  REVIEW TERM FAMILY: source={source!r} count={count} "
+                    "status={status} evidence={evidence!r}".format(
+                        source=term.get("source", ""),
+                        count=term.get("source_count", 0),
+                        status=term.get("status", "candidate"),
+                        evidence=str(term.get("source_evidence", ""))[:200],
+                    )
+                )
         if structure_audit is not None:
             lines.extend([
                 "PDF Structure:",
@@ -2134,15 +2154,51 @@ def _register_api(app: Flask) -> None:
     @_require_auth
     def api_job_research(job_id: str):
         """Return the persisted, review-only book research artifact."""
+        from tarjomeh.core.paragraph_protocol import split_paragraphs
         from tarjomeh.jobs.database import JobDatabase
 
         db = JobDatabase()
         if not db.get_job(job_id):
             return jsonify({"error": "Job not found"}), 404
         artifact = db.get_job_artifact(job_id, "book_research")
+        if artifact:
+            artifact = copy.deepcopy(artifact)
+            chunks = db.get_chunks(job_id)
+            for term in artifact.get("terms", []):
+                source = str(term.get("source", "")).strip()
+                if not source:
+                    continue
+                pattern = re.compile(
+                    rf"(?<!\w){re.escape(source)}(?!\w)", re.IGNORECASE
+                )
+                examples = []
+                for chunk in chunks:
+                    if not pattern.search(str(chunk.get("text", ""))):
+                        continue
+                    source_parts = split_paragraphs(str(chunk.get("text", "")))
+                    target_parts = split_paragraphs(str(chunk.get("translation", "")))
+                    aligned = len(source_parts) == len(target_parts)
+                    for paragraph_index, paragraph in enumerate(source_parts):
+                        if pattern.search(paragraph):
+                            examples.append({
+                                "chunk_index": chunk["chunk_index"],
+                                "source_excerpt": paragraph[:300],
+                                "target_excerpt": (
+                                    target_parts[paragraph_index][:300]
+                                    if aligned else ""
+                                ),
+                                "alignment": "paragraph" if aligned else "unverified",
+                            })
+                            break
+                    if len(examples) >= 2:
+                        break
+                term["checkpoint_examples"] = examples
         return jsonify({
             "job_id": job_id,
             "research": artifact,
+            "book_term_snapshot": db.get_job_artifact(
+                job_id, "book_term_snapshot_v1"
+            ),
         })
 
     @app.route(
@@ -2152,7 +2208,7 @@ def _register_api(app: Flask) -> None:
     @_require_auth
     @_serialise_glossary_writes
     def api_job_research_term(job_id: str, index: int, action: str):
-        """Approve or reject one job-scoped research suggestion."""
+        """Review a suggestion; approval is book-scoped unless explicitly shared."""
         from tarjomeh.glossary.manager import GlossaryEntry, GlossaryManager
         from tarjomeh.jobs.database import JobDatabase
 
@@ -2168,6 +2224,15 @@ def _register_api(app: Flask) -> None:
         term = terms[index]
         if not isinstance(term, dict):
             return jsonify({"error": "Invalid research term"}), 400
+        payload = request.get_json(silent=True) or {}
+        scope = str(payload.get("scope", "book")).strip().lower()
+        if scope not in {"book", "shared"}:
+            return jsonify({"error": "scope must be book or shared"}), 400
+        if action == "reject" and scope == "shared":
+            return jsonify({"error": "Rejection is book-scoped"}), 400
+        proposed_target = str(payload.get("target", term.get("target", ""))).strip()
+        if action == "approve" and proposed_target:
+            term["target"] = proposed_target
 
         if action == "approve":
             if (
@@ -2194,24 +2259,42 @@ def _register_api(app: Flask) -> None:
                     "error": "A curated glossary term already exists; it was not overwritten.",
                     "existing": _glossary_entry_payload(0, curated[0]),
                 }), 409
-            entries = [
-                entry for entry in gm.entries
-                if entry.source.casefold() != source_key
-            ]
-            entries.append(GlossaryEntry(
-                source=str(term.get("source", "")).strip(),
-                target=str(term.get("target", "")).strip(),
-                context=str(term.get("context", "")).strip(),
-                domain=str(term.get("domain", "")).strip(),
-                sense=str(term.get("sense", "")).strip(),
-                author=str(term.get("author", "")).strip(),
-                glossary="book_research_approved",
-                is_auto=False,
-                include_original=False,
-            ))
-            _save_glossary_entries(path, entries)
+            if scope == "shared":
+                if payload.get("confirm_shared") is not True:
+                    return jsonify({"error": "Shared approval requires explicit confirmation"}), 409
+                entries = [
+                    entry for entry in gm.entries
+                    if entry.source.casefold() != source_key
+                ]
+                entries.append(GlossaryEntry(
+                    source=str(term.get("source", "")).strip(),
+                    target=str(term.get("target", "")).strip(),
+                    context=str(term.get("context", "")).strip(),
+                    domain=str(term.get("domain", "")).strip(),
+                    sense=str(term.get("sense", "")).strip(),
+                    author=str(term.get("author", "")).strip(),
+                    glossary="book_research_approved",
+                    is_auto=False,
+                    include_original=False,
+                ))
+                _save_glossary_entries(path, entries)
+            else:
+                try:
+                    term["source_sha256"] = db.save_book_term_decision(
+                        job_id, term, "approved"
+                    )
+                except ValueError as exc:
+                    return jsonify({"error": str(exc)}), 409
+        else:
+            try:
+                term["source_sha256"] = db.save_book_term_decision(
+                    job_id, term, "rejected"
+                )
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 409
 
         term["status"] = "approved" if action == "approve" else "rejected"
+        term["approval_scope"] = scope
         db.save_job_artifact(job_id, "book_research", artifact)
         db.log_event(
             job_id,
@@ -2219,7 +2302,7 @@ def _register_api(app: Flask) -> None:
             f"Research term {index} {term['status']}: "
             + str(term.get("source", "")),
         )
-        return jsonify({"status": term["status"], "term": term})
+        return jsonify({"status": term["status"], "scope": scope, "term": term})
 
     @app.route("/api/glossary/upload", methods=["POST"])
     @_require_auth

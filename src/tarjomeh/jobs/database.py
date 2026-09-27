@@ -165,6 +165,22 @@ class JobDatabase:
                     created_at TEXT NOT NULL
                 )
             """)
+            job_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(jobs)")
+            }
+            if "source_sha256" not in job_columns:
+                conn.execute("ALTER TABLE jobs ADD COLUMN source_sha256 TEXT")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS book_term_decisions (
+                    source_sha256 TEXT NOT NULL,
+                    source_key TEXT NOT NULL,
+                    sense_key TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (source_sha256, source_key, sense_key)
+                )
+            """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS job_workers (
                     job_id TEXT PRIMARY KEY,
@@ -349,12 +365,85 @@ class JobDatabase:
                 "'-' and '_' (max 64 characters)."
             )
         created_at = datetime.utcnow().isoformat()
+        source_hash = self._source_file_hash(Path(input_path))
         with self._get_connection() as conn:
             conn.execute(
-                "INSERT INTO jobs (id, input_path, status, config, created_at) VALUES (?, ?, ?, ?, ?)",
-                (job_id, str(input_path), JobStatus.PENDING, json.dumps(config_dict), created_at)
+                "INSERT INTO jobs (id, input_path, status, config, created_at, source_sha256) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (job_id, str(input_path), JobStatus.PENDING, json.dumps(config_dict), created_at, source_hash)
             )
             conn.commit()
+
+    @staticmethod
+    def _source_file_hash(path: Path) -> str:
+        if not path.is_file():
+            return ""
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+
+    def get_job_source_hash(self, job_id: str) -> str:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT input_path, source_sha256 FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            if not row:
+                return ""
+            source_hash = self._source_file_hash(Path(row["input_path"]))
+            if not source_hash:
+                return ""
+            if row["source_sha256"] and source_hash != row["source_sha256"]:
+                raise ValueError("Uploaded source file changed after job creation")
+            if not row["source_sha256"]:
+                conn.execute(
+                    "UPDATE jobs SET source_sha256=? WHERE id=?",
+                    (source_hash, job_id),
+                )
+            return source_hash
+
+    def save_book_term_decision(
+        self, job_id: str, term: dict[str, Any], status: str,
+    ) -> str:
+        if status not in {"approved", "rejected"}:
+            raise ValueError("Invalid book-term decision")
+        source_hash = self.get_job_source_hash(job_id)
+        if not source_hash:
+            raise ValueError("Source file is unavailable; book scope cannot be proven")
+        source_key = " ".join(str(term.get("source", "")).casefold().split())
+        sense_key = "|".join(
+            " ".join(str(term.get(field, "")).casefold().split())
+            for field in ("sense", "author", "domain")
+        )
+        if not source_key:
+            raise ValueError("Source term is empty")
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO book_term_decisions
+                    (source_sha256, source_key, sense_key, payload, status, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_sha256, source_key, sense_key) DO UPDATE SET
+                    payload=excluded.payload, status=excluded.status,
+                    updated_at=excluded.updated_at
+            """, (
+                source_hash, source_key, sense_key,
+                json.dumps(term, ensure_ascii=False, sort_keys=True),
+                status, datetime.utcnow().isoformat(),
+            ))
+        return source_hash
+
+    def get_approved_book_terms(self, job_id: str) -> list[dict[str, Any]]:
+        source_hash = self.get_job_source_hash(job_id)
+        if not source_hash:
+            return []
+        with self._get_connection() as conn:
+            rows = conn.execute("""
+                SELECT payload FROM book_term_decisions
+                WHERE source_sha256=? AND status='approved'
+                ORDER BY source_key, sense_key
+            """, (source_hash,)).fetchall()
+        return [json.loads(row["payload"]) for row in rows]
 
     def save_evaluation(
         self,

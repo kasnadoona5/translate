@@ -2087,6 +2087,23 @@ def repair_source_grounded_language_artifacts(
             "offset": match.start(),
         })
 
+    # A single orphan dash before the Persian object marker is not a
+    # parenthetical aside when the source has a matched dash pair.
+    if structural_role == "body" and "\n" not in repaired.strip():
+        source_dashes = len(re.findall(r"\s[-\u2013\u2014]\s", source or ""))
+        target_dashes = list(re.finditer(r"\s[\u2013\u2014]\s", repaired))
+        if source_dashes >= 2 and source_dashes % 2 == 0 and len(target_dashes) == 1:
+            match = re.search(r"(?P<dash>\s[\u2013\u2014]\s)(?=\u0631\u0627(?:\s|$))", repaired)
+            if match and match.start("dash") == target_dashes[0].start():
+                before = match.group("dash")
+                repaired = repaired[:match.start()] + " " + repaired[match.end():]
+                edits.append({
+                    "type": "orphaned_object_marker_dash",
+                    "before": before,
+                    "after": " ",
+                    "offset": match.start(),
+                })
+
     source_folded = unicodedata.normalize("NFKC", source or "").casefold()
     for match in reversed(list(_PERSIAN_SUFFIX_AFTER_ORIGINAL_RE.finditer(repaired))):
         original = match.group("original")

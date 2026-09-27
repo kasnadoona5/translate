@@ -35,19 +35,19 @@ new evidence so later patches cannot silently revive an earlier defect.
 
 ## Current Baseline
 
-- Latest supplied live evidence: `v10.35.0`, job `5f347402c194`
+- Latest supplied live evidence: `v10.37.0`, job `e17faf75e315` (see the
+  v10.37 evidence section near the end of this ledger)
 - Prior fully reconciled baseline: `v10.33.0`, commit `fddc2b6`, job `96851204419f`
 - Source: *The State: Past, Present, Future* (Bob Jessop, 2016)
-- Runtime result: the chapter checkpoint persisted 16 of 222 chunks (13 completed,
-  3 needs review), with no terminal chunk stop. There were 123 LLM attempts, one
-  recovered critic failure (0.81%), and no transport failure.
-- Translation verdict: DOCX, canonical database text, and Layer 3 matched. The run
-  remains `REVIEW`: a physically single source note was counted twice in its target
-  representation, producing a false companion hard failure; an unmatched `--ra`
-  Persian object-marker dash survived; and central academic prose remains too opaque.
-  Research stayed advisory and representative style stayed separate from fallback.
-  The note counter is also used in production integrity checks, so this is not merely
-  an audit display defect. Full scholarly-table reconstruction remains deferred.
+- v10.37 runtime result: 16 of 222 chunks finished (12 completed, four
+  needs_review), with a downloadable chapter checkpoint. The supplied companion
+  audit reports `REVIEW` with no hard failures. This does not certify the whole
+  book or resolve the previously stopped `c31517e92d81` job.
+- Translation remains review-grade: one serious institutionalism scope issue
+  was detected only after an unrelated dash edit. Academic fluency and exact
+  source attachment still require direct PDF/DOCX inspection. Research stays
+  advisory and style authority is conditional. Full scholarly-table
+  reconstruction remains deferred.
 
 ## v10.33 Live Result
 
@@ -413,6 +413,13 @@ new evidence so later patches cannot silently revive an earlier defect.
 | R106 | Targeted language edits require source validation and unresolved style review is scoped | OPEN | v10.36 requires the existing source-aware critique, structure, and regression admission on every changed targeted repair, not only edits with prior deterministic findings. A hash-bound objective dash review withholds reliable long-term memory but may exclude only its affected paragraph from style; ambiguous or unscoped reviews still exclude the whole chunk. Local tests pass; live evidence pending. |
 | R107 | A faithful Persian argument announcement is recognized without waiving source counts | OPEN | v10.36 job `c31517e92d81` stopped four times on DB chunk 9/UI chunk 10: source `three key claims`, target `سه مدعای کلیدی` with `نخست/دوم/سوم`. The typed noun list recognized `ادعا` but not the ordinary synonym `مدعا`, inventing a zero-item mismatch. v10.37 adds this general argument-item noun and records aligned candidate text when no typed episode exists. Tests prove faithful three-item text passes and `three` to `دو مدعای` remains blocking. Live resume and DOCX evidence pending. |
 | R108 | A repeated, unchanged source-obligation failure cannot loop indefinitely or bypass quality gates | OPEN | v10.36 reused the same hash-bound candidate on each resume; `failure_count=4` and no fresh route existed. v10.37 rechecks the cached candidate under current policy, permits one full-pipeline replay, then one bounded fresh translation if the exact candidate still blocks, and stops explicitly if the fresh candidate also repeats the defect. A changed admitted candidate resolves recovery only in the atomic checkpoint when paragraph identity, selection, canonical admission, and final quality match the committed text. Focused tests pass; live validation pending. |
+| R109 | A newly detected old issue must not veto an independent source-safe edit | OPEN | v10.37 chunk 12's dash repair exposed a serious institutionalism scope finding in an unchanged paragraph. v10.38 requires a source quote, exact target quote, stable paragraph and unchanged paragraph bytes before treating it as old; uncertain attribution or a new source obligation blocks the edit. The old finding stays in final quality and review/memory decisions. Synthetic regression tests and live review are required before `PROTECTED`. |
+| R110 | One malformed readability item cannot erase valid sibling evidence | OPEN | v10.38 routes only individually validated exact-span readability items while preserving the response's invalid status and validation errors. Source-aware suppression, refiner veto, and final integrity gates remain authoritative. Unit tests pass; live event and DOCX evidence pending. |
+| R111 | Detached ezafe and optional plural spacing must be source/role scoped | OPEN | v10.38 reviews detached quoted ezafe and spaced Persian optional-plural markers. Auto repair of optional plural spacing requires one source `word(s)`, one target form, body role, and a single paragraph; ambiguous text stays REVIEW. No source-authored count or citation is changed. Unit tests pass; source/DOCX evidence pending. |
+| R112 | An extra attachment reviewer cannot silently alter the pipeline or memory | OPEN | v10.38 provides an opt-in, read-only offline replay, source/target quote validation, two ordinary-critic controls, known-good controls, synthetic sensitivity cases, served-model and cost accounting. It is OFF in live jobs. It can be enabled only after human adjudication, at least two real unique catches, precision at least 80% including uncertain findings, and user approval. Refiner rejection remains a veto; optional reviewer failures must not emit `qa_unavailable`. |
+| R113 | Accepted person-name memory stores only the lexical name, not surrounding prose | OPEN | v10.38 job `0314bebdace2` stored `Manuela Tecusan` as `ویراستاری عالمانه و کاملاً تخصصیِ مانوئلا تکوشان` even though the passage translation can remain contextual. The next candidate rejects oversized reviewed person targets and defers legacy `exact_local` records on retrieval; it never deletes source passage text. Focused tests pass; fresh memory and DOCX evidence pending. |
+| R114 | Source-proven optional plural spacing survives exact final-render admission | OPEN | v10.38 source `discourse(s)` and DOCX `گفتمان (ها)` show that the repair existed but `_language_quality_strictly_improves` omitted `spaced_optional_plural_count`. The next candidate adds that monotonic field; ambiguous, non-body, and source-authored forms remain REVIEW/untouched. Focused final-document tests pass; fresh DOCX evidence pending. |
+| R115 | A book research approval cannot silently become global authority | OPEN | The v10.38 Research Suggestions endpoint wrote approvals into the shared working CSV. The next candidate defaults to exact-upload-SHA-256 book scope; explicit confirmed shared approval remains available. It reports source-family candidates without automatically promoting them. Tests cover identical/different source bytes and curated conflicts; live cross-book evidence pending. |
 
 ## Validated v10.17 External Audit Notes
 
@@ -1631,6 +1638,85 @@ pending a fresh v10.25 VPS run.
   passed; Bash syntax, embedded audit/deploy Python syntax, and Git whitespace
   checks passed. Ruff was unavailable in this environment. These are code
   checks, not a live translation-quality or VPS deployment verdict.
+
+## v10.37 Live Evidence And v10.38 Pending Validation
+
+- Job `e17faf75e315` completed the requested 16-chunk chapter checkpoint: 12
+  completed, four `needs_review`, 206 pending. The supplied companion audit
+  verdict was `REVIEW`, not a product-wide PASS; it did not report a hard
+  failure. A downloadable DOCX was supplied. The institutionalism scope issue
+  appeared after an unrelated paragraph's dash repair, showing why new-issue
+  timing alone cannot prove the edit caused it.
+- R107/R108 remain OPEN until the earlier stopped job `c31517e92d81` is
+  resumed and its recovery artifact, final checkpoint, DOCX, source counts,
+  and memory authority are checked. The e17 checkpoint is not a substitute.
+- For v10.38, verify source-to-DOCX fidelity, academic fluency, optional
+  plurality and ezafe artifacts, dash balance, QA reason codes, atomic
+  canonical/paragraph/final-quality identity, four memory layers, style sample
+  authority, research provenance, and active/lifetime LLM call/failure counts.
+  Compare R07/R08/R09/R60 and every previously protected row; do not upgrade
+  R109-R112 solely because local tests or capability probes pass.
+- The focused attachment reviewer is trial-only and adds zero production LLM
+  calls. Its replay is read-only on the job database and requires separate
+  user approval of the finding-by-finding evidence table before any default
+  activation. An invalid or mismatched served-model trial is inconclusive.
+- Deployment must stop on insufficient space or an active Tarjomeh job,
+  preserve local glossary/config/DB, verify the running 9router ID, image,
+  start time, and mounts, and touch no 9router container, image, mount, or data.
+- Local v10.38 verification: 1,007 tests passed; all 33 runtime behavior
+  probes passed. Deployment/audit Bash syntax, embedded audit Python syntax,
+  compiled Python modules, and Git whitespace checks passed. No new VPS
+  translation or offline attachment LLM replay has been run yet; these local
+  checks do not prove product readiness or book-wide translation quality.
+
+## v10.38 Live Result And v10.39 Candidate
+
+- Job `0314bebdace2` reached a 16/222-chunk checkpoint (12 completed, four
+  `needs_review`, 206 pending). A DOCX and companion/memory/QA reports were
+  supplied. Active LLM attempts: 127; 16 obsolete-generation attempts were
+  reported separately (143 lifetime). Two deterministic chunk stops must not
+  be described as LLM failures. The checkpoint audit failed/requires review;
+  it is not a book-wide or product-ready PASS.
+- Source/DOCX comparison found `discourse(s)` -> `گفتمان (ها)`, an orphan
+  dash before Persian `را`, and an institutionalism parenthetical whose Persian
+  scope can attach to all five schools although the source limits the alias to
+  ideational institutionalism. The explicit source `two issues` remained `دو
+  موضوع`; that protection must not be reversed because a later list has three.
+- Layer 1 admitted a contextual `Manuela Tecusan` phrase as a reusable name;
+  four style samples included three representative records, one of which
+  contained dense state-power prose. Research had 13 attributable sources,
+  27 suggestions, and zero approved terms. Neither style score nor research
+  source count alone proves academic accuracy or fluency.
+- The next candidate fixes exact final optional-plural admission, narrowly
+  repairs a source-paired orphan object-marker dash, quarantines contextual
+  reviewed person names, and isolates book approvals by exact source bytes.
+  It widens bounded book research sampling and reports repeated conceptual
+  families for human review only. The focused attachment LLM remains OFF.
+- R01, R07-R09, R60, R100-R112 remain at their prior OPEN/PARTIAL/MONITOR
+  statuses until their exact source/output obligations are rechecked. In
+  particular R107/R108 require resuming `c31517e92d81`; another job's
+  checkpoint does not validate that recovery path. R113-R115 are new and OPEN.
+
+## v10.39 Local Release Gate
+
+- Local checks: 1,019 tests passed, one non-failing environment warning.
+  The first full run exposed eight release-name assertions still pinned to
+  v10.38 and an intermittent local mock-server read error; the assertions
+  were updated, the network test passed in isolation, and the full suite
+  passed on rerun. Runtime behavior probes, Python compilation, JavaScript
+  syntax, Bash syntax, embedded audit/deploy Python syntax, and whitespace
+  checks also passed. Both live audit scripts write their evidence and return
+  a nonzero status for a hard `FAIL`, rather than merely printing it.
+- The source-only family candidate is review-only and has no Persian guess or
+  prompt authority. Book approvals are keyed to exact uploaded source bytes;
+  curated conflicts remain unresolved rather than being silently overwritten.
+  The focused attachment reviewer remains OFF, with no additional production
+  LLM call. Book-specific term choices still require human approval.
+- This is a local release gate, not live evidence: no v10.39 VPS checkpoint,
+  DOCX, four-layer memory audit, research audit, or LLM failure-rate report
+  has yet been inspected. R107/R108 and R113-R115 remain OPEN. Do not call the
+  release production-ready or mark a row PROTECTED until source/output and
+  test evidence agree.
 
 ## Update Procedure
 

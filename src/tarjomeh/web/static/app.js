@@ -891,7 +891,7 @@ async function fetchResearchSuggestions(jobId) {
         ? research.terms : [];
     const suggested = terms
         .map((term, index) => ({ term: term, index: index }))
-        .filter(item => item.term.status === "suggested");
+        .filter(item => ["suggested", "candidate", "approved", "rejected"].includes(item.term.status));
     if (!research) {
         block.hidden = true;
         list.innerHTML = "";
@@ -929,27 +929,50 @@ async function fetchResearchSuggestions(jobId) {
     suggested.forEach(item => {
         const row = document.createElement("div");
         row.className = "glossary-row auto";
+        const evidence = Array.isArray(item.term.checkpoint_examples)
+            ? item.term.checkpoint_examples.find(example => example.target_excerpt)
+            : null;
+        const pending = ["suggested", "candidate"].includes(item.term.status);
         row.innerHTML =
             "<span><strong>" + escapeHtml(item.term.source) +
-            "</strong> to " + escapeHtml(item.term.target) + "</span>" +
-            "<span>" + escapeHtml(item.term.confidence || "low") +
+            "</strong></span><span>" + escapeHtml(item.term.status) +
+            " | " + escapeHtml(item.term.approval_scope || "review only") +
             " | " + escapeHtml(item.term.reason || "") + "</span>" +
-            "<span class='glossary-actions'><button class='action-btn' data-index='" + item.index +
-            "' data-action='approve' onclick='reviewResearchTerm(" +
-            "this.dataset.index, this.dataset.action)'>Approve</button>" +
-            "<button class='action-btn danger' data-index='" + item.index +
-            "' data-action='reject' onclick='reviewResearchTerm(" +
-            "this.dataset.index, this.dataset.action)'>Reject</button></span>";
+            (evidence ? "<span>" + escapeHtml(evidence.target_excerpt) + "</span>" : "") +
+            (pending
+                ? "<label>Persian term <input class='research-target' dir='rtl' value='" +
+                  escapeHtml(item.term.target || "") + "'></label>" +
+                  "<span class='glossary-actions'><button class='action-btn' data-index='" + item.index +
+                  "' onclick='reviewResearchTerm(this, \"approve\", \"book\")'>Approve for this book</button>" +
+                  "<button class='action-btn' data-index='" + item.index +
+                  "' onclick='reviewResearchTerm(this, \"approve\", \"shared\")'>Approve for all books</button>" +
+                  "<button class='action-btn danger' data-index='" + item.index +
+                  "' onclick='reviewResearchTerm(this, \"reject\", \"book\")'>Reject</button></span>"
+                : "");
         list.appendChild(row);
     });
 }
 
-async function reviewResearchTerm(index, action) {
+async function reviewResearchTerm(button, action, scope) {
     if (!currentReviewJobId) return;
+    const index = button.dataset.index;
+    const target = button.closest(".glossary-row").querySelector(".research-target")?.value.trim() || "";
+    if (action === "approve" && !target) {
+        alert("Enter a Persian term before approval.");
+        return;
+    }
+    const confirmShared = scope === "shared" && confirm(
+        "Use this term for every book? This changes the shared glossary."
+    );
+    if (scope === "shared" && !confirmShared) return;
     const response = await fetch(authUrl(
         "/api/jobs/" + currentReviewJobId + "/research/terms/" +
         index + "/" + action
-    ), { method: "POST" });
+    ), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope, target, confirm_shared: confirmShared }),
+    });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
         alert(data.error || "Research term update failed");

@@ -244,6 +244,34 @@ class GlossaryManager:
         )
         self._add_entry(entry)
 
+    def add_book_approved_term(self, term: dict[str, Any]) -> None:
+        """Replace only matching automatic evidence with a human book choice."""
+        source = str(term.get("source", "")).strip()
+        namespace = tuple(
+            str(term.get(field, "")).strip().casefold()
+            for field in ("sense", "author", "domain")
+        )
+        self._entries = [
+            entry for entry in self._entries
+            if not (
+                entry.is_auto
+                and entry.source.casefold() == source.casefold()
+                and tuple(
+                    str(getattr(entry, field, "")).casefold()
+                    for field in ("sense", "author", "domain")
+                ) == namespace
+            )
+        ]
+        self._rebuild_patterns()
+        self.add_term(
+            source, str(term.get("target", "")).strip(),
+            context=str(term.get("context", "")),
+            domain=str(term.get("domain", "")),
+            sense=str(term.get("sense", "")),
+            author=str(term.get("author", "")),
+            glossary="book_approved",
+        )
+
     def merge_auto_extracted(
         self,
         extracted_terms: Mapping[str, str | Mapping[str, Any]],

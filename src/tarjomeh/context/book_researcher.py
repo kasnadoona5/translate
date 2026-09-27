@@ -397,15 +397,32 @@ class BookResearcher:
 
     @staticmethod
     def _book_excerpt(document: Document) -> str:
-        parts: list[str] = []
-        if document.raw_toc:
-            parts.append("Table of contents:" + chr(10) + chr(10).join(document.raw_toc[:80]))
-        for paragraph in document.all_paragraphs:
-            if paragraph.text.strip():
-                parts.append(paragraph.text.strip())
-            if sum(len(part) for part in parts) >= 6000:
-                break
-        return (chr(10) * 2).join(parts)[:7000]
+        toc = "Table of contents:\n" + "\n".join(document.raw_toc or [])
+        parts = [toc[:900]] if document.raw_toc else []
+        body = [
+            paragraph.text.strip()
+            for paragraph in document.all_paragraphs
+            if getattr(paragraph, "is_translatable", True)
+            and not getattr(paragraph, "is_footnote", False)
+            and getattr(paragraph, "heading_level", None) is None
+            and str(getattr(paragraph, "metadata", {}).get("structure_role", "body")) == "body"
+            and len(paragraph.text.strip()) >= 80
+        ]
+        if not body:
+            body = [p.text.strip() for p in document.all_paragraphs if p.text.strip()]
+        if body:
+            # Keep the same prompt budget while sampling beyond front matter.
+            windows = ((0, 0.10), (0.25, 0.35), (0.50, 0.60), (0.75, 0.85))
+            used_indices: set[int] = set()
+            for start_fraction, end_fraction in windows:
+                start = min(len(body) - 1, int(len(body) * start_fraction))
+                end = max(start + 1, int(len(body) * end_fraction))
+                indices = [i for i in range(start, min(end, len(body))) if i not in used_indices]
+                used_indices.update(indices)
+                sample = "\n".join(body[i] for i in indices)[:1500]
+                if sample:
+                    parts.append(sample)
+        return "\n\n".join(parts)[:7000]
 
     def _normalise_terms(
         self,
