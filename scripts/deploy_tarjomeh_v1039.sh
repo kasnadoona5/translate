@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 cd /opt/translate
 
-TAG="v10.39.0"
+TAG="v10.39.1"
 CONTAINER="translate_tarjomeh_1"
 SERVICE="tarjomeh"
 STAMP="$(date +%Y%m%d-%H%M%S)"

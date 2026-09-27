@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v10.39.0"
+RUNTIME_RELEASE = "v10.39.1"
 RUNTIME_REVISION = 1
 
 

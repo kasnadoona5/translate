@@ -420,6 +420,7 @@ new evidence so later patches cannot silently revive an earlier defect.
 | R113 | Accepted person-name memory stores only the lexical name, not surrounding prose | OPEN | v10.38 job `0314bebdace2` stored `Manuela Tecusan` as `ویراستاری عالمانه و کاملاً تخصصیِ مانوئلا تکوشان` even though the passage translation can remain contextual. The next candidate rejects oversized reviewed person targets and defers legacy `exact_local` records on retrieval; it never deletes source passage text. Focused tests pass; fresh memory and DOCX evidence pending. |
 | R114 | Source-proven optional plural spacing survives exact final-render admission | OPEN | v10.38 source `discourse(s)` and DOCX `گفتمان (ها)` show that the repair existed but `_language_quality_strictly_improves` omitted `spaced_optional_plural_count`. The next candidate adds that monotonic field; ambiguous, non-body, and source-authored forms remain REVIEW/untouched. Focused final-document tests pass; fresh DOCX evidence pending. |
 | R115 | A book research approval cannot silently become global authority | OPEN | The v10.38 Research Suggestions endpoint wrote approvals into the shared working CSV. The next candidate defaults to exact-upload-SHA-256 book scope; explicit confirmed shared approval remains available. It reports source-family candidates without automatically promoting them. Tests cover identical/different source bytes and curated conflicts; live cross-book evidence pending. |
+| R116 | A hard audit failure must propagate through the shell process exit status | OPEN | v10.39.0 audit Python raised exit 2 on hard FAIL, but the shell script ended with `unset -f`, resetting the process status to zero. v10.39.1 preserves the function result after cleanup and exits with it. A focused test checks both script footers; VPS hard-FAIL behavior is not yet observed live. Do not deploy the superseded v10.39.0 tag. |
 
 ## Validated v10.17 External Audit Notes
 
@@ -1717,6 +1718,11 @@ pending a fresh v10.25 VPS run.
   has yet been inspected. R107/R108 and R113-R115 remain OPEN. Do not call the
   release production-ready or mark a row PROTECTED until source/output and
   test evidence agree.
+- The published v10.39.0 audit wrappers masked their own nonzero result with a
+  trailing `unset -f`. v10.39.1 is the patch release; use its tag for deploy
+  and audit scripts. Its local full suite passed 1,019 tests with one non-failing
+  environment warning; Bash, embedded Python, and runtime probes passed.
+  The v10.39.0 tag remains immutable for traceability.
 
 ## Update Procedure
 

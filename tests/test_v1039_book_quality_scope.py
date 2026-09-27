@@ -260,3 +260,5 @@ def test_live_audits_fail_closed_after_writing_hard_failure_evidence() -> None:
     ):
         script = (root / "scripts" / name).read_text(encoding="utf-8")
         assert 'if verdict == "FAIL":\n    raise SystemExit(2)' in script
+        assert 'AUDIT_RC=$?\nunset -f ' in script
+        assert 'exit "$AUDIT_RC"' in script

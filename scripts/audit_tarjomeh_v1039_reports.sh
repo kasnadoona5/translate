@@ -1578,4 +1578,6 @@ PY
 }
 
 collect_tarjomeh_v1039_reports "${1:-LATEST}"
+AUDIT_RC=$?
 unset -f collect_tarjomeh_v1039_reports
+exit "$AUDIT_RC"
