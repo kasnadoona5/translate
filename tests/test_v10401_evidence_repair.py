@@ -386,3 +386,24 @@ def test_extraction_sample_covers_every_candidate_kind():
     assert "state power" in sample.casefold()
     assert "nation-state" in sample
     assert "polity, politics, and policy" in sample
+
+
+def test_fragment_after_different_content_words_is_withdrawn():
+    paragraphs = [
+        "Officers shared a strong esprit de corps.",
+        "Recruits soon felt the spirit de corps.",
+    ]
+    document = Document(title="T", chapters=[_chapter("Chapter 1", *paragraphs)])
+    sources = [item["source"] for item in collect_book_term_candidates(document)]
+    assert "de corps" not in sources
+
+
+def test_fragment_attested_at_a_clear_boundary_is_kept():
+    paragraphs = [
+        "Its modus operandi was secret.",
+        "A distinctive modus operandi emerged later.",
+    ]
+    document = Document(title="T", chapters=[_chapter("Chapter 1", *paragraphs)])
+    sources = [item["source"] for item in collect_book_term_candidates(document)
+               if item["origin"] == "fixed_source_expression"]
+    assert "modus operandi" in sources

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-import unicodedata
 from collections import Counter
 from typing import Any
 
@@ -91,14 +90,6 @@ _QUOTAS = {
 }
 _KIND_ORDER = tuple(_QUOTAS)
 _SAMPLE_CANDIDATES = 36
-
-
-def _fold(value: str) -> str:
-    """Case- and accent-insensitive key: "ésprit" and "esprit" are one form."""
-    decomposed = unicodedata.normalize("NFKD", value)
-    return "".join(
-        char for char in decomposed if not unicodedata.combining(char)
-    ).casefold()
 
 
 def _family_key(value: str) -> str:
@@ -343,10 +334,15 @@ def collect_book_term_candidates(document: Document) -> list[dict[str, Any]]:
             and all(words)
             and all(word.islower() and word.casefold() not in _PHRASE_EDGE_STOP
                     for word in words)
-            and len({_fold(word) for word in words}) == 1
         ):
+            # At least one occurrence starts at a clear boundary (sentence
+            # start, punctuation or a function word): the fragment is itself
+            # attested as a complete expression.
             continue
         if len({word.casefold() for word in words}) > 1:
+            # Every occurrence continues a different content word
+            # ("esprit"/"spirit"/"ésprit" de corps): no complete form is
+            # proven, so the clipped fragment is withdrawn.
             counts.pop(key, None)
             continue
         completed = f"{words[0]} {occurrences[0][1]}"
