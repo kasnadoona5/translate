@@ -31,7 +31,7 @@ def test_v1040_audits_parse_and_fail_closed() -> None:
 def test_v1040_deploy_keeps_9router_out_of_cleanup() -> None:
     path = ROOT / "scripts" / "deploy_tarjomeh_v1040.sh"
     source = path.read_text(encoding="utf-8")
-    assert 'TAG="v10.40.0"' in source
+    assert 'TAG="v10.40.1"' in source
     assert "--no-deps" in source
     assert "less than 350 MB" in source
     assert "docker image prune" not in source
@@ -47,7 +47,7 @@ def test_v1040_deploy_keeps_9router_out_of_cleanup() -> None:
 def test_v1040_runtime_reports_pure_behavior_guards() -> None:
     manifest = runtime_capabilities()
     probes = runtime_behavior_probes()
-    assert manifest["release"] == "v10.40.0"
+    assert manifest["release"] == "v10.40.1"
     for name in (
         "opt_in_book_term_review_is_off_by_default",
         "reviewed_terms_are_paragraph_scoped",

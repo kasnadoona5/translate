@@ -55,6 +55,28 @@ _NONREPRESENTATIVE_STYLE_SOURCE_RE = re.compile(
     r"acknowledg(?:e|ement|ements|ing)|thanks?\s+(?:are|is|goes?)\s+to)\b",
     re.IGNORECASE,
 )
+
+# Acknowledgement vocabulary anywhere in the opening sentence ("Special thanks
+# are also due to ...", "I am grateful to ...") marks paratext, not body prose.
+_ACKNOWLEDGEMENT_STYLE_SOURCE_RE = re.compile(
+    r"\b(?:special\s+thanks|thanks\s+(?:are|is|go(?:es)?)\s+(?:also\s+)?(?:due\s+)?to|"
+    r"(?:am|are|is|remain)\s+(?:deeply\s+|very\s+|particularly\s+)?grateful\s+to|"
+    r"would\s+(?:also\s+)?like\s+to\s+(?:thank|acknowledge)|"
+    r"(?:want|wish)\s+to\s+(?:thank|acknowledge)|"
+    r"benefit(?:t)?ed\s+from\s+(?:the\s+)?(?:comments|advice|suggestions))\b",
+    re.IGNORECASE,
+)
+
+
+def _is_paratext_style_source(source: str) -> bool:
+    value = (source or "").strip()
+    first_sentence = re.split(r"(?<=[.!?])\s+", value, maxsplit=1)[0][:400]
+    return bool(
+        _NONREPRESENTATIVE_STYLE_SOURCE_RE.search(value)
+        or _ACKNOWLEDGEMENT_STYLE_SOURCE_RE.search(first_sentence)
+    )
+
+
 _STYLE_PROTOCOL_RE = re.compile(
     r"(?:^|\s)(?:source|target|translation|rationale|decision)\s*[:=]|"
     r"```|</?(?:analysis|answer|tool|assistant)>|\{\s*\"",
@@ -194,6 +216,8 @@ def _style_record_is_authoritative(record: dict[str, Any]) -> bool:
         return False
     if record.get("alignment_status") != "exact_paragraph":
         return False
+    if _is_paratext_style_source(str(record.get("source_text", ""))):
+        return False
     cleaned = _clean_style_sample(str(record.get("text", "")))
     if not cleaned:
         return False
@@ -222,7 +246,7 @@ def _style_record_is_prompt_safe(record: dict[str, Any]) -> bool:
     return bool(
         record.get("alignment_status") == "exact_paragraph"
         and source
-        and not _NONREPRESENTATIVE_STYLE_SOURCE_RE.search(source)
+        and not _is_paratext_style_source(source)
         and not _NON_PROSE_RE.search(source)
         and _clean_style_sample(target)
         and not _source_style_contradiction(source, target)
@@ -595,7 +619,7 @@ class MemoryManager:
         if len(source_paragraphs) == len(translation_paragraphs):
             source_genre_excluded_indices = {
                 index for index, paragraph in enumerate(source_paragraphs)
-                if _NONREPRESENTATIVE_STYLE_SOURCE_RE.search(paragraph)
+                if _is_paratext_style_source(paragraph)
             }
             excluded_style_indices.update(source_genre_excluded_indices)
         if not has_body_policy and excluded_style_indices:

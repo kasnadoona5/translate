@@ -174,9 +174,12 @@ def test_research_samples_later_body_and_family_candidates_are_review_only() -> 
     assert "Middle academic paragraph" in excerpt
     assert "Late academic paragraph" in excerpt
     candidates = collect_book_term_candidates(document)
-    assert candidates[0]["source"] == "polity, politics, and policy"
-    assert candidates[0]["target"] == ""
-    assert candidates[0]["status"] == "candidate"
+    # v10.40.1 ranks repeated body concepts before generic comma lists, so
+    # the family is required to be present, not to be first.
+    family = next(item for item in candidates
+                  if item["source"] == "polity, politics, and policy")
+    assert family["target"] == ""
+    assert family["status"] == "candidate"
 
 
 def test_research_approval_defaults_to_book_scope_and_shared_needs_confirmation(

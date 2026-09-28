@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 cd /opt/translate
 
-TAG="v10.40.0"
+TAG="v10.40.1"
 CONTAINER="translate_tarjomeh_1"
 SERVICE="tarjomeh"
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -659,6 +659,15 @@ done
 echo "========== VERIFY RUNNING V10.40 =========="
 docker exec -i "$CONTAINER" tarjomeh capabilities --verify --json
 docker exec -i "$CONTAINER" python -c '
+from tarjomeh.runtime import runtime_behavior_probes, runtime_capabilities
+manifest = runtime_capabilities()
+probes = runtime_behavior_probes()
+assert manifest["release"] == "v10.40.1", manifest["release"]
+failed = [name for name, ok in probes.items() if not ok]
+assert not failed, failed
+print("RUNTIME_V10401_BEHAVIOR_CONFIRMED", len(probes))
+'
+docker exec -i "$CONTAINER" python -c '
 from pathlib import Path
 import tarjomeh
 import tarjomeh.glossary
@@ -1042,6 +1051,9 @@ echo "========== VERIFY 9ROUTER UNCHANGED =========="
 REPLACED=0
 
 echo "========== TARJOMEH-ONLY FINAL CLEANUP =========="
+echo "NOTE: by the operator's choice, the previous Tarjomeh image is removed after"
+echo "the health check to save disk. A later translation failure has no immediate"
+echo "image rollback; redeploy the previous tag from Git instead. 9router is untouched."
 docker image rm "$ROLLBACK" >/dev/null 2>&1 || true
 docker image rm "$CANDIDATE" >/dev/null 2>&1 || true
 [ "$(docker inspect -f '{{.Id}}' 9router)" = "$NINE_CONTAINER_ID" ]

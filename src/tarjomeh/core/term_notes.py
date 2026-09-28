@@ -64,10 +64,23 @@ _PERSIAN_ANCHOR_SUFFIX_RE = re.compile(
 )
 
 
+_COMBINING_MARKS = frozenset(
+    "ًٌٍَُِّْٰٔ"
+)
+
+
 def _extend_persian_anchor_end(text: str, end: int) -> int:
-    """Keep a productive Persian suffix attached before an English original."""
-    match = _PERSIAN_ANCHOR_SUFFIX_RE.match(text or "", end)
-    return match.end() if match else end
+    """Keep a productive Persian suffix attached before an English original.
+
+    A combining mark written on the anchor word (e.g. an ezafe kasra) belongs
+    to that word; the inserted original goes after it, never between them.
+    """
+    value = text or ""
+    match = _PERSIAN_ANCHOR_SUFFIX_RE.match(value, end)
+    end = match.end() if match else end
+    while end < len(value) and value[end] in _COMBINING_MARKS:
+        end += 1
+    return end
 
 
 _PERSIAN_TARGET_TOKEN_RE = re.compile(

@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v10.40.0"
+RUNTIME_RELEASE = "v10.40.1"
 RUNTIME_REVISION = 1
 
 
@@ -85,12 +85,25 @@ def runtime_capabilities() -> dict[str, Any]:
             "source_only_body_term_inventory": True,
             "source_confirmed_note_superscripts": True,
             "source_proven_surface_repair": True,
+            "context_anchored_note_markers": True,
+            "aligned_italic_runs": True,
+            "paratext_excluded_term_sampling": True,
+            "role_independent_zwnj_repair": True,
+            "idempotent_inline_original_wrappers": True,
+            "stranded_mark_relocation": True,
+            "source_proven_optional_prefix_spacing": True,
+            "sentence_scoped_orphan_dash_repair": True,
+            "us_postal_code_identifier": True,
+            "determiner_phrase_memory_quarantine": True,
+            "name_shaped_entity_guard": True,
+            "acknowledgement_style_exclusion": True,
+            "advisory_critic_terminology_label": True,
         },
         "policy_versions": {
             "structure_evidence": 2,
             "canonical_text": 3,
-            "layer1_admission": 8,
-            "style_evidence": 6,
+            "layer1_admission": 9,
+            "style_evidence": 7,
             "benchmark_schema": 1,
             "checkpoint_export": 3,
             "paragraph_identity": 1,
@@ -100,7 +113,7 @@ def runtime_capabilities() -> dict[str, Any]:
             "summary_admission": 2,
             "final_candidate_selection": 2,
             "final_quality_authority": 1,
-            "note_marker_recovery": 4,
+            "note_marker_recovery": 5,
             "critique_canonical_rebind": 1,
             "final_quality_checkpoint": 3,
             "source_obligation_recovery": 2,
@@ -110,9 +123,9 @@ def runtime_capabilities() -> dict[str, Any]:
             "post_edit_issue_attribution": 1,
             "attachment_trial": 1,
             "book_term_scope": 2,
-            "final_language_admission": 3,
+            "final_language_admission": 4,
             "book_term_review": 1,
-            "source_term_inventory": 2,
+            "source_term_inventory": 3,
         },
     }
 
@@ -595,5 +608,109 @@ def runtime_behavior_probes() -> dict[str, bool]:
                 "They make history - their own - in context.",
                 "\u062a\u0627\u0631\u06cc\u062e\u2014\u0631\u0627 \u0645\u06cc\u200c\u0633\u0627\u0632\u0646\u062f.",
             )["unbalanced_explanatory_dash_count"] == 1
+        ),
+        **_v10401_behavior_probes(),
+    }
+
+
+def _v10401_behavior_probes() -> dict[str, bool]:
+    """Pure v10.40.1 probes: no network, LLM, database or job state."""
+    from tarjomeh.context.book_term_candidates import body_term_paragraphs
+    from tarjomeh.core.term_notes import _extend_persian_anchor_end
+    from tarjomeh.exporters.docx_exporter import source_superscript_spans
+    from tarjomeh.memory.manager import _is_paratext_style_source
+    from tarjomeh.memory.proper_nouns import (
+        is_bounded_person_name_target,
+        is_reusable_terminology_mapping,
+    )
+    from tarjomeh.parsers.base import Chapter, Document, Paragraph, Section
+    from tarjomeh.parsers.pdf_parser import _italic_runs, locate_source_marker
+    from tarjomeh.quality.integrity import (
+        extract_identifiers,
+        repair_proven_surface_artifacts,
+        repair_source_grounded_language_artifacts,
+    )
+
+    note_source = "In the 1920s (3) writers followed,3 historical accounts (chapter 3)."
+    note_record = {"text": "3", "context_before": "iters followed,", "context_after": " historical"}
+    note_target = "در دههٔ ۱۹۲۰ (۳) نویسندگان پیروی کردند، ۳ گزارش‌های تاریخی (فصل ۳)."
+    note_spans = source_superscript_spans(
+        note_target, {"superscript_markers": [note_record]}, note_source,
+    )
+    italic = _italic_runs([
+        {"spans": [{"text": "Ideo­", "flags": 2, "font": "Italic"}]},
+        {"spans": [{"text": "logiekritik", "flags": 2, "font": "Italic"}]},
+    ])
+    sampling_document = Document(title="T", chapters=[
+        Chapter(title="T", sections=[Section(title="", level=2, paragraphs=[
+            Paragraph("Copyright notice and publisher details."),
+        ])]),
+        Chapter(title="Contents", sections=[]),
+        Chapter(title="1 Argument", sections=[Section(title="", level=2, paragraphs=[
+            Paragraph("The argument concerns state power."),
+        ])]),
+        Chapter(title="Subject Index", sections=[Section(title="", level=2, paragraphs=[
+            Paragraph("state power 3, 17, 22"),
+        ])]),
+    ])
+    sampled = [paragraph.text for paragraph in body_term_paragraphs(sampling_document)]
+    zwnj_fixed, _ = repair_proven_surface_artifacts(
+        "SRA strategic–relational approach",
+        "SRA رویکرد راهبردی‌‌رابطه‌ای",
+        structural_role="mixed", paragraph_roles=["table"],
+    )
+    wrapper_source = "It acquires its own political rationale (raison d’état)."
+    wrapper_once, _ = repair_source_grounded_language_artifacts(
+        wrapper_source, "عقلانیت سیاسی (مصلحت دولت [(raison d’état)]) را",
+    )
+    wrapper_twice, _ = repair_source_grounded_language_artifacts(
+        wrapper_source, wrapper_once,
+    )
+    kasra_fixed, _ = repair_source_grounded_language_artifacts(
+        "It examines the elective affinities between them.",
+        "خویشاوندی‌های انتخابی (elective affinities)ِ میان آن‌ها را بررسی می‌کند.",
+    )
+    return {
+        "note_marker_is_context_anchored": bool(
+            locate_source_marker(note_source, note_record)
+            == note_source.index("followed,3") + len("followed,")
+            and len(note_spans) == 1
+            and note_target[:note_spans[0][0]].rstrip().endswith("،")
+        ),
+        "italic_run_crosses_soft_hyphen": italic == ["Ideologiekritik"],
+        "paratext_excluded_from_term_sampling": sampled == [
+            "The argument concerns state power."
+        ],
+        "zwnj_repaired_in_table_rows": "‌‌" not in zwnj_fixed,
+        "inline_original_wrapper_is_idempotent": bool(
+            "(مصلحت دولت [raison d’état])" in wrapper_once
+            and "[(" not in wrapper_once
+            and wrapper_once == wrapper_twice
+        ),
+        "stranded_kasra_returns_to_word": bool(
+            "انتخابیِ (elective affinities)" in kasra_fixed
+            and _extend_persian_anchor_end("انتخابیِ", 7) == 8
+        ),
+        "us_postal_code_is_identifier": bool(
+            extract_identifiers("Malden, MA 02148") == {"ma 02148": 1}
+            and not extract_identifiers("in 1988")
+        ),
+        "determiner_phrase_is_not_reusable": bool(
+            not is_reusable_terminology_mapping(
+                "some broad macro-trends", "کلان‌روندهای گسترده"
+            )
+            and is_reusable_terminology_mapping("state building", "دولت‌سازی")
+        ),
+        "name_guard_rejects_surrounding_prose": bool(
+            not is_bounded_person_name_target(
+                "Manuela Tecusan", "تخصصیِ مانوئلا تکوشان"
+            )
+            and is_bounded_person_name_target("Hegel", "گ. و. ف. هگل")
+        ),
+        "acknowledgement_is_not_style_evidence": bool(
+            _is_paratext_style_source("Special thanks are also due to the editors.")
+            and not _is_paratext_style_source(
+                "Chapter 4 is dedicated to the analysis of class power."
+            )
         ),
     }

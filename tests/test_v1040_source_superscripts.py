@@ -12,9 +12,9 @@ from tarjomeh.parsers.pdf_parser import (
 def test_split_marker_only_follows_its_source_fragment():
     marker = {"text": "7", "relative_position": 0.5}
     assert _markers_in_text("An argument.", [marker]) == []
-    assert _markers_in_text("A note.7", [marker]) == [
-        {"text": "7", "relative_position": 0.9375}
-    ]
+    kept = _markers_in_text("A note.7", [marker])
+    assert [(item["text"], item["offset"], item["relative_position"])
+            for item in kept] == [("7", 7, 0.9375)]
 
 
 def test_continuation_preserves_unique_right_hand_note():

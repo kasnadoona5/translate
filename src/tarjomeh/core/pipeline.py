@@ -56,6 +56,7 @@ from tarjomeh.memory.proper_nouns import (
     is_safe_low_authority_mapping,
     is_reusable_terminology_mapping,
     is_bounded_person_name_target,
+    requires_bounded_name_target,
     low_authority_mapping_category,
     looks_like_transliterated_loanword,
     observed_bilingual_target,
@@ -5471,9 +5472,9 @@ def _reconcile_committed_terminology(
             if memory_category in entity_categories
             else is_reusable_terminology_mapping(source, target)
         )
-        if memory_category == "person" and not is_bounded_person_name_target(
-            source, target
-        ):
+        if requires_bounded_name_target(
+            str(memory_category), source
+        ) and not is_bounded_person_name_target(source, target):
             reusable = False
         if not reusable or (
             memory_category not in entity_categories and scope_risks
@@ -8781,10 +8782,9 @@ class TranslationPipeline:
         canonical, proven_surface_edits = repair_proven_surface_artifacts(
             chunk.text,
             canonical,
-            structural_role=(
-                "body" if set(_paragraph_structural_roles(
-                    chunk, len(split_paragraphs(canonical))
-                )) == {"body"} else "mixed"
+            structural_role="mixed",
+            paragraph_roles=_paragraph_structural_roles(
+                chunk, len(split_paragraphs(canonical))
             ),
         )
         structure_conflicts = _introduced_structure_conflicts(
@@ -9795,7 +9795,9 @@ class TranslationPipeline:
         terminology_ctx = glossary_terms_str
         if mem_context.proper_nouns:
             terminology_ctx += (
-                "\n\n### Mandatory established proper-noun renderings\n"
+                "\n\n### Established proper-noun and terminology renderings "
+                "(authority is stated on each line: curated/canonical entries are "
+                "binding; advisory entries are evidence only, never mandates)\n"
                 + mem_context.proper_nouns
             )
         terminology_ctx += (

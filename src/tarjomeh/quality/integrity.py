@@ -88,6 +88,11 @@ _IDENTIFIER_PATTERNS = (
         rf"(?<![A-Za-z0-9])[A-Z]{{1,2}}[{_IDENTIFIER_DIGITS}][A-Z{_IDENTIFIER_DIGITS}]?"
         rf"\s+[{_IDENTIFIER_DIGITS}][A-Z]{{2}}(?![A-Za-z0-9])"
     ),
+    # US postal code after a two-letter state code (e.g. `MA 02148`).
+    re.compile(
+        rf"(?<![A-Za-z0-9])[A-Z]{{2}}\s+[{_IDENTIFIER_DIGITS}]{{5}}"
+        rf"(?:-[{_IDENTIFIER_DIGITS}]{{4}})?(?![{_IDENTIFIER_DIGITS}])"
+    ),
 )
 _PROSE_FOOTNOTE_SUFFIX_RE = re.compile(
     r"^[a-z][a-z'\u2019-]{1,40}\.[0-9]{1,3}$"
@@ -194,6 +199,65 @@ _NESTED_INLINE_ORIGINAL_RE = re.compile(
     rf"(?P<original>\((?=[^()\n]*[A-Za-z])[^()\n]{{1,200}}\))"
     rf"(?P<after>[^()\n]*)\)"
 )
+_BRACKETED_INLINE_ORIGINAL_RE = re.compile(
+    rf"\((?P<before>[^()\[\]\n]*[{_PERSIAN_LETTER_CLASS}][^()\[\]\n]*?)\s*"
+    rf"\[\(?(?P<original>(?=[^()\[\]\n]*[A-Za-z])[^()\[\]\n]{{1,200}}?)\)?\]\s*\)"
+)
+_SOURCE_OPTIONAL_PREFIX_RE = re.compile(r"(?<![A-Za-z])\([A-Za-z]{2,8}\)[A-Za-z]")
+_SPACED_OPTIONAL_PREFIX_RE = re.compile(
+    rf"\((?P<prefix>[{_PERSIAN_LETTER_CLASS}]{{1,6}})\)[ \t]+(?=[{_PERSIAN_LETTER_CLASS}])"
+)
+_STRANDED_MARK_AFTER_ORIGINAL_RE = re.compile(
+    rf"(?P<word>[{_PERSIAN_LETTER_CLASS}]+)(?P<gap>[ \t]*)"
+    rf"(?P<original>\((?=[^()\n]*[A-Za-z])[^()\n]{{1,200}}\))"
+    r"[ \t]?(?P<mark>[ً-ْٔ])"
+)
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?؟])\s+")
+_SPACED_DASH_RE = re.compile(r"\s[–—]\s")
+_SOURCE_SPACED_DASH_RE = re.compile(r"\s[-–—]\s")
+_ORPHAN_DASH_BEFORE_RA_RE = re.compile(
+    r"(?P<dash>\s[–—]\s)(?=را(?:\s|$))"
+)
+
+
+def _sentence_scoped_orphan_dash(source: str, target: str) -> tuple[int, int] | None:
+    """Return the span of a provably unpaired dash before `را`, else None.
+
+    Proof requires: equal source/target sentence counts; exactly one
+    `— را` in the paragraph; its target sentence holds exactly one dash while
+    the aligned source sentence holds exactly two; and no other target
+    sentence has an unpaired dash. Anything else is left for REVIEW.
+    """
+    orphans = list(_ORPHAN_DASH_BEFORE_RA_RE.finditer(target))
+    if len(orphans) != 1:
+        return None
+    source_sentences = [part for part in _SENTENCE_SPLIT_RE.split(source.strip()) if part]
+    target_spans: list[tuple[int, int]] = []
+    cursor = 0
+    stripped = target
+    for part in _SENTENCE_SPLIT_RE.split(stripped):
+        start = stripped.find(part, cursor)
+        if start < 0 or not part:
+            continue
+        target_spans.append((start, start + len(part)))
+        cursor = start + len(part)
+    if not source_sentences or len(source_sentences) != len(target_spans):
+        return None
+    orphan_start = orphans[0].start("dash")
+    for index, (start, end) in enumerate(target_spans):
+        sentence = target[start:end]
+        dash_count = len(_SPACED_DASH_RE.findall(" " + sentence + " "))
+        contains = start <= orphan_start < end
+        if contains:
+            if dash_count != 1:
+                return None
+            if len(_SOURCE_SPACED_DASH_RE.findall(source_sentences[index])) != 2:
+                return None
+        elif dash_count % 2:
+            return None
+    return orphans[0].start("dash"), orphans[0].end("dash")
+
+
 _FOREIGN_SCRIPT_PATTERNS = {
     "cyrillic": re.compile(r"[\u0400-\u052f]+"),
     "greek": re.compile(r"[\u0370-\u03ff]+"),
@@ -1944,35 +2008,54 @@ def spaced_optional_plural_artifacts(
 
 
 def repair_proven_surface_artifacts(
-    source: str, translation: str, *, structural_role: str = "body",
+    source: str,
+    translation: str,
+    *,
+    structural_role: str = "body",
+    paragraph_roles: list[str] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
-    """Repair only unambiguous, source-unwritten Persian surface accidents."""
-    if structural_role != "body":
-        return translation, []
+    """Repair only unambiguous, source-unwritten Persian surface accidents.
+
+    An adjacent ZWNJ run is never meaningful Persian orthography, so it is
+    collapsed in every paragraph role (contents, table and list rows too),
+    unless the aligned source itself contains one. Lexical edits such as a
+    duplicated coordinator stay body-prose-only and require paragraph
+    alignment with the source.
+    """
     source_parts = _paragraph_text_spans(source)
     target_parts = _paragraph_text_spans(translation)
-    if len(source_parts) != len(target_parts):
-        return translation, []
+    aligned = len(source_parts) == len(target_parts)
+    roles = list(paragraph_roles or [])
+    if len(roles) != len(target_parts):
+        roles = [structural_role] * len(target_parts)
     edits: list[dict[str, Any]] = []
     replacements: list[tuple[int, int, str]] = []
-    for paragraph_index, (source_record, target_record) in enumerate(
-        zip(source_parts, target_parts, strict=True)
-    ):
-        source_part = source_record[2]
+    for paragraph_index, target_record in enumerate(target_parts):
+        source_part = (
+            source_parts[paragraph_index][2] if aligned else (source or "")
+        )
         target_part = target_record[2]
         repaired = target_part
         if "\u200c\u200c" not in source_part and "\u200c\u200c" in repaired:
             repaired = re.sub(r"\u200c{2,}", "\u200c", repaired)
-            edits.append({"type": "double_zwnj", "paragraph": paragraph_index})
-        doubled_and = list(re.finditer(
-            r"(?<![\u0621-\u06ff])\u0648[ \t]+\u0648(?![\u0621-\u06ff])", repaired
-        ))
-        if (len(doubled_and) == 1
-                and not re.search(r"\band\s+and\b", source_part, re.I)
-                and "\u0648 \u0648" not in source_part):
-            match = doubled_and[0]
-            repaired = repaired[:match.start()] + "\u0648" + repaired[match.end():]
-            edits.append({"type": "duplicate_coordinator", "paragraph": paragraph_index})
+            edits.append({
+                "type": "double_zwnj",
+                "paragraph": paragraph_index,
+                "role": roles[paragraph_index],
+            })
+        if aligned and roles[paragraph_index] == "body":
+            doubled_and = list(re.finditer(
+                r"(?<![\u0621-\u06ff])\u0648[ \t]+\u0648(?![\u0621-\u06ff])",
+                repaired,
+            ))
+            if (len(doubled_and) == 1
+                    and not re.search(r"\band\s+and\b", source_part, re.I)
+                    and "\u0648 \u0648" not in source_part):
+                match = doubled_and[0]
+                repaired = repaired[:match.start()] + "\u0648" + repaired[match.end():]
+                edits.append({
+                    "type": "duplicate_coordinator", "paragraph": paragraph_index,
+                })
         if repaired != target_part:
             replacements.append((target_record[0], target_record[1], repaired))
     result = translation
@@ -2125,12 +2208,47 @@ def repair_source_grounded_language_artifacts(
             "offset": match.start(),
         })
 
+    # A spaced optional prefix, e.g. `(\u0641\u0631\u0627) \u0646\u0638\u0631\u06cc`, is closed only when the
+    # source paragraph has exactly one `(prefix)word` form and the target has
+    # exactly one spaced counterpart. Anything else stays REVIEW.
+    prefix_source = _SOURCE_OPTIONAL_PREFIX_RE.findall(source or "")
+    prefix_targets = list(_SPACED_OPTIONAL_PREFIX_RE.finditer(repaired))
+    if (
+        structural_role == "body"
+        and len(prefix_source) == 1
+        and len(prefix_targets) == 1
+        and "\n" not in (source or "").strip()
+        and "\n" not in repaired.strip()
+    ):
+        match = prefix_targets[0]
+        before = match.group()
+        after = f"({match.group('prefix')})"
+        repaired = repaired[:match.start()] + after + repaired[match.end():]
+        edits.append({
+            "type": "source_optional_prefix_spacing",
+            "before": before,
+            "after": after,
+            "offset": match.start(),
+        })
+
     # A single orphan dash before the Persian object marker is not a
     # parenthetical aside when the source has a matched dash pair.
     if structural_role == "body" and "\n" not in repaired.strip():
         source_dashes = len(re.findall(r"\s[-\u2013\u2014]\s", source or ""))
         target_dashes = list(re.finditer(r"\s[\u2013\u2014]\s", repaired))
-        if source_dashes >= 2 and source_dashes % 2 == 0 and len(target_dashes) == 1:
+        orphan = _sentence_scoped_orphan_dash(source or "", repaired)
+        if orphan is not None and len(target_dashes) > 1:
+            start, end = orphan
+            before = repaired[start:end]
+            repaired = repaired[:start] + " " + repaired[end:]
+            edits.append({
+                "type": "orphaned_object_marker_dash",
+                "before": before,
+                "after": " ",
+                "offset": start,
+                "scope": "aligned_sentence",
+            })
+        elif source_dashes >= 2 and source_dashes % 2 == 0 and len(target_dashes) == 1:
             match = re.search(r"(?P<dash>\s[\u2013\u2014]\s)(?=\u0631\u0627(?:\s|$))", repaired)
             if match and match.start("dash") == target_dashes[0].start():
                 before = match.group("dash")
@@ -2143,6 +2261,24 @@ def repair_source_grounded_language_artifacts(
                 })
 
     source_folded = unicodedata.normalize("NFKC", source or "").casefold()
+    # An ezafe/diacritic stranded after an inserted English original belongs
+    # to the Persian word before it: `انتخابی (x)ِ` -> `انتخابیِ (x)`.
+    if structural_role == "body":
+        for match in reversed(list(_STRANDED_MARK_AFTER_ORIGINAL_RE.finditer(repaired))):
+            original_text = match.group("original")[1:-1].strip()
+            if unicodedata.normalize("NFKC", original_text).casefold() not in source_folded:
+                continue
+            after = (
+                f"{match.group('word')}{match.group('mark')}"
+                f"{match.group('gap') or ' '}{match.group('original')}"
+            )
+            repaired = repaired[:match.start()] + after + repaired[match.end():]
+            edits.append({
+                "type": "stranded_mark_after_original",
+                "before": match.group(),
+                "after": after,
+                "offset": match.start(),
+            })
     for match in reversed(list(_PERSIAN_SUFFIX_AFTER_ORIGINAL_RE.finditer(repaired))):
         original = match.group("original")
         original_text = original[1:-1].strip()
@@ -2156,6 +2292,24 @@ def repair_source_grounded_language_artifacts(
         repaired = repaired[:match.start()] + after + repaired[match.end():]
         edits.append({
             "type": "parenthetical_persian_suffix",
+            "before": match.group(),
+            "after": after,
+            "offset": match.start(),
+        })
+
+    # A bracketed original left by an earlier pass, e.g. `(گلوس [(x)])` or
+    # `(گلوس [x])`, is flattened to one parenthesis `(گلوس؛ x)` when x is the
+    # exact source original. Re-running the repair then changes nothing.
+    for match in reversed(list(_BRACKETED_INLINE_ORIGINAL_RE.finditer(repaired))):
+        original_text = match.group("original").strip()
+        if unicodedata.normalize("NFKC", original_text).casefold() not in source_folded:
+            continue
+        after = f"({match.group('before').rstrip()} [{original_text}])"
+        if after == match.group():
+            continue
+        repaired = repaired[:match.start()] + after + repaired[match.end():]
+        edits.append({
+            "type": "bracketed_inline_original",
             "before": match.group(),
             "after": after,
             "offset": match.start(),
@@ -2300,7 +2454,13 @@ def repair_source_grounded_language_artifacts(
             continue
         before = repaired[:match.start()].rstrip()
         after = repaired[match.end():].lstrip()
-        if before.endswith("(") and after.startswith(")"):
+        if before.endswith(("(", "[")) and after.startswith((")", "]")):
+            continue
+        prefix = repaired[:match.start()]
+        if (prefix.rfind("(") > prefix.rfind(")")
+                or prefix.rfind("[") > prefix.rfind("]")):
+            # Already inside a parenthetical or bracket: wrapping it again
+            # would create a nested annotation.
             continue
         replacements.append((match.start(), match.end(), phrase))
     for start, end, phrase in reversed(replacements):

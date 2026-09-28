@@ -1429,7 +1429,7 @@ citation_probe_text, citation_probe_changes = normalize_citation_house_style_tex
     "(see Jessop 1990, 2002)"
 )
 runtime_markers = {
-    "runtime_release_contract": runtime_manifest.get("release") == "v10.40.0",
+    "runtime_release_contract": runtime_manifest.get("release") == "v10.40.1",
     "runtime_behavior_contract": all(runtime_probes.values()),
     "book_scope_runtime_contract": (
         runtime_manifest.get("capabilities", {}).get("book_scoped_term_approval")

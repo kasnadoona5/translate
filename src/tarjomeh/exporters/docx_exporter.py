@@ -44,12 +44,48 @@ def contents_display_title(text: str, metadata: dict) -> str:
     return title or (text or "").strip()
 
 
+_STRUCTURAL_REFERENCE_BEFORE_RE = re.compile(
+    r"(?:\u0641\u0635\u0644(?:\u200c?\u0647\u0627\u06cc)?|\u0628\u062e\u0634|"
+    r"\u062c\u062f\u0648\u0644|\u0646\u0645\u0648\u062f\u0627\u0631|\u0634\u06a9\u0644|"
+    r"\u0635\u0641\u062d\u0647\u0654?|\u0635\u0641\u062d\u0627\u062a|\u0635\.|"
+    r"chapters?|tables?|figures?|parts?|sections?|pages?|pp?\.)"
+    r"\s*[\u0600-\u06ff0-9\s\u060c,\-\u2013]{0,6}$",
+    re.IGNORECASE,
+)
+# Punctuation after which a trailing digit reads as a note call, not a numeral.
+_NOTE_BOUNDARY_BEFORE = frozenset(".!?\u061f\u061b:\u060c,)\u00bb]\u201d\u2019\"'")
+
+
+def _note_like_target_position(text: str, start: int, end: int) -> bool:
+    """A target digit can be a note call unless it names a chapter/table/page.
+
+    Uniqueness (checked by the caller) is the main proof; this only removes
+    structural references and digits glued to a following word.
+    """
+    stripped = text[:start].rstrip()
+    if not stripped:
+        return False
+    if _STRUCTURAL_REFERENCE_BEFORE_RE.search(stripped.rstrip(".)\u00bb]")):
+        return False
+    after = text[end:end + 1]
+    return not after or after.isspace() or after in "\u2014\u2013-.\u060c,;\u061b:)"
+
+
 def source_superscript_spans(
     text: str,
     metadata: dict,
     source_text: str = "",
 ) -> list[tuple[int, int]]:
-    """Locate only source-confirmed superscript markers in translated text."""
+    """Locate only source-confirmed superscript markers in translated text.
+
+    The source marker must be uniquely located (by its recorded line context)
+    in this paragraph's source. The target digit must be the only standalone
+    candidate that sits at a note-like boundary outside any parenthesis and
+    is not part of a chapter/table/page reference. Otherwise nothing is
+    superscripted and the final audit reports the paragraph for REVIEW.
+    """
+    from tarjomeh.parsers.pdf_parser import locate_source_marker
+
     records = metadata.get("superscript_markers", []) or []
     if not isinstance(records, list):
         return []
@@ -58,7 +94,7 @@ def source_superscript_spans(
         if not isinstance(record, dict):
             continue
         raw = str(record.get("text", "")).strip()
-        if source_text and source_text.count(raw) != 1:
+        if source_text and locate_source_marker(source_text, record) is None:
             continue
         normalized = raw.translate(_DIGIT_TO_ASCII)
         if normalized.isdigit():
@@ -83,7 +119,13 @@ def source_superscript_spans(
                 > (text or "").rfind(")", 0, match.start())
             )
         ]
+        # Uniqueness is judged before structural exclusion: a paragraph with
+        # both "سوم ۳" and "فصل ۳" is ambiguous and stays plain (REVIEW).
         if len(candidates) != 1:
+            continue
+        if normalized.isdigit() and not _note_like_target_position(
+            text or "", *candidates[0]
+        ):
             continue
         selected.append(candidates[0])
     return sorted(selected)

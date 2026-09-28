@@ -215,8 +215,73 @@ def _line_superscript_markers(
             "relative_position": round(
                 (offset + len(value) / 2) / max(1, len(line_text)), 6
             ),
+            # Same-line context identifies this physical marker later, after
+            # line joins and dehyphenation; a digit count cannot (years and
+            # enumerations reuse the same digits).
+            "context_before": line_text[max(0, offset - _MARKER_CONTEXT):offset],
+            "context_after": line_text[
+                offset + len(value):offset + len(value) + _MARKER_CONTEXT
+            ],
         })
     return markers
+
+
+_MARKER_CONTEXT = 14
+
+
+def _context_pattern(value: str) -> str:
+    """Whitespace-tolerant literal pattern for a same-line source context."""
+    parts = [re.escape(part) for part in value.split()]
+    pattern = r"\s+".join(parts)
+    if value[:1].isspace() and pattern:
+        pattern = r"\s+" + pattern
+    if value[-1:].isspace() and pattern:
+        pattern += r"\s+"
+    return pattern
+
+
+def locate_source_marker(text: str, record: dict[str, Any]) -> int | None:
+    """Return the unique offset of one physical source note marker, or None.
+
+    The marker is anchored by its recorded same-line context. Only when no
+    context is available does a standalone occurrence of the marker digits
+    count, and then only if it is unique. Ambiguity is never guessed.
+    """
+    raw = str(record.get("text", "")).strip()
+    if not raw or not text:
+        return None
+    marker = re.escape(raw)
+    before = str(record.get("context_before", ""))
+    after = str(record.get("context_after", ""))
+    if before.strip():
+        hits = [
+            match.start("marker")
+            for match in re.finditer(
+                rf"{_context_pattern(before)}(?P<marker>{marker})(?![0-9])", text
+            )
+        ]
+        if len(hits) == 1:
+            return hits[0]
+        if hits:
+            return None
+    if after.strip():
+        hits = [
+            match.start("marker")
+            for match in re.finditer(
+                rf"(?<![0-9])(?P<marker>{marker}){_context_pattern(after)}", text
+            )
+        ]
+        if len(hits) == 1:
+            return hits[0]
+        if hits:
+            return None
+    if before.strip() or after.strip():
+        return None
+    hits = [
+        match.start()
+        for match in re.finditer(rf"(?<![0-9]){marker}(?![0-9])", text)
+    ]
+    return hits[0] if len(hits) == 1 else None
 
 
 def _markers_in_text(
@@ -224,17 +289,82 @@ def _markers_in_text(
 ) -> list[dict[str, Any]]:
     """Retain only marker identities uniquely located in this source fragment."""
     kept: list[dict[str, Any]] = []
+    seen: set[int] = set()
     for record in records:
         raw = str(record.get("text", "")).strip()
-        if raw and text.count(raw) == 1:
-            offset = text.find(raw)
-            kept.append({
-                "text": raw,
-                "relative_position": round(
-                    (offset + len(raw) / 2) / max(1, len(text)), 6
-                ),
-            })
+        offset = locate_source_marker(text, record)
+        if not raw or offset is None or offset in seen:
+            continue
+        seen.add(offset)
+        kept.append({
+            "text": raw,
+            "offset": offset,
+            "relative_position": round(
+                (offset + len(raw) / 2) / max(1, len(text)), 6
+            ),
+            "context_before": str(record.get("context_before", "")),
+            "context_after": str(record.get("context_after", "")),
+        })
     return kept
+
+
+def _italic_runs(lines: list[dict[str, Any]]) -> list[str]:
+    """Join consecutive italic spans, across a soft-hyphen or line break.
+
+    A word broken over two lines (``Ideo`` + soft hyphen / ``logiekritik``)
+    is one italic run. Runs are review candidates only, never authority.
+    """
+    italic_flag = int(getattr(fitz, "TEXT_FONT_ITALIC", 2))
+    runs: list[str] = []
+    current = ""
+    for line in lines:
+        spans = [
+            span for span in line.get("spans", [])
+            if str(span.get("text", "")).strip()
+        ]
+        for position, span in enumerate(spans):
+            text = str(span.get("text", ""))
+            italic = bool(
+                int(span.get("flags", 0)) & italic_flag
+                or re.search(r"italic|oblique", str(span.get("font", "")), re.I)
+            )
+            if not italic:
+                if current:
+                    runs.append(current)
+                current = ""
+                continue
+            if not current:
+                current = text
+            elif position == 0:
+                # Continuation of a run that ended the previous line.
+                if current.rstrip().endswith(_SOFT_HYPHEN):
+                    current = current.rstrip()[:-1] + text.lstrip()
+                else:
+                    current = current.rstrip() + " " + text.lstrip()
+            else:
+                current += text
+    if current:
+        runs.append(current)
+    cleaned: list[str] = []
+    for run in runs:
+        value = re.sub(r"\s+", " ", run.replace(_SOFT_HYPHEN, "")).strip()
+        value = value.strip(" ,.;:()[]‘’“”'\"")
+        if (
+            len(value) >= 4
+            and len(value.split()) <= 6
+            and re.search(r"[A-Za-zÀ-ɏ]", value)
+        ):
+            cleaned.append(value)
+    return list(dict.fromkeys(cleaned))
+
+
+def _italic_spans_in_text(text: str, values: list[str]) -> list[str]:
+    """Keep italic evidence only where it occurs exactly once in the text."""
+    return [
+        value for value in dict.fromkeys(values)
+        if isinstance(value, str) and value
+        and len(re.findall(rf"(?<!\w){re.escape(value)}(?!\w)", text)) == 1
+    ]
 
 
 def _joined_superscript_markers(
@@ -245,6 +375,14 @@ def _joined_superscript_markers(
         records = fragment.metadata.get("superscript_markers", []) or []
         markers.extend(_markers_in_text(fragment.text, records))
     return _markers_in_text(left.text + joiner + right.text, markers)
+
+
+def _joined_italic_spans(left: Paragraph, right: Paragraph, joiner: str) -> list[str]:
+    values = [
+        *(left.metadata.get("italic_source_spans", []) or []),
+        *(right.metadata.get("italic_source_spans", []) or []),
+    ]
+    return _italic_spans_in_text(left.text + joiner + right.text, values)
 
 
 def _extract_page_blocks(
@@ -277,7 +415,6 @@ def _extract_page_blocks(
         line_records: list[dict[str, Any]] = []
         sizes: list[float] = []
         font_names: list[str] = []
-        italic_candidates: list[str] = []
         for line in block.get("lines", []):
             spans = line.get("spans", [])
             text_parts: list[str] = []
@@ -287,9 +424,6 @@ def _extract_page_blocks(
                     text_parts.append(t)
                     sizes.append(span.get("size", 0.0))
                     font_names.append(span.get("font", ""))
-                    if (int(span.get("flags", 0)) & int(getattr(fitz, "TEXT_FONT_ITALIC", 2))
-                            or re.search(r"italic|oblique", str(span.get("font", "")), re.I)):
-                        italic_candidates.append(t.strip())
             if text_parts:
                 line_text = _join_span_texts([
                     span for span in spans if str(span.get("text", "")).strip()
@@ -334,11 +468,9 @@ def _extract_page_blocks(
         merged_text = _join_block_lines(line_texts)
         if not merged_text:
             continue
-        italic_source_spans = [
-            value for value in dict.fromkeys(italic_candidates)
-            if len(value) >= 5 and merged_text.count(value) == 1
-            and re.search(r"[A-Za-z]", value)
-        ]
+        italic_source_spans = _italic_spans_in_text(
+            merged_text, _italic_runs(block.get("lines", []))
+        )
 
         x0, y0, x1, y1 = block["bbox"]
         avg_size = sum(sizes) / len(sizes) if sizes else 0.0
@@ -357,6 +489,8 @@ def _extract_page_blocks(
                     "relative_position": round(
                         absolute / max(1, raw_line_chars), 6
                     ),
+                    "context_before": str(marker.get("context_before", "")),
+                    "context_after": str(marker.get("context_after", "")),
                 })
             consumed += len(line_text) + 1
         blocks.append(
@@ -802,6 +936,9 @@ def _prepare_document_blocks(
                     [marker for line in line_group
                      for marker in line.get("superscript_markers", []) or []],
                 )
+                updated["italic_source_spans"] = _italic_spans_in_text(
+                    text, list(block.get("italic_source_spans", []) or []),
+                )
                 updated["bbox"] = _line_group_bbox(
                     line_group, tuple(float(value) for value in block["bbox"])
                 )
@@ -924,6 +1061,9 @@ def _merge_continuation_paragraphs(paragraphs: list[Paragraph]) -> list[Paragrap
             prev.metadata["superscript_markers"] = _joined_superscript_markers(
                 prev, para, joiner
             )
+            prev.metadata["italic_source_spans"] = _joined_italic_spans(
+                prev, para, joiner
+            )
             prev.text = prev.text + joiner + para.text
             prev.metadata["end_page"] = page
             prev.metadata["cross_page_join"] = True
@@ -994,6 +1134,9 @@ def _merge_table_interrupted_continuations(
         tables = paragraphs[index + 1:table_end]
         joiner = "" if left.text.endswith("-") else " "
         left.metadata["superscript_markers"] = _joined_superscript_markers(
+            left, right, joiner
+        )
+        left.metadata["italic_source_spans"] = _joined_italic_spans(
             left, right, joiner
         )
         left.text = left.text + joiner + right.text
@@ -1588,6 +1731,9 @@ class PyMuPDFParser(BaseParser):
                     "has_superscript": bool(blk.get("has_superscript")),
                     "superscript_markers": list(
                         blk.get("superscript_markers", []) or []
+                    ),
+                    "italic_source_spans": list(
+                        blk.get("italic_source_spans", []) or []
                     ),
                     "orientation": str(blk.get("orientation", "horizontal")),
                     "reading_order": int(blk.get("reading_order", 0)),

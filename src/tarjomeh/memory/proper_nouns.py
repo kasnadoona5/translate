@@ -632,6 +632,21 @@ def is_reusable_terminology_mapping(english: str, persian: str) -> bool:
         return False
     if source_words[-1].casefold() in _SOURCE_NONTERM_TRAILERS:
         return False
+    if source_words[0].casefold() in _SOURCE_DETERMINER_LEADERS:
+        # "some broad macro-trends", "another epistemic community": a
+        # determiner-led span is passage wording, not reusable terminology.
+        return False
+    if (
+        len(source_words) >= 2
+        and source_words[0].casefold().endswith("ing")
+        and source_words[1].casefold() in _GERUND_PHRASE_CONTINUATIONS
+    ):
+        # "speculating about ...": a verb phrase, not a term. Nominal -ing
+        # terms such as "state building" or "path shaping" are unaffected.
+        return False
+    if _TRAILING_COMBINING_MARK_RE.search(target):
+        # A dangling ezafe/diacritic ("\u062a\u0639\u06cc\u0646\u0650 \u062a\u0627\u0631\u06cc\u062e\u06cc\u0650") is sentence morphology.
+        return False
     if _SOURCE_CLAUSAL_PREDICATE_RE.search(source):
         return False
     if _context_bound_persian_target(target):
@@ -639,15 +654,66 @@ def is_reusable_terminology_mapping(english: str, persian: str) -> bool:
     return not automatic_terminology_risk_reasons(source, target)
 
 
-def is_bounded_person_name_target(source: str, target: str) -> bool:
-    """Exclude surrounding Persian prose from reusable person names."""
-    source_words = re.findall(r"[A-Za-z\u00c0-\u024f]+", source or "")
-    target_words = _PERSIAN_WORD_RE.findall(target or "")
+_SOURCE_DETERMINER_LEADERS = frozenset({
+    "some", "another", "any", "each", "every", "several", "such", "many",
+    "few", "most", "certain",
+})
+_GERUND_PHRASE_CONTINUATIONS = frozenset({
+    "about", "on", "upon", "of", "in", "into", "for", "with", "to", "from",
+    "at", "by", "the", "a", "an", "this", "that", "these", "those", "its",
+    "their", "his", "her", "our",
+})
+_TRAILING_COMBINING_MARK_RE = re.compile(r"[\u064b-\u0652\u0654\u0670]\s*$")
+_PERSIAN_CONTEXT_EDGE_WORDS = frozenset({
+    "\u0648", "\u0627\u0632", "\u0628\u0647", "\u062f\u0631", "\u0628\u0627",
+    "\u0631\u0627", "\u06a9\u0647", "\u0627\u06cc\u0646", "\u0622\u0646",
+    "\u0628\u0631\u0627\u06cc",
+})
+_PERSIAN_INITIAL_RE = re.compile(r"(?<![\u0600-\u06ff])[\u0600-\u06ff]\.")
+
+
+def name_shaped_source(source: str) -> bool:
+    """A 2-4 word capitalized source with no function word reads as a name."""
+    tokens = re.findall(r"[A-Za-z\u00c0-\u024f][A-Za-z\u00c0-\u024f'.\-]*", source or "")
     return bool(
-        source_words
-        and target_words
-        and len(target_words) <= max(3, len(source_words) + 1)
+        2 <= len(tokens) <= 4
+        and all(token[:1].isupper() for token in tokens)
+        and not any(token.casefold() in {"and", "of", "for", "the"} for token in tokens)
     )
+
+
+def requires_bounded_name_target(category: str, source: str) -> bool:
+    """Persons, and name-shaped grounded entities, store only the name."""
+    return category == "person" or (
+        category in {"source_grounded_entity", "source_entity_candidate"}
+        and name_shaped_source(source)
+    )
+
+
+def is_bounded_person_name_target(source: str, target: str) -> bool:
+    """Exclude surrounding Persian prose from reusable person names.
+
+    Persian initials (``\u06af. \u0648. \u0641.``) count as one name unit. A leading or
+    trailing Persian function word, or an edge word carrying an ezafe kasra
+    (``\u062a\u062e\u0635\u0635\u06cc\u0650``), is context from the surrounding sentence, not the name.
+    """
+    source_words = re.findall(r"[A-Za-z\u00c0-\u024f]+", source or "")
+    value = target or ""
+    initials = _PERSIAN_INITIAL_RE.findall(value)
+    remainder = _PERSIAN_INITIAL_RE.sub(" ", value)
+    target_words = _PERSIAN_WORD_RE.findall(remainder)
+    if not source_words or not target_words:
+        return False
+    edges = [target_words[0], target_words[-1]]
+    if any(word in _PERSIAN_CONTEXT_EDGE_WORDS for word in edges):
+        return False
+    edge_tokens = remainder.split()
+    if edge_tokens and any(
+        token.endswith("\u0650") for token in (edge_tokens[0], edge_tokens[-1])
+    ):
+        return False
+    units = len(target_words) + (1 if initials else 0)
+    return units <= max(3, len(source_words) + 1)
 
 
 def _context_bound_persian_target(value: str) -> bool:
@@ -1339,7 +1405,7 @@ class ProperNouns:
                     key, self._nouns.get(key, "")
                 )
                 or (
-                    self.category_for(key) == "person"
+                    requires_bounded_name_target(self.category_for(key), key)
                     and not is_bounded_person_name_target(
                         key, self._nouns.get(key, "")
                     )
@@ -1590,7 +1656,9 @@ class ProperNouns:
                     })
                 if (
                     record.get("origin") == "accepted_correction"
-                    and self._categories.get(source) == "person"
+                    and requires_bounded_name_target(
+                        str(self._categories.get(source, "")), source
+                    )
                     and not is_bounded_person_name_target(
                         source, self._nouns[source]
                     )
