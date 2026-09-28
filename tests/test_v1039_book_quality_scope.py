@@ -158,8 +158,10 @@ def test_research_samples_later_body_and_family_candidates_are_review_only() -> 
         Paragraph("Opening academic paragraph " + "context " * 18),
         Paragraph("Middle academic paragraph " + "relations " * 18),
         Paragraph("Late academic paragraph " + "theory " * 18),
-        Paragraph("polity, politics, and policy " * 5),
-        Paragraph("polity, politics, and policy " * 5),
+        # v10.40.1 abstains when a list is glued to a following lowercase word,
+        # so the repeated triad is given clear sentence boundaries here.
+        Paragraph("It concerns the polity, politics, and policy. " * 5),
+        Paragraph("It concerns the polity, politics, and policy. " * 5),
     ]
     document = Document(
         title="A book",

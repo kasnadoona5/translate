@@ -19,11 +19,14 @@ from tarjomeh.parsers.base import Document
 
 _COORDINATED_TERMS = re.compile(
     r"\b[A-Za-z][A-Za-z'-]+(?:,\s+[A-Za-z][A-Za-z'-]+){1,4}"
-    r",?\s+and\s+[A-Za-z][A-Za-z'-]+"
-    # Keep a capitalized multiword final member intact ("South Africa",
-    # "United Arab Emirates").
-    r"(?:\s+[A-Z][A-Za-z'-]+){0,3}\b",
+    r",?\s+and\s+"
+    # A capitalized final member may span up to four words ("South Africa",
+    # "United Arab Emirates"); a lowercase final member is one word, and a
+    # following lowercase content word makes the boundary uncertain.
+    r"(?:[A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+){0,3}|[a-z][A-Za-z'-]+)\b",
 )
+_WORD_AFTER_RE = re.compile(r"\s+([A-Za-z][A-Za-z'-]*)")
+_WORD_BEFORE_RE = re.compile(r"([A-Za-z][A-Za-z'-]*)\s+$")
 _FRONT_PARATEXT_TITLE = re.compile(
     r"^(?:contents|table of contents|copyright|abbreviations|acknowledg(?:e)?ments|"
     r"preface|foreword|dedication|tables|list of tables|figures|list of figures|"
@@ -117,6 +120,26 @@ def _coordination_key(value: str) -> str:
     return " | ".join(_singular(item.strip()) for item in items)
 
 
+def _coordination_boundary_is_clear(text: str, match: re.Match[str]) -> bool:
+    """Abstain when a list member may continue beyond the matched words.
+
+    "polity, politics, and public policy" must not become "... and public":
+    a lowercase final member followed by a lowercase content word, or a
+    first member preceded by one, has an uncertain boundary.
+    """
+    after = _WORD_AFTER_RE.match(text, match.end())
+    last = match.group().split()[-1]
+    if (after and last[:1].islower() and after.group(1)[:1].islower()
+            and after.group(1).casefold() not in _PHRASE_EDGE_STOP):
+        return False
+    before = _WORD_BEFORE_RE.search(text[:match.start()])
+    first = match.group().split(",")[0].strip()
+    return not (
+        before and first[:1].islower() and before.group(1)[:1].islower()
+        and before.group(1).casefold() not in _PHRASE_EDGE_STOP
+    )
+
+
 def _normalized(text: str) -> str:
     """Treat a letter-joining en/em dash as a hyphen for candidate keys only."""
     return _LETTER_DASH.sub("-", text)
@@ -199,6 +222,8 @@ def collect_book_term_candidates(document: Document) -> list[dict[str, Any]]:
                 note(key, value, "aligned_pdf_italic", raw)
         present_families: set[str] = set()
         for match in _COORDINATED_TERMS.finditer(text):
+            if not _coordination_boundary_is_clear(text, match):
+                continue
             surface = " ".join(match.group().split())
             key = "family:" + _coordination_key(surface)
             present_families.add(key)
@@ -305,29 +330,31 @@ def collect_book_term_candidates(document: Document) -> list[dict[str, Any]]:
             counts[fixed] = count
             counts.pop("phrase:" + key, None)
 
-    # A fixed fragment always preceded by one word (ignoring only accents:
-    # "esprit"/"ésprit") is completed with it: "de corps" -> "esprit de corps".
-    # Accent-insensitive comparison is limited to this completion step, so
-    # distinct words such as "résumé"/"resume" are never merged elsewhere.
+    # A fixed fragment always preceded by the identical content word is
+    # completed with that word, so the full expression is offered. If the
+    # preceding words differ only by accents ("esprit"/"ésprit",
+    # "résumé"/"resume"), equivalence is not proven: the fragment's boundary
+    # is uncertain, so nothing is offered rather than a clipped or merged form.
     for key in [key for key in counts if key.startswith("fixed:")]:
         occurrences = preceding.get(key[len("fixed:"):], [])
         words = [word for word, _surface in occurrences]
-        if (
+        if not (
             occurrences
             and all(words)
+            and all(word.islower() and word.casefold() not in _PHRASE_EDGE_STOP
+                    for word in words)
             and len({_fold(word) for word in words}) == 1
-            and words[0].islower()
-            and words[0].casefold() not in _PHRASE_EDGE_STOP
         ):
-            completed = f"{words[0]} {occurrences[0][1]}"
-            completed_key = "fixed:" + _family_key(completed)
-            kinds[completed_key] = "fixed_source_expression"
-            surfaces[completed_key] = completed
-            evidence[completed_key] = evidence[key]
-            counts[completed_key] = counts.pop(key)
-            variants[completed_key] = list(dict.fromkeys(
-                f"{word} {surface}" for word, surface in occurrences
-            ))
+            continue
+        if len({word.casefold() for word in words}) > 1:
+            counts.pop(key, None)
+            continue
+        completed = f"{words[0]} {occurrences[0][1]}"
+        completed_key = "fixed:" + _family_key(completed)
+        kinds[completed_key] = "fixed_source_expression"
+        surfaces[completed_key] = completed
+        evidence[completed_key] = evidence[key]
+        counts[completed_key] = counts.pop(key)
 
     # Keep a complete fixed expression ("esprit de corps"), not its fragment.
     fixed_keys = [key for key in counts if key.startswith("fixed:")]

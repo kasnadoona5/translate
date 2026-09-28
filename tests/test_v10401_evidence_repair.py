@@ -139,9 +139,9 @@ def test_name_pairs_are_not_terms_and_lists_keep_multiword_final_item():
 
 def test_coordinated_family_variants_merge_by_plural_rules():
     paragraphs = [
-        "It studies territory, place, scale, and network in context.",
-        "Again territories, places, scales, and networks appear.",
-        "Finally territory, place, scale, and networks recur.",
+        "It studies the territory, place, scale, and network in context.",
+        "Again the territories, places, scales, and networks.",
+        "Finally the territory, place, scale, and networks, as before.",
     ]
     document = Document(title="T", chapters=[_chapter("Chapter 1", *paragraphs)])
     families = [item for item in collect_book_term_candidates(document)
@@ -302,11 +302,51 @@ def test_fixed_expression_merges_accent_variants_and_drops_fragment():
         "The distinctive ésprit de corps of the service matters here.",
     ]
     document = Document(title="T", chapters=[_chapter("Chapter 1", *paragraphs)])
-    fixed = {item["source"]: item for item in collect_book_term_candidates(document)
-             if item["origin"] == "fixed_source_expression"}
-    assert "de corps" not in fixed
-    assert "esprit de corps" in fixed
-    assert "ésprit de corps" in fixed["esprit de corps"]["source_variants"]
+    sources = [item["source"] for item in collect_book_term_candidates(document)]
+    # Accent-only variation does not prove equivalence: abstain, offering
+    # neither the clipped fragment nor a merged form.
+    assert "de corps" not in sources
+    assert not any("esprit de corps" in source for source in sources)
+
+
+def test_identical_preceding_word_completes_a_fixed_fragment():
+    paragraphs = [
+        "Its political esprit de corps is unusual in such bureaucracies.",
+        "The civil service esprit de corps of the ministry matters here.",
+    ]
+    document = Document(title="T", chapters=[_chapter("Chapter 1", *paragraphs)])
+    fixed = [item["source"] for item in collect_book_term_candidates(document)
+             if item["origin"] == "fixed_source_expression"]
+    assert "esprit de corps" in fixed and "de corps" not in fixed
+
+
+def test_accent_distinct_fixed_expressions_are_not_merged():
+    paragraphs = [
+        "The résumé analysis report ranks applicants.",
+        "Each résumé analysis report is archived.",
+        "The resume analysis report lists restarted jobs.",
+        "Each resume analysis report is rotated nightly.",
+    ]
+    document = Document(title="T", chapters=[_chapter("Chapter 1", *paragraphs)])
+    sources = [item["source"] for item in collect_book_term_candidates(document)
+               if item["origin"] == "fixed_source_expression"]
+    assert "analysis report" not in sources
+    assert not any("résumé" in source and "resume" in source for source in sources)
+    merged = [s for s in sources if s.endswith("analysis report") and " " in s]
+    assert all(s.split()[0] in {"résumé", "resume"} for s in merged)
+
+
+def test_uncertain_list_boundary_is_not_clipped():
+    paragraphs = [
+        "It studies polity, politics, and public policy in Europe.",
+        "Again polity, politics, and public policy interact.",
+        "Finally polity, politics, and public policy diverge.",
+    ]
+    document = Document(title="T", chapters=[_chapter("Chapter 1", *paragraphs)])
+    families = [item["source"] for item in collect_book_term_candidates(document)
+                if item["origin"] == "source_coordination"]
+    assert "polity, politics, and public" not in families
+    assert families == []
 
 
 def test_accent_distinct_words_are_not_merged():
