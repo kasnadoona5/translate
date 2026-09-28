@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from types import SimpleNamespace
 
 from tarjomeh.context.book_researcher import BookResearcher
@@ -94,6 +95,17 @@ def test_style_projection_rejects_contaminated_samples_without_mutating_state() 
         "\u0627\u06cc\u0646 \u067e\u0698\u0648\u0647\u0634 \u0628\u0627 \u0646\u062b\u0631\u06cc \u0631\u0633\u0645\u06cc \u0648 \u062f\u0642\u06cc\u0642\u060c \u0645\u0646\u0627\u0633\u0628\u0627\u062a \u0646\u0647\u0627\u062f\u06cc \u0631\u0627 \u062f\u0631 \u0628\u0633\u062a\u0631 \u062a\u0627\u0631\u06cc\u062e\u06cc \u0622\u0646\u200c\u0647\u0627 \u0628\u0631\u0631\u0633\u06cc \u0645\u06cc\u200c\u06a9\u0646\u062f."
     )
     manager.style_samples = [contaminated, clean]
+    manager.style_sample_records = [{
+        "text": clean,
+        "text_hash": hashlib.sha256(clean.encode("utf-8")).hexdigest(),
+        "source_text": "This study analyzes institutional relations in context.",
+        "alignment_status": "exact_paragraph",
+        "representative": True,
+        "quality_score": 95.0,
+        "final_scores": dict.fromkeys(
+            ("accuracy", "fluency", "terminology", "register"), 9.5
+        ),
+    }]
     projected = manager.get_context_for_chunk(SimpleNamespace(text="state")).style_profile
     assert "see Example" not in projected
     assert clean in projected

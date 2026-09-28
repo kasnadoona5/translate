@@ -143,6 +143,8 @@ def _summary_english_prefix_stutters(
             len(shorter) >= 5
             and shorter != longer
             and longer.startswith(shorter)
+            and longer not in {shorter + "s", shorter + "es", shorter + "ed"}
+            and not re.search(rf"\b{re.escape(shorter)}\b", evidence)
             and phrase not in evidence
         ):
             findings.append({
@@ -190,6 +192,8 @@ def _style_record_is_authoritative(record: dict[str, Any]) -> bool:
     """Return whether persisted evidence may actively teach book-level style."""
     if not bool(record.get("representative")):
         return False
+    if record.get("alignment_status") != "exact_paragraph":
+        return False
     cleaned = _clean_style_sample(str(record.get("text", "")))
     if not cleaned:
         return False
@@ -209,6 +213,20 @@ def _style_record_is_authoritative(record: dict[str, Any]) -> bool:
             _numeric_score(scores.get(name)) >= _STYLE_AUTHORITY_FLOOR
             for name in _STYLE_AUTHORITY_DIMENSIONS
         )
+    )
+
+
+def _style_record_is_prompt_safe(record: dict[str, Any]) -> bool:
+    source = str(record.get("source_text", ""))
+    target = str(record.get("text", ""))
+    return bool(
+        record.get("alignment_status") == "exact_paragraph"
+        and source
+        and not _NONREPRESENTATIVE_STYLE_SOURCE_RE.search(source)
+        and not _NON_PROSE_RE.search(source)
+        and _clean_style_sample(target)
+        and not _source_style_contradiction(source, target)
+        and _numeric_score(record.get("quality_score")) >= 75.0
     )
 
 
@@ -407,6 +425,23 @@ class MemoryManager:
 
         # Layer 3: Long-term Memory (TF-IDF)
         relevant_long_term = self.long_term.get_relevant(chunk.text)
+        pairs = self.short_term.get_entries()
+        short_keys = {
+            (
+                hashlib.sha256(pair.source.encode("utf-8")).hexdigest(),
+                hashlib.sha256(pair.translation.encode("utf-8")).hexdigest(),
+                pair.trust,
+            )
+            for pair in pairs
+        }
+        relevant_long_term = [
+            pair for pair in relevant_long_term
+            if (
+                hashlib.sha256(str(pair["source"]).encode("utf-8")).hexdigest(),
+                hashlib.sha256(str(pair["translation"]).encode("utf-8")).hexdigest(),
+                "trusted" if pair.get("reliable", True) else "advisory_review",
+            ) not in short_keys
+        ]
         long_term_blocks = []
         for pair in relevant_long_term:
             guidance = (
@@ -423,7 +458,6 @@ class MemoryManager:
         long_term_str = "\n\n".join(long_term_blocks)
 
         # Layer 4: Short-term Memory (Window)
-        pairs = self.short_term.get_entries()
         short_term_str = ""
         if pairs:
             formatted_pairs = []
@@ -615,6 +649,9 @@ class MemoryManager:
                 style_translation,
                 source_paragraphs=source_paragraphs,
                 source_paragraph_indices=style_source_indices,
+                source_alignment_proven=(
+                    len(source_paragraphs) == len(translation_paragraphs)
+                ),
                 paragraph_role=primary_role,
                 book_genre=self._book_genre(),
                 source_chunk_index=chunk.index,
@@ -720,6 +757,7 @@ class MemoryManager:
         *,
         source_paragraphs: list[str] | None = None,
         source_paragraph_indices: list[int] | None = None,
+        source_alignment_proven: bool = False,
         paragraph_role: str = "body",
         book_genre: str = "general",
         source_chunk_index: int | None = None,
@@ -748,6 +786,16 @@ class MemoryManager:
                 if source_paragraphs
                 and 0 <= source_paragraph_index < len(source_paragraphs)
                 else ""
+            )
+            quality["source_text"] = source_paragraph
+            quality["alignment_status"] = (
+                "exact_paragraph"
+                if source_alignment_proven and source_paragraph and source_paragraph_indices
+                and len(source_paragraph_indices) == len(
+                    [part for part in re.split(r"\n\s*\n", translation or "")
+                     if part.strip()]
+                )
+                else "uncertain"
             )
             structural_contradictions = _source_style_contradiction(
                 source_paragraph, paragraph
@@ -822,7 +870,8 @@ class MemoryManager:
             )
             record = {
                 "text": text,
-                "source_text": source_paragraph,
+                "source_text": str(selected.get("source_text", "")),
+                "alignment_status": selected.get("alignment_status", "uncertain"),
                 "text_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
                 "paragraph_role": paragraph_role,
                 "book_genre": book_genre,
@@ -939,14 +988,15 @@ class MemoryManager:
                 -_numeric_score(record.get("quality_score")),
             ),
         )
-        representative_count = sum(
-            _style_record_is_authoritative(record)
-            for record in ordered_records
-        )
+        authoritative = [
+            record for record in ordered_records
+            if _style_record_is_authoritative(record)
+        ]
         active_records = (
-            [record for record in ordered_records if _style_record_is_authoritative(record)]
-            if representative_count >= self._style_min_representative_samples
-            else ordered_records
+            authoritative
+            if len(authoritative) >= self._style_min_representative_samples
+            else [record for record in ordered_records
+                  if _style_record_is_prompt_safe(record)]
         )
         clean_records = [
             (record, cleaned)

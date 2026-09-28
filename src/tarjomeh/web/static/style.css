@@ -919,6 +919,69 @@ select {
     white-space: nowrap;
 }
 
+.book-term-review-list {
+    margin: 14px 0;
+    max-height: 55vh;
+    overflow: auto;
+    border-top: 1px solid var(--border);
+}
+
+.book-term-review-row {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr) minmax(0, 1.5fr);
+    align-items: start;
+    gap: 12px;
+    padding: 12px 2px;
+    border-bottom: 1px solid var(--border);
+}
+
+.book-term-details, .book-term-controls {
+    min-width: 0;
+    display: grid;
+    gap: 7px;
+}
+
+.book-term-details > span {
+    overflow-wrap: anywhere;
+}
+
+.book-term-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.book-term-controls input:not([type="checkbox"]), .book-term-controls select {
+    width: 100%;
+    min-width: 0;
+}
+
+.book-term-controls label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.book-term-review-row small {
+    display: block;
+    color: var(--muted);
+    overflow-wrap: anywhere;
+}
+
+.book-term-review-row input[type="text"] {
+    width: 100%;
+    min-width: 0;
+}
+
+@media (max-width: 700px) {
+    .book-term-review-row {
+        grid-template-columns: 24px minmax(0, 1fr);
+    }
+    .book-term-controls {
+        grid-column: 2;
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
 .research-block {
     margin-top: 18px;
     padding: 14px;

@@ -219,6 +219,34 @@ def _line_superscript_markers(
     return markers
 
 
+def _markers_in_text(
+    text: str, records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Retain only marker identities uniquely located in this source fragment."""
+    kept: list[dict[str, Any]] = []
+    for record in records:
+        raw = str(record.get("text", "")).strip()
+        if raw and text.count(raw) == 1:
+            offset = text.find(raw)
+            kept.append({
+                "text": raw,
+                "relative_position": round(
+                    (offset + len(raw) / 2) / max(1, len(text)), 6
+                ),
+            })
+    return kept
+
+
+def _joined_superscript_markers(
+    left: Paragraph, right: Paragraph, joiner: str,
+) -> list[dict[str, Any]]:
+    markers: list[dict[str, Any]] = []
+    for fragment in (left, right):
+        records = fragment.metadata.get("superscript_markers", []) or []
+        markers.extend(_markers_in_text(fragment.text, records))
+    return _markers_in_text(left.text + joiner + right.text, markers)
+
+
 def _extract_page_blocks(
     page: fitz.Page,
     *,
@@ -249,6 +277,7 @@ def _extract_page_blocks(
         line_records: list[dict[str, Any]] = []
         sizes: list[float] = []
         font_names: list[str] = []
+        italic_candidates: list[str] = []
         for line in block.get("lines", []):
             spans = line.get("spans", [])
             text_parts: list[str] = []
@@ -258,6 +287,9 @@ def _extract_page_blocks(
                     text_parts.append(t)
                     sizes.append(span.get("size", 0.0))
                     font_names.append(span.get("font", ""))
+                    if (int(span.get("flags", 0)) & int(getattr(fitz, "TEXT_FONT_ITALIC", 2))
+                            or re.search(r"italic|oblique", str(span.get("font", "")), re.I)):
+                        italic_candidates.append(t.strip())
             if text_parts:
                 line_text = _join_span_texts([
                     span for span in spans if str(span.get("text", "")).strip()
@@ -302,6 +334,11 @@ def _extract_page_blocks(
         merged_text = _join_block_lines(line_texts)
         if not merged_text:
             continue
+        italic_source_spans = [
+            value for value in dict.fromkeys(italic_candidates)
+            if len(value) >= 5 and merged_text.count(value) == 1
+            and re.search(r"[A-Za-z]", value)
+        ]
 
         x0, y0, x1, y1 = block["bbox"]
         avg_size = sum(sizes) / len(sizes) if sizes else 0.0
@@ -344,6 +381,7 @@ def _extract_page_blocks(
                     bool(line.get("has_superscript")) for line in line_records
                 ),
                 "superscript_markers": superscript_markers,
+                "italic_source_spans": italic_source_spans,
             }
         )
     return (
@@ -759,6 +797,11 @@ def _prepare_document_blocks(
                 updated = dict(block)
                 updated["text"] = text
                 updated["lines"] = line_group
+                updated["superscript_markers"] = _markers_in_text(
+                    text,
+                    [marker for line in line_group
+                     for marker in line.get("superscript_markers", []) or []],
+                )
                 updated["bbox"] = _line_group_bbox(
                     line_group, tuple(float(value) for value in block["bbox"])
                 )
@@ -878,6 +921,9 @@ def _merge_continuation_paragraphs(paragraphs: list[Paragraph]) -> list[Paragrap
             and (para.text[0].islower() or prev.text.endswith("-"))
         ):
             joiner = "" if prev.text.endswith("-") else " "
+            prev.metadata["superscript_markers"] = _joined_superscript_markers(
+                prev, para, joiner
+            )
             prev.text = prev.text + joiner + para.text
             prev.metadata["end_page"] = page
             prev.metadata["cross_page_join"] = True
@@ -947,6 +993,9 @@ def _merge_table_interrupted_continuations(
 
         tables = paragraphs[index + 1:table_end]
         joiner = "" if left.text.endswith("-") else " "
+        left.metadata["superscript_markers"] = _joined_superscript_markers(
+            left, right, joiner
+        )
         left.text = left.text + joiner + right.text
         left.metadata["end_page"] = right_page
         left.metadata["cross_table_join"] = True
@@ -1440,6 +1489,9 @@ class PyMuPDFParser(BaseParser):
                                 ),
                                 "superscript_markers": list(
                                     blk.get("superscript_markers", []) or []
+                                ),
+                                "italic_source_spans": list(
+                                    blk.get("italic_source_spans", []) or []
                                 ),
                                 "orientation": str(
                                     blk.get("orientation", "horizontal")

@@ -35,19 +35,23 @@ new evidence so later patches cannot silently revive an earlier defect.
 
 ## Current Baseline
 
-- Latest supplied live evidence: `v10.37.0`, job `e17faf75e315` (see the
-  v10.37 evidence section near the end of this ledger)
+- Latest supplied live evidence: `v10.39.1`, job `d19d485f045c` (see the
+  v10.39.1 live evidence section near the end of this ledger)
+- Previous live baseline: `v10.37.0`, job `e17faf75e315`
 - Prior fully reconciled baseline: `v10.33.0`, commit `fddc2b6`, job `96851204419f`
 - Source: *The State: Past, Present, Future* (Bob Jessop, 2016)
-- v10.37 runtime result: 16 of 222 chunks finished (12 completed, four
-  needs_review), with a downloadable chapter checkpoint. The supplied companion
-  audit reports `REVIEW` with no hard failures. This does not certify the whole
-  book or resolve the previously stopped `c31517e92d81` job.
-- Translation remains review-grade: one serious institutionalism scope issue
-  was detected only after an unrelated dash edit. Academic fluency and exact
-  source attachment still require direct PDF/DOCX inspection. Research stays
-  advisory and style authority is conditional. Full scholarly-table
-  reconstruction remains deferred.
+- v10.39.1 runtime result: 16 of 222 chunks finished (10 completed, six
+  needs_review), with a downloadable chapter checkpoint. The companion audit
+  reports `REVIEW` with no hard failures. The DOCX hash matches the published
+  checkpoint; this does not certify the whole book or resolve the previously
+  stopped `c31517e92d81` job.
+- Translation remains review-grade: the institutionalism alias scope and source
+  `two issues` are correct in the supplied DOCX, but the central condensation
+  sentence and `polity / politics / policy` family remain awkward/inconsistent,
+  and a source-authored foreign-expression parenthesis is nested in the final
+  output. Book research was disabled in this job, so its effectiveness was not
+  tested. Style authority is conditional. Full scholarly-table reconstruction
+  remains deferred.
 
 ## v10.33 Live Result
 
@@ -304,15 +308,15 @@ new evidence so later patches cannot silently revive an earlier defect.
 
 | ID | Behavior | Current status | Evidence / required behavior |
 |---|---|---|---|
-| R01 | Source-authored inconsistent enumeration is preserved | PARTIAL | v10.24 live output preserved the source's explicit `two issues`, but a later run regressed despite tests. v10.29 adds verifiable per-sentence critic coverage while retaining the deterministic final announced-count blocker. Fresh live evidence is required before restoring `PROTECTED`. |
+| R01 | Source-authored inconsistent enumeration is preserved | PARTIAL | v10.39.1 job `d19d485f045c` again preserves source `It addresses two issues` as `این فصل به دو مسئله می‌پردازد` even though three items follow. Earlier recurrence despite tests keeps this under monitoring across runs before `PROTECTED`. |
 | R02 | Refiner may reject critic suggestions | PROTECTED | Full candidates and local edits are independently gated; rejected edits do not become memory. |
 | R03 | Page headers do not split or contaminate prose | PROTECTED | “Third” and “Fourth” paragraphs remain separate despite page boundaries. |
 | R04 | Exact adjacent duplicated phrases are blocked | PROTECTED | Earlier repetitions such as duplicated “complementarity” remain absent. |
 | R05 | Non-adjacent grammatical duplication is blocked | PROTECTED | The duplicated fourth-element appositive is absent in the v10.18 DOCX, and the paired regression tests remain in the historical suite. Continue source-relative protection so deliberate repetition is retained. |
 | R06 | Valid restructuring is not rejected by predicate-count heuristics | MONITOR | v10.17 replaces the paragraph-wide count with an edit-local predicate-evidence guard; valid restructuring tests pass, live confirmation pending. |
-| R07 | Coordinated source meanings survive and recurring conceptual families remain consistent | PARTIAL | Source actions remained present, but `polity / politics / policy` drifted away from the previously accepted related Persian family. This is not an omission, but it is a project terminology-consistency regression. Phrase-level curated choices may guide the book; production logic must not hard-code this example. |
-| R08 | Matrix predicate and attachment remain grammatical | OPEN | v10.22 again separates the condensation head from its balance-of-forces complement and permits ambiguous predicate attachment. The fix must accept multiple fluent Persian realizations while rejecting the structural defect. |
-| R09 | Academic Persian is readable without semantic weakening | PARTIAL | Review exists, but opaque calques and broken matrix clauses still pass or valid repairs are rolled back. |
+| R07 | Coordinated source meanings survive and recurring conceptual families remain consistent | PARTIAL | v10.39.1 again renders `polity / politics / policy` as `نظام سیاسی، سیاست‌ورزی و خط‌مشی`; the previously requested conceptual family is not stable. This is not an omission. Book-approved phrase choices may guide one book; production code must not hard-code this example. |
+| R08 | Matrix predicate and attachment remain grammatical | OPEN | v10.39.1 retains `قدرت دولتی فشردگی‌ای میانجی‌گری‌شده ... (انعکاس و انکساری) از موازنه ...`; the `از` attachment and stacked modifiers remain opaque despite a critique and a rolled-back refinement. Accept multiple fluent, source-faithful realizations, not one hard-coded sentence. |
+| R09 | Academic Persian is readable without semantic weakening | PARTIAL | v10.39.1 improves the institutionalism alias scope and preserves source counts, but the central condensation clause remains an English-shaped calque and one foreign-expression parenthesis is malformed. Scores and local tests cannot certify fluent academic prose. |
 | R10 | Singular/plural agreement is correct | PROTECTED | The v10.17 output uses `تاریخ‌های دولت‌ها و نظام‌های دولت‌ها ... دارند`; the prior agreement defect did not return. |
 | R11 | First-occurrence English anchors are complete and non-duplicated | PARTIAL | `methodological individualism` is now anchored, but final QA still reports a missing `apparatus` anchor in structural contents material. Reconciliation must distinguish prose, tables, contents, citations, and abbreviations without duplicating English originals. |
 | R12 | Citations, ISBNs, superscripts, and source identifiers survive | PARTIAL | v10.27 canonical DB text damaged `CB2 1UR`, `JC11.J47`, `politybooks.com`, and `RES-051-27-0303` even though the deterministic restorer could repair them. v10.29 performs and verifies exact source-bound restoration at final canonical admission. Live output is required. |
@@ -347,7 +351,7 @@ new evidence so later patches cannot silently revive an earlier defect.
 | R41 | A grounded source omission shared by every accepted version receives bounded repair | OPEN | v10.19 database chunk 11 omitted `analysed from at least six perspectives` from every retained candidate, so earlier-version recovery had nothing complete to restore. v10.20 adds one paragraph-local, source-grounded repair with an independent source-aware critic and monotonic integrity/language admission; live confirmation is pending. |
 | R42 | Reliable retrieval and active style use one reconciled final-quality authority | OPEN | v10.19 chunk 13 admitted reliable long-term wording while style rejected the same final grounded attachment defect. v10.20 emits one canonical disposition record and fails audits if unresolved wording enters either durable authority; live confirmation is pending. |
 | R43 | Duplicate Persian phrases differing only by an optional diacritic are detected source-relatively | OPEN | v10.19 exported `چگونه مدعیِ چگونه مدعی`. v10.20 compares Persian lexical tokens without optional combining marks and removes only exact adjacent multiword duplication absent from the aligned source; deliberate source repetition remains protected. |
-| R44 | Parenthetical originals and structural references remain non-nested and localized | MONITOR | v10.23 defers an English first-occurrence anchor when its Persian target occurs only inside parenthetical apparatus, records that deferral, and leaves later eligible prose available. A generalized non-nesting test passes; live output remains required. |
+| R44 | Parenthetical originals and structural references remain non-nested and localized | PARTIAL | v10.39.1 DOCX has `مصلحت دولت [(raison d’état)]` inside an outer parenthesis where the source has `(raison d’état)`. The final audit correctly reports new nested parentheses, and its attempted deterministic repair was rejected as non-improving; the output remains malformed. The earlier non-nesting test did not cover this construction. |
 | R45 | A long in-flight quality call is visible without inflating failure accounting | OPEN | v10.19 database chunks 11-12 spent roughly 18-25 minutes in successful quality work while completed-chunk progress stayed unchanged. v10.20 persists a separate `llm_call_started` event and worker stage, exposes it in the job snapshot/UI, and reports unmatched and >=10-minute calls without counting starts as attempts. |
 | R46 | Visibly malformed Persian word construction cannot teach durable wording or style | OPEN | v10.19 contained recurring `معناب‌شناسی`. v10.20 explicitly routes malformed morpheme/ZWNJ construction as an objective target-side defect while uncommon technical vocabulary remains allowed; live correction evidence is pending. |
 | R47 | Source completeness outranks aggregate polish when selecting an earlier version | OPEN | v10.20 retained a smoother candidate that omitted `accumulation` because generic blocker count preceded grounded source-fidelity count. v10.21 ranks serious source obligations first and tests the exact adverse ranking case without requiring book-specific wording. |
@@ -405,7 +409,7 @@ new evidence so later patches cannot silently revive an earlier defect.
 
 | R99 | Objective final Persian defect receives only bounded source-safe repair | OPEN | v10.34 kept a malformed verb after a full refiner candidate introduced a larger source regression and was correctly rolled back. v10.35 adds one conditional exact-candidate refiner pass, admits only independently validated paragraph-local edits, and reruns identity, source structure, integrity, critique, and regression checks. Rejected repairs cannot become final quality authority. Fresh DOCX evidence is required. |
 | R100 | Reviewed terminology requires exact local bilingual alignment | OPEN | v10.34 accepted a printer name mapped to a country because the review used an oversized source excerpt and a context-independent label. v10.35 requires unique source-local and target-local alignment, persists `alignment_status`, and defers legacy unaligned accepted corrections on load. The short v10.35 memory audit did not show this mapping recurring; longer cross-book evidence is still required. |
-| R101 | Representative style meets every academic quality dimension | OPEN | v10.34 could establish style from a sample with a strong average but a weak single dimension, including malformed joiners. v10.35 requires accuracy, fluency, terminology, and register individually at or above the academic threshold and excludes deterministic malformed joiners. The v10.35 audit found three representative and two fallback records; style quality in a longer run remains unproved. |
+| R101 | Representative style meets every academic quality dimension | OPEN | v10.39.1 has five style records, three labelled representative, no dimension-floor violations, and a `warming_up` profile. Direct authority re-evaluation admits only one of the three because two sampled texts truncate source enumerations (R118). Scores alone do not establish style authority; longer-run evidence remains required. |
 | R102 | Duplicate source-note markers cannot be introduced | OPEN | v10.34 carried both rich and plain versions of one source note marker. v10.35 removes only one unambiguous extra plain trailing copy when the source requires exactly one and blocks remaining surplus markers. The v10.35 audit found a distinct false surplus caused by overlapping extractors (R104), so this row cannot be promoted yet. |
 | R103 | Prompted research suggestions have directly supporting evidence | OPEN | v10.34 retained advisory suggestions whose excerpts did not establish the proposed term or identity. v10.35 includes only identity- and term-supported single-choice suggestions in the translator prompt. The v10.35 audit found 22 attributable proposals and zero prompt-eligible terms; this supports the negative gate but not positive behavior across books. |
 | R104 | One physical note marker counts once across overlapping extraction patterns | OPEN | v10.35 source `(Cerny 2010.)4` and target `(Cerny 2010.) 4` caused a false surplus hard failure: two plain regexes counted the same target span. v10.36 deduplicates by marker span while still detecting and conservatively repairing a distinct rich-plus-plain duplicate. Production integrity and companion audits share this counter. Local regression tests pass; live audit pending. |
@@ -417,10 +421,23 @@ new evidence so later patches cannot silently revive an earlier defect.
 | R110 | One malformed readability item cannot erase valid sibling evidence | OPEN | v10.38 routes only individually validated exact-span readability items while preserving the response's invalid status and validation errors. Source-aware suppression, refiner veto, and final integrity gates remain authoritative. Unit tests pass; live event and DOCX evidence pending. |
 | R111 | Detached ezafe and optional plural spacing must be source/role scoped | OPEN | v10.38 reviews detached quoted ezafe and spaced Persian optional-plural markers. Auto repair of optional plural spacing requires one source `word(s)`, one target form, body role, and a single paragraph; ambiguous text stays REVIEW. No source-authored count or citation is changed. Unit tests pass; source/DOCX evidence pending. |
 | R112 | An extra attachment reviewer cannot silently alter the pipeline or memory | OPEN | v10.38 provides an opt-in, read-only offline replay, source/target quote validation, two ordinary-critic controls, known-good controls, synthetic sensitivity cases, served-model and cost accounting. It is OFF in live jobs. It can be enabled only after human adjudication, at least two real unique catches, precision at least 80% including uncertain findings, and user approval. Refiner rejection remains a veto; optional reviewer failures must not emit `qa_unavailable`. |
-| R113 | Accepted person-name memory stores only the lexical name, not surrounding prose | OPEN | v10.38 job `0314bebdace2` stored `Manuela Tecusan` as `ویراستاری عالمانه و کاملاً تخصصیِ مانوئلا تکوشان` even though the passage translation can remain contextual. The next candidate rejects oversized reviewed person targets and defers legacy `exact_local` records on retrieval; it never deletes source passage text. Focused tests pass; fresh memory and DOCX evidence pending. |
-| R114 | Source-proven optional plural spacing survives exact final-render admission | OPEN | v10.38 source `discourse(s)` and DOCX `گفتمان (ها)` show that the repair existed but `_language_quality_strictly_improves` omitted `spaced_optional_plural_count`. The next candidate adds that monotonic field; ambiguous, non-body, and source-authored forms remain REVIEW/untouched. Focused final-document tests pass; fresh DOCX evidence pending. |
+| R113 | Accepted person-name memory stores only the lexical name, not surrounding prose | MONITOR | v10.38 job `0314bebdace2` stored an oversized contextual phrase for `Manuela Tecusan`. v10.39.1 job `d19d485f045c` stores only `مانوئلا تکوسان`, with zero unsafe accepted-person findings; focused tests pass. Keep monitoring cross-job retrieval and legacy deferral before `PROTECTED`. |
+| R114 | Source-proven optional plural spacing survives exact final-render admission | MONITOR | v10.39.1 source `discourse(s)` has DOCX `گفتمان(ها)`, with no spaced optional-plural artifact; one final-render repair was accepted. Focused tests pass. Ambiguous, non-body, and source-authored forms still need future-run evidence before `PROTECTED`. |
 | R115 | A book research approval cannot silently become global authority | OPEN | The v10.38 Research Suggestions endpoint wrote approvals into the shared working CSV. The next candidate defaults to exact-upload-SHA-256 book scope; explicit confirmed shared approval remains available. It reports source-family candidates without automatically promoting them. Tests cover identical/different source bytes and curated conflicts; live cross-book evidence pending. |
 | R116 | A hard audit failure must propagate through the shell process exit status | OPEN | v10.39.0 audit Python raised exit 2 on hard FAIL, but the shell script ended with `unset -f`, resetting the process status to zero. v10.39.1 preserves the function result after cleanup and exits with it. A focused test checks both script footers; VPS hard-FAIL behavior is not yet observed live. Do not deploy the superseded v10.39.0 tag. |
+| R117 | Whole-book source-family candidates exclude reference noise and preserve complete phrases | OPEN | v10.39.1 review list includes bibliography publisher `Farrar, Straus and Giroux`, book-title text, and clipped `Brazil, Russia, India, China, and South`. The regex scans parsed `body` paragraphs, but reference/index material can still be classified as body, and the last expression is cut before `Africa`. These candidates are review-only and did not enter prompts or approved glossary authority; improve candidate provenance and complete-span filtering generally. |
+| R118 | Representative style evidence must align to its recorded source span | OPEN | v10.39.1 records from DB chunks 8 and 14 are labelled `representative=True`, yet `_style_record_is_authoritative` returns false with `announced_count_mismatch`: the saved Persian style excerpts omit the source's two-approach or three-chapter enumeration while `source_text` stores the full paragraph. Only one of three labelled records is actually authoritative, explaining `warming_up`; the prompt labels the other two fallback. Retain source/target-aligned bounded spans or reject truncated samples before recording representative status. |
+
+| R119 | DOCX note superscripts require source-position evidence | OPEN | v10.39.1 superscripted a structural digit in `(فصل ۳)` instead of an actual trailing note marker. Parser split/merge metadata and exporter positioning must agree with canonical source markers; uncertain matches remain plain and REVIEW. |
+| R120 | Inline-original insertion cannot strand kasra on `)` | OPEN | v10.39.1 had a combining kasra following an English-original parenthesis. Keep a source-grounded kasra on its Persian lexical anchor; detect remaining cases without target-only guessing. |
+| R121 | Canonical final Persian contains no double ZWNJ | OPEN | v10.39.1 DOCX had five doubled ZWNJs. Collapse only adjacent ZWNJs before canonical hashing, not during lexical assembly, and verify DB/DOCX identity. |
+| R122 | Optional prefixes and suffixes remain attached only with unique source proof | OPEN | Spaced `(فرا) نظری` and `گفتمان (ها)` are visible output risks. A single aligned optional source form may license a single local repair in body prose; ambiguous, structural, or source-authored spacing remains REVIEW. |
+| R123 | Layer-2 stutter rejection respects sentence boundaries | OPEN | Two v10.39.1 summary updates were rejected after punctuation stripping made `chapters. Chapter` and `states. State` look like restarts. Preserve rejection of genuine fragment restarts without rejecting grammatical adjacent sentences. |
+| R124 | Context-bound phrase fragments cannot teach Layer-1 terminology | OPEN | Determiner-led phrases and targets with a dangling kasra were reusable advice in v10.39.1. Retain passage context while withholding cross-chunk lexical authority; do not reject legitimate `-ing` technical nouns globally. |
+| R125 | Memory prompt duplication is measured and removed without losing distinct evidence | OPEN | v10.39.1 translation prompts grew to roughly 97k characters, with whole English/Persian pairs repeated across Layer 3, Layer 4, and previous context. Remove a presentation duplicate only when exact source, target, and trust identities all agree; no hard 50k-character cap or memory-layer removal. |
+| R126 | Initial term extraction samples body evidence rather than `chunks[0]` | OPEN | The initial extraction call read the Jessop copyright page, not the conceptual body. In both review modes, use a bounded, source-grounded body inventory; review-off remains low-authority advisory, review-on proposals remain UI-only until approval. |
+| R127 | Approved book terms cannot silently become advisory or override another sense | OPEN | A verbose English explanation placed in `GlossaryEntry.sense` can fail the context-token gate, while chunk-wide matching can apply a body term to an adjacent heading. Store the explanation in the review record and resolve mandatory approved terms per aligned paragraph, role, chapter, book identity and unambiguous sense. Uncertain scope remains REVIEW. |
+| R128 | Paratext and inactive style evidence never render as prose guidance | OPEN | Acknowledgements and source-misaligned fallback records could appear during `warming_up` despite not being authoritative. Keep them for audit if useful, but never render them as a model for body prose; representative and authoritative counts must agree. |
 
 ## Validated v10.17 External Audit Notes
 
@@ -1161,6 +1178,7 @@ push, and fresh VPS evidence.
 | v10.35 | `5f347402c194` | REVIEW | 16/222 checkpoint chunks (13 completed, 3 review), 123 LLM attempts, one recovered critic failure, no transport failure, matching DOCX/DB/Layer-3 text. R104 false note surplus and R105 unbalanced Persian dash remain; central academic prose still needs human review. |
 | v10.36 | `c31517e92d81` | REVIEW | DB chunk 9/UI chunk 10 stopped four times on the same source-obligation candidate. The saved Persian text preserved all three explicit claims; the detector lacked `مدعا` and falsely reported an announcement mismatch. Supplied companion: 75 active LLM calls, no LLM/transport failures; no DOCX checkpoint was produced. Memory/style and later prose cannot be certified from this stopped run. R107-R108 remain open. |
 | v10.37 (`pending`) | awaiting VPS run | PENDING | General typed-announcement recognition, bounded repeated-failure recovery, exact checkpoint resolution, and expanded diagnostics/audits pass 1,000 local tests and runtime probes. A resumed v10.36 job and a fresh checkpoint still need live source/DOCX, four-layer memory, style, research, stage/LLM, and 9router verification. |
+| v10.39.1 | `d19d485f045c` | REVIEW | Gemini 3.8 Flash translation / GLM 5.3 Flash critique; 16/222-chunk chapter checkpoint, 10 completed and six review, 138 active/lifetime LLM attempts with zero recorded operational failures and one repaired invalid critic response. Canonical DOCX identity, explicit counts, optional plural spacing, person-name lexical memory, and institutionalism alias scope held. Book research was disabled, no approved book terms were active, central state-power prose and a nested foreign-term annotation remain defective, and two labelled representative style records fail authority re-evaluation. No full-book or old-job resume claim. |
 
 ## v10.24 Live Validation
 
@@ -1723,6 +1741,89 @@ pending a fresh v10.25 VPS run.
   and audit scripts. Its local full suite passed 1,019 tests with one non-failing
   environment warning; Bash, embedded Python, and runtime probes passed.
   The v10.39.0 tag remains immutable for traceability.
+
+## v10.39.1 Live Evidence
+
+- All seven job/audit artifacts and the source PDF were supplied. The delivered
+  DOCX SHA-256 matches the published checkpoint. The configured chapter pause
+  occurred after 16 of 222 chunks: 10 `completed`, six `needs_review`
+  (0, 8, 10, 11, 12, 13), and 206 pending. The worker lease was released as
+  `paused`; there was no terminal chunk failure. This is a checkpoint review,
+  not a full-book quality verdict.
+- The companion and memory audits report REVIEW with zero hard failures. The
+  assembled/canonical hash and all 16 final selection/admission identities
+  match; final-quality and checkpoint publication are atomic in this run.
+  Active and lifetime LLM attempts are both 138. Recorded transport/content
+  failures are zero, but one invalid structured critic response required JSON
+  repair; zero operational failures must not be described as perfect first-pass
+  model output. The source PDF and DOCX were compared on key argument and
+  regression passages; this sampled inspection cannot certify all 222 chunks.
+- PDF `It addresses two issues` remains `این فصل به دو مسئله می‌پردازد` despite
+  the source's later three-item list. PDF `three key claims` becomes
+  `سه مدعای کلیدی` with all three items. The institutionalism alias is now
+  attached only to the ideational school, and source `discourse(s)` becomes
+  `گفتمان(ها)`. Earlier defects are not all absent by implication: the
+  state-power sentence retains the hard-to-parse `فشردگی‌ای ... (انعکاس و
+  انکساری) از موازنه` and `خط‌مشی`; the PDF's `(raison d’état)` appears as a
+  nested/bracketed original in the DOCX. The final audit caught the latter but
+  rejected an unsafe repair, so its output still needs human review.
+- Four-layer memory remained separated: 59 Layer-1 nouns, a present but
+  advisory-input Layer-2 summary, 16 Layer-3 records (three reliable and 13
+  advisory), and four Layer-4 entries (one trusted, two advisory review, one
+  structural only). Two unsafe summary updates were rejected. The person-name
+  mapping for Manuela Tecusan is lexical, not surrounding prose. Five style
+  records exist and the profile is `warming_up`: of three labelled
+  representative samples, only one passes the actual authority predicate;
+  the other two are presented as fallback, not established style (R118).
+- Book research was disabled for this job: zero research sources, suggestions,
+  or approved book terms. Sixteen per-chunk web-context term-detection calls
+  do not validate book-level research or book-scoped glossary approvals. The
+  new source-family list has 27 review-only candidates but includes reference
+  noise and a clipped country list (R117). The focused attachment reviewer
+  remains off; this run did not add that production LLM stage.
+- R107's fresh three-claim wording is observed here, but R107/R108's stopped
+  `c31517e92d81` resume path remains unverified. R115 cross-book isolation
+  and R116 audit hard-failure exit behavior also remain unverified live. The
+  local test suite passed 1,019 tests with two non-failing warnings using
+  `PYTHONPATH=src`; this is useful regression evidence, not a proof of prose
+  quality or VPS behavior. No ledger row is promoted to PROTECTED on this run.
+
+## v10.40 Local Candidate Evidence (not a live release)
+
+- The stage order remains preparation -> translation -> critique/refinement ->
+  integrity/glossary repair -> typography and identifiers -> exact final
+  quality -> four-layer memory/style decision -> atomic checkpoint/export.
+  The focused attachment reviewer remains OFF. The new book-term wait is
+  opt-in and precedes chunk 1; it is not a replacement for chapter review.
+- Local tests cover source-confirmed DOCX superscripts and REVIEW on ambiguous
+  markers (R119), existing source-grounded ezafe/optional-affix repair plus
+  narrow double-ZWNJ and duplicate-coordinator repair (R120-R122, R49),
+  aligned style evidence and paratext filtering (R128), summary stutter and
+  layer-3/layer-4 prompt deduplication (R123/R125), and body-only source term
+  sampling including repeated phrases, abbreviations and uniquely aligned
+  PDF italic spans (R117/R126). These tests do not certify prose quality.
+- New opt-in tests verify an unchecked default, no translation or output at
+  the first wait, durable Start/Skip, bulk confirmation, duplicate Start
+  refusal, source-hash binding, paragraph-scoped approval, publisher-line and
+  heading exclusion, and final compliance on the committed candidate (R127).
+  Broad body scope requires a separate explicit confirmation; the default is
+  the evidenced paragraph. Pending/rejected/skipped proposals have no prompt
+  authority. Human approval of a term is not proof that its Persian choice is
+  academically correct.
+- Full local suite after the candidate changes: 1,048 tests passed with two
+  non-failing environment warnings. The v10.40 capability behavior probes and
+  focused post-edit review tests also pass. The companion audit now records
+  opt-in review phase/proposal statuses and treats a finished opt-in job without
+  its review record as a hard failure; prompt-composition events report the
+  real checkbox state. JavaScript and release-script shell syntax passed, and desktop and
+  mobile browser inspection found no review-form overflow. A fresh VPS DOCX,
+  QA/companion/memory audits, served-model and failure accounting, and the
+  stopped `c31517e92d81` resume check remain REQUIRED. R119-R128 remain OPEN
+  until that evidence is supplied. This candidate is not production-ready.
+- R129 (OPEN): editor retranslation of an opt-in job must obey the same
+  approved-term and research-suggestion authority as normal translation.
+  The local route was aligned and the suite passed; live editor retranslation
+  has not been exercised. Do not claim it protected from static inspection.
 
 ## Update Procedure
 

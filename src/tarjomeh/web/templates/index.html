@@ -145,6 +145,11 @@
                                         <input id="cfgBookResearch" type="checkbox">
                                         <span class="toggle" aria-hidden="true"></span>
                                     </label>
+                                    <label class="toggle-field">
+                                        <span><strong>Review book terms before translating</strong></span>
+                                        <input id="cfgBookTermReview" type="checkbox">
+                                        <span class="toggle" aria-hidden="true"></span>
+                                    </label>
                                     <label class="field compact-field">
                                         <span>Search provider</span>
                                         <select id="cfgSearchProvider">
@@ -312,6 +317,26 @@
                     <span id="progressStage">Initializing...</span>
                 </div>
                 <div class="progress-log" id="progressLog"></div>
+            </section>
+
+            <section class="workspace-panel" id="bookTermReviewSection" hidden>
+                <div class="section-heading">
+                    <div>
+                        <p class="section-kicker">Book terms</p>
+                        <h2>Review before translation</h2>
+                    </div>
+                </div>
+                <div class="toolbar-actions">
+                    <button class="btn btn-secondary btn-compact" type="button" onclick="decideBookTerms('approved', true)">Approve all</button>
+                    <button class="btn btn-secondary btn-compact" type="button" onclick="decideBookTerms('approved', false)">Approve selected</button>
+                    <button class="btn btn-secondary btn-compact" type="button" onclick="decideBookTerms('rejected', true)">Reject all</button>
+                    <button class="btn btn-secondary btn-compact" type="button" onclick="decideBookTerms('rejected', false)">Reject selected</button>
+                </div>
+                <div id="bookTermReviewList" class="book-term-review-list"></div>
+                <div class="toolbar-actions">
+                    <button class="btn btn-primary" type="button" onclick="finishBookTermReview('start')">Start</button>
+                    <button class="btn btn-secondary" type="button" onclick="finishBookTermReview('skip')">Skip</button>
+                </div>
             </section>
 
             <section class="workspace-panel jobs-section">

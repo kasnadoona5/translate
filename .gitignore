@@ -58,3 +58,6 @@ show_all_db_rows.py
 .codegraph/
 .playwright-cli/
 _patch_batch*.py
+
+# Local quality history: maintained per run, never shipped.
+QUALITY-FIX-TRACKER.local.md

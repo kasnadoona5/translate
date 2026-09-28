@@ -505,6 +505,9 @@ def _register_api(app: Flask) -> None:
                 config_overrides[dotted_key] = value
         _boolean_field_map = {
             "enable_book_research": "translation.enable_book_research",
+            "review_book_terms_before_translating": (
+                "translation.review_book_terms_before_translating"
+            ),
             "enable_critique": "translation.enable_critique",
             "enable_back_translation": "translation.enable_back_translation",
             "enable_integrity_gate": "translation.enable_integrity_gate",
@@ -620,9 +623,11 @@ def _register_api(app: Flask) -> None:
 
                 db = JobDatabase()
                 current_job = db.get_job(job_id)
-                if current_job and current_job.get("status") == JobStatus.PAUSED:
+                if current_job and current_job.get("status") in {
+                    JobStatus.PAUSED, JobStatus.AWAITING_BOOK_TERM_REVIEW
+                }:
                     worker_queue.put({
-                        "stage": "paused",
+                        "stage": "book_term_review" if current_job.get("status") == JobStatus.AWAITING_BOOK_TERM_REVIEW else "paused",
                         "progress": current_job.get("pct", 0),
                         "message": "Job paused. Resume when ready.",
                     })
@@ -683,6 +688,7 @@ def _register_api(app: Flask) -> None:
         job = db.get_job(job_id)
         if not job:
             return jsonify({"error": "Job not found"}), 404
+
         chunks = db.get_chunk_summary(job_id)
         return jsonify({
             "job": job,
@@ -1258,9 +1264,20 @@ def _register_api(app: Flask) -> None:
                 f"{final_text_audit.get('language_finding_count', 0)}",
                 f"  unresolved_identifiers="
                 f"{final_text_audit.get('unresolved_identifier_count', 0)}",
+                f"  report_only_findings="
+                f"{final_text_audit.get('report_only_finding_count', 0)}",
                 "  policy=evidence only; unexplained foreign prose is retained for "
                 "review, while exact source identifiers are restored deterministically",
             ])
+            for finding in final_text_audit.get("report_only_findings", []) or []:
+                lines.append(
+                    "  REVIEW (report only): paragraph={paragraph} check={check} "
+                    "span={span!r}".format(
+                        paragraph=finding.get("paragraph_index"),
+                        check=finding.get("check_id", ""),
+                        span=finding.get("target_span", ""),
+                    )
+                )
             for finding in final_text_audit.get("paragraph_findings", []) or []:
                 tokens = [
                     item.get("token", "")
@@ -1301,6 +1318,48 @@ def _register_api(app: Flask) -> None:
             for chunk_events in current_events_by_chunk.values()
             for event in chunk_events
         ]
+
+        def operation_counts(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+            counts: dict[str, dict[str, Any]] = {}
+            for event in events:
+                if event.get("event_type") != "llm_call_attempt":
+                    continue
+                payload = event.get("payload", {}) or {}
+                name = str(payload.get("operation") or "unknown")
+                row = counts.setdefault(name, {
+                    "attempts": 0, "failures": 0,
+                    "served_models": set(), "requested_models": set(),
+                })
+                row["attempts"] += 1
+                row["failures"] += not bool(payload.get("success"))
+                served = payload.get("response_model")
+                if served:
+                    row["served_models"].add(str(served))
+                requested = payload.get("model")
+                if requested:
+                    row["requested_models"].add(str(requested))
+            return counts
+
+        active_operations = operation_counts(current_events)
+        lifetime_operations = operation_counts(all_events)
+        lines.append("LLM attempts by operation (completed attempts; starts excluded):")
+        for name in sorted(set(active_operations) | set(lifetime_operations)):
+            active = active_operations.get(name, {})
+            lifetime = lifetime_operations.get(name, {})
+            lines.append(
+                "  {name}: active={active} active_failures={active_failures} "
+                "lifetime={lifetime} lifetime_failures={lifetime_failures} "
+                "served_models={served_models} requested_models={requested_models}".format(
+                    name=name,
+                    active=active.get("attempts", 0),
+                    active_failures=active.get("failures", 0),
+                    lifetime=lifetime.get("attempts", 0),
+                    lifetime_failures=lifetime.get("failures", 0),
+                    served_models=sorted(lifetime.get("served_models", set())),
+                    requested_models=sorted(lifetime.get("requested_models", set())),
+                )
+            )
+        lines.append("")
 
         reached_positions = [
             int(value) for value in
@@ -1507,6 +1566,21 @@ def _register_api(app: Flask) -> None:
             lines.append(f"Chunk {idx} [{chunk['status']}]")
             for event in chunk_events:
                 payload = event["payload"]
+                if event["event_type"] == "translation_prompt_composition":
+                    lines.append(
+                        "  Translation prompt: chars={chars} estimated_tokens={tokens} "
+                        "research={research} term_review={review}".format(
+                            chars=payload.get("total_chars"),
+                            tokens=payload.get("total_estimated_tokens"),
+                            research=payload.get("book_research_enabled"),
+                            review=payload.get("book_term_review_mode", "off"),
+                        )
+                    )
+                    for name, size in sorted((payload.get("components") or {}).items()):
+                        lines.append(
+                            f"    {name}: chars={size.get('chars')} "
+                            f"estimated_tokens={size.get('estimated_tokens')}"
+                        )
                 if event["event_type"] == "llm_call_attempt" and (
                     payload.get("recovery") or not payload.get("success", False)
                 ):
@@ -2047,6 +2121,8 @@ def _register_api(app: Flask) -> None:
         job = db.get_job(job_id)
         if not job:
             return jsonify({"error": "Job not found"}), 404
+        if job.get("raw_status") == JobStatus.AWAITING_BOOK_TERM_REVIEW:
+            return jsonify({"error": "Review book terms or Skip before resuming"}), 409
 
         # Claiming under a lock is what makes this safe: the old
         # check-then-submit let two concurrent POSTs both pass and both submit,
@@ -2099,7 +2175,9 @@ def _register_api(app: Flask) -> None:
 
                 db_after = JobDatabase()
                 current_job = db_after.get_job(job_id)
-                if current_job and current_job.get("status") == JobStatus.PAUSED:
+                if current_job and current_job.get("status") in {
+                    JobStatus.PAUSED, JobStatus.AWAITING_BOOK_TERM_REVIEW
+                }:
                     worker_queue.put({
                         "stage": "paused",
                         "progress": current_job.get("pct", 0),
@@ -2200,6 +2278,111 @@ def _register_api(app: Flask) -> None:
                 job_id, "book_term_snapshot_v1"
             ),
         })
+
+    @app.route("/api/jobs/<job_id>/book-term-review", methods=["GET", "POST"])
+    @_require_auth
+    @_serialise_glossary_writes
+    def api_book_term_review(job_id: str):
+        from tarjomeh.jobs.database import JobDatabase, JobStatus
+        from tarjomeh.glossary.manager import GlossaryManager
+
+        db = JobDatabase()
+        job = db.get_job(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+        review = db.get_job_artifact(job_id, "book_term_review_v1")
+        if review is None:
+            return jsonify({"error": "This job has no book-term review"}), 404
+        if request.method == "GET":
+            return jsonify({"job_id": job_id, "review": review})
+        if job.get("raw_status") != JobStatus.AWAITING_BOOK_TERM_REVIEW or review.get("phase") != "awaiting":
+            return jsonify({"error": "Book-term review is no longer awaiting decisions"}), 409
+        try:
+            if db.get_job_source_hash(job_id) != review.get("source_sha256"):
+                return jsonify({"error": "Source identity changed"}), 409
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 409
+        payload = request.get_json(silent=True) or {}
+        action = str(payload.get("action", ""))
+        proposals = review.get("proposals", [])
+        if not isinstance(proposals, list):
+            return jsonify({"error": "Invalid review artifact"}), 409
+        if action == "decide":
+            decisions = payload.get("decisions", [])
+            if not isinstance(decisions, list) or not decisions:
+                return jsonify({"error": "Select one or more proposals"}), 400
+            if len(decisions) == len(proposals) and any(
+                item.get("status") == "approved" for item in decisions
+            ) and payload.get("confirm_bulk") is not True:
+                return jsonify({"error": "Confirm bulk approval explicitly"}), 409
+            base = app.config.get("TARJOMEH_CONFIG")
+            curated = GlossaryManager()
+            if base:
+                paths = [base.glossary.path, *(base.glossary.paths or [])]
+                curated.load_many([path for path in paths if path], ignore_missing=True)
+            updated = copy.deepcopy(proposals)
+            seen: set[int] = set()
+            for decision in decisions:
+                if not isinstance(decision, dict) or not isinstance(decision.get("index"), int):
+                    return jsonify({"error": "Invalid proposal index"}), 400
+                index = decision["index"]
+                if index in seen or not 0 <= index < len(updated):
+                    return jsonify({"error": "Duplicate or missing proposal index"}), 400
+                seen.add(index)
+                status = str(decision.get("status", ""))
+                if status not in {"approved", "rejected"}:
+                    return jsonify({"error": "Decision must be approved or rejected"}), 400
+                item = updated[index]
+                source = str(item.get("source", ""))
+                target = str(decision.get("target", item.get("target", ""))).strip()
+                keep_original = decision.get("keep_original") is True
+                if keep_original:
+                    target = source
+                if status == "approved" and not target:
+                    return jsonify({"error": f"Persian term missing for {source}"}), 400
+                if status == "approved" and any(
+                    entry.source.casefold() == source.casefold()
+                    and not entry.is_auto and entry.target != target
+                    for entry in curated.entries
+                ):
+                    return jsonify({"error": f"Curated glossary conflict: {source}"}), 409
+                positions = decision.get("chapter_positions", [])
+                if (not isinstance(positions, list)
+                        or any(not isinstance(value, int) or value < 1 for value in positions)):
+                    return jsonify({"error": "Invalid chapter positions"}), 400
+                scope_mode = str(decision.get("scope_mode", "evidence_paragraph"))
+                if scope_mode not in {"evidence_paragraph", "all_body"}:
+                    return jsonify({"error": "Invalid book-term scope"}), 400
+                if (status == "approved" and scope_mode == "all_body"
+                        and payload.get("confirm_broad_scope") is not True):
+                    return jsonify({"error": "Confirm all-body scope explicitly"}), 409
+                evidence_hash = str(item.get("source_evidence_sha256", ""))
+                if status == "approved" and (
+                    len(evidence_hash) != 64
+                    or any(char not in "0123456789abcdef" for char in evidence_hash)
+                ):
+                    return jsonify({"error": f"Missing source evidence for {source}"}), 409
+                item.update({
+                    "status": status, "target": target if status == "approved" else "",
+                    "keep_original": keep_original if status == "approved" else False,
+                    "chapter_positions": sorted(set(positions)),
+                    "sense_id": str(decision.get("sense_id", "")).strip()[:60],
+                    "scope_mode": scope_mode,
+                })
+            review["proposals"] = updated
+        elif action in {"start", "skip"}:
+            review["phase"] = "started" if action == "start" else "skipped"
+            if action == "skip":
+                for item in proposals:
+                    item["status"] = "skipped"
+            if not db.complete_book_term_review(job_id, review):
+                return jsonify({"error": "Book-term review changed; reload it"}), 409
+            db.log_event(job_id, "INFO", f"Book-term review {review['phase']} by user.")
+            return jsonify({"job_id": job_id, "review": review})
+        else:
+            return jsonify({"error": "Unsupported review action"}), 400
+        db.save_job_artifact(job_id, "book_term_review_v1", review)
+        return jsonify({"job_id": job_id, "review": review})
 
     @app.route(
         "/api/jobs/<job_id>/research/terms/<int:index>/<action>",

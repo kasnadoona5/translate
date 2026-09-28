@@ -179,6 +179,8 @@ def test_style_authority_requires_clean_surface_and_all_dimensions_at_nine() -> 
     clean = "این تحلیل رابطهٔ میان نهادها را به‌دقت بررسی می‌کند."
     record = {
         "text": clean,
+        "source_text": "The analysis considers institutional relations.",
+        "alignment_status": "exact_paragraph",
         "representative": True,
         "quality_score": 90.0,
         "final_scores": {

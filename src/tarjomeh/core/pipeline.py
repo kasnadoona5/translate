@@ -97,6 +97,7 @@ from tarjomeh.quality.integrity import (
     repair_corruption,
     mixed_script_artifacts,
     repair_source_grounded_language_artifacts,
+    repair_proven_surface_artifacts,
     newly_source_unjustified_repeated_adjacent_spans,
     newly_source_unjustified_repeated_governed_spans,
     source_unjustified_repeated_adjacent_span_artifacts,
@@ -653,6 +654,7 @@ def audit_document_final_text(
     """Recheck final assembled text after every deterministic transformation."""
     paragraph_findings: list[dict[str, Any]] = []
     unresolved_identifiers: list[dict[str, Any]] = []
+    report_only_findings: list[dict[str, Any]] = []
     for paragraph in document.paragraphs:
         language = audit_translation_language(
             paragraph.source_text,
@@ -670,6 +672,51 @@ def audit_document_final_text(
                 "paragraph_index": paragraph.index,
                 **language,
             })
+        target = paragraph.translated_text
+        source = paragraph.source_text
+        source_superscripts = paragraph.metadata.get("superscript_markers", []) or []
+        if isinstance(source_superscripts, list) and source_superscripts:
+            from tarjomeh.exporters.docx_exporter import source_superscript_spans
+
+            confirmed = source_superscript_spans(target, paragraph.metadata, source)
+            if len(confirmed) < len(source_superscripts):
+                report_only_findings.append({
+                    "paragraph_index": paragraph.index,
+                    "check_id": "source_superscript_alignment_uncertain",
+                    "source_marker_count": len(source_superscripts),
+                    "confirmed_target_count": len(confirmed),
+                    "disposition": "REVIEW",
+                })
+        source_has_optional_affix = bool(re.search(
+            r"(?:\b[A-Za-z]+\([A-Za-z]{1,8}\)|\([A-Za-z]{1,8}\)[A-Za-z]+)",
+            source,
+        ))
+        report_patterns = {
+            "double_zwnj": r"\u200c{2,}",
+            "combining_mark_after_parenthesis": r"\)\s*[\u064b-\u0652\u0654]",
+        }
+        if source_has_optional_affix:
+            report_patterns["spaced_optional_affix"] = (
+                r"(?:[\u0600-\u06ff\u200c]+\s+\([\u0600-\u06ff]{1,5}\)"
+                r"|\([\u0600-\u06ff]{1,5}\)\s+[\u0600-\u06ff])"
+            )
+        for check_id, pattern in report_patterns.items():
+            for match in re.finditer(pattern, target):
+                report_only_findings.append({
+                    "paragraph_index": paragraph.index,
+                    "check_id": check_id,
+                    "target_span": match.group(),
+                    "target_offset": match.start(),
+                    "disposition": "REVIEW",
+                })
+        for line_number, line in enumerate(target.splitlines(), 1):
+            if re.search(r"[0-9]", line) and re.search(r"[\u06f0-\u06f9\u0660-\u0669]", line):
+                report_only_findings.append({
+                    "paragraph_index": paragraph.index,
+                    "check_id": "mixed_digit_systems",
+                    "line_number": line_number,
+                    "disposition": "REVIEW",
+                })
         missing = list((
             extract_identifiers(paragraph.source_text)
             - extract_identifiers(paragraph.translated_text)
@@ -696,6 +743,8 @@ def audit_document_final_text(
         ),
         "paragraph_findings": paragraph_findings,
         "unresolved_identifiers": unresolved_identifiers,
+        "report_only_finding_count": len(report_only_findings),
+        "report_only_findings": report_only_findings,
     }
 
 
@@ -2448,7 +2497,9 @@ Requirements:
 """
 
 
-def _research_context_for_memory(artifact: dict[str, Any] | None) -> str:
+def _research_context_for_memory(
+    artifact: dict[str, Any] | None, *, include_suggestions: bool = True,
+) -> str:
     """Format unapproved research as non-authoritative prompt context."""
     usable_statuses = {
         "completed", "completed_without_suggestions", "degraded"
@@ -2457,7 +2508,7 @@ def _research_context_for_memory(artifact: dict[str, Any] | None) -> str:
         return ""
     parts = [str(artifact.get("book_context", "")).strip()]
     suggestions = []
-    for item in artifact.get("terms", []):
+    for item in artifact.get("terms", []) if include_suggestions else []:
         if not isinstance(item, dict) or item.get("status") != "suggested":
             continue
         source = str(item.get("source", "")).strip()
@@ -6634,13 +6685,15 @@ class TranslationPipeline:
             if p not in glossary_paths:
                 glossary_paths.append(p)
         glossary_manager.load_many(glossary_paths, ignore_missing=True)
-        _merge_approved_book_terms(self.db, job_id, glossary_manager)
+        if not self.config.translation.review_book_terms_before_translating:
+            _merge_approved_book_terms(self.db, job_id, glossary_manager)
         if is_resume:
             extracted_artifact = self.db.get_job_artifact(
                 job_id, "auto_extracted_terms"
             ) or {}
             persisted_terms = extracted_artifact.get("terms", {})
-            if isinstance(persisted_terms, dict):
+            if (isinstance(persisted_terms, dict)
+                    and not self.config.translation.review_book_terms_before_translating):
                 glossary_manager.merge_auto_extracted(persisted_terms)
 
         # 4. Setup Memory Manager
@@ -6650,18 +6703,26 @@ class TranslationPipeline:
             if saved_mem:
                 memory_manager.from_dict(saved_mem)
 
-        # 5. Extract terms (TOC + first chapter) if configured and new job
-        if not is_resume and self.config.glossary.enable_auto_extraction:
+        # 5. Extract source-grounded body terms if configured and new job
+        book_review_auto_terms: dict[str, dict[str, Any]] = {}
+        if not is_resume and (
+            self.config.glossary.enable_auto_extraction
+            or self.config.translation.review_book_terms_before_translating
+        ):
             if progress_callback:
                 progress_callback("Glossary", 0.10, "Extracting specialized terms...")
             try:
+                from tarjomeh.context.book_term_candidates import book_term_extraction_sample
+
+                first_text = book_term_extraction_sample(research_document)
+                if not first_text:
+                    raise ValueError("No eligible body-prose term evidence")
                 self.db.log_chunk_event(
                     job_id, 0, "auto_extraction_started", {
-                        "source_chars": len(chunks[0].text),
+                        "source_chars": len(first_text),
+                        "source_scope": "body_term_inventory",
                     }
                 )
-                # Run NER extraction on first chunk as a proxy for TOC / Ch 1
-                first_text = chunks[0].text
                 sys_prompt = "You are a terminology extraction assistant."
                 ner_response = self.llm_client.complete(
                     messages=[{"role": "user", "content": GLOSSARY_EXTRACT_PROMPT.format(text=first_text)}],
@@ -6719,6 +6780,8 @@ class TranslationPipeline:
                             "category": category,
                             "evidence_status": "minimal_context_independent",
                         }
+                        if self.config.translation.review_book_terms_before_translating:
+                            continue
                         memory_manager.proper_nouns.add_noun(
                             term,
                             persian,
@@ -6741,12 +6804,15 @@ class TranslationPipeline:
                                 or item.get("category", "")
                             ),
                         )
-                glossary_manager.merge_auto_extracted(auto_terms)
-                self.db.save_job_artifact(
-                    job_id,
-                    "auto_extracted_terms",
-                    {"terms": auto_terms, "count": len(auto_terms)},
-                )
+                if self.config.translation.review_book_terms_before_translating:
+                    book_review_auto_terms = auto_terms
+                else:
+                    glossary_manager.merge_auto_extracted(auto_terms)
+                    self.db.save_job_artifact(
+                        job_id,
+                        "auto_extracted_terms",
+                        {"terms": auto_terms, "count": len(auto_terms)},
+                    )
                 self.db.log_chunk_event(
                     job_id, 0, "auto_extraction_completed", {
                         "model_candidates": len(extracted_terms),
@@ -6799,8 +6865,80 @@ class TranslationPipeline:
             "completed", "completed_without_suggestions", "degraded", "partial"
         }:
             memory_manager.book_context = _research_context_for_memory(
-                research_artifact
+                research_artifact,
+                include_suggestions=(
+                    not self.config.translation.review_book_terms_before_translating
+                ),
             )
+
+        if self.config.translation.review_book_terms_before_translating:
+            review = self.db.get_job_artifact(job_id, "book_term_review_v1")
+            if not is_resume:
+                from tarjomeh.context.book_term_candidates import collect_book_term_candidates
+
+                proposals: list[dict[str, Any]] = []
+                candidate_keys: set[str] = set()
+                for candidate in collect_book_term_candidates(research_document):
+                    source = str(candidate["source"])
+                    candidate_keys.add(source.casefold())
+                    proposed = next((value for key, value in book_review_auto_terms.items()
+                                     if key.casefold() == source.casefold()), {})
+                    proposals.append({
+                        "source": source,
+                        "target": str(proposed.get("target", "")),
+                        "english_explanation": str(proposed.get("context", "")),
+                        "source_evidence": candidate["source_evidence"],
+                        "source_evidence_sha256": candidate["source_evidence_sha256"],
+                        "source_count": candidate["source_count"],
+                        "source_variants": candidate.get("source_variants", []),
+                        "origin": candidate.get("origin", "source_candidate"),
+                        "status": "proposed",
+                        "chapter_positions": [],
+                        "sense_id": "",
+                        "keep_original": False,
+                        "scope_mode": "evidence_paragraph",
+                    })
+                from tarjomeh.context.book_term_candidates import body_term_paragraphs
+
+                for source, proposed in book_review_auto_terms.items():
+                    if source.casefold() in candidate_keys:
+                        continue
+                    evidence_paragraph = next((paragraph.text.strip()
+                                     for paragraph in body_term_paragraphs(research_document)
+                                     if re.search(rf"(?<!\w){re.escape(source)}(?!\w)",
+                                                  paragraph.text, re.IGNORECASE)), "")
+                    if not evidence_paragraph:
+                        continue
+                    proposals.append({
+                        "source": source,
+                        "target": str(proposed.get("target", "")),
+                        "english_explanation": str(proposed.get("context", "")),
+                        "source_evidence": evidence_paragraph[:500],
+                        "source_evidence_sha256": hashlib.sha256(
+                            evidence_paragraph.encode("utf-8")
+                        ).hexdigest(),
+                        "source_count": 1,
+                        "source_variants": [],
+                        "origin": "source_grounded_auto_extraction",
+                        "status": "proposed",
+                        "chapter_positions": [],
+                        "sense_id": "",
+                        "keep_original": False,
+                        "scope_mode": "evidence_paragraph",
+                    })
+                review = {
+                    "phase": "awaiting",
+                    "source_sha256": self.db.get_job_source_hash(job_id),
+                    "proposals": proposals,
+                }
+                self.db.save_job_artifact(job_id, "book_term_review_v1", review)
+            if not review or review.get("phase") == "awaiting":
+                self.db.update_job_status(job_id, JobStatus.AWAITING_BOOK_TERM_REVIEW)
+                self.db.log_event(job_id, "INFO", "Waiting for book-term review before chunk 1.")
+                return PipelineResult(output_path, 0, time.monotonic() - t0,
+                                      warnings=["Awaiting book-term review"])
+            if review.get("phase") not in {"started", "skipped"}:
+                raise ValueError("Book-term review is not ready to start")
 
         # 6. Translate Chunks (Sequential or Concurrent)
         # Run translation loop
@@ -8389,7 +8527,8 @@ class TranslationPipeline:
             if p not in glossary_paths:
                 glossary_paths.append(p)
         glossary_manager.load_many(glossary_paths, ignore_missing=True)
-        _merge_approved_book_terms(self.db, job_id, glossary_manager)
+        if not self.config.translation.review_book_terms_before_translating:
+            _merge_approved_book_terms(self.db, job_id, glossary_manager)
 
         memory_manager = MemoryManager(self.config)
         saved_mem = self.db.get_memory_state(job_id)
@@ -8406,7 +8545,10 @@ class TranslationPipeline:
         research_artifact = self.db.get_job_artifact(job_id, "book_research")
         if research_artifact is not None:
             memory_manager.book_context = _research_context_for_memory(
-                research_artifact
+                research_artifact,
+                include_suggestions=(
+                    not self.config.translation.review_book_terms_before_translating
+                ),
             )
 
         web_searcher = WebContextSearcher(self.config, self.llm_client)
@@ -8636,12 +8778,22 @@ class TranslationPipeline:
         canonical, final_source_artifact_report = (
             _restore_source_bound_artifacts(chunk.text, canonical)
         )
+        canonical, proven_surface_edits = repair_proven_surface_artifacts(
+            chunk.text,
+            canonical,
+            structural_role=(
+                "body" if set(_paragraph_structural_roles(
+                    chunk, len(split_paragraphs(canonical))
+                )) == {"body"} else "mixed"
+            ),
+        )
         structure_conflicts = _introduced_structure_conflicts(
             chunk.text, translation, canonical
         )
         if structure_conflicts:
             canonical = translation
             repair_accepted = False
+            proven_surface_edits = []
             citation_house_style_changes = []
             canonical, final_source_artifact_report = (
                 _restore_source_bound_artifacts(chunk.text, canonical)
@@ -8675,6 +8827,7 @@ class TranslationPipeline:
                 "after_chars": len(canonical),
                 "source_grounded_repair_proposed": repair_proposed,
                 "source_grounded_repair_accepted": repair_accepted,
+                "proven_surface_edits": proven_surface_edits,
                 "source_grounded_repairs": repair_report.get("repairs", []),
                 "final_source_artifact_reconciliation": (
                     final_source_artifact_report
@@ -9280,6 +9433,33 @@ class TranslationPipeline:
             for entry in active_entries
             if not bool(getattr(entry, "is_auto", False)) or enforce_auto_terms
         ]
+        reviewed_matches: list[dict[str, Any]] = []
+        if self.config.translation.review_book_terms_before_translating:
+            from tarjomeh.glossary.book_review import resolve_reviewed_book_terms
+
+            review_artifact = self.db.get_job_artifact(job_id, "book_term_review_v1") or {}
+            if review_artifact.get("source_sha256") != self.db.get_job_source_hash(job_id):
+                raise ValueError("Book-term approval belongs to a different source")
+            if review_artifact.get("phase") == "started":
+                reviewed_matches, scoped_review = resolve_reviewed_book_terms(
+                    chunk.text,
+                    chunk.metadata,
+                    self._chunk_chapter_position(chunk),
+                    review_artifact.get("proposals", []),
+                )
+                self.db.log_chunk_event(job_id, idx, "book_term_scope_resolved", {
+                    "matched": reviewed_matches,
+                    "review": scoped_review,
+                    "policy": "verified_source_paragraph_only",
+                })
+                if scoped_review:
+                    self.db.log_chunk_event(job_id, idx, "glossary_needs_review", {
+                        "review_reason": "approved_book_term_scope_uncertain",
+                        "review": scoped_review,
+                        "message": "Approved book-term scope could not be proven for this source paragraph.",
+                    })
+            elif review_artifact.get("phase") != "skipped":
+                raise ValueError("Book-term review is not complete")
         advisory_entries = [
             entry
             for entry in active_entries
@@ -9346,6 +9526,10 @@ class TranslationPipeline:
                 else ""
             ),
         ]
+        if reviewed_matches:
+            from tarjomeh.glossary.book_review import format_reviewed_book_terms
+
+            glossary_prompt_parts.append(format_reviewed_book_terms(reviewed_matches))
         glossary_terms_str = "\n\n".join(
             part for part in glossary_prompt_parts if part
         ) or "(no glossary terms matched in this chunk)"
@@ -9426,6 +9610,15 @@ class TranslationPipeline:
             if expression in source_entity_candidates
             or expression in pending_originals
         ]
+        approved_originals = [
+            str(match["source"])
+            for match in reviewed_matches
+            if match.get("keep_original")
+            and str(match["source"]) in chunk.text
+        ]
+        required_foreign_expressions = list(dict.fromkeys([
+            *required_foreign_expressions, *approved_originals,
+        ]))
         required_entity_candidates = list(dict.fromkeys([
             *required_person_candidates,
             *required_instrument_candidates,
@@ -9433,7 +9626,7 @@ class TranslationPipeline:
         ]))
         allowed_inline_originals = (
             sorted(
-                set(pending_originals).union(source_entity_candidates),
+                set(pending_originals).union(source_entity_candidates).union(approved_originals),
                 key=str.casefold,
             )
             if protect_inline_english else []
@@ -9555,6 +9748,46 @@ class TranslationPipeline:
         if use_paragraph_protocol:
             user_content = build_translation_prompt(encoded_source, prev_trans)
             user_content += protocol_instruction(paragraph_markers)
+
+        prompt_components = {
+            "source": encoded_source if use_paragraph_protocol else chunk.text,
+            "exemplars": exemplars,
+            "glossary": glossary_terms_str,
+            "layer_1": mem_context.proper_nouns,
+            "layer_2": mem_context.bilingual_summary,
+            "layer_3": mem_context.long_term,
+            "layer_4": mem_context.short_term,
+            "style": mem_context.style_profile,
+            "book_context": mem_context.book_context,
+            "web_context": web_context_str,
+            "previous_translation": prev_trans,
+            "term_notes": term_notes_instruction,
+            "inline_policy": inline_policy_context,
+        }
+        component_sizes = {}
+        for name, value in prompt_components.items():
+            try:
+                estimated_tokens = int(self.llm_client.count_tokens(value)) if value else 0
+            except Exception:
+                estimated_tokens = None
+            component_sizes[name] = {
+                "chars": len(value),
+                "estimated_tokens": estimated_tokens,
+            }
+        try:
+            total_estimated_tokens = int(self.llm_client.count_tokens(user_content))
+        except Exception:
+            total_estimated_tokens = None
+        self.db.log_chunk_event(job_id, idx, "translation_prompt_composition", {
+            "components": component_sizes,
+            "total_chars": len(user_content),
+            "total_estimated_tokens": total_estimated_tokens,
+            "book_research_enabled": bool(self.config.translation.enable_book_research),
+            "book_term_review_mode": (
+                "opt_in" if self.config.translation.review_book_terms_before_translating
+                else "off"
+            ),
+        })
 
         # Terminology context for the judge & refiner: matched glossary terms
         # plus the established proper-noun renderings, so the "terminology"
@@ -11835,6 +12068,19 @@ class TranslationPipeline:
                 chunk_location=f"Chunk {idx}",
                 entries=enforced_entries,
             )
+            if reviewed_matches:
+                from tarjomeh.glossary.book_review import check_reviewed_book_terms
+
+                scoped_report, scoped_uncertain = check_reviewed_book_terms(
+                    translation, chunk.text, chunk.metadata, reviewed_matches
+                )
+                report.violations.extend(scoped_report.violations)
+                report.total_checked += scoped_report.total_checked
+                if scoped_uncertain:
+                    self.db.log_chunk_event(job_id, idx, "book_term_target_alignment_review", {
+                        "review": scoped_uncertain,
+                        "candidate_target_hash": _candidate_text_hash(translation),
+                    })
             self.db.log_chunk_event(
                 job_id,
                 idx,
@@ -11850,7 +12096,7 @@ class TranslationPipeline:
                     while not report.compliant and attempts < max_attempts:
                         attempts += 1
                         violations_text = "\n".join(
-                            f"- English: {v.term} -> expected Persian: {v.expected} (status: {v.status})"
+                            f"- {v.chunk_location}: English: {v.term} -> expected Persian: {v.expected} (status: {v.status})"
                             for v in report.violations
                         )
                         allowed_originals_folded = {
@@ -11906,6 +12152,7 @@ listed spacing variant is malformed; spacing-only equivalents remain compliant.
 Preserve every protected English original above exactly once. Do not remove or relocate
 those parentheticals while correcting glossary terminology. Preserve paragraph structure,
 citations, numbers, names, and all text unrelated to the listed violations.
+For a violation naming a paragraph, make its term correction only in that paragraph.
 {correction_feedback}
 Output ONLY the corrected Persian translation.
 """
@@ -12052,6 +12299,12 @@ Output ONLY the corrected Persian translation.
                                 chunk_location=f"Chunk {idx}",
                                 entries=enforced_entries,
                             )
+                            if reviewed_matches:
+                                scoped_report, scoped_uncertain = check_reviewed_book_terms(
+                                    translation, chunk.text, chunk.metadata, reviewed_matches
+                                )
+                                report.violations.extend(scoped_report.violations)
+                                report.total_checked += scoped_report.total_checked
                             if not report.compliant:
                                 remaining_terms = "; ".join(
                                     f"{v.term} -> {v.expected}"
@@ -13512,6 +13765,24 @@ Output ONLY the corrected Persian translation.
                         detail="candidate_hash_matched_final_critique",
                     ),
                 )
+        if reviewed_matches:
+            from tarjomeh.glossary.book_review import check_reviewed_book_terms
+
+            final_book_terms, final_book_uncertain = check_reviewed_book_terms(
+                translation, chunk.text, chunk.metadata, reviewed_matches
+            )
+            self.db.log_chunk_event(job_id, idx, "book_term_final_compliance", {
+                **_compliance_report_for_event(final_book_terms),
+                "review": final_book_uncertain,
+                "candidate_target_hash": _candidate_text_hash(translation),
+            })
+            if final_book_terms.violations or final_book_uncertain:
+                self.db.log_chunk_event(job_id, idx, "glossary_needs_review", {
+                    "review_reason": "approved_book_term_final_unresolved",
+                    "violations": [vars(item) for item in final_book_terms.violations],
+                    "review": final_book_uncertain,
+                    "candidate_target_hash": _candidate_text_hash(translation),
+                })
         self.db.log_chunk_event(
             job_id,
             idx,

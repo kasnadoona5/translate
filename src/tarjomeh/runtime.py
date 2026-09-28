@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v10.39.1"
+RUNTIME_RELEASE = "v10.40.0"
 RUNTIME_REVISION = 1
 
 
@@ -80,6 +80,11 @@ def runtime_capabilities() -> dict[str, Any]:
             "final_optional_plural_admission": True,
             "contextual_person_name_quarantine": True,
             "orphan_object_marker_dash_repair": True,
+            "opt_in_book_term_review": True,
+            "paragraph_scoped_approved_terms": True,
+            "source_only_body_term_inventory": True,
+            "source_confirmed_note_superscripts": True,
+            "source_proven_surface_repair": True,
         },
         "policy_versions": {
             "structure_evidence": 2,
@@ -104,8 +109,10 @@ def runtime_capabilities() -> dict[str, Any]:
             "targeted_language_repair": 2,
             "post_edit_issue_attribution": 1,
             "attachment_trial": 1,
-            "book_term_scope": 1,
+            "book_term_scope": 2,
             "final_language_admission": 3,
+            "book_term_review": 1,
+            "source_term_inventory": 2,
         },
     }
 
@@ -116,6 +123,7 @@ def runtime_behavior_probes() -> dict[str, bool]:
 
     from tarjomeh.chunking.chunker import Chunk
     from tarjomeh.core.config import TarjomehConfig
+    from tarjomeh.glossary.book_review import resolve_reviewed_book_terms
     from tarjomeh.core.pipeline import (
         audit_translation_language,
         _language_quality_strictly_improves,
@@ -152,6 +160,7 @@ def runtime_behavior_probes() -> dict[str, bool]:
     from tarjomeh.quality.integrity import (
         available_note_markers,
         extract_note_markers,
+        repair_proven_surface_artifacts,
         restore_source_identifiers,
         restore_source_note_markers,
     )
@@ -162,6 +171,21 @@ def runtime_behavior_probes() -> dict[str, bool]:
     )
 
     manifest = runtime_capabilities()
+    probe_source = "The polity matters."
+    probe_decision = [{
+        "status": "approved", "source": "polity", "target": "ساختار سیاسی",
+        "scope_mode": "all_body", "chapter_positions": [1],
+    }]
+    body_matches, _ = resolve_reviewed_book_terms(
+        probe_source, {"structural_roles": ["body"]}, 1, probe_decision,
+    )
+    heading_matches, heading_review = resolve_reviewed_book_terms(
+        probe_source, {"structural_roles": ["heading"]}, 1, probe_decision,
+    )
+    surface_repaired, surface_changes = repair_proven_surface_artifacts(
+        "The institutions and society matter.",
+        "نهادها و و جامعه مهم‌اند.",
+    )
     three_issues = (
         "\u0627\u06cc\u0646 \u0641\u0635\u0644 \u0628\u0647 \u0633\u0647 "
         "\u0645\u0633\u0626\u0644\u0647 "
@@ -386,6 +410,15 @@ def runtime_behavior_probes() -> dict[str, bool]:
         "\u062a\u0627\u0631\u06cc\u062e \u062e\u0648\u062f \u0648 \u062f\u06cc\u06af\u0631\u0627\u0646 \u2014 \u0631\u0627 \u0645\u06cc\u200c\u0633\u0627\u0632\u0646\u062f.",
     )
     return {
+        "opt_in_book_term_review_is_off_by_default": bool(
+            not TarjomehConfig().translation.review_book_terms_before_translating
+        ),
+        "reviewed_terms_are_paragraph_scoped": bool(
+            len(body_matches) == 1 and not heading_matches and heading_review
+        ),
+        "source_proven_surface_repair_is_bounded": bool(
+            surface_changes and "و و" not in surface_repaired
+        ),
         "final_optional_plural_admission": bool(
             _language_quality_strictly_improves(optional_before, optional_after)
         ),

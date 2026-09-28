@@ -200,12 +200,16 @@ def test_only_representative_body_prose_establishes_style_profile() -> None:
 
     fallback = manager._update_style_profile(
         _STYLE_SAMPLE_A,
+        source_paragraphs=["The first academic argument continues."],
+        source_paragraph_indices=[0], source_alignment_proven=True,
         paragraph_role="body",
         book_genre="academic",
         representative=False,
     )
     manager._update_style_profile(
         _STYLE_SAMPLE_B,
+        source_paragraphs=["The second academic argument continues."],
+        source_paragraph_indices=[0], source_alignment_proven=True,
         paragraph_role="body",
         book_genre="academic",
         representative=True,
@@ -213,6 +217,8 @@ def test_only_representative_body_prose_establishes_style_profile() -> None:
     )
     final = manager._update_style_profile(
         _STYLE_SAMPLE_C,
+        source_paragraphs=["The third academic argument continues."],
+        source_paragraph_indices=[0], source_alignment_proven=True,
         paragraph_role="body",
         book_genre="academic",
         representative=True,
@@ -227,6 +233,8 @@ def test_only_representative_body_prose_establishes_style_profile() -> None:
         "در این چشم‌انداز، توضیح دگرگونی سیاسی مستلزم آن است که سازوکارهای "
         "نهادی و انتخاب‌های راهبردی را در پیوندی تاریخی و منسجم با یکدیگر بسنجیم.",
         paragraph_role="body",
+        source_paragraphs=["The fourth academic argument continues."],
+        source_paragraph_indices=[0], source_alignment_proven=True,
         book_genre="academic",
         representative=True,
         final_scores=_STYLE_SCORES,
@@ -238,6 +246,8 @@ def test_genre_guidance_changes_style_dimensions_not_terminology_authority() -> 
     academic = MemoryManager(TarjomehConfig())
     academic._update_style_profile(
         _STYLE_SAMPLE_A,
+        source_paragraphs=["An academic argument continues."],
+        source_paragraph_indices=[0], source_alignment_proven=True,
         paragraph_role="body",
         book_genre="academic",
         representative=True,
@@ -249,6 +259,8 @@ def test_genre_guidance_changes_style_dimensions_not_terminology_authority() -> 
     literary = MemoryManager(literary_config)
     literary._update_style_profile(
         _STYLE_SAMPLE_A,
+        source_paragraphs=["The narrative continues."],
+        source_paragraph_indices=[0], source_alignment_proven=True,
         paragraph_role="body",
         book_genre="literary",
         representative=True,
@@ -264,7 +276,7 @@ def test_genre_guidance_changes_style_dimensions_not_terminology_authority() -> 
 def test_runtime_capability_manifest_is_versioned_and_complete() -> None:
     manifest = runtime_capabilities()
 
-    assert manifest["release"] == "v10.39.1"
+    assert manifest["release"] == "v10.40.0"
     assert manifest["revision"] >= 1
     assert all(manifest["capabilities"].values())
     assert manifest["capabilities"]["four_layer_memory"] is True

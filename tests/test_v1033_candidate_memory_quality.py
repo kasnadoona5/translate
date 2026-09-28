@@ -320,6 +320,8 @@ def test_warming_style_profile_labels_fallback_as_non_authoritative() -> None:
     manager.style_sample_records = [
         {
             "text": representative,
+            "source_text": "The first scholarly argument continues.",
+            "alignment_status": "exact_paragraph",
             "text_hash": "representative",
             "representative": True,
             "fallback": False,
@@ -328,6 +330,8 @@ def test_warming_style_profile_labels_fallback_as_non_authoritative() -> None:
         },
         {
             "text": fallback,
+            "source_text": "The second scholarly argument continues.",
+            "alignment_status": "exact_paragraph",
             "text_hash": "fallback",
             "representative": False,
             "fallback": True,

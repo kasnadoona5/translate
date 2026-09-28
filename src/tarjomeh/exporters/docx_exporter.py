@@ -47,6 +47,7 @@ def contents_display_title(text: str, metadata: dict) -> str:
 def source_superscript_spans(
     text: str,
     metadata: dict,
+    source_text: str = "",
 ) -> list[tuple[int, int]]:
     """Locate only source-confirmed superscript markers in translated text."""
     records = metadata.get("superscript_markers", []) or []
@@ -57,6 +58,8 @@ def source_superscript_spans(
         if not isinstance(record, dict):
             continue
         raw = str(record.get("text", "")).strip()
+        if source_text and source_text.count(raw) != 1:
+            continue
         normalized = raw.translate(_DIGIT_TO_ASCII)
         if normalized.isdigit():
             pattern = "".join(
@@ -75,20 +78,14 @@ def source_superscript_spans(
                 match.start() < end and match.end() > start
                 for start, end in selected
             )
+            and not (
+                (text or "").rfind("(", 0, match.start())
+                > (text or "").rfind(")", 0, match.start())
+            )
         ]
-        if not candidates:
+        if len(candidates) != 1:
             continue
-        try:
-            expected = float(record.get("relative_position", 0.0))
-        except (TypeError, ValueError):
-            expected = 0.0
-        chosen = min(
-            candidates,
-            key=lambda span: abs(
-                ((span[0] + span[1]) / 2) / max(1, len(text or "")) - expected
-            ),
-        )
-        selected.append(chosen)
+        selected.append(candidates[0])
     return sorted(selected)
 
 
@@ -256,8 +253,8 @@ class DocxExporter(BaseExporter):
                 fmt.first_line_indent = Cm(0.5)
                 fmt.widow_control = True
 
-        def add_target_runs(p_obj, text: str, metadata: dict) -> None:
-            source_markers = source_superscript_spans(text, metadata)
+        def add_target_runs(p_obj, text: str, metadata: dict, source_text: str = "") -> None:
+            source_markers = source_superscript_spans(text, metadata, source_text)
             cursor = 0
 
             def add_text(value: str, absolute_start: int) -> None:
@@ -423,7 +420,7 @@ class DocxExporter(BaseExporter):
                 p_fa = cell_fa.paragraphs[0]
                 if p.heading_level is not None:
                     p_fa.style = doc.styles[f'Heading {min(p.heading_level, 9)}']
-                add_target_runs(p_fa, p.translated_text, p.metadata)
+                add_target_runs(p_fa, p.translated_text, p.metadata, p.source_text)
                 
                 make_paragraph_rtl(p_fa, heading=p.heading_level is not None)
                 apply_structural_format(p_fa, p.metadata)
@@ -461,7 +458,7 @@ class DocxExporter(BaseExporter):
                     else:
                         p_fa = doc.add_paragraph()
                     
-                    add_target_runs(p_fa, p.translated_text, p.metadata)
+                    add_target_runs(p_fa, p.translated_text, p.metadata, p.source_text)
                     make_paragraph_rtl(p_fa, heading=p.heading_level is not None)
                     apply_chapter_break(p_fa, p.metadata)
                     apply_structural_format(p_fa, p.metadata)
@@ -480,7 +477,7 @@ class DocxExporter(BaseExporter):
                         p_fa = doc.add_heading(level=min(p.heading_level, 9))
                     else:
                         p_fa = doc.add_paragraph()
-                    add_target_runs(p_fa, p.translated_text, p.metadata)
+                    add_target_runs(p_fa, p.translated_text, p.metadata, p.source_text)
                     make_paragraph_rtl(p_fa, heading=p.heading_level is not None)
                     apply_structural_format(p_fa, p.metadata)
 

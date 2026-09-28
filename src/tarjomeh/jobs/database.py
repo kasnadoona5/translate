@@ -117,6 +117,7 @@ class JobStatus:
     COMPLETED = "completed"
     PAUSED = "paused"
     PAUSED_ERROR = "paused_error"
+    AWAITING_BOOK_TERM_REVIEW = "awaiting_book_term_review"
     FAILED = "failed"
 
 
@@ -1062,6 +1063,34 @@ class JobDatabase:
                 ),
             )
             conn.commit()
+
+    def complete_book_term_review(
+        self, job_id: str, review: dict[str, Any],
+    ) -> bool:
+        """Publish the review decision and resumable status in one transaction."""
+        payload = json.dumps(review, ensure_ascii=False, sort_keys=True)
+        timestamp = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT status FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if not row or row["status"] != JobStatus.AWAITING_BOOK_TERM_REVIEW:
+                conn.rollback()
+                return False
+            conn.execute(
+                """INSERT INTO job_artifacts (job_id, artifact_key, payload, updated_at)
+                   VALUES (?, 'book_term_review_v1', ?, ?)
+                   ON CONFLICT(job_id, artifact_key) DO UPDATE SET
+                       payload = excluded.payload, updated_at = excluded.updated_at""",
+                (job_id, payload, timestamp),
+            )
+            conn.execute(
+                "UPDATE jobs SET status = ?, error_message = NULL WHERE id = ?",
+                (JobStatus.PAUSED, job_id),
+            )
+            conn.commit()
+        return True
 
     def update_chunk_with_event(
         self,

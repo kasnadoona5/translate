@@ -219,6 +219,7 @@ class TranslationConfig:
     # Optional one-time research pass before chunk translation. Disabled by
     # default because it adds web searches and one LLM call.
     enable_book_research: bool = False
+    review_book_terms_before_translating: bool = False
     # Optional 1-based parser chapter positions. An empty list translates the
     # entire document. These positions come from the chapter inspection API,
     # not from potentially missing/duplicated printed chapter numbers.

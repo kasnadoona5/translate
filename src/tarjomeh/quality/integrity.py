@@ -1943,6 +1943,44 @@ def spaced_optional_plural_artifacts(
     ]
 
 
+def repair_proven_surface_artifacts(
+    source: str, translation: str, *, structural_role: str = "body",
+) -> tuple[str, list[dict[str, Any]]]:
+    """Repair only unambiguous, source-unwritten Persian surface accidents."""
+    if structural_role != "body":
+        return translation, []
+    source_parts = _paragraph_text_spans(source)
+    target_parts = _paragraph_text_spans(translation)
+    if len(source_parts) != len(target_parts):
+        return translation, []
+    edits: list[dict[str, Any]] = []
+    replacements: list[tuple[int, int, str]] = []
+    for paragraph_index, (source_record, target_record) in enumerate(
+        zip(source_parts, target_parts, strict=True)
+    ):
+        source_part = source_record[2]
+        target_part = target_record[2]
+        repaired = target_part
+        if "\u200c\u200c" not in source_part and "\u200c\u200c" in repaired:
+            repaired = re.sub(r"\u200c{2,}", "\u200c", repaired)
+            edits.append({"type": "double_zwnj", "paragraph": paragraph_index})
+        doubled_and = list(re.finditer(
+            r"(?<![\u0621-\u06ff])\u0648[ \t]+\u0648(?![\u0621-\u06ff])", repaired
+        ))
+        if (len(doubled_and) == 1
+                and not re.search(r"\band\s+and\b", source_part, re.I)
+                and "\u0648 \u0648" not in source_part):
+            match = doubled_and[0]
+            repaired = repaired[:match.start()] + "\u0648" + repaired[match.end():]
+            edits.append({"type": "duplicate_coordinator", "paragraph": paragraph_index})
+        if repaired != target_part:
+            replacements.append((target_record[0], target_record[1], repaired))
+    result = translation
+    for start, end, replacement in reversed(replacements):
+        result = result[:start] + replacement + result[end:]
+    return result, edits
+
+
 def tatweel_separator_artifacts(text: str) -> list[dict[str, Any]]:
     """Report elongation glyph runs used as punctuation in Persian prose."""
     target = text or ""

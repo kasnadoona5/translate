@@ -16,9 +16,19 @@ from typing import Any
 
 
 
+_RETRIEVAL_STOPWORDS = frozenset({
+    "about", "after", "again", "also", "among", "because", "before", "being",
+    "between", "could", "during", "from", "have", "into", "other", "their",
+    "there", "these", "those", "through", "under", "which", "while", "with",
+    "would", "that", "this", "they", "them", "then", "when", "where", "what",
+    "and", "are", "for", "not", "the", "was", "were", "but", "its", "can",
+})
+
+
 def _tokenize_english(text: str) -> list[str]:
     """Tokenize and lowercase English text, removing punctuation."""
-    return re.findall(r"[a-zA-Z0-9']+", text.lower())
+    return [token for token in re.findall(r"[a-zA-Z0-9']+", text.lower())
+            if len(token) >= 3 and token not in _RETRIEVAL_STOPWORDS]
 
 
 class LongTermMemory:

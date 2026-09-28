@@ -251,6 +251,8 @@ def test_source_confirmed_superscript_marker_reaches_docx() -> None:
     metadata = {"superscript_markers": [{"text": "3", "relative_position": 0.5}]}
     text = "\u0627\u062f\u0639\u0627\u06cc \u0633\u0648\u0645 3 \u0627\u0633\u062a."
     assert source_superscript_spans(text, metadata) == [(10, 11)]
+    assert source_superscript_spans("(فصل ۳)", metadata, "The third claim.3") == []
+    assert source_superscript_spans("سوم ۳ و فصل ۳", metadata, "The third claim.3") == []
 
     translated = TranslatedDocument(
         paragraphs=[

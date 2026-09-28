@@ -397,19 +397,18 @@ class BookResearcher:
 
     @staticmethod
     def _book_excerpt(document: Document) -> str:
+        from tarjomeh.context.book_term_candidates import body_term_paragraphs
+
         toc = "Table of contents:\n" + "\n".join(document.raw_toc or [])
         parts = [toc[:900]] if document.raw_toc else []
         body = [
             paragraph.text.strip()
-            for paragraph in document.all_paragraphs
-            if getattr(paragraph, "is_translatable", True)
-            and not getattr(paragraph, "is_footnote", False)
-            and getattr(paragraph, "heading_level", None) is None
-            and str(getattr(paragraph, "metadata", {}).get("structure_role", "body")) == "body"
-            and len(paragraph.text.strip()) >= 80
+            for paragraph in body_term_paragraphs(document)
+            if len(paragraph.text.strip()) >= 80
         ]
         if not body:
-            body = [p.text.strip() for p in document.all_paragraphs if p.text.strip()]
+            body = [paragraph.text.strip() for paragraph in body_term_paragraphs(document)
+                    if paragraph.text.strip()]
         if body:
             # Keep the same prompt budget while sampling beyond front matter.
             windows = ((0, 0.10), (0.25, 0.35), (0.50, 0.60), (0.75, 0.85))

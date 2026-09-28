@@ -6,6 +6,7 @@ let currentReviewJobId = null;
 let comparisonBaselineJobId = null;
 let currentEvaluationId = null;
 let detectedChapters = [];
+let currentBookTermReviewJobId = null;
 
 // Initialize on page load
 document.addEventListener("DOMContentLoaded", () => {
@@ -248,6 +249,8 @@ async function startTranslation() {
     formData.append("bilingual_mode", document.getElementById("cfgBilingual").value);
     formData.append("term_notes", document.getElementById("cfgTermNotes").value);
     formData.append("enable_book_research", String(document.getElementById("cfgBookResearch").checked));
+    formData.append("review_book_terms_before_translating", String(
+        document.getElementById("cfgBookTermReview").checked));
     formData.append("enable_critique", String(document.getElementById("cfgCritique").checked));
     formData.append("enable_back_translation", String(document.getElementById("cfgBackTranslation").checked));
     formData.append("enable_integrity_gate", String(document.getElementById("cfgIntegrityGate").checked));
@@ -393,6 +396,20 @@ async function trackJobProgress(jobId) {
         }, 3000);
     };
 
+    const showBookTermReview = () => {
+        jobFinished = true;
+        if (currentEventSource) {
+            currentEventSource.close();
+            currentEventSource = null;
+        }
+        if (snapshotPollTimer) clearTimeout(snapshotPollTimer);
+        document.getElementById("progressSection").hidden = true;
+        document.getElementById("uploadSection").hidden = false;
+        document.getElementById("startBtn").disabled = false;
+        openBookTermReview(jobId);
+        fetchJobs();
+    };
+
     try {
         const response = await fetch(detailUrl);
         if (!response.ok) throw new Error("Failed to load current job state");
@@ -407,6 +424,7 @@ async function trackJobProgress(jobId) {
         appendLog(`Restored current job state: ${pct}% complete.`, "info");
 
         const status = job.raw_status || job.status;
+        if (status === "awaiting_book_term_review") { showBookTermReview(); return; }
         if (status === "completed") { finish("complete"); return; }
         if (status === "paused") { finish("paused"); return; }
         if (status === "failed" || status === "paused_error") { finish("error"); return; }
@@ -428,6 +446,7 @@ async function trackJobProgress(jobId) {
             progressPct.innerText = `${pct}%`;
             progressStage.innerText = snapshotStage(chunks, worker);
             const status = job.raw_status || job.status;
+            if (status === "awaiting_book_term_review") { showBookTermReview(); return; }
             if (status === "completed") { finish("complete"); return; }
             if (status === "paused") { finish("paused"); return; }
             if (status === "failed" || status === "paused_error") { finish("error"); return; }
@@ -474,6 +493,8 @@ async function trackJobProgress(jobId) {
             // Terminal events use `stage` (the server never sends `status` here).
             if (data.stage === "complete" || data.stage === "error" || data.stage === "paused") {
                 finish(data.stage);
+            } else if (data.stage === "book_term_review") {
+                showBookTermReview();
             }
         } catch (e) {
             console.error("Failed to parse SSE packet", e);
@@ -544,7 +565,7 @@ async function fetchJobs() {
             if (job.status === "completed") badgeClass = "completed";
             else if (job.status === "failed") badgeClass = "failed";
             else if (job.status === "paused_error") badgeClass = "failed";
-            else if (job.status === "paused") badgeClass = "paused";
+            else if (job.status === "paused" || job.status === "awaiting_book_term_review") badgeClass = "paused";
 
             const progressPct = Math.round(job.pct * 100);
             const outputName = job.output_filename || job.filename;
@@ -565,6 +586,8 @@ async function fetchJobs() {
                     ${job.output_filename ? `<button class="action-btn" title="Download chapter checkpoint" onclick="downloadJob('${job.id}')">Download preview</button>` : ""}
                     <button class="action-btn" title="Resume job" onclick="resumeJob('${job.id}')">Resume</button>
                 `;
+            } else if (job.status === "awaiting_book_term_review") {
+                actionHtml = `<button class="action-btn" title="Review book terms" onclick="openBookTermReview('${job.id}')">Review terms</button>`;
             }
 
             if (job.status === "completed") {
@@ -891,7 +914,7 @@ async function fetchResearchSuggestions(jobId) {
         ? research.terms : [];
     const suggested = terms
         .map((term, index) => ({ term: term, index: index }))
-        .filter(item => ["suggested", "candidate", "approved", "rejected"].includes(item.term.status));
+        .filter(item => ["suggested", "candidate", "proposed", "approved", "rejected"].includes(item.term.status));
     if (!research) {
         block.hidden = true;
         list.innerHTML = "";
@@ -951,6 +974,128 @@ async function fetchResearchSuggestions(jobId) {
                 : "");
         list.appendChild(row);
     });
+}
+
+async function openBookTermReview(jobId) {
+    const section = document.getElementById("bookTermReviewSection");
+    const list = document.getElementById("bookTermReviewList");
+    const response = await fetch(authUrl(`/api/jobs/${jobId}/book-term-review`));
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        alert(data.error || "Could not load book terms");
+        return;
+    }
+    currentBookTermReviewJobId = jobId;
+    list.replaceChildren();
+    (data.review.proposals || []).forEach((term, index) => {
+        const row = document.createElement("div");
+        row.className = "book-term-review-row";
+        row.dataset.index = index;
+        const details = document.createElement("div");
+        details.className = "book-term-details";
+        const source = document.createElement("strong");
+        source.textContent = term.source;
+        const evidence = document.createElement("span");
+        evidence.textContent = [
+            term.source_evidence || "",
+            (term.source_variants || []).length ? `Variants: ${term.source_variants.join(", ")}` : "",
+            term.english_explanation || ""
+        ].filter(Boolean).join(" | ");
+        const status = document.createElement("small");
+        status.textContent = term.status || "proposed";
+        details.append(source, evidence, status);
+        const controls = document.createElement("div");
+        controls.className = "book-term-controls";
+        const selection = document.createElement("input");
+        selection.type = "checkbox";
+        selection.className = "book-term-select";
+        selection.setAttribute("aria-label", `Select ${term.source}`);
+        const target = document.createElement("input");
+        target.className = "book-term-target";
+        target.dir = "rtl";
+        target.value = term.target || "";
+        target.setAttribute("aria-label", `Persian rendering for ${term.source}`);
+        const scope = document.createElement("select");
+        scope.className = "book-term-scope";
+        scope.setAttribute("aria-label", `Approval scope for ${term.source}`);
+        [{ value: "evidence_paragraph", label: "Evidence paragraph" },
+         { value: "all_body", label: "All body paragraphs" }].forEach(option => {
+            const element = document.createElement("option");
+            element.value = option.value;
+            element.textContent = option.label;
+            scope.appendChild(element);
+        });
+        scope.value = term.scope_mode || "evidence_paragraph";
+        const chapters = document.createElement("input");
+        chapters.className = "book-term-chapters";
+        chapters.placeholder = "Chapter numbers (optional)";
+        chapters.value = (term.chapter_positions || []).join(", ");
+        chapters.setAttribute("aria-label", `Chapter numbers for ${term.source}`);
+        const sense = document.createElement("input");
+        sense.className = "book-term-sense";
+        sense.placeholder = "Sense ID (optional)";
+        sense.value = term.sense_id || "";
+        sense.setAttribute("aria-label", `Sense ID for ${term.source}`);
+        const original = document.createElement("input");
+        original.type = "checkbox";
+        original.className = "book-term-original";
+        original.checked = term.keep_original === true;
+        const originalLabel = document.createElement("label");
+        originalLabel.append(original, " Keep original");
+        controls.append(target, scope, chapters, sense, originalLabel);
+        row.append(selection, details, controls);
+        list.appendChild(row);
+    });
+    section.hidden = false;
+    section.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function decideBookTerms(status, all) {
+    if (!currentBookTermReviewJobId) return;
+    const rows = Array.from(document.querySelectorAll("#bookTermReviewList .book-term-review-row"));
+    const chosen = rows.filter(row => all || row.querySelector(".book-term-select").checked);
+    if (!chosen.length) { alert("Select at least one term."); return; }
+    if (status === "approved" && all && !confirm("Approve all proposed book terms as mandatory in their scope?")) return;
+    const broad = status === "approved" && chosen.some(row =>
+        row.querySelector(".book-term-scope").value === "all_body");
+    if (broad && !confirm("Apply selected terms in all body paragraphs where their meaning is unambiguous?")) return;
+    const decisions = chosen.map(row => ({
+        index: Number(row.dataset.index), status,
+        target: row.querySelector(".book-term-target").value,
+        keep_original: row.querySelector(".book-term-original").checked,
+        scope_mode: row.querySelector(".book-term-scope").value,
+        chapter_positions: row.querySelector(".book-term-chapters").value
+            .split(",").map(value => value.trim()).filter(Boolean).map(Number),
+        sense_id: row.querySelector(".book-term-sense").value.trim()
+    }));
+    if (decisions.some(item => item.chapter_positions.some(value =>
+        !Number.isInteger(value) || value < 1))) {
+        alert("Chapter numbers must be positive integers.");
+        return;
+    }
+    const response = await fetch(authUrl(`/api/jobs/${currentBookTermReviewJobId}/book-term-review`), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "decide", decisions,
+            confirm_bulk: all && status === "approved", confirm_broad_scope: broad })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) { alert(data.error || "Could not save decisions"); return; }
+    openBookTermReview(currentBookTermReviewJobId);
+}
+
+async function finishBookTermReview(action) {
+    if (!currentBookTermReviewJobId) return;
+    if (action === "skip" && !confirm("Skip all proposed book terms and start translation?")) return;
+    const jobId = currentBookTermReviewJobId;
+    const response = await fetch(authUrl(`/api/jobs/${jobId}/book-term-review`), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) { alert(data.error || "Could not start translation"); return; }
+    document.getElementById("bookTermReviewSection").hidden = true;
+    currentBookTermReviewJobId = null;
+    await resumeJob(jobId);
 }
 
 async function reviewResearchTerm(button, action, scope) {

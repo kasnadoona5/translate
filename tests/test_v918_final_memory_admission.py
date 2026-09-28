@@ -85,7 +85,7 @@ def test_memory_trust_separates_continuity_from_authority() -> None:
     assert policy["long_term_reliable"] is False
     assert policy["style_sample_added"] is False
     assert len(manager.long_term.serialize()) == 1
-    assert "advisory continuity" in context.long_term
+    assert context.long_term == ""  # Exact source, target and advisory trust are already in layer 4.
     assert "needs review" in context.short_term
 
 
