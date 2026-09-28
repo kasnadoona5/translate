@@ -20,8 +20,9 @@ from tarjomeh.parsers.base import Document
 _COORDINATED_TERMS = re.compile(
     r"\b[A-Za-z][A-Za-z'-]+(?:,\s+[A-Za-z][A-Za-z'-]+){1,4}"
     r",?\s+and\s+[A-Za-z][A-Za-z'-]+"
-    # Keep a capitalized multiword final member intact ("South Africa").
-    r"(?:\s+[A-Z][A-Za-z'-]+)?\b",
+    # Keep a capitalized multiword final member intact ("South Africa",
+    # "United Arab Emirates").
+    r"(?:\s+[A-Z][A-Za-z'-]+){0,3}\b",
 )
 _FRONT_PARATEXT_TITLE = re.compile(
     r"^(?:contents|table of contents|copyright|abbreviations|acknowledg(?:e)?ments|"
@@ -98,7 +99,8 @@ def _fold(value: str) -> str:
 
 
 def _family_key(value: str) -> str:
-    return " ".join(_fold(value).split())
+    # Case-insensitive but accent-sensitive: "résumé" and "resume" differ.
+    return " ".join(value.casefold().split())
 
 
 def _singular(word: str) -> str:
@@ -174,6 +176,7 @@ def collect_book_term_candidates(document: Document) -> list[dict[str, Any]]:
 
     phrase_paragraphs: Counter[str] = Counter()
     long_phrases: set[str] = set()
+    preceding: dict[str, list[tuple[str | None, str]]] = {}
     word_paragraphs: Counter[str] = Counter()
     token_totals: Counter[str] = Counter()
     phrase_token_totals: dict[str, Counter[str]] = {}
@@ -204,7 +207,7 @@ def collect_book_term_candidates(document: Document) -> list[dict[str, Any]]:
                 variants[key].append(surface)
         family_paragraphs.update(present_families)
         tokens = list(_TOKEN.finditer(text))
-        token_totals.update(_fold(match.group()) for match in tokens)
+        token_totals.update(match.group().casefold() for match in tokens)
         present_words: set[str] = set()
         for match in _WORD.finditer(text):
             word = match.group().strip("'’-")
@@ -254,8 +257,14 @@ def collect_book_term_candidates(document: Document) -> list[dict[str, Any]]:
                 present_phrases.add(key)
                 note("phrase:" + key, " ".join(group), "repeated_source_phrase", raw)
                 phrase_token_totals.setdefault(key, Counter()).update(
-                    _fold(word) for word in group
+                    word.casefold() for word in group
                 )
+                previous = (
+                    tokens[offset - 1].group()
+                    if offset and text[tokens[offset - 1].end():group_matches[0].start()].isspace()
+                    else None
+                )
+                preceding.setdefault(key, []).append((previous, " ".join(group)))
         phrase_paragraphs.update(present_phrases)
 
     # Repeated phrases; merge an attested plural into its attested singular.
@@ -295,6 +304,30 @@ def collect_book_term_candidates(document: Document) -> list[dict[str, Any]]:
             evidence[fixed] = evidence["phrase:" + key]
             counts[fixed] = count
             counts.pop("phrase:" + key, None)
+
+    # A fixed fragment always preceded by one word (ignoring only accents:
+    # "esprit"/"ésprit") is completed with it: "de corps" -> "esprit de corps".
+    # Accent-insensitive comparison is limited to this completion step, so
+    # distinct words such as "résumé"/"resume" are never merged elsewhere.
+    for key in [key for key in counts if key.startswith("fixed:")]:
+        occurrences = preceding.get(key[len("fixed:"):], [])
+        words = [word for word, _surface in occurrences]
+        if (
+            occurrences
+            and all(words)
+            and len({_fold(word) for word in words}) == 1
+            and words[0].islower()
+            and words[0].casefold() not in _PHRASE_EDGE_STOP
+        ):
+            completed = f"{words[0]} {occurrences[0][1]}"
+            completed_key = "fixed:" + _family_key(completed)
+            kinds[completed_key] = "fixed_source_expression"
+            surfaces[completed_key] = completed
+            evidence[completed_key] = evidence[key]
+            counts[completed_key] = counts.pop(key)
+            variants[completed_key] = list(dict.fromkeys(
+                f"{word} {surface}" for word, surface in occurrences
+            ))
 
     # Keep a complete fixed expression ("esprit de corps"), not its fragment.
     fixed_keys = [key for key in counts if key.startswith("fixed:")]

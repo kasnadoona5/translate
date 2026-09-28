@@ -300,12 +300,39 @@ def test_fixed_expression_merges_accent_variants_and_drops_fragment():
     paragraphs = [
         "A political esprit de corps is unusual in such bureaucracies.",
         "The distinctive ésprit de corps of the service matters here.",
-        "Corps members and the esprit of officials differ elsewhere.",
     ]
     document = Document(title="T", chapters=[_chapter("Chapter 1", *paragraphs)])
-    sources = [item["source"] for item in collect_book_term_candidates(document)
-               if item["origin"] == "fixed_source_expression"]
-    assert "de corps" not in sources
+    fixed = {item["source"]: item for item in collect_book_term_candidates(document)
+             if item["origin"] == "fixed_source_expression"}
+    assert "de corps" not in fixed
+    assert "esprit de corps" in fixed
+    assert "ésprit de corps" in fixed["esprit de corps"]["source_variants"]
+
+
+def test_accent_distinct_words_are_not_merged():
+    paragraphs = [
+        "Recruiters use résumé analysis to rank applicants carefully.",
+        "Automated résumé analysis favours keywords over experience.",
+        "After a crash, resume analysis restarts the stopped batch job.",
+        "Operators trigger resume analysis whenever a worker fails.",
+        "Both résumé analysis and resume analysis appear in the manual.",
+    ]
+    document = Document(title="T", chapters=[_chapter("Chapter 1", *paragraphs)])
+    sources = {item["source"]: item for item in collect_book_term_candidates(document)}
+    assert "résumé analysis" in sources and "resume analysis" in sources
+    assert sources["résumé analysis"]["source_count"] == 3
+    assert sources["resume analysis"]["source_count"] == 3
+
+
+def test_coordinated_list_keeps_three_word_final_member():
+    paragraphs = [
+        "Trade links Qatar, Oman, Bahrain, and United Arab Emirates closely.",
+        "Again Qatar, Oman, Bahrain, and United Arab Emirates cooperate.",
+    ]
+    document = Document(title="T", chapters=[_chapter("Chapter 1", *paragraphs)])
+    families = [item["source"] for item in collect_book_term_candidates(document)
+                if item["origin"] == "source_coordination"]
+    assert families == ["Qatar, Oman, Bahrain, and United Arab Emirates"]
 
 
 def test_extraction_sample_covers_every_candidate_kind():
