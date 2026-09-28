@@ -705,6 +705,7 @@ def _v10401_behavior_probes() -> dict[str, bool]:
             not is_bounded_person_name_target(
                 "Manuela Tecusan", "تخصصیِ مانوئلا تکوشان"
             )
+            and not is_bounded_person_name_target("Hegel", "فیلسوف هگل")
             and is_bounded_person_name_target("Hegel", "گ. و. ف. هگل")
         ),
         "acknowledgement_is_not_style_evidence": bool(

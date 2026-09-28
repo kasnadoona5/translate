@@ -699,7 +699,6 @@ def is_bounded_person_name_target(source: str, target: str) -> bool:
     """
     source_words = re.findall(r"[A-Za-z\u00c0-\u024f]+", source or "")
     value = target or ""
-    initials = _PERSIAN_INITIAL_RE.findall(value)
     remainder = _PERSIAN_INITIAL_RE.sub(" ", value)
     target_words = _PERSIAN_WORD_RE.findall(remainder)
     if not source_words or not target_words:
@@ -712,8 +711,10 @@ def is_bounded_person_name_target(source: str, target: str) -> bool:
         token.endswith("\u0650") for token in (edge_tokens[0], edge_tokens[-1])
     ):
         return False
-    units = len(target_words) + (1 if initials else 0)
-    return units <= max(3, len(source_words) + 1)
+    # A transliterated name never needs more Persian words than the source has
+    # name words (initials aside). An extra word is a descriptor or context
+    # from the sentence ("فیلسوف هگل", "ویراستاری مانوئلا تکوسان").
+    return len(target_words) <= len(source_words)
 
 
 def _context_bound_persian_target(value: str) -> bool:

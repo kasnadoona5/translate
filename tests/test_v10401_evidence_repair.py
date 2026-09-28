@@ -283,3 +283,39 @@ def test_acknowledgement_prose_is_paratext_for_style_only():
     assert not _is_paratext_style_source(
         "The state benefited from favourable conjunctures."
     )
+
+
+# -- follow-up audit findings (v10.40.1 review) --------------------------------
+
+def test_name_guard_rejects_descriptor_words():
+    assert not is_bounded_person_name_target("Hegel", "فیلسوف هگل")
+    assert not is_bounded_person_name_target(
+        "Manuela Tecusan", "ویراستاری مانوئلا تکوسان"
+    )
+    assert is_bounded_person_name_target("Emmerich de Vattel", "امریک دو واتل")
+    assert is_bounded_person_name_target("Den Haag", "لاهه")
+
+
+def test_fixed_expression_merges_accent_variants_and_drops_fragment():
+    paragraphs = [
+        "A political esprit de corps is unusual in such bureaucracies.",
+        "The distinctive ésprit de corps of the service matters here.",
+        "Corps members and the esprit of officials differ elsewhere.",
+    ]
+    document = Document(title="T", chapters=[_chapter("Chapter 1", *paragraphs)])
+    sources = [item["source"] for item in collect_book_term_candidates(document)
+               if item["origin"] == "fixed_source_expression"]
+    assert "de corps" not in sources
+
+
+def test_extraction_sample_covers_every_candidate_kind():
+    paragraphs = [
+        f"State power and state power again; the nation-state {i} matters, "
+        "and polity, politics, and policy recur."
+        for i in range(6)
+    ]
+    document = Document(title="T", chapters=[_chapter("Chapter 1", *paragraphs)])
+    sample = book_term_extraction_sample(document)
+    assert "state power" in sample.casefold()
+    assert "nation-state" in sample
+    assert "polity, politics, and policy" in sample

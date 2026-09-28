@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from collections import Counter
 from typing import Any
 
@@ -85,10 +86,19 @@ _QUOTAS = {
     "source_coordination": 8,
 }
 _KIND_ORDER = tuple(_QUOTAS)
+_SAMPLE_CANDIDATES = 36
+
+
+def _fold(value: str) -> str:
+    """Case- and accent-insensitive key: "ésprit" and "esprit" are one form."""
+    decomposed = unicodedata.normalize("NFKD", value)
+    return "".join(
+        char for char in decomposed if not unicodedata.combining(char)
+    ).casefold()
 
 
 def _family_key(value: str) -> str:
-    return " ".join(value.casefold().split())
+    return " ".join(_fold(value).split())
 
 
 def _singular(word: str) -> str:
@@ -194,7 +204,7 @@ def collect_book_term_candidates(document: Document) -> list[dict[str, Any]]:
                 variants[key].append(surface)
         family_paragraphs.update(present_families)
         tokens = list(_TOKEN.finditer(text))
-        token_totals.update(match.group().casefold() for match in tokens)
+        token_totals.update(_fold(match.group()) for match in tokens)
         present_words: set[str] = set()
         for match in _WORD.finditer(text):
             word = match.group().strip("'’-")
@@ -244,7 +254,7 @@ def collect_book_term_candidates(document: Document) -> list[dict[str, Any]]:
                 present_phrases.add(key)
                 note("phrase:" + key, " ".join(group), "repeated_source_phrase", raw)
                 phrase_token_totals.setdefault(key, Counter()).update(
-                    word.casefold() for word in group
+                    _fold(word) for word in group
                 )
         phrase_paragraphs.update(present_phrases)
 
@@ -346,9 +356,20 @@ def collect_book_term_candidates(document: Document) -> list[dict[str, Any]]:
 def book_term_extraction_sample(document: Document) -> str:
     """Bounded source evidence for the existing initial extraction call."""
     candidates = collect_book_term_candidates(document)
+    # Take candidates in turn from every kind so compounds, italic foreign
+    # expressions and coordinated families also receive a proposal, instead
+    # of the first kinds filling the whole bounded sample.
+    by_kind: dict[str, list[dict[str, Any]]] = {kind: [] for kind in _KIND_ORDER}
+    for item in candidates:
+        by_kind.setdefault(item["origin"], []).append(item)
+    ordered: list[dict[str, Any]] = []
+    while len(ordered) < _SAMPLE_CANDIDATES and any(by_kind.values()):
+        for kind in list(by_kind):
+            if by_kind[kind] and len(ordered) < _SAMPLE_CANDIDATES:
+                ordered.append(by_kind[kind].pop(0))
     lines = [
         f"{item['source']} | {item['source_evidence'][:180]}"
-        for item in candidates[:24]
+        for item in ordered
     ]
     body = [paragraph.text.strip() for paragraph in body_term_paragraphs(document)
             if len(paragraph.text.strip()) >= 80]
