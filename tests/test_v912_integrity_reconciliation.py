@@ -10,6 +10,7 @@ from tarjomeh.persian.typography import PersianTypographer
 from tarjomeh.quality.back_translator import BackTranslator
 from tarjomeh.quality.integrity import (
     PostEditIntegrityGate,
+    extract_labeled_identifier_surfaces,
     mixed_script_artifacts,
     restore_source_identifiers,
 )
@@ -18,7 +19,9 @@ from tarjomeh.quality.integrity import (
 FA_NEO = "\u0646\u0626\u0648\u067e\u0644\u0648\u0631\u0627\u0644\u06cc\u0633\u0645"
 
 
-def test_source_identifier_repair_preserves_persian_label() -> None:
+def test_source_identifier_repair_restores_proven_source_label() -> None:
+    # v10.29 final admission (R75) requires the labeled source surface, so a
+    # localized label before a uniquely labeled payload is restored.
     source = "ISBN-13: 978-0-7456-3304-6 (pb)"
     translated = (
         "\u0634\u0627\u0628\u06a9-\u06f1\u06f3: "
@@ -29,8 +32,10 @@ def test_source_identifier_repair_preserves_persian_label() -> None:
     repaired, report = restore_source_identifiers(source, translated)
 
     assert report["repair_count"] == 1
-    assert "\u0634\u0627\u0628\u06a9-\u06f1\u06f3:" in repaired
-    assert "978-0-7456-3304-6" in repaired
+    assert repaired == source
+    assert extract_labeled_identifier_surfaces(repaired) == (
+        extract_labeled_identifier_surfaces(source)
+    )
     assert PostEditIntegrityGate().evaluate(source, repaired).accepted
 
 

@@ -1275,6 +1275,26 @@ def _identifier_occurrences(text: str) -> list[tuple[int, int, str]]:
     ]
 
 
+def _nonblank_paragraph_spans(text: str) -> list[tuple[int, int]]:
+    """Return offsets of blank-line-separated paragraphs with visible text."""
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for separator in re.finditer(r"\n\s*\n", text or ""):
+        if (text or "")[start:separator.start()].strip():
+            spans.append((start, separator.start()))
+        start = separator.end()
+    if (text or "")[start:].strip():
+        spans.append((start, len(text or "")))
+    return spans
+
+
+def _paragraph_index_at(spans: list[tuple[int, int]], offset: int) -> int:
+    for index, (start, end) in enumerate(spans):
+        if start <= offset < end:
+            return index
+    return -1
+
+
 def restore_source_identifiers(source: str, translation: str) -> tuple[str, dict[str, Any]]:
     """Restore uniquely matched identifier values without translating nearby labels.
 
@@ -1282,10 +1302,27 @@ def restore_source_identifiers(source: str, translation: str) -> tuple[str, dict
     replaced only when its alphanumeric identity maps to exactly one source value.
     """
     source_by_identity: dict[str, list[str]] = {}
-    for _start, _end, value in _identifier_occurrences(source):
+    source_paragraph_spans = _nonblank_paragraph_spans(source)
+    target_paragraph_spans = _nonblank_paragraph_spans(translation)
+    paragraphs_aligned = (
+        bool(source_paragraph_spans)
+        and len(source_paragraph_spans) == len(target_paragraph_spans)
+    )
+    source_by_paragraph_identity: dict[tuple[int, str], list[str]] = {}
+    for source_start, _end, value in _identifier_occurrences(source):
         identity = _identifier_identity(value)
         if identity:
             source_by_identity.setdefault(identity, []).append(value)
+            if paragraphs_aligned:
+                source_by_paragraph_identity.setdefault(
+                    (
+                        _paragraph_index_at(
+                            source_paragraph_spans, source_start
+                        ),
+                        identity,
+                    ),
+                    [],
+                ).append(value)
 
     replacements: list[tuple[int, int, str, str]] = []
     candidate_occurrences = _identifier_occurrences(translation)
@@ -1383,6 +1420,15 @@ def restore_source_identifiers(source: str, translation: str) -> tuple[str, dict
         if len(source_payloads) != 1:
             continue
         candidate_label = _identifier_label_identity(value)
+        if len(candidates) > 1 and not candidate_label and paragraphs_aligned:
+            # The aligned source paragraph proves the label when it prints
+            # this payload exactly once.
+            paragraph_candidates = source_by_paragraph_identity.get(
+                (_paragraph_index_at(target_paragraph_spans, start), identity),
+                [],
+            )
+            if len(paragraph_candidates) == 1:
+                candidates = paragraph_candidates
         label_matched = [
             candidate for candidate in candidates
             if _identifier_label_identity(candidate) == candidate_label
@@ -1411,7 +1457,13 @@ def restore_source_identifiers(source: str, translation: str) -> tuple[str, dict
                 )
             elif not candidate_has_label:
                 if localized_label:
-                    replacement = source_payload
+                    # The source label is proven (one label for this payload,
+                    # or one in the aligned paragraph); final admission
+                    # requires the exact labeled source surface.
+                    replacement_start = prefix_start + localized_label.start()
+                    replacement_before = (
+                        (translation or "")[replacement_start:start] + value
+                    )
                 else:
                     label_match = _FLEXIBLE_IDENTIFIER_LABEL_SUFFIX_RE.search(
                         prefix
