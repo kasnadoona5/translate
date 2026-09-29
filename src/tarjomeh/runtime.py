@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v10.40.1"
+RUNTIME_RELEASE = "v10.40.2"
 RUNTIME_REVISION = 1
 
 
@@ -610,6 +610,7 @@ def runtime_behavior_probes() -> dict[str, bool]:
             )["unbalanced_explanatory_dash_count"] == 1
         ),
         **_v10401_behavior_probes(),
+        **_v10402_behavior_probes(),
     }
 
 
@@ -713,5 +714,31 @@ def _v10401_behavior_probes() -> dict[str, bool]:
             and not _is_paratext_style_source(
                 "Chapter 4 is dedicated to the analysis of class power."
             )
+        ),
+    }
+
+
+def _v10402_behavior_probes() -> dict[str, bool]:
+    """Pure identifier evidence checks; no network, LLM, or job state."""
+    from tarjomeh.quality.integrity import restore_source_identifiers
+
+    payload = "1234-5678"
+    source = f"ISBN-13: {payload}\n\nISBN {payload}"
+    target = f"شابک {payload}\n\nشابک-۱۳: {payload}"
+    repaired, _ = restore_source_identifiers(source, target)
+    bare_target = f"شابک {payload}\n\nشابک {payload}"
+    bare_repaired, _ = restore_source_identifiers(source, bare_target)
+    mixed_source = f"ISBN {payload}\n\nISSN {payload}"
+    mixed_target = f"ISBN {payload}\n\nشابک {payload}"
+    mixed_repaired, _ = restore_source_identifiers(mixed_source, mixed_target)
+    return {
+        "repeated_isbn_labels_use_target_evidence": repaired == (
+            f"ISBN {payload}\n\nISBN-13: {payload}"
+        ),
+        "unproven_repeated_isbn_labels_remain_unresolved": (
+            bare_repaired == bare_target
+        ),
+        "persian_book_number_never_becomes_issn": (
+            mixed_repaired == mixed_target
         ),
     }

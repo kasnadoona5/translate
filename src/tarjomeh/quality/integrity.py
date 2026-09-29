@@ -1348,6 +1348,8 @@ def _target_proven_identifier_labels(
             if len(left) != 1 or next(iter(left.values())) != len(bare):
                 continue
             only_label = next(iter(left))
+            if not only_label.startswith("isbn"):
+                continue
             for start in bare:
                 resolved[start] = values_by_label[only_label]
         proven.update(resolved)
@@ -1488,6 +1490,10 @@ def restore_source_identifiers(source: str, translation: str) -> tuple[str, dict
             prefix_start = max(0, start - 80)
             prefix = (translation or "")[prefix_start:start]
             localized_label = _LOCALIZED_IDENTIFIER_LABEL_SUFFIX_RE.search(prefix)
+            if localized_label and not _identifier_label_identity(
+                source_value
+            ).startswith("isbn"):
+                continue
             if candidate_has_label and localized_label:
                 replacement_start = prefix_start + localized_label.start()
                 replacement_before = (

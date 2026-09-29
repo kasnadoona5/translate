@@ -1,4 +1,4 @@
-"""Static release gates for the opt-in term-review candidate."""
+"""Static and pure runtime gates for the v10.40.2 identifier release."""
 
 import ast
 from pathlib import Path
@@ -10,9 +10,9 @@ from tarjomeh.runtime import runtime_behavior_probes, runtime_capabilities
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_v1040_audits_parse_and_fail_closed() -> None:
+def test_v10402_audits_parse_and_fail_closed() -> None:
     for name in ("companion", "reports"):
-        path = ROOT / "scripts" / f"audit_tarjomeh_v1040_{name}.sh"
+        path = ROOT / "scripts" / f"audit_tarjomeh_v10402_{name}.sh"
         source = path.read_text(encoding="utf-8")
         blocks = re.findall(r"<<'PY'[^\n]*\n(.*?)\nPY(?:\r?\n|$)", source, re.S)
         assert blocks, path
@@ -20,20 +20,16 @@ def test_v1040_audits_parse_and_fail_closed() -> None:
             ast.parse(block, filename=str(path))
         assert 'if verdict == "FAIL":\n    raise SystemExit(2)' in source
         assert 'exit "$AUDIT_RC"' in source
-        assert "v10.40" in source
-    companion = (ROOT / "scripts" / "audit_tarjomeh_v1040_companion.sh").read_text(
-        encoding="utf-8"
-    )
-    assert "finished_opt_in_job_missing_book_term_review" in companion
-    assert "awaiting_user_book_term_decision" in companion
+        assert "v10402" in source
+        assert "v10.40.2" in source or name == "reports"
 
 
-def test_v1040_deploy_keeps_9router_out_of_cleanup() -> None:
-    path = ROOT / "scripts" / "deploy_tarjomeh_v1040.sh"
+def test_v10402_deploy_is_tarjomeh_only() -> None:
+    path = ROOT / "scripts" / "deploy_tarjomeh_v10402.sh"
     source = path.read_text(encoding="utf-8")
-    assert 'TAG="v10.40.1"' in source
+    assert 'TAG="v10.40.2"' in source
+    assert 'manifest["release"] == "v10.40.2"' in source
     assert "--no-deps" in source
-    assert "less than 350 MB" in source
     assert "docker image prune" not in source
     assert "docker system prune" not in source
     for marker in ("NINE_CONTAINER_ID", "NINE_IMAGE", "NINE_STARTED", "NINE_MOUNTS"):
@@ -44,13 +40,12 @@ def test_v1040_deploy_keeps_9router_out_of_cleanup() -> None:
         ast.parse(block, filename=str(path))
 
 
-def test_v1040_runtime_reports_pure_behavior_guards() -> None:
-    manifest = runtime_capabilities()
+def test_v10402_runtime_identifier_guards_are_pure_and_enabled() -> None:
+    assert runtime_capabilities()["release"] == "v10.40.2"
     probes = runtime_behavior_probes()
-    assert manifest["release"] == "v10.40.2"
     for name in (
-        "opt_in_book_term_review_is_off_by_default",
-        "reviewed_terms_are_paragraph_scoped",
-        "source_proven_surface_repair_is_bounded",
+        "repeated_isbn_labels_use_target_evidence",
+        "unproven_repeated_isbn_labels_remain_unresolved",
+        "persian_book_number_never_becomes_issn",
     ):
         assert probes[name] is True

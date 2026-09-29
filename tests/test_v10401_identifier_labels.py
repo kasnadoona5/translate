@@ -166,3 +166,27 @@ def test_payload_printed_twice_in_one_paragraph_stays_unlabeled() -> None:
 
     assert repaired == target
     assert report["repair_count"] == 0
+
+
+def test_persian_book_number_label_never_becomes_issn_by_elimination() -> None:
+    payload = "1234-5678"
+    source = f"ISBN {payload}\n\nISSN {payload}"
+    target = f"ISBN {payload}\n\n{SHABAK} {payload}"
+
+    repaired, report = restore_source_identifiers(source, target)
+
+    assert repaired == target
+    assert report["repair_count"] == 0
+    assert extract_labeled_identifier_surfaces(source) - (
+        extract_labeled_identifier_surfaces(repaired)
+    )
+
+
+def test_unique_issn_cannot_be_inferred_from_persian_book_number_label() -> None:
+    source = "ISSN 1234-5678"
+    target = f"{SHABAK} 1234-5678"
+
+    repaired, report = restore_source_identifiers(source, target)
+
+    assert repaired == target
+    assert report["repair_count"] == 0
