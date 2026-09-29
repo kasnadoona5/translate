@@ -1275,24 +1275,83 @@ def _identifier_occurrences(text: str) -> list[tuple[int, int, str]]:
     ]
 
 
-def _nonblank_paragraph_spans(text: str) -> list[tuple[int, int]]:
-    """Return offsets of blank-line-separated paragraphs with visible text."""
-    spans: list[tuple[int, int]] = []
-    start = 0
-    for separator in re.finditer(r"\n\s*\n", text or ""):
-        if (text or "")[start:separator.start()].strip():
-            spans.append((start, separator.start()))
-        start = separator.end()
-    if (text or "")[start:].strip():
-        spans.append((start, len(text or "")))
-    return spans
+def _localized_identifier_label_identity(label: str) -> str:
+    """Return the ISBN label a localized label proves, or "" when unproven.
+
+    Only an explicit ``-10``/``-13`` suffix identifies the source label; a
+    bare localized label could stand for either spelling.
+    """
+    digits = re.sub(r"[^0-9]", "", (label or "").translate(_DIGIT_MAP))
+    return f"isbn-{digits}" if digits in {"10", "13"} else ""
 
 
-def _paragraph_index_at(spans: list[tuple[int, int]], offset: int) -> int:
-    for index, (start, end) in enumerate(spans):
-        if start <= offset < end:
-            return index
-    return -1
+def _target_proven_identifier_labels(
+    translation: str,
+    candidate_occurrences: list[tuple[int, int, str]],
+    source_by_identity: dict[str, list[str]],
+) -> dict[int, str]:
+    """Map target identifier offsets to the source value their labels prove.
+
+    Applies only to payloads printed in the source under more than one label.
+    A target occurrence is proven by its own Latin label or by a localized
+    label with an explicit ``-10``/``-13`` suffix. A bare localized label is
+    resolved only by elimination: after every proven occurrence removes its
+    label from the source label counts, exactly one label must remain, with
+    as many copies as there are bare localized occurrences. Paragraph
+    position is never used as evidence. Any contradiction or unlabeled
+    occurrence leaves the whole payload unresolved.
+    """
+    by_identity: dict[str, list[tuple[int, str, str]]] = {}
+    for start, _end, value in candidate_occurrences:
+        identity = _identifier_identity(value)
+        candidates = list(dict.fromkeys(source_by_identity.get(identity, [])))
+        if len(candidates) < 2:
+            continue
+        label = _identifier_label_identity(value)
+        kind = "latin" if label else ""
+        if not label:
+            prefix = (translation or "")[max(0, start - 80):start]
+            localized = _LOCALIZED_IDENTIFIER_LABEL_SUFFIX_RE.search(prefix)
+            if localized:
+                label = _localized_identifier_label_identity(
+                    localized.group()
+                )
+                kind = "localized" if label else "localized_bare"
+        by_identity.setdefault(identity, []).append((start, kind, label))
+
+    proven: dict[int, str] = {}
+    for identity, occurrences in by_identity.items():
+        values_by_label: dict[str, str] = {}
+        remaining: Counter[str] = Counter()
+        for source_value in source_by_identity[identity]:
+            source_label = _identifier_label_identity(source_value)
+            values_by_label.setdefault(source_label, source_value)
+            remaining[source_label] += 1
+        if "" in remaining or any(kind == "" for _s, kind, _l in occurrences):
+            continue
+        resolved: dict[int, str] = {}
+        contradiction = False
+        for start, kind, label in occurrences:
+            if kind == "localized_bare":
+                continue
+            if remaining[label] <= 0:
+                contradiction = True
+                break
+            remaining[label] -= 1
+            if kind == "localized":
+                resolved[start] = values_by_label[label]
+        if contradiction:
+            continue
+        bare = [start for start, kind, _l in occurrences if kind == "localized_bare"]
+        left = {label: count for label, count in remaining.items() if count > 0}
+        if bare:
+            if len(left) != 1 or next(iter(left.values())) != len(bare):
+                continue
+            only_label = next(iter(left))
+            for start in bare:
+                resolved[start] = values_by_label[only_label]
+        proven.update(resolved)
+    return proven
 
 
 def restore_source_identifiers(source: str, translation: str) -> tuple[str, dict[str, Any]]:
@@ -1302,27 +1361,10 @@ def restore_source_identifiers(source: str, translation: str) -> tuple[str, dict
     replaced only when its alphanumeric identity maps to exactly one source value.
     """
     source_by_identity: dict[str, list[str]] = {}
-    source_paragraph_spans = _nonblank_paragraph_spans(source)
-    target_paragraph_spans = _nonblank_paragraph_spans(translation)
-    paragraphs_aligned = (
-        bool(source_paragraph_spans)
-        and len(source_paragraph_spans) == len(target_paragraph_spans)
-    )
-    source_by_paragraph_identity: dict[tuple[int, str], list[str]] = {}
-    for source_start, _end, value in _identifier_occurrences(source):
+    for _start, _end, value in _identifier_occurrences(source):
         identity = _identifier_identity(value)
         if identity:
             source_by_identity.setdefault(identity, []).append(value)
-            if paragraphs_aligned:
-                source_by_paragraph_identity.setdefault(
-                    (
-                        _paragraph_index_at(
-                            source_paragraph_spans, source_start
-                        ),
-                        identity,
-                    ),
-                    [],
-                ).append(value)
 
     replacements: list[tuple[int, int, str, str]] = []
     candidate_occurrences = _identifier_occurrences(translation)
@@ -1411,6 +1453,9 @@ def restore_source_identifiers(source: str, translation: str) -> tuple[str, dict
             )
             occupied.append(match.span())
 
+    proven_labels = _target_proven_identifier_labels(
+        translation, candidate_occurrences, source_by_identity
+    )
     for start, end, value in candidate_occurrences:
         identity = _identifier_identity(value)
         candidates = list(dict.fromkeys(source_by_identity.get(identity, [])))
@@ -1420,15 +1465,8 @@ def restore_source_identifiers(source: str, translation: str) -> tuple[str, dict
         if len(source_payloads) != 1:
             continue
         candidate_label = _identifier_label_identity(value)
-        if len(candidates) > 1 and not candidate_label and paragraphs_aligned:
-            # The aligned source paragraph proves the label when it prints
-            # this payload exactly once.
-            paragraph_candidates = source_by_paragraph_identity.get(
-                (_paragraph_index_at(target_paragraph_spans, start), identity),
-                [],
-            )
-            if len(paragraph_candidates) == 1:
-                candidates = paragraph_candidates
+        if len(candidates) > 1 and not candidate_label and start in proven_labels:
+            candidates = [proven_labels[start]]
         label_matched = [
             candidate for candidate in candidates
             if _identifier_label_identity(candidate) == candidate_label
@@ -1458,8 +1496,8 @@ def restore_source_identifiers(source: str, translation: str) -> tuple[str, dict
             elif not candidate_has_label:
                 if localized_label:
                     # The source label is proven (one label for this payload,
-                    # or one in the aligned paragraph); final admission
-                    # requires the exact labeled source surface.
+                    # or proven by the target's own label evidence); final
+                    # admission requires the exact labeled source surface.
                     replacement_start = prefix_start + localized_label.start()
                     replacement_before = (
                         (translation or "")[replacement_start:start] + value
