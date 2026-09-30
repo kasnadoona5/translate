@@ -3,14 +3,14 @@ set -Eeuo pipefail
 
 cd /opt/translate
 
-TAG="v20"
+TAG="v20.1"
 CONTAINER="translate_tarjomeh_1"
 SERVICE="tarjomeh"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP_ROOT="/root/tarjomeh-backups"
-BACKUP="$BACKUP_ROOT/v20-$STAMP"
-ROLLBACK="translate_tarjomeh:rollback-v20-$STAMP"
-CANDIDATE="translate_tarjomeh:candidate-v20-$STAMP"
+BACKUP="$BACKUP_ROOT/v20.1-$STAMP"
+ROLLBACK="translate_tarjomeh:rollback-v20.1-$STAMP"
+CANDIDATE="translate_tarjomeh:candidate-v20.1-$STAMP"
 OVERLAY_DOCKERFILE=""
 DB_SNAPSHOT=""
 
@@ -93,9 +93,16 @@ DB_SOURCE="/opt/translate/jobs/jobs.db"
 DB_SNAPSHOT="$BACKUP/jobs.db.snapshot"
 DB_SIZE="$(stat -c %s "$DB_SOURCE")"
 BACKUP_FREE="$(df --output=avail -B1 "$BACKUP_ROOT" | tail -1)"
-# Allow room for the snapshot, its compressed copy, and the later code layer.
-if [ "$BACKUP_FREE" -lt $((2 * DB_SIZE + 350000000)) ]; then
+# The snapshot and gzip coexist briefly. Keep 110 MB at peak and reserve
+# 350 MB after the snapshot is removed, even if gzip saves almost no space.
+MIN_BACKUP_FREE=$((DB_SIZE + 360000000))
+PEAK_BACKUP_FREE=$((2 * DB_SIZE + 110000000))
+if [ "$PEAK_BACKUP_FREE" -gt "$MIN_BACKUP_FREE" ]; then
+    MIN_BACKUP_FREE="$PEAK_BACKUP_FREE"
+fi
+if [ "$BACKUP_FREE" -lt "$MIN_BACKUP_FREE" ]; then
     echo "STOPPED: insufficient space for a consistent Tarjomeh database backup."
+    echo "Available: $BACKUP_FREE bytes; required: $MIN_BACKUP_FREE bytes."
     exit 1
 fi
 python3 - "$DB_SOURCE" "$DB_SNAPSHOT" <<'PY'
@@ -118,6 +125,11 @@ gzip -c "$DB_SNAPSHOT" > "$BACKUP/jobs.db.gz"
 gzip -t "$BACKUP/jobs.db.gz"
 rm -f -- "$DB_SNAPSHOT"
 DB_SNAPSHOT=""
+POST_BACKUP_FREE="$(df --output=avail -B1 "$BACKUP_ROOT" | tail -1)"
+if [ "$POST_BACKUP_FREE" -lt 350000000 ]; then
+    echo "STOPPED: less than 350 MB remains after the verified database backup."
+    exit 1
+fi
 cp -a .env config.toml "$BACKUP/"
 GLOSSARY_COPY=""
 if ! git diff --quiet -- glossary/academic_political_theory.csv; then

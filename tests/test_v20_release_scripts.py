@@ -18,12 +18,15 @@ def _python_blocks(source: str) -> list[str]:
 
 def test_v20_deploy_backs_up_sqlite_and_preserves_9router() -> None:
     source = (SCRIPTS / "deploy_tarjomeh_v20.sh").read_text(encoding="utf-8")
-    assert 'TAG="v20"' in source
+    assert 'TAG="v20.1"' in source
     assert 'manifest["release"] == "v20"' in source
     assert "source.backup(snapshot)" in source
     assert 'snapshot.execute("PRAGMA integrity_check")' in source
     assert 'gzip -t "$BACKUP/jobs.db.gz"' in source
-    assert 'if [ "$BACKUP_FREE" -lt $((2 * DB_SIZE + 350000000)) ]' in source
+    assert 'MIN_BACKUP_FREE=$((DB_SIZE + 360000000))' in source
+    assert 'PEAK_BACKUP_FREE=$((2 * DB_SIZE + 110000000))' in source
+    assert 'if [ "$BACKUP_FREE" -lt "$MIN_BACKUP_FREE" ]' in source
+    assert 'if [ "$POST_BACKUP_FREE" -lt 350000000 ]' in source
     assert 'if [ "$AVAILABLE_KB" -lt 350000 ]' in source
     assert "--no-deps" in source
     assert "docker image prune" not in source
