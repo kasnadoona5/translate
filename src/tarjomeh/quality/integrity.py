@@ -203,9 +203,17 @@ _BRACKETED_INLINE_ORIGINAL_RE = re.compile(
     rf"\((?P<before>[^()\[\]\n]*[{_PERSIAN_LETTER_CLASS}][^()\[\]\n]*?)\s*"
     rf"\[\(?(?P<original>(?=[^()\[\]\n]*[A-Za-z])[^()\[\]\n]{{1,200}}?)\)?\]\s*\)"
 )
-_SOURCE_OPTIONAL_PREFIX_RE = re.compile(r"(?<![A-Za-z])\([A-Za-z]{2,8}\)[A-Za-z]")
+_SOURCE_OPTIONAL_PREFIX_RE = re.compile(
+    r"(?<![A-Za-z])\((?P<prefix>[A-Za-z]{2,8})\)(?P<stem>[A-Za-z]+)"
+)
+# A `(` glued to a preceding Persian letter opens a joined optional suffix
+# (a joined plural before the next word), not a spaced prefix.
 _SPACED_OPTIONAL_PREFIX_RE = re.compile(
+    rf"(?<![{_PERSIAN_LETTER_CLASS}\u200c])"
     rf"\((?P<prefix>[{_PERSIAN_LETTER_CLASS}]{{1,6}})\)[ \t]+(?=[{_PERSIAN_LETTER_CLASS}])"
+)
+_PERSIAN_STEM_RE = re.compile(
+    rf"[{_PERSIAN_LETTER_CLASS}]+(?:\u200c[{_PERSIAN_LETTER_CLASS}]+)*"
 )
 _STRANDED_MARK_AFTER_ORIGINAL_RE = re.compile(
     rf"(?P<word>[{_PERSIAN_LETTER_CLASS}]+)(?P<gap>[ \t]*)"
@@ -289,6 +297,33 @@ _SOURCE_METADATA_RE = re.compile(
     r"copyright|all rights reserved)\b",
     re.IGNORECASE,
 )
+# A printing imprint ("Typeset in ... by X", "Printed and bound in ... by Y")
+# names its typesetter and printer; only those exact names are protected.
+_IMPRINT_PARAGRAPH_RE = re.compile(
+    r"\b(?:typeset\s+in|printed\s+and\s+bound\s+in)\b", re.IGNORECASE
+)
+_IMPRINT_BY_RE = re.compile(r"\bby\s+")
+_IMPRINT_STOP_WORDS = frozenset({"Printed", "Typeset", "Published", "Made"})
+
+
+def _imprint_names(source: str) -> list[str]:
+    """Return the exact typesetter/printer names of a printing imprint."""
+    if not _IMPRINT_PARAGRAPH_RE.search(source or ""):
+        return []
+    names: list[str] = []
+    for match in _IMPRINT_BY_RE.finditer(source or ""):
+        tokens: list[str] = []
+        for token in re.finditer(r"[^\s,]+|,", source[match.end():]):
+            value = token.group()
+            if value == ",":
+                tokens.append(value)
+                continue
+            if not value[:1].isupper() or value in _IMPRINT_STOP_WORDS:
+                break
+            tokens.append(value)
+        name = " ".join(tokens).replace(" ,", ",").strip(" ,")
+        names.extend(part.strip() for part in name.split(",") if part.strip())
+    return names
 _CATALOG_NAME_LINE_RE = re.compile(
     rf"^\s*[{_LATIN_LETTERS}][{_LATIN_LETTERS}'\u2019.-]+\s*,\s*"
     rf"[{_LATIN_LETTERS}][{_LATIN_LETTERS}'\u2019.-]+"
@@ -2103,6 +2138,59 @@ def spaced_optional_plural_artifacts(
     ]
 
 
+def spaced_optional_prefix_artifacts(
+    source: str,
+    text: str,
+    *,
+    structural_role: str = "body",
+) -> list[dict[str, Any]]:
+    """Report spaced Persian optional prefixes only when the source proves one.
+
+    A source form such as ``(meta)theoretical`` makes the spaced Persian prefix a spacing
+    accident. Without that source evidence a short parenthesized word followed
+    by a space (for example a list label) is ordinary prose and is not counted.
+    """
+    if structural_role != "body" or not _SOURCE_OPTIONAL_PREFIX_RE.search(source or ""):
+        return []
+    return [
+        {
+            "text": match.group(),
+            "offset": match.start(),
+            "prefix": match.group("prefix"),
+        }
+        for match in _SPACED_OPTIONAL_PREFIX_RE.finditer(text or "")
+    ]
+
+
+def _one_to_one_optional_prefixes(
+    source: str,
+    targets: list[re.Match[str]],
+    translation: str,
+) -> bool:
+    """Return whether spaced target prefixes map one-to-one onto source forms.
+
+    One source form and one spaced target always map. Repeated forms map only
+    when every source occurrence is the same prefix and stem and every target
+    occurrence is the same Persian prefix before the same stem, so count and
+    order alone never pair different words.
+    """
+    source_forms = [
+        (match.group("prefix").casefold(), match.group("stem").casefold())
+        for match in _SOURCE_OPTIONAL_PREFIX_RE.finditer(source or "")
+    ]
+    if not source_forms or len(source_forms) != len(targets):
+        return False
+    if len(source_forms) == 1:
+        return True
+    target_forms = []
+    for match in targets:
+        stem = _PERSIAN_STEM_RE.match(translation, match.end())
+        if stem is None:
+            return False
+        target_forms.append((match.group("prefix"), stem.group()))
+    return len(set(source_forms)) == 1 and len(set(target_forms)) == 1
+
+
 def repair_proven_surface_artifacts(
     source: str,
     translation: str,
@@ -2305,27 +2393,26 @@ def repair_source_grounded_language_artifacts(
         })
 
     # A spaced optional prefix, e.g. `(\u0641\u0631\u0627) \u0646\u0638\u0631\u06cc`, is closed only when the
-    # source paragraph has exactly one `(prefix)word` form and the target has
-    # exactly one spaced counterpart. Anything else stays REVIEW.
-    prefix_source = _SOURCE_OPTIONAL_PREFIX_RE.findall(source or "")
+    # spaced target forms map one-to-one onto the source paragraph's
+    # `(prefix)word` forms. Anything else stays REVIEW.
     prefix_targets = list(_SPACED_OPTIONAL_PREFIX_RE.finditer(repaired))
     if (
         structural_role == "body"
-        and len(prefix_source) == 1
-        and len(prefix_targets) == 1
+        and prefix_targets
         and "\n" not in (source or "").strip()
         and "\n" not in repaired.strip()
+        and _one_to_one_optional_prefixes(source, prefix_targets, repaired)
     ):
-        match = prefix_targets[0]
-        before = match.group()
-        after = f"({match.group('prefix')})"
-        repaired = repaired[:match.start()] + after + repaired[match.end():]
-        edits.append({
-            "type": "source_optional_prefix_spacing",
-            "before": before,
-            "after": after,
-            "offset": match.start(),
-        })
+        for match in reversed(prefix_targets):
+            before = match.group()
+            after = f"({match.group('prefix')})"
+            repaired = repaired[:match.start()] + after + repaired[match.end():]
+            edits.append({
+                "type": "source_optional_prefix_spacing",
+                "before": before,
+                "after": after,
+                "offset": match.start(),
+            })
 
     # A single orphan dash before the Persian object marker is not a
     # parenthetical aside when the source has a matched dash pair.
@@ -2802,6 +2889,7 @@ def unexpected_latin_prose(
         value for value in allowed_originals
         if value and re.search(re.escape(value), source or "", re.IGNORECASE)
     )
+    grounded_phrases.extend(_imprint_names(source))
     for phrase in grounded_phrases:
         protected_spans.extend(_grounded_phrase_spans(text, phrase))
     protected_spans.extend(_source_grounded_parenthetical_spans(source, text))

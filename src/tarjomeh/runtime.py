@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v10.40.2"
+RUNTIME_RELEASE = "v10.40.3"
 RUNTIME_REVISION = 1
 
 
@@ -98,12 +98,20 @@ def runtime_capabilities() -> dict[str, Any]:
             "name_shaped_entity_guard": True,
             "acknowledgement_style_exclusion": True,
             "advisory_critic_terminology_label": True,
+            "complete_style_pairs": True,
+            "per_paragraph_precanonical_affix_repair": True,
+            "render_identity_audit": True,
+            "reviewed_book_term_occurrences": True,
+            "job_scoped_book_term_add": True,
+            "imprint_name_grounding": True,
+            "malformed_persian_option_screening": True,
+            "prompt_duplication_measurement": True,
         },
         "policy_versions": {
             "structure_evidence": 2,
             "canonical_text": 3,
             "layer1_admission": 9,
-            "style_evidence": 7,
+            "style_evidence": 8,
             "benchmark_schema": 1,
             "checkpoint_export": 3,
             "paragraph_identity": 1,
@@ -122,10 +130,11 @@ def runtime_capabilities() -> dict[str, Any]:
             "targeted_language_repair": 2,
             "post_edit_issue_attribution": 1,
             "attachment_trial": 1,
-            "book_term_scope": 2,
-            "final_language_admission": 4,
-            "book_term_review": 1,
+            "book_term_scope": 3,
+            "final_language_admission": 5,
+            "book_term_review": 2,
             "source_term_inventory": 3,
+            "render_identity": 1,
         },
     }
 
@@ -611,6 +620,7 @@ def runtime_behavior_probes() -> dict[str, bool]:
         ),
         **_v10401_behavior_probes(),
         **_v10402_behavior_probes(),
+        **_v10403_behavior_probes(),
     }
 
 
@@ -740,5 +750,151 @@ def _v10402_behavior_probes() -> dict[str, bool]:
         ),
         "persian_book_number_never_becomes_issn": (
             mixed_repaired == mixed_target
+        ),
+    }
+
+
+def _v10403_behavior_probes() -> dict[str, bool]:
+    """Pure style, affix, render-identity and book-term checks; no LLM or DB."""
+    import hashlib
+    import re
+
+    from tarjomeh.core.config import TarjomehConfig
+    from tarjomeh.core.pipeline import repair_source_grounded_paragraphs
+    from tarjomeh.core.render_identity import RenderChangeLedger
+    from tarjomeh.core.term_notes import normalize_adjacent_original_citations
+    from tarjomeh.exporters.base import TranslatedDocument, TranslatedParagraph
+    from tarjomeh.glossary.book_review import (
+        check_reviewed_book_terms,
+        persian_option_defect,
+        resolve_reviewed_book_terms,
+    )
+    from tarjomeh.memory.manager import MemoryManager, _style_record_is_authoritative
+    from tarjomeh.quality.integrity import (
+        spaced_optional_prefix_artifacts,
+        unexpected_latin_prose,
+    )
+
+    def sha(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    scores = dict.fromkeys(("accuracy", "fluency", "terminology", "register"), 9.5)
+    cited = (
+        "این جمله نمونه‌ای روشن از نثر دانشگاهی پیوسته و دقیق است. "
+        "این ادعا در پژوهش‌های پیشین بررسی شده است (Author 1990)."
+    )
+    manager = MemoryManager(TarjomehConfig())
+    manager._update_style_profile(
+        cited, source_paragraphs=["A clear sentence. The claim (Author 1990)."],
+        source_paragraph_indices=[0], source_alignment_proven=True,
+        final_scores=scores,
+    )
+    stored = manager.style_sample_records[-1] if manager.style_sample_records else {}
+
+    legacy = MemoryManager(TarjomehConfig())
+    legacy.from_dict({
+        "style_samples": ["استدلال دانشگاهی."],
+        "style_sample_records": [{
+            "text": "استدلال دانشگاهی.", "text_hash": sha("استدلال دانشگاهی."),
+            "source_text": "The academic argument continues.",
+            "alignment_status": "exact_paragraph", "representative": True,
+            "quality_score": 100.0, "final_scores": scores, "source_chunk_index": 0,
+        }],
+        "past_translations": [{
+            "entry_id": 0, "source": "The academic argument continues.",
+            "translation": "استدلال دانشگاهی ادامه می‌یابد.", "reliable": True,
+            "chunk_index": 0,
+        }],
+    })
+
+    mixed, _ = repair_source_grounded_paragraphs(
+        "1 Introduction\n\nIt concerns (inter)national relations.",
+        "۱ مقدمه\n\nروابط (بینا) ملی.",
+        ["heading", "body"], require_monotonic=True,
+    )
+
+    def document(target: str) -> TranslatedDocument:
+        return TranslatedDocument(title="t", author="a", paragraphs=[
+            TranslatedParagraph(
+                index=0,
+                source_text="Exemplary is Jane Author's (1990) work.",
+                translated_text=target,
+                metadata={"structure_role": "body"},
+            ),
+        ], metadata={})
+
+    merged = document("اثر جین آتور (Jane Author) (1990).")
+    merge_ledger = RenderChangeLedger(merged)
+    merge_ledger.step(
+        "citation_merge", normalize_adjacent_original_citations,
+        {"Jane Author": "جین آتور"},
+    )
+    unknown = document("اثر جین آتور.")
+    unknown_ledger = RenderChangeLedger(unknown)
+    unknown.paragraphs[0].translated_text = "متنی دیگر."
+
+    paragraph = "The institution acts. Later the institution changes."
+    metadata = {
+        "paragraph_indices": [0], "source_paragraph_spans": [[0, len(paragraph)]],
+        "source_paragraph_hashes": [sha(paragraph)], "structural_roles": ["body"],
+    }
+    spans = [(m.start(), m.end()) for m in re.finditer("institution", paragraph)]
+    ticks = [
+        {"paragraph_index": 0, "paragraph_sha256": sha(paragraph), "start": start,
+         "end": end, "matched": paragraph[start:end]}
+        for start, end in spans
+    ]
+    term = {"source": "institution", "target": "نهاد", "status": "approved",
+            "scope_mode": "reviewed_occurrences"}
+    partial, partial_review = resolve_reviewed_book_terms(
+        paragraph, metadata, 1, [{**term, "approved_occurrences": ticks[:1]}])
+    both, _ = resolve_reviewed_book_terms(
+        paragraph, metadata, 1, [{**term, "approved_occurrences": ticks}])
+    both_report, both_uncertain = check_reviewed_book_terms(
+        "نهاد عمل کرد و سپس تغییر کرد.", paragraph, metadata, both)
+
+    imprint = "Typeset in Serif by Example Typesetting Limited"
+    return {
+        "complete_style_pair_is_stored_whole": bool(
+            stored.get("text") == cited
+            and stored.get("sample_scope") == "complete_paragraph"
+            and _style_record_is_authoritative(stored)
+        ),
+        "clipped_legacy_style_is_quarantined": (
+            legacy.style_sample_records[0].get("legacy_style_status")
+            == "unverifiable_quarantined"
+            and not _style_record_is_authoritative(legacy.style_sample_records[0])
+        ),
+        "prefix_repaired_per_paragraph_before_canonical": (
+            mixed == "۱ مقدمه\n\nروابط (بینا)ملی."
+        ),
+        "joined_plural_is_not_a_spaced_prefix": spaced_optional_prefix_artifacts(
+            "policy(s) shape (inter)national claims.",
+            "سیاست(ها) به مدعیات (بینا)ملی شکل دادند.",
+        ) == [],
+        "render_citation_merge_is_replay_proven": bool(
+            merge_ledger.audit()["passed"]
+            and "(Jane Author, 1990)" in merged.paragraphs[0].translated_text
+        ),
+        "render_change_without_producer_blocks": (
+            unknown_ledger.audit()["passed"] is False
+        ),
+        "partial_occurrence_ticks_are_not_prompted": bool(
+            not partial
+            and partial_review
+            and partial_review[0]["reason"] == "partial_occurrence_approval"
+        ),
+        "repeated_term_occurrences_stay_review": bool(
+            both
+            and both_report.total_checked == 0
+            and both_uncertain
+            and "rendering_count_short" in both_uncertain[0]["reasons"]
+        ),
+        "imprint_names_are_source_grounded": unexpected_latin_prose(
+            imprint, "توسط شرکت نمونه (Example Typesetting Limited).",
+        ) == [],
+        "malformed_persian_option_is_withheld": (
+            persian_option_defect("مفهوم\u200cـ\u200cنمونه")
+            == "tatweel_in_persian_option"
         ),
     }

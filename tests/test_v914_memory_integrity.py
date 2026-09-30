@@ -112,7 +112,9 @@ def test_layer_one_prompt_contains_only_terms_in_current_source() -> None:
     assert "civil society" not in context
 
 
-def test_style_memory_omits_citation_and_note_marker_sentences() -> None:
+def test_style_memory_keeps_citations_but_rejects_note_marker_sentences() -> None:
+    # v10.40.3 (R118): a style sample is the complete paragraph, so its
+    # citation sentence is kept rather than clipped away.
     manager = MemoryManager(TarjomehConfig())
     chunk = Chunk(
         index=0,
@@ -122,16 +124,26 @@ def test_style_memory_omits_citation_and_note_marker_sentences() -> None:
     )
     translation = (
         "این جمله نمونه‌ای روشن از نثر دانشگاهی پیوسته و دقیق است. "
-        "این ادعا در پژوهش‌های پیشین بررسی شده است (Tilly 1975; Spruyt 1993). "
-        "2 و این یادداشت توضیحی نباید الگوی سبک باشد."
+        "این ادعا در پژوهش‌های پیشین بررسی شده است (Tilly 1975; Spruyt 1993)."
     )
 
     policy = manager.update_after_translation(chunk, translation)
     assert policy["style_sample_added"]
     sample = manager.style_samples[0]
-    assert "Tilly" not in sample
-    assert "2 و" not in sample
-    assert "نثر دانشگاهی" in sample
+    assert sample == translation
+    assert "Tilly" in sample
+    record = manager.style_sample_records[0]
+    assert record["sample_scope"] == "complete_paragraph"
+    assert record["source_text"] == chunk.text.strip()
+
+    # A flattened note marker opening a sentence disqualifies the paragraph.
+    noted = MemoryManager(TarjomehConfig())
+    noted_policy = noted.update_after_translation(
+        chunk,
+        translation + " 2 و این یادداشت توضیحی نباید الگوی سبک باشد.",
+    )
+    assert not noted_policy["style_sample_added"]
+    assert not noted.style_samples
 
 
 def test_machine_identifiers_are_restored_exactly() -> None:

@@ -1138,6 +1138,21 @@ def _register_api(app: Flask) -> None:
                 "  providers="
                 + ", ".join(research.get("providers_used", [])),
                 f"  suggestions={len(suggested)} approved={len(approved)}",
+                # Each kind of evidence is reported on its own: a supported
+                # book identity or an attested English term is not proof of a
+                # Persian rendering, and nothing is approved without the user.
+                "  authority: identity_supported="
+                + str(sum(bool(term.get("identity_supported")) for term in suggested))
+                + " english_term_attested="
+                + str(sum(bool(term.get("exact_evidence_quote")) for term in suggested))
+                + " persian_equivalent_evidenced="
+                + str(sum(bool(term.get("term_supported")) for term in suggested))
+                + f" user_approved={len(approved)}"
+                + " malformed_persian_withheld="
+                + str(sum(
+                    bool(term.get("target_withheld_reason"))
+                    for term in research.get("terms", []) if isinstance(term, dict)
+                )),
                 f"  source_family_candidates={len(candidates)}",
                 "  approved_book_terms_active="
                 + str(len((book_term_snapshot or {}).get("applied", []))),
@@ -2285,6 +2300,11 @@ def _register_api(app: Flask) -> None:
     def api_book_term_review(job_id: str):
         from tarjomeh.jobs.database import JobDatabase, JobStatus
         from tarjomeh.glossary.manager import GlossaryManager
+        from tarjomeh.glossary.book_review import (
+            REVIEW_VERSION,
+            REVIEWED_OCCURRENCES,
+            verify_ticked_occurrences,
+        )
 
         db = JobDatabase()
         job = db.get_job(job_id)
@@ -2293,8 +2313,54 @@ def _register_api(app: Flask) -> None:
         review = db.get_job_artifact(job_id, "book_term_review_v1")
         if review is None:
             return jsonify({"error": "This job has no book-term review"}), 404
+        review_version = int(review.get("review_version", 1) or 1)
+
+        def term_occurrences(source: str, *, include_paragraph: bool = False):
+            """Recompute every body occurrence from stored chunks, or None."""
+            from tarjomeh.glossary.book_review import find_term_occurrences
+
+            index = db.get_job_artifact(job_id, "book_term_body_index_v1") or {}
+            if (
+                review_version < REVIEW_VERSION
+                or index.get("source_sha256") != review.get("source_sha256")
+            ):
+                return None
+            records = {
+                int(record["chunk_index"]): (
+                    str(record.get("text", "")), dict(record.get("metadata") or {})
+                )
+                for record in db.get_chunks(job_id)
+            }
+            return find_term_occurrences(
+                source,
+                list(index.get("entries", []) or []),
+                records,
+                include_paragraph=include_paragraph,
+            )
+
         if request.method == "GET":
-            return jsonify({"job_id": job_id, "review": review})
+            occurrence_index = request.args.get("occurrences")
+            if occurrence_index is None:
+                return jsonify({"job_id": job_id, "review": review})
+            proposals = review.get("proposals", [])
+            try:
+                proposal = proposals[int(occurrence_index)]
+            except (ValueError, IndexError, TypeError):
+                return jsonify({"error": "Unknown proposal"}), 404
+            occurrences = term_occurrences(
+                str(proposal.get("source", "")), include_paragraph=True
+            )
+            if occurrences is None:
+                return jsonify({
+                    "error": "Occurrence review needs a review created by v10.40.3 or later"
+                }), 409
+            return jsonify({
+                "job_id": job_id,
+                "index": int(occurrence_index),
+                "source": proposal.get("source", ""),
+                "occurrences": occurrences,
+                "count": len(occurrences),
+            })
         if job.get("raw_status") != JobStatus.AWAITING_BOOK_TERM_REVIEW or review.get("phase") != "awaiting":
             return jsonify({"error": "Book-term review is no longer awaiting decisions"}), 409
         try:
@@ -2307,7 +2373,64 @@ def _register_api(app: Flask) -> None:
         proposals = review.get("proposals", [])
         if not isinstance(proposals, list):
             return jsonify({"error": "Invalid review artifact"}), 409
-        if action == "decide":
+        if action == "add":
+            # A job-scoped term found in this book's body text; it never
+            # touches the shared glossary.
+            source = " ".join(str(payload.get("source", "")).split())
+            target = str(payload.get("target", "")).strip()
+            keep_original = payload.get("keep_original") is True
+            if not source or len(source) > 120:
+                return jsonify({"error": "Enter an English term (at most 120 characters)"}), 400
+            if not target and not keep_original:
+                return jsonify({"error": "Enter a Persian rendering or keep the original"}), 400
+            if any(
+                str(item.get("source", "")).casefold() == source.casefold()
+                for item in proposals
+            ):
+                index = next(
+                    position for position, item in enumerate(proposals)
+                    if str(item.get("source", "")).casefold() == source.casefold()
+                )
+                return jsonify({
+                    "error": f"{source} is already proposed; review that entry",
+                    "index": index,
+                }), 409
+            occurrences = term_occurrences(source, include_paragraph=True)
+            if occurrences is None:
+                return jsonify({
+                    "error": "Adding terms needs a review created by v10.40.3 or later"
+                }), 409
+            if not occurrences:
+                return jsonify({"error": f"{source} does not occur in the book's body text"}), 400
+            base = app.config.get("TARJOMEH_CONFIG")
+            curated = GlossaryManager()
+            if base:
+                paths = [base.glossary.path, *(base.glossary.paths or [])]
+                curated.load_many([path for path in paths if path], ignore_missing=True)
+            if any(
+                entry.source.casefold() == source.casefold()
+                and not entry.is_auto and entry.target != (source if keep_original else target)
+                for entry in curated.entries
+            ):
+                return jsonify({"error": f"Curated glossary conflict: {source}"}), 409
+            first = occurrences[0]
+            proposals.append({
+                "source": source,
+                "target": source if keep_original else target,
+                "english_explanation": " ".join(str(payload.get("sense", "")).split())[:300],
+                "source_evidence": str(first["paragraph"])[:500],
+                "source_evidence_sha256": first["paragraph_sha256"],
+                "source_count": len(occurrences),
+                "source_variants": [],
+                "origin": "user_added",
+                "status": "proposed",
+                "chapter_positions": [],
+                "sense_id": "",
+                "keep_original": keep_original,
+                "scope_mode": "evidence_paragraph",
+            })
+            review["proposals"] = proposals
+        elif action == "decide":
             decisions = payload.get("decisions", [])
             if not isinstance(decisions, list) or not decisions:
                 return jsonify({"error": "Select one or more proposals"}), 400
@@ -2351,11 +2474,38 @@ def _register_api(app: Flask) -> None:
                         or any(not isinstance(value, int) or value < 1 for value in positions)):
                     return jsonify({"error": "Invalid chapter positions"}), 400
                 scope_mode = str(decision.get("scope_mode", "evidence_paragraph"))
-                if scope_mode not in {"evidence_paragraph", "all_body"}:
+                allowed_scopes = (
+                    {"evidence_paragraph", REVIEWED_OCCURRENCES}
+                    if review_version >= REVIEW_VERSION
+                    else {"evidence_paragraph", "all_body"}
+                )
+                if scope_mode not in allowed_scopes:
+                    if scope_mode == "all_body":
+                        return jsonify({
+                            "error": "All-body approval is not accepted; review "
+                                     "each occurrence instead"
+                        }), 409
                     return jsonify({"error": "Invalid book-term scope"}), 400
                 if (status == "approved" and scope_mode == "all_body"
                         and payload.get("confirm_broad_scope") is not True):
                     return jsonify({"error": "Confirm all-body scope explicitly"}), 409
+                approved_occurrences = []
+                if status == "approved" and scope_mode == REVIEWED_OCCURRENCES:
+                    ticked = decision.get("occurrences", [])
+                    if not isinstance(ticked, list) or not ticked:
+                        return jsonify({
+                            "error": f"Tick at least one reviewed occurrence for {source}"
+                        }), 400
+                    known = term_occurrences(source)
+                    if known is None:
+                        return jsonify({"error": "Occurrence index unavailable"}), 409
+                    approved_occurrences, failure = verify_ticked_occurrences(
+                        ticked, known
+                    )
+                    if failure:
+                        return jsonify({
+                            "error": f"Occurrence check failed for {source}: {failure}"
+                        }), 409
                 evidence_hash = str(item.get("source_evidence_sha256", ""))
                 if status == "approved" and (
                     len(evidence_hash) != 64
@@ -2368,6 +2518,7 @@ def _register_api(app: Flask) -> None:
                     "chapter_positions": sorted(set(positions)),
                     "sense_id": str(decision.get("sense_id", "")).strip()[:60],
                     "scope_mode": scope_mode,
+                    "approved_occurrences": approved_occurrences,
                 })
             review["proposals"] = updated
         elif action in {"start", "skip"}:

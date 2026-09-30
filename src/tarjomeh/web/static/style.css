@@ -972,12 +972,56 @@ select {
     min-width: 0;
 }
 
+.book-term-add {
+    display: grid;
+    grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1.2fr) auto auto;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 2px;
+    border-bottom: 1px solid var(--border);
+}
+
+.book-term-add input:not([type="checkbox"]) {
+    width: 100%;
+    min-width: 0;
+}
+
+.book-term-occurrences {
+    grid-column: 2 / -1;
+    display: grid;
+    gap: 8px;
+    max-height: 40vh;
+    overflow: auto;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+}
+
+.book-term-occurrence {
+    display: grid;
+    grid-template-columns: 22px minmax(0, 1fr);
+    gap: 4px 8px;
+    align-items: start;
+}
+
+.book-term-occurrence small {
+    grid-column: 2;
+}
+
+.book-term-occurrence span {
+    grid-column: 2;
+    overflow-wrap: anywhere;
+}
+
 @media (max-width: 700px) {
     .book-term-review-row {
         grid-template-columns: 24px minmax(0, 1fr);
     }
     .book-term-controls {
         grid-column: 2;
+        grid-template-columns: minmax(0, 1fr);
+    }
+    .book-term-add {
         grid-template-columns: minmax(0, 1fr);
     }
 }

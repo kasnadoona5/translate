@@ -203,15 +203,22 @@ def test_kasra_insertion_point_steps_over_combining_mark():
     assert _extend_persian_anchor_end(text, len("انتخابی")) == len("انتخابیِ")
 
 
-def test_optional_prefix_joined_only_with_unique_source_form():
+def test_optional_prefix_joined_only_with_one_to_one_source_forms():
     once_source = "It implies (meta)theoretical pluralism in analysis."
     target = "این امر مستلزم کثرت‌گرایی (فرا) نظری در تحلیل است."
     repaired, _ = repair_source_grounded_language_artifacts(once_source, target)
     assert "(فرا)نظری" in repaired
+    # v10.40.3: identical repeated forms map one-to-one (same source prefix
+    # and stem, same Persian prefix before the same stem).
     twice_source = "Both (inter)state systems and (inter)state rivalry matter."
     twice_target = "هم نظام‌های (بینا) دولتی و هم رقابت (بینا) دولتی مهم‌اند."
-    unchanged, _ = repair_source_grounded_language_artifacts(twice_source, twice_target)
-    assert unchanged == twice_target
+    joined, _ = repair_source_grounded_language_artifacts(twice_source, twice_target)
+    assert joined.count("(بینا)دولتی") == 2
+    # Different prefixes cannot be paired by count and order alone.
+    mixed_source = "Both (meta)theoretical and (inter)state views matter."
+    mixed_target = "هم دیدگاه‌های (فرا) نظری و هم (بینا) دولتی مهم‌اند."
+    unchanged, _ = repair_source_grounded_language_artifacts(mixed_source, mixed_target)
+    assert unchanged == mixed_target
 
 
 def test_stray_dash_removed_only_when_sentence_alignment_proves_it():

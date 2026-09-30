@@ -41,7 +41,7 @@ def test_v10402_deploy_is_tarjomeh_only() -> None:
 
 
 def test_v10402_runtime_identifier_guards_are_pure_and_enabled() -> None:
-    assert runtime_capabilities()["release"] == "v10.40.2"
+    assert runtime_capabilities()["release"] == "v10.40.3"
     probes = runtime_behavior_probes()
     for name in (
         "repeated_isbn_labels_use_target_evidence",

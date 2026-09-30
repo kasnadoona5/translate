@@ -340,6 +340,15 @@ def test_warming_style_profile_labels_fallback_as_non_authoritative() -> None:
         },
     ]
 
+    for record in manager.style_sample_records:
+        # v10.40.3: authority requires proof of a complete source/target pair.
+        record.update({
+            "sample_scope": "complete_paragraph",
+            "text_hash": hashlib.sha256(record["text"].encode("utf-8")).hexdigest(),
+            "source_text_hash": hashlib.sha256(
+                record["source_text"].encode("utf-8")
+            ).hexdigest(),
+        })
     profile = manager._render_style_profile()
 
     assert "[representative]" not in profile

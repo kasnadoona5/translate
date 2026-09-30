@@ -37,8 +37,10 @@ from tarjomeh.quality.integrity import (
     repeated_persian_clause_artifacts,
     repeated_persian_word_artifacts,
     spaced_optional_plural_artifacts,
+    spaced_optional_prefix_artifacts,
     tatweel_separator_artifacts,
 )
+from tarjomeh.core.paragraph_protocol import split_paragraphs
 from tarjomeh.quality.structure_audit import audit_payload as structure_audit_payload
 
 logger = logging.getLogger(__name__)
@@ -101,6 +103,38 @@ _STYLE_SURFACE_ARTIFACT_RE = re.compile(
 )
 _STYLE_AUTHORITY_DIMENSIONS = ("accuracy", "fluency", "terminology", "register")
 _STYLE_AUTHORITY_FLOOR = 9.0
+# A style record holds one complete canonical paragraph, never an excerpt.
+# The limit makes a paragraph eligible by length; it never makes it
+# authoritative on its own.
+_STYLE_SAMPLE_MAX_CHARS = 1600
+_STYLE_SAMPLE_SCOPE = "complete_paragraph"
+_TERMINAL_PUNCTUATION_RE = re.compile(r"[.!?\u061f][\"'\u00bb)\]]*$")
+
+
+def _style_hash(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def _mask_style_citations(text: str) -> str:
+    """Drop author-year citation parentheticals for style measurement only.
+
+    Citation commas, names and years would otherwise dominate the density
+    score of academic prose. The stored sample itself keeps its citations.
+    """
+    return " ".join(_AUTHOR_YEAR_CITATION_RE.sub(" ", text or "").split())
+
+
+def _has_complete_pair_proof(record: dict[str, Any]) -> bool:
+    """Return whether a record proves it stores a complete aligned pair."""
+    text = str(record.get("text", ""))
+    source = str(record.get("source_text", ""))
+    return bool(
+        record.get("sample_scope") == _STYLE_SAMPLE_SCOPE
+        and text
+        and source
+        and record.get("text_hash") == _style_hash(text)
+        and record.get("source_text_hash") == _style_hash(source)
+    )
 
 
 def _numeric_score(value: Any) -> float:
@@ -176,11 +210,36 @@ def _summary_english_prefix_stutters(
     return findings[:12]
 
 
+def _style_paragraph_shape_reason(text: str) -> str:
+    """Return why a paragraph cannot be a complete style sample, or ""."""
+    sample = (text or "").strip()
+    if not sample:
+        return "empty_paragraph"
+    if len(sample) > _STYLE_SAMPLE_MAX_CHARS:
+        return "paragraph_exceeds_style_sample_limit"
+    if not _TERMINAL_PUNCTUATION_RE.search(sample):
+        return "incomplete_paragraph"
+    # A sentence that opens with a bare note number is a flattened note
+    # marker; such a paragraph is never style evidence.
+    if any(
+        _LEADING_NOTE_MARKER_RE.search(sentence)
+        for sentence in re.split(r"(?<=[.!?\u061f])\s+", sample)
+    ):
+        return "note_marker_sentence"
+    return ""
+
+
 def _clean_style_sample(text: str) -> str:
-    """Return a safe style-only sample without mutating persisted memory."""
-    sample = _complete_style_sample(text)
+    """Return the complete paragraph when it is safe style evidence, else "".
+
+    The paragraph is never clipped and no citation sentence is removed, so a
+    stored sample always stays aligned with its complete source paragraph.
+    Surface checks run on the unmasked text; only the Latin-word density gate
+    ignores author-year citations.
+    """
+    sample = (text or "").strip()
     if (
-        not sample
+        _style_paragraph_shape_reason(sample)
         or _STYLE_PROTOCOL_RE.search(sample)
         or _STYLE_SURFACE_ARTIFACT_RE.search(sample)
     ):
@@ -203,8 +262,9 @@ def _clean_style_sample(text: str) -> str:
         or tatweel_separator_artifacts(sample)
     ):
         return ""
-    persian_chars = len(re.findall(r"[\u0600-\u06ff]", sample))
-    latin_words = len(re.findall(r"\b[A-Za-z]{3,}\b", sample))
+    measured = _mask_style_citations(sample)
+    persian_chars = len(re.findall(r"[\u0600-\u06ff]", measured))
+    latin_words = len(re.findall(r"\b[A-Za-z]{3,}\b", measured))
     if persian_chars < 8 or latin_words > max(12, persian_chars // 18):
         return ""
     return sample
@@ -215,6 +275,8 @@ def _style_record_is_authoritative(record: dict[str, Any]) -> bool:
     if not bool(record.get("representative")):
         return False
     if record.get("alignment_status") != "exact_paragraph":
+        return False
+    if not _has_complete_pair_proof(record):
         return False
     if _is_paratext_style_source(str(record.get("source_text", ""))):
         return False
@@ -227,6 +289,7 @@ def _style_record_is_authoritative(record: dict[str, Any]) -> bool:
     if source and (
         _source_style_contradiction(source, cleaned)
         or spaced_optional_plural_artifacts(source, cleaned)
+        or spaced_optional_prefix_artifacts(source, cleaned)
         or re.search(r"\s[\u2013\u2014]\s+\u0631\u0627(?:\s|$)", cleaned)
     ):
         return False
@@ -245,6 +308,7 @@ def _style_record_is_prompt_safe(record: dict[str, Any]) -> bool:
     target = str(record.get("text", ""))
     return bool(
         record.get("alignment_status") == "exact_paragraph"
+        and _has_complete_pair_proof(record)
         and source
         and not _is_paratext_style_source(source)
         and not _NON_PROSE_RE.search(source)
@@ -279,22 +343,29 @@ def _style_sample_quality(text: str) -> dict[str, Any]:
     """
     sample = _clean_style_sample(text)
     if not sample:
-        return {"approved": False, "score": 0.0, "reasons": ["surface_artifact"]}
+        return {
+            "approved": False,
+            "score": 0.0,
+            "reasons": [_style_paragraph_shape_reason(text) or "surface_artifact"],
+        }
+    # Density is measured on the prose with author-year citations masked; the
+    # stored sample keeps them.
+    measured = _mask_style_citations(sample) or sample
     sentences = [
-        value.strip() for value in re.split(r"(?<=[.!?\u061f])\s+", sample)
+        value.strip() for value in re.split(r"(?<=[.!?\u061f])\s+", measured)
         if value.strip()
-    ] or [sample]
+    ] or [measured]
     word_counts = [
         len(re.findall(r"[\u0600-\u06ffA-Za-z0-9]+", sentence))
         for sentence in sentences
     ]
     maximum_words = max(word_counts, default=0)
-    punctuation = len(re.findall(r"[,،;؛:]", sample))
+    punctuation = len(re.findall(r"[,،;؛:]", measured))
     punctuation_per_sentence = punctuation / max(1, len(sentences))
     parenthetical_chars = sum(
-        len(match.group()) for match in re.finditer(r"\([^()]*\)", sample)
+        len(match.group()) for match in re.finditer(r"\([^()]*\)", measured)
     )
-    parenthetical_ratio = parenthetical_chars / max(1, len(sample))
+    parenthetical_ratio = parenthetical_chars / max(1, len(measured))
     reasons: list[str] = []
     if maximum_words > 65:
         reasons.append("sentence_too_dense_for_style_anchor")
@@ -319,40 +390,6 @@ def _style_sample_quality(text: str) -> dict[str, Any]:
         "parenthetical_ratio": round(parenthetical_ratio, 4),
         "sample": sample,
     }
-
-
-def _complete_style_sample(text: str, preferred_limit: int = 900) -> str:
-    """Select complete early sentences without cutting a sample mid-sentence."""
-    normalized = " ".join((text or "").split())
-    if not normalized:
-        return ""
-    sentences = re.findall(r".*?(?:[.!?\u061f]+(?:[\"'\u00bb)]*)|$)", normalized)
-    complete = [
-        sentence.strip() for sentence in sentences
-        if sentence.strip() and re.search(r"[.!?\u061f][\"'\u00bb)]*$", sentence.strip())
-    ]
-    clean_complete = [
-        sentence for sentence in complete
-        if not _AUTHOR_YEAR_CITATION_RE.search(sentence)
-        and not _LEADING_NOTE_MARKER_RE.search(sentence)
-    ]
-    if not complete:
-        return normalized if len(normalized) <= preferred_limit else ""
-    if not clean_complete:
-        return ""
-    complete = clean_complete
-
-    selected: list[str] = []
-    for sentence in complete:
-        candidate = " ".join(selected + [sentence])
-        if selected and len(candidate) > preferred_limit:
-            break
-        if not selected and len(sentence) > 1400:
-            return ""
-        selected.append(sentence)
-        if len(candidate) >= preferred_limit:
-            break
-    return " ".join(selected)
 
 
 @dataclass
@@ -532,8 +569,44 @@ class MemoryManager:
                 "short_term_trust": [pair.trust for pair in pairs],
                 "proper_noun_count": len(self.proper_nouns),
                 "has_bilingual_summary": bool(bilingual_summary_str),
+                # Measurement only: exact duplicates that reach the prompt.
+                "duplication": self._duplication_measurement(
+                    relevant_long_term, pairs
+                ),
             },
         )
+
+    @staticmethod
+    def _duplication_measurement(
+        relevant_long_term: list[dict[str, Any]],
+        pairs: list[Any],
+    ) -> dict[str, Any]:
+        """Report exact Layer-3/Layer-4 text duplicates without removing any.
+
+        The existing dedupe keys on source, target and trust, so an entry with
+        identical text but a different trust label still reaches the prompt.
+        """
+        short_texts = {
+            (_style_hash(pair.source), _style_hash(pair.translation))
+            for pair in pairs
+        }
+        same_text = [
+            pair for pair in relevant_long_term
+            if (
+                _style_hash(str(pair["source"])),
+                _style_hash(str(pair["translation"])),
+            ) in short_texts
+        ]
+        return {
+            "short_term_translation_sha256": [
+                _style_hash(pair.translation.strip()) for pair in pairs
+            ],
+            "layer3_layer4_same_text_different_trust": len(same_text),
+            "layer3_layer4_same_text_chars": sum(
+                len(str(pair["source"])) + len(str(pair["translation"]))
+                for pair in same_text
+            ),
+        }
 
     def update_after_translation(
         self,
@@ -812,9 +885,13 @@ class MemoryManager:
                 else ""
             )
             quality["source_text"] = source_paragraph
+            # Exact only when the stored sample is the whole paragraph and the
+            # paragraph itself is proven aligned with its source paragraph.
+            complete_sample = str(quality.get("sample", "")) == paragraph.strip()
             quality["alignment_status"] = (
                 "exact_paragraph"
-                if source_alignment_proven and source_paragraph and source_paragraph_indices
+                if complete_sample
+                and source_alignment_proven and source_paragraph and source_paragraph_indices
                 and len(source_paragraph_indices) == len(
                     [part for part in re.split(r"\n\s*\n", translation or "")
                      if part.strip()]
@@ -827,6 +904,8 @@ class MemoryManager:
             if source_paragraph:
                 if spaced_optional_plural_artifacts(source_paragraph, paragraph):
                     structural_contradictions.append("spaced_optional_plural")
+                if spaced_optional_prefix_artifacts(source_paragraph, paragraph):
+                    structural_contradictions.append("spaced_optional_prefix")
                 if re.search(r"\s[\u2013\u2014]\s+\u0631\u0627(?:\s|$)", paragraph):
                     structural_contradictions.append("detached_object_marker")
             if structural_contradictions:
@@ -892,11 +971,18 @@ class MemoryManager:
                 and local_index < len(source_paragraph_indices)
                 else local_index
             )
+            source_text = str(selected.get("source_text", ""))
             record = {
                 "text": text,
-                "source_text": str(selected.get("source_text", "")),
+                "source_text": source_text,
                 "alignment_status": selected.get("alignment_status", "uncertain"),
-                "text_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "sample_scope": (
+                    _STYLE_SAMPLE_SCOPE
+                    if selected.get("alignment_status") == "exact_paragraph"
+                    else "uncertain"
+                ),
+                "text_hash": _style_hash(text),
+                "source_text_hash": _style_hash(source_text),
                 "paragraph_role": paragraph_role,
                 "book_genre": book_genre,
                 "representative": bool(representative),
@@ -904,9 +990,7 @@ class MemoryManager:
                 "quality_score": float(selected.get("score", 0.0)),
                 "source_chunk_index": source_chunk_index,
                 "source_paragraph_index": source_paragraph_index,
-                "canonical_paragraph_hash": hashlib.sha256(
-                    text.encode("utf-8")
-                ).hexdigest(),
+                "canonical_paragraph_hash": _style_hash(text),
                 "final_scores": {
                     key: _numeric_score(value)
                     for key, value in dict(final_scores or {}).items()
@@ -996,6 +1080,11 @@ class MemoryManager:
 
         self.style_profile = self._render_style_profile()
         report["profile_status"] = self._style_profile_status()
+        report["style_block_characters"] = len(self.style_profile)
+        report["authoritative_sample_count"] = sum(
+            _style_record_is_authoritative(record)
+            for record in self.style_sample_records
+        )
         report["representative_sample_count"] = sum(
             bool(record.get("representative"))
             for record in self.style_sample_records
@@ -1413,3 +1502,47 @@ class MemoryManager:
             data.get("short_term_context", []),
             window_size=self.short_term.window_size
         )
+        self._verify_legacy_style_records()
+
+    def _verify_legacy_style_records(self) -> dict[str, int]:
+        """Prove or quarantine style records saved before complete-pair storage.
+
+        A legacy record regains authority only when its text and source are an
+        exact complete paragraph pair of its chunk in canonical Layer-3 memory.
+        Unverifiable records stay stored for audit but never teach style.
+        """
+        counts = {"verified": 0, "quarantined": 0}
+        pairs_by_chunk: dict[int, list[tuple[str, str]]] = {}
+        for entry in self.long_term.serialize():
+            chunk_index = entry.get("chunk_index")
+            source_parts = split_paragraphs(str(entry.get("source", "")))
+            target_parts = split_paragraphs(str(entry.get("translation", "")))
+            if isinstance(chunk_index, int) and len(source_parts) == len(target_parts):
+                pairs_by_chunk.setdefault(chunk_index, []).extend(
+                    zip(source_parts, target_parts, strict=True)
+                )
+        for record in self.style_sample_records:
+            if record.get("sample_scope") == _STYLE_SAMPLE_SCOPE:
+                continue
+            text = str(record.get("text", ""))
+            source = str(record.get("source_text", ""))
+            chunk_index = record.get("source_chunk_index")
+            proven = bool(
+                text
+                and source
+                and isinstance(chunk_index, int)
+                and (source, text) in pairs_by_chunk.get(chunk_index, [])
+            )
+            if proven:
+                record.update({
+                    "sample_scope": _STYLE_SAMPLE_SCOPE,
+                    "text_hash": _style_hash(text),
+                    "source_text_hash": _style_hash(source),
+                    "canonical_paragraph_hash": _style_hash(text),
+                    "legacy_style_status": "verified_complete_pair",
+                })
+                counts["verified"] += 1
+            else:
+                record["legacy_style_status"] = "unverifiable_quarantined"
+                counts["quarantined"] += 1
+        return counts

@@ -544,9 +544,14 @@ class BookResearcher:
                 for excerpt in term_supporting_excerpts
             ):
                 exact_evidence_quote = ""
+            from tarjomeh.glossary.book_review import persian_option_defect
+
+            target_defect = persian_option_defect(target)
             terms.append({
                 "source": source,
-                "target": target,
+                "target": "" if target_defect else target,
+                "withheld_target": target if target_defect else "",
+                "target_withheld_reason": target_defect,
                 "context": str(item.get("context", "")).strip()[:1000],
                 "domain": str(item.get("domain", "")).strip()
                 or self.config.translation.domain,

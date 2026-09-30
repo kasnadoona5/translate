@@ -106,6 +106,15 @@ def test_style_projection_rejects_contaminated_samples_without_mutating_state() 
             ("accuracy", "fluency", "terminology", "register"), 9.5
         ),
     }]
+    for record in manager.style_sample_records:
+        # v10.40.3: authority requires proof of a complete source/target pair.
+        record.update({
+            "sample_scope": "complete_paragraph",
+            "text_hash": hashlib.sha256(record["text"].encode("utf-8")).hexdigest(),
+            "source_text_hash": hashlib.sha256(
+                record["source_text"].encode("utf-8")
+            ).hexdigest(),
+        })
     projected = manager.get_context_for_chunk(SimpleNamespace(text="state")).style_profile
     assert "see Example" not in projected
     assert clean in projected

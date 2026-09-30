@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import ast
 import re
 from pathlib import Path
@@ -138,6 +139,15 @@ def test_established_style_profile_excludes_fallback_evidence() -> None:
         }
         for index, sample in enumerate(samples)
     ]
+    for record in manager.style_sample_records:
+        # v10.40.3: authority requires proof of a complete source/target pair.
+        record.update({
+            "sample_scope": "complete_paragraph",
+            "text_hash": hashlib.sha256(record["text"].encode("utf-8")).hexdigest(),
+            "source_text_hash": hashlib.sha256(
+                record["source_text"].encode("utf-8")
+            ).hexdigest(),
+        })
 
     profile = manager._render_style_profile()
 
@@ -209,7 +219,7 @@ def test_v1033_runtime_and_release_scripts_are_complete() -> None:
     manifest = runtime_capabilities()
     probes = runtime_behavior_probes()
 
-    assert manifest["release"] == "v10.40.2"
+    assert manifest["release"] == "v10.40.3"
     assert manifest["capabilities"]["post_rollback_final_evidence"] is True
     assert manifest["capabilities"]["objective_candidate_ranking"] is True
     assert manifest["capabilities"]["contextual_morphology_quarantine"] is True

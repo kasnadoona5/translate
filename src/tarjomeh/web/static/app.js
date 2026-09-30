@@ -7,6 +7,7 @@ let comparisonBaselineJobId = null;
 let currentEvaluationId = null;
 let detectedChapters = [];
 let currentBookTermReviewJobId = null;
+let currentBookTermReviewVersion = 1;
 
 // Initialize on page load
 document.addEventListener("DOMContentLoaded", () => {
@@ -986,7 +987,9 @@ async function openBookTermReview(jobId) {
         return;
     }
     currentBookTermReviewJobId = jobId;
+    currentBookTermReviewVersion = Number(data.review.review_version || 1);
     list.replaceChildren();
+    if (currentBookTermReviewVersion >= 2) list.appendChild(buildAddBookTermForm());
     (data.review.proposals || []).forEach((term, index) => {
         const row = document.createElement("div");
         row.className = "book-term-review-row";
@@ -999,7 +1002,10 @@ async function openBookTermReview(jobId) {
         evidence.textContent = [
             term.source_evidence || "",
             (term.source_variants || []).length ? `Variants: ${term.source_variants.join(", ")}` : "",
-            term.english_explanation || ""
+            term.english_explanation || "",
+            term.target_withheld_reason
+                ? `Persian option withheld (${term.target_withheld_reason}); enter your own rendering`
+                : ""
         ].filter(Boolean).join(" | ");
         const status = document.createElement("small");
         status.textContent = term.status || "proposed";
@@ -1018,8 +1024,12 @@ async function openBookTermReview(jobId) {
         const scope = document.createElement("select");
         scope.className = "book-term-scope";
         scope.setAttribute("aria-label", `Approval scope for ${term.source}`);
-        [{ value: "evidence_paragraph", label: "Evidence paragraph" },
-         { value: "all_body", label: "All body paragraphs" }].forEach(option => {
+        const scopeOptions = currentBookTermReviewVersion >= 2
+            ? [{ value: "evidence_paragraph", label: "Evidence paragraph" },
+               { value: "reviewed_occurrences", label: "Reviewed occurrences" }]
+            : [{ value: "evidence_paragraph", label: "Evidence paragraph" },
+               { value: "all_body", label: "All body paragraphs" }];
+        scopeOptions.forEach(option => {
             const element = document.createElement("option");
             element.value = option.value;
             element.textContent = option.label;
@@ -1044,10 +1054,124 @@ async function openBookTermReview(jobId) {
         originalLabel.append(original, " Keep original");
         controls.append(target, scope, chapters, sense, originalLabel);
         row.append(selection, details, controls);
+        if (currentBookTermReviewVersion >= 2) {
+            const reviewButton = document.createElement("button");
+            reviewButton.type = "button";
+            reviewButton.className = "btn btn-secondary btn-compact";
+            reviewButton.textContent = "Review occurrences";
+            reviewButton.onclick = () => loadBookTermOccurrences(row, index);
+            const occurrences = document.createElement("div");
+            occurrences.className = "book-term-occurrences";
+            occurrences.hidden = true;
+            controls.append(reviewButton);
+            row.append(occurrences);
+        }
         list.appendChild(row);
     });
     section.hidden = false;
     section.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function buildAddBookTermForm() {
+    // A job-scoped term found in this book's body text; never the shared glossary.
+    const form = document.createElement("div");
+    form.className = "book-term-add";
+    const source = document.createElement("input");
+    source.className = "book-term-add-source";
+    source.placeholder = "English term from the book";
+    source.setAttribute("aria-label", "English term to add");
+    const target = document.createElement("input");
+    target.className = "book-term-add-target";
+    target.dir = "rtl";
+    target.placeholder = "Persian rendering";
+    target.setAttribute("aria-label", "Persian rendering for the added term");
+    const sense = document.createElement("input");
+    sense.className = "book-term-add-sense";
+    sense.placeholder = "Sense in this book (optional)";
+    sense.setAttribute("aria-label", "Sense of the added term");
+    const original = document.createElement("input");
+    original.type = "checkbox";
+    original.className = "book-term-add-original";
+    const originalLabel = document.createElement("label");
+    originalLabel.append(original, " Keep original");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "btn btn-secondary btn-compact";
+    button.textContent = "Add term";
+    button.onclick = () => addBookTerm(form);
+    form.append(source, target, sense, originalLabel, button);
+    return form;
+}
+
+async function addBookTerm(form) {
+    if (!currentBookTermReviewJobId) return;
+    const payload = {
+        action: "add",
+        source: form.querySelector(".book-term-add-source").value.trim(),
+        target: form.querySelector(".book-term-add-target").value.trim(),
+        sense: form.querySelector(".book-term-add-sense").value.trim(),
+        keep_original: form.querySelector(".book-term-add-original").checked
+    };
+    const response = await fetch(authUrl(`/api/jobs/${currentBookTermReviewJobId}/book-term-review`), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) { alert(data.error || "Could not add the term"); return; }
+    openBookTermReview(currentBookTermReviewJobId);
+}
+
+async function loadBookTermOccurrences(row, index) {
+    const panel = row.querySelector(".book-term-occurrences");
+    const response = await fetch(authUrl(
+        `/api/jobs/${currentBookTermReviewJobId}/book-term-review?occurrences=${index}`));
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) { alert(data.error || "Could not load occurrences"); return; }
+    panel.replaceChildren();
+    const summary = document.createElement("p");
+    summary.textContent = `${data.count} occurrence(s). Read each paragraph and tick only ` +
+        "the occurrences that carry the approved meaning. Keys: j/k or arrows move, space ticks.";
+    panel.appendChild(summary);
+    (data.occurrences || []).forEach(item => {
+        const entry = document.createElement("label");
+        entry.className = "book-term-occurrence";
+        const tick = document.createElement("input");
+        tick.type = "checkbox";
+        tick.className = "book-term-occurrence-tick";
+        tick.dataset.identity = JSON.stringify({
+            paragraph_index: item.paragraph_index,
+            paragraph_sha256: item.paragraph_sha256,
+            start: item.start, end: item.end, matched: item.matched
+        });
+        const where = document.createElement("small");
+        where.textContent = `Chapter ${item.chapter_position}, paragraph ${item.paragraph_index + 1}`;
+        const text = document.createElement("span");
+        const paragraph = item.paragraph || "";
+        const mark = document.createElement("mark");
+        mark.textContent = paragraph.slice(item.start, item.end);
+        text.append(paragraph.slice(0, item.start), mark, paragraph.slice(item.end));
+        entry.append(tick, where, text);
+        panel.appendChild(entry);
+    });
+    panel.onkeydown = event => {
+        const ticks = Array.from(panel.querySelectorAll(".book-term-occurrence-tick"));
+        const current = ticks.indexOf(document.activeElement);
+        const step = ["ArrowDown", "j"].includes(event.key) ? 1
+            : ["ArrowUp", "k"].includes(event.key) ? -1 : 0;
+        if (!step || !ticks.length) return;
+        event.preventDefault();
+        const next = ticks[Math.min(ticks.length - 1, Math.max(0, current + step))];
+        next.focus();
+        next.closest(".book-term-occurrence").scrollIntoView({ block: "nearest" });
+    };
+    panel.hidden = false;
+    const first = panel.querySelector(".book-term-occurrence-tick");
+    if (first) first.focus();
+}
+
+function tickedBookTermOccurrences(row) {
+    return Array.from(row.querySelectorAll(".book-term-occurrence-tick:checked"))
+        .map(tick => JSON.parse(tick.dataset.identity));
 }
 
 async function decideBookTerms(status, all) {
@@ -1059,11 +1183,21 @@ async function decideBookTerms(status, all) {
     const broad = status === "approved" && chosen.some(row =>
         row.querySelector(".book-term-scope").value === "all_body");
     if (broad && !confirm("Apply selected terms in all body paragraphs where their meaning is unambiguous?")) return;
+    const unreviewed = status === "approved" ? chosen.filter(row =>
+        row.querySelector(".book-term-scope").value === "reviewed_occurrences"
+        && !tickedBookTermOccurrences(row).length) : [];
+    if (unreviewed.length) {
+        alert("Review occurrences and tick at least one for: " + unreviewed
+            .map(row => row.querySelector(".book-term-details strong").textContent).join(", "));
+        return;
+    }
     const decisions = chosen.map(row => ({
         index: Number(row.dataset.index), status,
         target: row.querySelector(".book-term-target").value,
         keep_original: row.querySelector(".book-term-original").checked,
         scope_mode: row.querySelector(".book-term-scope").value,
+        occurrences: row.querySelector(".book-term-scope").value === "reviewed_occurrences"
+            ? tickedBookTermOccurrences(row) : [],
         chapter_positions: row.querySelector(".book-term-chapters").value
             .split(",").map(value => value.trim()).filter(Boolean).map(Number),
         sense_id: row.querySelector(".book-term-sense").value.trim()

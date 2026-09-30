@@ -28,6 +28,10 @@ from tarjomeh.core.structured_output import (
     parse_structured_output,
     protocol_artifacts,
 )
+from tarjomeh.core.render_identity import (
+    RenderChangeLedger,
+    compare_docx_to_rendered,
+)
 from tarjomeh.core.paragraph_protocol import (
     decode_paragraphs,
     encode_paragraphs,
@@ -107,6 +111,7 @@ from tarjomeh.quality.integrity import (
     source_unjustified_repeated_word_artifacts,
     detached_ezafe_artifacts,
     spaced_optional_plural_artifacts,
+    spaced_optional_prefix_artifacts,
     tatweel_separator_artifacts,
     foreign_script_artifacts,
     markup_wrapper_artifacts,
@@ -394,6 +399,149 @@ def restore_document_source_identifiers(
     }
 
 
+def _exact_paragraph_spans(text: str) -> list[tuple[int, int, str]]:
+    """Return non-empty paragraph spans with their exact offsets in *text*."""
+    value = text or ""
+    spans: list[tuple[int, int, str]] = []
+    cursor = 0
+    for separator in [*re.finditer(r"\n\s*\n", value), None]:
+        stop = separator.start() if separator else len(value)
+        raw = value[cursor:stop]
+        if raw.strip():
+            start = cursor + len(raw) - len(raw.lstrip())
+            end = stop - (len(raw) - len(raw.rstrip()))
+            spans.append((start, end, value[start:end]))
+        if separator:
+            cursor = separator.end()
+    return spans
+
+
+def _language_repair_is_monotonic(
+    source: str,
+    before: str,
+    candidate: str,
+    *,
+    structural_role: str,
+    allowed_originals: list[str] | tuple[str, ...],
+    chapter_title: str,
+) -> tuple[bool, str]:
+    """Apply the final-render admission gate to one proposed repair."""
+    if not (
+        extract_identifiers(candidate) == extract_identifiers(before)
+        and extract_labeled_identifier_surfaces(candidate)
+        == extract_labeled_identifier_surfaces(before)
+    ):
+        return False, "identifier_change"
+    before_quality, after_quality = (
+        audit_translation_language(
+            source,
+            value,
+            allowed_originals=allowed_originals,
+            structural_role=structural_role,
+            chapter_title=chapter_title,
+        )
+        for value in (before, candidate)
+    )
+    if not _language_quality_strictly_improves(before_quality, after_quality):
+        return False, "no_monotonic_language_improvement"
+    return True, ""
+
+
+def repair_source_grounded_paragraphs(
+    source_text: str,
+    translation: str,
+    roles: list[str],
+    *,
+    require_monotonic: bool,
+    allowed_originals: list[str] | tuple[str, ...] = (),
+    chapter_title: str = "",
+    whole_chunk_audit_role: str = "body",
+) -> tuple[str, dict[str, Any]]:
+    """Run the source-grounded language repair on each aligned paragraph.
+
+    Each target paragraph is repaired against its own source paragraph and
+    structural role, so paragraph-local rules (optional affixes, orphan
+    dashes) also apply inside multi-paragraph chunks. With
+    ``require_monotonic`` a paragraph edit is kept only when identifiers are
+    unchanged and objective language artifacts strictly decrease. A chunk
+    whose paragraphs do not align keeps the whole-chunk behaviour.
+    """
+    source_parts = split_paragraphs(source_text)
+    spans = _exact_paragraph_spans(translation)
+    if not spans or len(source_parts) != len(spans) or len(roles) != len(spans):
+        candidate, report = repair_source_grounded_language_artifacts(
+            source_text,
+            translation,
+            structural_role="body" if set(roles) == {"body"} else "mixed",
+        )
+        report = {**report, "scope": "whole_chunk_unaligned", "rejected": []}
+        if require_monotonic and candidate != translation:
+            accepted, reason = _language_repair_is_monotonic(
+                source_text,
+                translation,
+                candidate,
+                structural_role=whole_chunk_audit_role,
+                allowed_originals=allowed_originals,
+                chapter_title=chapter_title,
+            )
+            if not accepted:
+                report["rejected"] = [{
+                    "paragraph_index": None,
+                    "reason": reason,
+                    "repairs": report.get("repairs", []),
+                }]
+                report["repairs"] = []
+                report["repair_count"] = 0
+                candidate = translation
+        return candidate, report
+
+    repaired = translation
+    repairs: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for index in reversed(range(len(spans))):
+        start, end, before = spans[index]
+        candidate, report = repair_source_grounded_language_artifacts(
+            source_parts[index],
+            before,
+            structural_role=roles[index],
+        )
+        if candidate == before:
+            continue
+        paragraph_repairs = [
+            {**item, "paragraph_index": index}
+            for item in report.get("repairs", [])
+        ]
+        if require_monotonic:
+            accepted, reason = _language_repair_is_monotonic(
+                source_parts[index],
+                before,
+                candidate,
+                structural_role=roles[index],
+                allowed_originals=allowed_originals,
+                chapter_title=chapter_title,
+            )
+            if not accepted:
+                rejected.append({
+                    "paragraph_index": index,
+                    "reason": reason,
+                    "repairs": paragraph_repairs,
+                })
+                continue
+        repaired = repaired[:start] + candidate + repaired[end:]
+        repairs = paragraph_repairs + repairs
+    rejected.reverse()
+    return repaired, {
+        "scope": "aligned_paragraphs",
+        "repair_count": len(repairs),
+        "repairs": repairs,
+        "rejected": rejected,
+        "policy": (
+            "source-grounded language repair applied per aligned paragraph; "
+            "no terminology or proposition is rewritten"
+        ),
+    }
+
+
 def repair_document_source_grounded_language_artifacts(
     document: TranslatedDocument,
     *,
@@ -586,6 +734,9 @@ def audit_translation_language(
     spaced_optional_plural = spaced_optional_plural_artifacts(
         source, translation, structural_role=structural_role
     )
+    spaced_optional_prefix = spaced_optional_prefix_artifacts(
+        source, translation, structural_role=structural_role
+    )
     tatweel_separators = tatweel_separator_artifacts(translation)
     explanatory_dashes = _unbalanced_explanatory_dash_artifacts(
         source,
@@ -605,6 +756,7 @@ def audit_translation_language(
             or parentheses
             or detached_ezafe
             or spaced_optional_plural
+            or spaced_optional_prefix
             or tatweel_separators
             or explanatory_dashes
         ),
@@ -630,6 +782,8 @@ def audit_translation_language(
         "detached_ezafe_artifacts": detached_ezafe,
         "spaced_optional_plural_count": len(spaced_optional_plural),
         "spaced_optional_plural_artifacts": spaced_optional_plural,
+        "spaced_optional_prefix_count": len(spaced_optional_prefix),
+        "spaced_optional_prefix_artifacts": spaced_optional_prefix,
         "tatweel_separator_count": len(tatweel_separators),
         "tatweel_separator_artifacts": tatweel_separators,
         "unbalanced_explanatory_dash_count": len(explanatory_dashes),
@@ -697,9 +851,13 @@ def audit_document_final_text(
             "combining_mark_after_parenthesis": r"\)\s*[\u064b-\u0652\u0654]",
         }
         if source_has_optional_affix:
+            # Letters only, so list numbers such as `(2)` never match, and a
+            # `(` glued to the previous word opens a joined suffix (a joined
+            # plural before the next word), not a spaced prefix.
+            letters = r"\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff"
             report_patterns["spaced_optional_affix"] = (
-                r"(?:[\u0600-\u06ff\u200c]+\s+\([\u0600-\u06ff]{1,5}\)"
-                r"|\([\u0600-\u06ff]{1,5}\)\s+[\u0600-\u06ff])"
+                rf"(?:[{letters}\u200c]+\s+\([{letters}]{{1,5}}\)(?![{letters}])"
+                rf"|(?<![{letters}\u200c])\([{letters}]{{1,5}}\)\s+[{letters}])"
             )
         for check_id, pattern in report_patterns.items():
             for match in re.finditer(pattern, target):
@@ -2032,6 +2190,7 @@ _LANGUAGE_QUALITY_COUNT_FIELDS = (
     "parenthesis_artifact_count",
     "detached_ezafe_count",
     "spaced_optional_plural_count",
+    "spaced_optional_prefix_count",
     "tatweel_separator_count",
     "unbalanced_explanatory_dash_count",
 )
@@ -6876,6 +7035,7 @@ class TranslationPipeline:
             review = self.db.get_job_artifact(job_id, "book_term_review_v1")
             if not is_resume:
                 from tarjomeh.context.book_term_candidates import collect_book_term_candidates
+                from tarjomeh.glossary.book_review import persian_option_defect
 
                 proposals: list[dict[str, Any]] = []
                 candidate_keys: set[str] = set()
@@ -6884,9 +7044,13 @@ class TranslationPipeline:
                     candidate_keys.add(source.casefold())
                     proposed = next((value for key, value in book_review_auto_terms.items()
                                      if key.casefold() == source.casefold()), {})
+                    proposed_target = str(proposed.get("target", ""))
+                    target_defect = persian_option_defect(proposed_target)
                     proposals.append({
                         "source": source,
-                        "target": str(proposed.get("target", "")),
+                        "target": "" if target_defect else proposed_target,
+                        "withheld_target": proposed_target if target_defect else "",
+                        "target_withheld_reason": target_defect,
                         "english_explanation": str(proposed.get("context", "")),
                         "source_evidence": candidate["source_evidence"],
                         "source_evidence_sha256": candidate["source_evidence_sha256"],
@@ -6910,9 +7074,13 @@ class TranslationPipeline:
                                                   paragraph.text, re.IGNORECASE)), "")
                     if not evidence_paragraph:
                         continue
+                    proposed_target = str(proposed.get("target", ""))
+                    target_defect = persian_option_defect(proposed_target)
                     proposals.append({
                         "source": source,
-                        "target": str(proposed.get("target", "")),
+                        "target": "" if target_defect else proposed_target,
+                        "withheld_target": proposed_target if target_defect else "",
+                        "target_withheld_reason": target_defect,
                         "english_explanation": str(proposed.get("context", "")),
                         "source_evidence": evidence_paragraph[:500],
                         "source_evidence_sha256": hashlib.sha256(
@@ -6927,11 +7095,27 @@ class TranslationPipeline:
                         "keep_original": False,
                         "scope_mode": "evidence_paragraph",
                     })
+                from tarjomeh.glossary.book_review import (
+                    REVIEW_VERSION,
+                    body_paragraph_index,
+                )
+
                 review = {
                     "phase": "awaiting",
+                    "review_version": REVIEW_VERSION,
                     "source_sha256": self.db.get_job_source_hash(job_id),
                     "proposals": proposals,
                 }
+                # Locations (no text) of every body paragraph, so the reviewer
+                # can list and verify each occurrence of any term.
+                self.db.save_job_artifact(
+                    job_id,
+                    "book_term_body_index_v1",
+                    {
+                        "source_sha256": review["source_sha256"],
+                        "entries": body_paragraph_index(research_document, chunks),
+                    },
+                )
                 self.db.save_job_artifact(job_id, "book_term_review_v1", review)
             if not review or review.get("phase") == "awaiting":
                 self.db.update_job_status(job_id, JobStatus.AWAITING_BOOK_TERM_REVIEW)
@@ -7921,7 +8105,10 @@ class TranslationPipeline:
             self.warnings.append(warning)
             self.db.log_event(job_id, "WARNING", warning)
 
-        protocol_audit = sanitize_document_protocol_artifacts(trans_doc)
+        render_ledger = RenderChangeLedger(trans_doc)
+        protocol_audit = render_ledger.step(
+            "protocol_sanitation", sanitize_document_protocol_artifacts
+        )
         self.db.save_job_artifact(
             job_id, "protocol_integrity_audit", protocol_audit
         )
@@ -7947,20 +8134,23 @@ class TranslationPipeline:
         proper_nouns = memory_manager.proper_nouns.inline_eligible_nouns()
         noun_aliases = memory_manager.proper_nouns.inline_eligible_aliases()
         noun_categories = dict(noun_state.get("categories", {}))
+        render_ledger.set_authorized(dict(proper_nouns), noun_aliases)
         if note_mode in {"inline", "both"}:
-            initial_anchor_audit = ensure_inline_proper_noun_originals(
-                trans_doc,
+            initial_anchor_audit = render_ledger.step(
+                "inline_original_anchor",
+                ensure_inline_proper_noun_originals,
                 proper_nouns,
                 typographer,
                 noun_categories,
                 aliases=noun_aliases,
                 return_report=True,
             )
-        citation_audit = normalize_adjacent_original_citations(
-            trans_doc, proper_nouns
+        citation_audit = render_ledger.step(
+            "citation_merge", normalize_adjacent_original_citations, proper_nouns
         )
-        fragment_audit = reconcile_redundant_original_fragments(
-            trans_doc, proper_nouns
+        fragment_audit = render_ledger.step(
+            "original_fragment_reconciliation",
+            reconcile_redundant_original_fragments, proper_nouns
         )
         self.db.save_job_artifact(
             job_id, "original_fragment_reconciliation", fragment_audit
@@ -7968,8 +8158,9 @@ class TranslationPipeline:
         self.db.save_job_artifact(
             job_id, "citation_format_audit", citation_audit
         )
-        original_audit = audit_inline_english_originals(
-            trans_doc,
+        original_audit = render_ledger.step(
+            "english_original_cleanup",
+            audit_inline_english_originals,
             proper_nouns if note_mode in {"inline", "both"} else {},
         )
         original_audit["stage"] = "before_final_anchor_reconciliation"
@@ -7988,8 +8179,9 @@ class TranslationPipeline:
             f"citations_preserved={original_audit['preserved_citation_count']}.",
         )
         if note_mode in {"inline", "both"}:
-            final_anchor_audit = ensure_inline_proper_noun_originals(
-                trans_doc,
+            final_anchor_audit = render_ledger.step(
+                "inline_original_anchor",
+                ensure_inline_proper_noun_originals,
                 proper_nouns,
                 typographer,
                 noun_categories,
@@ -8023,11 +8215,12 @@ class TranslationPipeline:
                     f"repositioned={anchor_audit.get('repositioned_count', 0)}, "
                     f"ambiguous={anchor_audit.get('ambiguous_count', 0)}.",
                 )
-            final_citation_audit = normalize_adjacent_original_citations(
-                trans_doc, proper_nouns
+            final_citation_audit = render_ledger.step(
+                "citation_merge", normalize_adjacent_original_citations, proper_nouns
             )
-            final_fragment_audit = reconcile_redundant_original_fragments(
-                trans_doc, proper_nouns
+            final_fragment_audit = render_ledger.step(
+                "original_fragment_reconciliation",
+                reconcile_redundant_original_fragments, proper_nouns
             )
             fragment_audit = {
                 "removed_count": int(fragment_audit.get("removed_count", 0))
@@ -8051,8 +8244,9 @@ class TranslationPipeline:
             )
             post_fragment_anchor_audit = cast(
                 dict[str, Any],
-                ensure_inline_proper_noun_originals(
-                    trans_doc,
+                render_ledger.step(
+                    "inline_original_anchor",
+                    ensure_inline_proper_noun_originals,
                     proper_nouns,
                     typographer,
                     noun_categories,
@@ -8060,8 +8254,8 @@ class TranslationPipeline:
                     return_report=True,
                 ),
             )
-            post_fragment_citation_audit = normalize_adjacent_original_citations(
-                trans_doc, proper_nouns
+            post_fragment_citation_audit = render_ledger.step(
+                "citation_merge", normalize_adjacent_original_citations, proper_nouns
             )
             anchor_audit.update({
                 "post_fragment_inserted_count": int(
@@ -8086,8 +8280,9 @@ class TranslationPipeline:
             self.db.save_job_artifact(
                 job_id, "citation_format_audit", citation_audit
             )
-            original_audit = audit_inline_english_originals(
-                trans_doc, proper_nouns
+            original_audit = render_ledger.step(
+                "english_original_cleanup",
+                audit_inline_english_originals, proper_nouns
             )
             original_audit["stage"] = "after_fragment_cleanup"
             original_audit_passes.append(original_audit)
@@ -8124,8 +8319,9 @@ class TranslationPipeline:
             self.db.log_event(job_id, "WARNING", warning)
 
         rendered_language_repair = (
-            repair_document_source_grounded_language_artifacts(
-                trans_doc,
+            render_ledger.step(
+                "render_language_repair",
+                repair_document_source_grounded_language_artifacts,
                 allowed_originals=tuple(proper_nouns),
             )
         )
@@ -8140,7 +8336,9 @@ class TranslationPipeline:
                 f"{rendered_language_repair['accepted_repair_count']} repair(s).",
             )
 
-        identifier_audit = restore_document_source_identifiers(trans_doc)
+        identifier_audit = render_ledger.step(
+            "identifier_restoration", restore_document_source_identifiers
+        )
         self.db.save_job_artifact(
             job_id, "final_identifier_reconciliation", identifier_audit
         )
@@ -8151,8 +8349,9 @@ class TranslationPipeline:
                 f"{identifier_audit['repair_count']} repair(s).",
             )
 
-        final_original_audit = audit_inline_english_originals(
-            trans_doc,
+        final_original_audit = render_ledger.step(
+            "english_original_cleanup",
+            audit_inline_english_originals,
             proper_nouns if note_mode in {"inline", "both"} else {},
         )
         final_original_audit["stage"] = "final_rendered_document"
@@ -8190,10 +8389,8 @@ class TranslationPipeline:
 
         exporter_cls = get_exporter(self.config.output.format)
         exporter = exporter_cls(self.config.to_dict().get(self.config.output.format))
-        exporter.export(
-            document=trans_doc,
-            output_path=output_path,
-            bilingual_mode=self.config.output.bilingual_mode,
+        self._export_with_render_identity(
+            job_id, trans_doc, exporter, output_path, render_ledger, self.config.output.format
         )
 
         # Update Job Status in DB
@@ -8211,6 +8408,59 @@ class TranslationPipeline:
             progress_callback("Complete", 1.0, f"Finished! Output at {output_path.name}")
 
         return PipelineResult(output_path, total_chunks, duration, warnings=self.warnings)
+
+    def _export_with_render_identity(
+        self,
+        job_id: str,
+        trans_doc: TranslatedDocument,
+        exporter: Any,
+        output_path: Path,
+        render_ledger: RenderChangeLedger,
+        output_format: str,
+    ) -> None:
+        """Publish an export only when canonical, rendered and DOCX text agree.
+
+        The file is written to a temporary sibling, the render ledger proves
+        every canonical-to-rendered change, and a DOCX is read back with the
+        exporter's own mapping. Only then does the file replace the output.
+        """
+        output_path = Path(output_path)
+        temporary = output_path.with_name(
+            f".{output_path.stem}.render-{uuid.uuid4().hex}.tmp{output_path.suffix}"
+        )
+        bilingual_mode = self.config.output.bilingual_mode
+        try:
+            exporter.export(
+                document=trans_doc,
+                output_path=temporary,
+                bilingual_mode=bilingual_mode,
+            )
+            render_audit = render_ledger.audit()
+            if str(output_format).lower() == "docx":
+                delivered_audit = compare_docx_to_rendered(
+                    trans_doc, temporary, bilingual_mode
+                )
+            else:
+                delivered_audit = {
+                    "mapping": "not_verified_for_format",
+                    "format": str(output_format),
+                    "passed": True,
+                    "mismatches": [],
+                }
+            identity = {
+                "render": render_audit,
+                "delivered": delivered_audit,
+                "passed": bool(render_audit["passed"] and delivered_audit["passed"]),
+            }
+            self.db.save_job_artifact(job_id, "render_identity_audit", identity)
+            if not identity["passed"]:
+                raise RuntimeError(
+                    "Export blocked: delivered text differs from canonical text "
+                    "without a proven render change (see render_identity_audit)."
+                )
+            temporary.replace(output_path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def export_completed_job(
         self,
@@ -8266,7 +8516,10 @@ class TranslationPipeline:
         _save_canonical_document_identity(
             self.db, job_id, trans_doc, chunks, translations
         )
-        protocol_audit = sanitize_document_protocol_artifacts(trans_doc)
+        render_ledger = RenderChangeLedger(trans_doc)
+        protocol_audit = render_ledger.step(
+            "protocol_sanitation", sanitize_document_protocol_artifacts
+        )
         self.db.save_job_artifact(
             job_id, "protocol_integrity_audit", protocol_audit
         )
@@ -8282,22 +8535,25 @@ class TranslationPipeline:
         noun_categories = dict(noun_state.get("categories", {})) \
             if isinstance(noun_state, dict) else {}
         noun_aliases = _inline_aliases_from_state(noun_state)
+        render_ledger.set_authorized(dict(proper_nouns), noun_aliases)
 
         typographer = PersianTypographer(self.config.to_dict().get("persian"))
         if note_mode in {"inline", "both"}:
-            initial_anchor_audit = ensure_inline_proper_noun_originals(
-                trans_doc,
+            initial_anchor_audit = render_ledger.step(
+                "inline_original_anchor",
+                ensure_inline_proper_noun_originals,
                 dict(proper_nouns),
                 typographer,
                 noun_categories,
                 aliases=noun_aliases,
                 return_report=True,
             )
-        citation_audit = normalize_adjacent_original_citations(
-            trans_doc, dict(proper_nouns)
+        citation_audit = render_ledger.step(
+            "citation_merge", normalize_adjacent_original_citations, dict(proper_nouns)
         )
-        fragment_audit = reconcile_redundant_original_fragments(
-            trans_doc, dict(proper_nouns)
+        fragment_audit = render_ledger.step(
+            "original_fragment_reconciliation",
+            reconcile_redundant_original_fragments, dict(proper_nouns)
         )
         self.db.save_job_artifact(
             job_id, "original_fragment_reconciliation", fragment_audit
@@ -8305,8 +8561,9 @@ class TranslationPipeline:
         self.db.save_job_artifact(
             job_id, "citation_format_audit", citation_audit
         )
-        original_audit = audit_inline_english_originals(
-            trans_doc,
+        original_audit = render_ledger.step(
+            "english_original_cleanup",
+            audit_inline_english_originals,
             dict(proper_nouns) if note_mode in {"inline", "both"} else {},
         )
         original_audit["stage"] = "before_final_anchor_reconciliation"
@@ -8319,8 +8576,9 @@ class TranslationPipeline:
         if note_mode in {"inline", "both"}:
             anchor_audit = cast(
                 dict[str, Any],
-                ensure_inline_proper_noun_originals(
-                    trans_doc,
+                render_ledger.step(
+                    "inline_original_anchor",
+                    ensure_inline_proper_noun_originals,
                     dict(proper_nouns),
                     typographer,
                     noun_categories,
@@ -8340,11 +8598,12 @@ class TranslationPipeline:
             self.db.save_job_artifact(
                 job_id, "english_original_anchor_audit", anchor_audit
             )
-            final_citation_audit = normalize_adjacent_original_citations(
-                trans_doc, dict(proper_nouns)
+            final_citation_audit = render_ledger.step(
+                "citation_merge", normalize_adjacent_original_citations, dict(proper_nouns)
             )
-            final_fragment_audit = reconcile_redundant_original_fragments(
-                trans_doc, dict(proper_nouns)
+            final_fragment_audit = render_ledger.step(
+                "original_fragment_reconciliation",
+                reconcile_redundant_original_fragments, dict(proper_nouns)
             )
             fragment_audit = {
                 "removed_count": int(fragment_audit.get("removed_count", 0))
@@ -8368,8 +8627,9 @@ class TranslationPipeline:
             )
             post_fragment_anchor_audit = cast(
                 dict[str, Any],
-                ensure_inline_proper_noun_originals(
-                    trans_doc,
+                render_ledger.step(
+                    "inline_original_anchor",
+                    ensure_inline_proper_noun_originals,
                     dict(proper_nouns),
                     typographer,
                     noun_categories,
@@ -8377,8 +8637,8 @@ class TranslationPipeline:
                     return_report=True,
                 ),
             )
-            post_fragment_citation_audit = normalize_adjacent_original_citations(
-                trans_doc, dict(proper_nouns)
+            post_fragment_citation_audit = render_ledger.step(
+                "citation_merge", normalize_adjacent_original_citations, dict(proper_nouns)
             )
             anchor_audit.update({
                 "post_fragment_inserted_count": int(
@@ -8403,8 +8663,9 @@ class TranslationPipeline:
             self.db.save_job_artifact(
                 job_id, "citation_format_audit", citation_audit
             )
-            original_audit = audit_inline_english_originals(
-                trans_doc, dict(proper_nouns)
+            original_audit = render_ledger.step(
+                "english_original_cleanup",
+                audit_inline_english_originals, dict(proper_nouns)
             )
             original_audit["stage"] = "after_fragment_cleanup"
             original_audit_passes.append(original_audit)
@@ -8445,20 +8706,24 @@ class TranslationPipeline:
                 aliases=noun_aliases,
             )
         rendered_language_repair = (
-            repair_document_source_grounded_language_artifacts(
-                trans_doc,
+            render_ledger.step(
+                "render_language_repair",
+                repair_document_source_grounded_language_artifacts,
                 allowed_originals=tuple(proper_nouns),
             )
         )
         self.db.save_job_artifact(
             job_id, "final_rendered_language_repair", rendered_language_repair
         )
-        identifier_audit = restore_document_source_identifiers(trans_doc)
+        identifier_audit = render_ledger.step(
+            "identifier_restoration", restore_document_source_identifiers
+        )
         self.db.save_job_artifact(
             job_id, "final_identifier_reconciliation", identifier_audit
         )
-        final_original_audit = audit_inline_english_originals(
-            trans_doc,
+        final_original_audit = render_ledger.step(
+            "english_original_cleanup",
+            audit_inline_english_originals,
             dict(proper_nouns) if note_mode in {"inline", "both"} else {},
         )
         final_original_audit["stage"] = "final_rendered_document"
@@ -8481,10 +8746,8 @@ class TranslationPipeline:
         )
         exporter_cls = get_exporter(fmt)
         exporter = exporter_cls(self.config.to_dict().get(fmt))
-        exporter.export(
-            document=trans_doc,
-            output_path=output_path,
-            bilingual_mode=self.config.output.bilingual_mode,
+        self._export_with_render_identity(
+            job_id, trans_doc, exporter, output_path, render_ledger, fmt
         )
         if persist_job_output:
             self.db.update_job_status(
@@ -8725,52 +8988,31 @@ class TranslationPipeline:
             self.config.to_dict().get("persian")
         ).process(translation)
         typography_changed = canonical != translation
-        repair_candidate, repair_report = (
-            repair_source_grounded_language_artifacts(
-                chunk.text,
-                canonical,
-                structural_role=(
-                    "body" if set(_paragraph_structural_roles(
-                        chunk, len(split_paragraphs(canonical))
-                    )) == {"body"} else "mixed"
-                ),
-            )
+        # Paragraph-local repairs (optional affixes, orphan dashes) are
+        # admitted here, before the canonical hash, one aligned paragraph at a
+        # time with the same monotonic gate the final render uses.
+        repair_candidate, repair_report = repair_source_grounded_paragraphs(
+            chunk.text,
+            canonical,
+            _paragraph_structural_roles(chunk, len(split_paragraphs(canonical))),
+            require_monotonic=True,
+            allowed_originals=protected_english_originals(chunk.text, canonical),
+            chapter_title=str(chunk.metadata.get("chapter_title", "")),
+            whole_chunk_audit_role=str(chunk.metadata.get("structure_role", "body")),
         )
-        repair_proposed = repair_candidate != canonical
+        repair_proposed = bool(
+            repair_report.get("repairs") or repair_report.get("rejected")
+        )
         repair_accepted = False
         structure_conflicts: list[dict[str, Any]] = []
-        if repair_proposed:
+        if repair_candidate != canonical:
             identifiers_unchanged = (
                 extract_identifiers(repair_candidate)
                 == extract_identifiers(canonical)
                 and extract_labeled_identifier_surfaces(repair_candidate)
                 == extract_labeled_identifier_surfaces(canonical)
             )
-            role = str(chunk.metadata.get("structure_role", "body"))
-            chapter_title = str(chunk.metadata.get("chapter_title", ""))
-            allowed_originals = protected_english_originals(
-                chunk.text, canonical
-            )
-            before_quality = audit_translation_language(
-                chunk.text,
-                canonical,
-                allowed_originals=allowed_originals,
-                structural_role=role,
-                chapter_title=chapter_title,
-            )
-            after_quality = audit_translation_language(
-                chunk.text,
-                repair_candidate,
-                allowed_originals=allowed_originals,
-                structural_role=role,
-                chapter_title=chapter_title,
-            )
-            repair_accepted = bool(
-                identifiers_unchanged
-                and _language_quality_strictly_improves(
-                    before_quality, after_quality
-                )
-            )
+            repair_accepted = identifiers_unchanged
             if repair_accepted:
                 canonical = repair_candidate
         canonical, citation_house_style_changes = (
@@ -9778,8 +10020,26 @@ class TranslationPipeline:
             total_estimated_tokens = int(self.llm_client.count_tokens(user_content))
         except Exception:
             total_estimated_tokens = None
+        duplication = dict(
+            (mem_context.references or {}).get("duplication", {}) or {}
+        )
+        previous_hash = hashlib.sha256(
+            (prev_trans or "").strip().encode("utf-8")
+        ).hexdigest()
+        previous_in_layer4 = bool(prev_trans) and previous_hash in {
+            str(value) for value in duplication.pop("short_term_translation_sha256", [])
+        }
+        duplication.update({
+            "previous_translation_sha256": previous_hash if prev_trans else "",
+            "previous_translation_in_layer4": previous_in_layer4,
+            "previous_translation_duplicate_chars": (
+                len(prev_trans) if previous_in_layer4 else 0
+            ),
+            "policy": "measurement_only_no_prompt_change",
+        })
         self.db.log_chunk_event(job_id, idx, "translation_prompt_composition", {
             "components": component_sizes,
+            "duplication": duplication,
             "total_chars": len(user_content),
             "total_estimated_tokens": total_estimated_tokens,
             "book_research_enabled": bool(self.config.translation.enable_book_research),
@@ -12656,14 +12916,13 @@ Output ONLY the corrected Persian translation.
             )
 
         language_candidate, safe_language_repair = (
-            repair_source_grounded_language_artifacts(
+            repair_source_grounded_paragraphs(
                 chunk.text,
                 translation,
-                structural_role=(
-                    "body" if set(_paragraph_structural_roles(
-                        chunk, len(split_paragraphs(translation))
-                    )) == {"body"} else "mixed"
+                _paragraph_structural_roles(
+                    chunk, len(split_paragraphs(translation))
                 ),
+                require_monotonic=False,
             )
         )
         language_candidate, source_bound_repairs = (

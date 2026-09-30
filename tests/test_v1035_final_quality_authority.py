@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from types import SimpleNamespace
 
 from tarjomeh.core.pipeline import (
@@ -190,6 +191,14 @@ def test_style_authority_requires_clean_surface_and_all_dimensions_at_nine() -> 
             "register": 9.2,
         },
     }
+    # v10.40.3: authority requires proof of a complete source/target pair.
+    record.update({
+        "sample_scope": "complete_paragraph",
+        "text_hash": hashlib.sha256(record["text"].encode("utf-8")).hexdigest(),
+        "source_text_hash": hashlib.sha256(
+            record["source_text"].encode("utf-8")
+        ).hexdigest(),
+    })
     assert not _style_record_is_authoritative(record)
     record["final_scores"]["fluency"] = 9.0
     assert _style_record_is_authoritative(record)

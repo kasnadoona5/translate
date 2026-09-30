@@ -11,6 +11,9 @@ from tarjomeh.exporters.term_notes import document_term_notes, paragraph_note_pa
 
 logger = logging.getLogger(__name__)
 
+# Heading of the appended term-note section (Persian "notes").
+NOTES_HEADING = "\u06cc\u0627\u062f\u062f\u0627\u0634\u062a\u200c\u0647\u0627"
+
 _LATIN_PARENTHETICAL_RE = re.compile(r"\([^()\n]*[A-Za-z][^()\n]*\)")
 _PERSIAN_LETTER_RE = re.compile(
     r"[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]"
@@ -527,7 +530,7 @@ class DocxExporter(BaseExporter):
 
         notes = document_term_notes(document)
         if notes:
-            heading = doc.add_heading("یادداشت‌ها", level=1)
+            heading = doc.add_heading(NOTES_HEADING, level=1)
             make_paragraph_rtl(heading, heading=True)
             for note in notes:
                 note_para = doc.add_paragraph()
