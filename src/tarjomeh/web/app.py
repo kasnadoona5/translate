@@ -2315,6 +2315,16 @@ def _register_api(app: Flask) -> None:
             return jsonify({"error": "This job has no book-term review"}), 404
         review_version = int(review.get("review_version", 1) or 1)
 
+        def job_curated_glossary() -> GlossaryManager:
+            base = app.config.get("TARJOMEH_CONFIG")
+            stored = (job.get("config") or {}).get("glossary") or {}
+            primary = stored.get("path", base.glossary.path if base else "")
+            extras = stored.get("paths", base.glossary.paths if base else []) or []
+            curated = GlossaryManager()
+            paths = [primary, *extras]
+            curated.load_many([path for path in paths if path], ignore_missing=True)
+            return curated
+
         def term_occurrences(source: str, *, include_paragraph: bool = False):
             """Recompute every body occurrence from stored chunks, or None."""
             from tarjomeh.glossary.book_review import find_term_occurrences
@@ -2402,11 +2412,7 @@ def _register_api(app: Flask) -> None:
                 }), 409
             if not occurrences:
                 return jsonify({"error": f"{source} does not occur in the book's body text"}), 400
-            base = app.config.get("TARJOMEH_CONFIG")
-            curated = GlossaryManager()
-            if base:
-                paths = [base.glossary.path, *(base.glossary.paths or [])]
-                curated.load_many([path for path in paths if path], ignore_missing=True)
+            curated = job_curated_glossary()
             if any(
                 entry.source.casefold() == source.casefold()
                 and not entry.is_auto and entry.target != (source if keep_original else target)
@@ -2438,11 +2444,7 @@ def _register_api(app: Flask) -> None:
                 item.get("status") == "approved" for item in decisions
             ) and payload.get("confirm_bulk") is not True:
                 return jsonify({"error": "Confirm bulk approval explicitly"}), 409
-            base = app.config.get("TARJOMEH_CONFIG")
-            curated = GlossaryManager()
-            if base:
-                paths = [base.glossary.path, *(base.glossary.paths or [])]
-                curated.load_many([path for path in paths if path], ignore_missing=True)
+            curated = job_curated_glossary()
             updated = copy.deepcopy(proposals)
             seen: set[int] = set()
             for decision in decisions:

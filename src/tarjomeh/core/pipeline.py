@@ -7113,7 +7113,7 @@ class TranslationPipeline:
                     "book_term_body_index_v1",
                     {
                         "source_sha256": review["source_sha256"],
-                        "entries": body_paragraph_index(research_document, chunks),
+                        "entries": body_paragraph_index(document, chunks),
                     },
                 )
                 self.db.save_job_artifact(job_id, "book_term_review_v1", review)
@@ -8444,13 +8444,17 @@ class TranslationPipeline:
                 delivered_audit = {
                     "mapping": "not_verified_for_format",
                     "format": str(output_format),
-                    "passed": True,
+                    "verified": False,
+                    "passed": None,
                     "mismatches": [],
                 }
             identity = {
                 "render": render_audit,
                 "delivered": delivered_audit,
-                "passed": bool(render_audit["passed"] and delivered_audit["passed"]),
+                "passed": bool(
+                    render_audit["passed"]
+                    and (delivered_audit["passed"] if str(output_format).lower() == "docx" else True)
+                ),
             }
             self.db.save_job_artifact(job_id, "render_identity_audit", identity)
             if not identity["passed"]:

@@ -378,11 +378,11 @@ def expected_delivered_units(
     document: TranslatedDocument,
     bilingual_mode: str,
 ) -> list[dict[str, Any]] | None:
-    """Mirror the DOCX exporter's target-only layout as comparable text units."""
+    """Mirror the DOCX exporter's text units for every supported layout."""
     from tarjomeh.exporters.docx_exporter import NOTES_HEADING, contents_display_title
     from tarjomeh.exporters.term_notes import document_term_notes, paragraph_note_parts
 
-    if bilingual_mode != "target_only":
+    if bilingual_mode not in {"target_only", "inline", "side_by_side"}:
         return None
 
     def delivered(text: str, metadata: dict[str, Any]) -> str:
@@ -395,38 +395,59 @@ def expected_delivered_units(
 
     units: list[dict[str, Any]] = []
     paragraphs = document.paragraphs
-    position = 0
-    while position < len(paragraphs):
-        paragraph = paragraphs[position]
-        if (
-            paragraph.metadata.get("suppress_empty_target_export")
-            and not paragraph.translated_text.strip()
-        ):
-            position += 1
-            continue
-        if paragraph.metadata.get("structure_role") == "contents_entry":
-            rows = []
-            while (
-                position < len(paragraphs)
-                and paragraphs[position].metadata.get("structure_role") == "contents_entry"
-            ):
-                entry = paragraphs[position]
-                rows.append([
-                    delivered(
-                        contents_display_title(entry.translated_text, entry.metadata),
-                        entry.metadata,
-                    ),
-                    str(entry.metadata.get("toc_page_label", "")),
-                ])
-                position += 1
-            units.append({"kind": "table", "rows": rows})
-            continue
+    if bilingual_mode == "side_by_side":
         units.append({
-            "kind": "paragraph",
-            "paragraph_index": paragraph.index,
-            "text": delivered(paragraph.translated_text, paragraph.metadata),
+            "kind": "table",
+            "rows": [
+                [paragraph.source_text, delivered(paragraph.translated_text, paragraph.metadata)]
+                for paragraph in paragraphs
+            ],
         })
-        position += 1
+    elif bilingual_mode == "inline":
+        for paragraph in paragraphs:
+            units.append({
+                "kind": "paragraph",
+                "paragraph_index": paragraph.index,
+                "text": paragraph.source_text,
+            })
+            units.append({
+                "kind": "paragraph",
+                "paragraph_index": paragraph.index,
+                "text": delivered(paragraph.translated_text, paragraph.metadata),
+            })
+    else:
+        position = 0
+        while position < len(paragraphs):
+            paragraph = paragraphs[position]
+            if (
+                paragraph.metadata.get("suppress_empty_target_export")
+                and not paragraph.translated_text.strip()
+            ):
+                position += 1
+                continue
+            if paragraph.metadata.get("structure_role") == "contents_entry":
+                rows = []
+                while (
+                    position < len(paragraphs)
+                    and paragraphs[position].metadata.get("structure_role") == "contents_entry"
+                ):
+                    entry = paragraphs[position]
+                    rows.append([
+                        delivered(
+                            contents_display_title(entry.translated_text, entry.metadata),
+                            entry.metadata,
+                        ),
+                        str(entry.metadata.get("toc_page_label", "")),
+                    ])
+                    position += 1
+                units.append({"kind": "table", "rows": rows})
+                continue
+            units.append({
+                "kind": "paragraph",
+                "paragraph_index": paragraph.index,
+                "text": delivered(paragraph.translated_text, paragraph.metadata),
+            })
+            position += 1
     notes = document_term_notes(document)
     if notes:
         units.append({"kind": "paragraph", "paragraph_index": None, "text": NOTES_HEADING})
@@ -472,9 +493,9 @@ def compare_docx_to_rendered(
     expected = expected_delivered_units(document, bilingual_mode)
     if expected is None:
         return {
-            "mapping": "not_verified_for_bilingual_mode",
+            "mapping": "unsupported_bilingual_mode",
             "bilingual_mode": bilingual_mode,
-            "passed": True,
+            "passed": False,
             "mismatches": [],
         }
     actual = read_docx_units(path)
@@ -500,7 +521,8 @@ def compare_docx_to_rendered(
         if len(mismatches) >= 20:
             break
     return {
-        "mapping": "exporter_target_only",
+        "mapping": f"exporter_{bilingual_mode}",
+        "verified": True,
         "expected_unit_count": len(expected),
         "actual_unit_count": len(actual),
         "mismatches": mismatches,

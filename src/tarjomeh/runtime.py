@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v10.40.3"
+RUNTIME_RELEASE = "v20"
 RUNTIME_REVISION = 1
 
 
@@ -106,6 +106,8 @@ def runtime_capabilities() -> dict[str, Any]:
             "imprint_name_grounding": True,
             "malformed_persian_option_screening": True,
             "prompt_duplication_measurement": True,
+            "selected_chapter_term_index": True,
+            "bilingual_docx_identity": True,
         },
         "policy_versions": {
             "structure_evidence": 2,
@@ -130,11 +132,11 @@ def runtime_capabilities() -> dict[str, Any]:
             "targeted_language_repair": 2,
             "post_edit_issue_attribution": 1,
             "attachment_trial": 1,
-            "book_term_scope": 3,
+            "book_term_scope": 4,
             "final_language_admission": 5,
             "book_term_review": 2,
             "source_term_inventory": 3,
-            "render_identity": 1,
+            "render_identity": 2,
         },
     }
 
@@ -621,6 +623,7 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v10401_behavior_probes(),
         **_v10402_behavior_probes(),
         **_v10403_behavior_probes(),
+        **_v20_behavior_probes(),
     }
 
 
@@ -896,5 +899,43 @@ def _v10403_behavior_probes() -> dict[str, bool]:
         "malformed_persian_option_is_withheld": (
             persian_option_defect("مفهوم\u200cـ\u200cنمونه")
             == "tatweel_in_persian_option"
+        ),
+    }
+
+
+def _v20_behavior_probes() -> dict[str, bool]:
+    """Pure selected-chapter and bilingual-layout checks; no I/O or LLM calls."""
+    from tarjomeh.chunking.chunker import SemanticChunker
+    from tarjomeh.core.pipeline import apply_chapter_selection, build_chapter_manifest
+    from tarjomeh.core.render_identity import expected_delivered_units
+    from tarjomeh.exporters.base import TranslatedDocument, TranslatedParagraph
+    from tarjomeh.glossary.book_review import body_paragraph_index
+    from tarjomeh.parsers.base import Chapter, Document, Paragraph, Section
+
+    front = Chapter("Copyright", sections=[Section("", 2, [Paragraph("Copyright 2026.")])])
+    body = Chapter("Chapter 1", sections=[Section("", 2, [
+        Paragraph("The institution mediates the argument.")
+    ])])
+    document = Document("Example", chapters=[front, body])
+    build_chapter_manifest(document)
+    selected = apply_chapter_selection(document, [2])
+    chunks = SemanticChunker(
+        max_tokens=1000, overlap_sentences=0,
+        token_counter=lambda text: len(text.split()),
+    ).chunk(selected)
+    index = body_paragraph_index(selected, chunks)
+    rendered = TranslatedDocument(title="Example", author="", paragraphs=[
+        TranslatedParagraph(index=0, source_text="A source.", translated_text="متن.")
+    ])
+    inline = expected_delivered_units(rendered, "inline")
+    side_by_side = expected_delivered_units(rendered, "side_by_side")
+    return {
+        "selected_chapter_body_terms_keep_local_indices": bool(
+            len(index) == 1 and index[0]["paragraph_index"] == 0
+            and index[0]["chapter_position"] == 2
+        ),
+        "bilingual_docx_layouts_have_expected_text_units": bool(
+            inline and [item["text"] for item in inline] == ["A source.", "متن."]
+            and side_by_side and side_by_side[0]["rows"] == [["A source.", "متن."]]
         ),
     }
