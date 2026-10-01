@@ -33,7 +33,7 @@ def setup_logging(verbose: bool = False) -> None:
         level=level,
         format="%(message)s",
         datefmt="[%X]",
-        handlers=[RichHandler(console=console, rich_tracebacks=True)],
+        handlers=[RichHandler(console=Console(stderr=True), rich_tracebacks=True)],
     )
 
 

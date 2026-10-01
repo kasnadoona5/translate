@@ -664,6 +664,17 @@ _GERUND_PHRASE_CONTINUATIONS = frozenset({
     "their", "his", "her", "our",
 })
 _TRAILING_COMBINING_MARK_RE = re.compile(r"[\u064b-\u0652\u0654\u0670]\s*$")
+
+
+def _has_quantified_object_context(source_words: list[str]) -> bool:
+    # "record every observed value" is a passage instruction. Do not
+    # blacklist its first word: "record type" can name a technical term.
+    return bool(
+        len(source_words) >= 3
+        and source_words[1].casefold() in _SOURCE_DETERMINER_LEADERS
+    )
+
+
 _PERSIAN_CONTEXT_EDGE_WORDS = frozenset({
     "\u0648", "\u0627\u0632", "\u0628\u0647", "\u062f\u0631", "\u0628\u0627",
     "\u0631\u0627", "\u06a9\u0647", "\u0627\u06cc\u0646", "\u0622\u0646",
@@ -764,6 +775,8 @@ def automatic_terminology_risk_reasons(
     reasons: list[str] = []
     if not source_words or not target_words:
         return ["missing_lexical_span"]
+    if _has_quantified_object_context(source_words):
+        reasons.append("quantified_object_passage_fragment")
     if len(source_words) == 1 and len(target_words) > 3:
         reasons.append("target_scope_wider_than_source")
     # Persian lexical equivalents are often shorter than English compounds.

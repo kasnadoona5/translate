@@ -3,7 +3,59 @@
 English-to-Persian academic book translation with persistent terminology,
 book-level memory, independent quality review, and RTL document export.
 
-This README documents release **v10.34.0**. Tarjomeh is licensed under AGPL-3.0.
+Current runtime release: **v20.2**. Tarjomeh is licensed under AGPL-3.0.
+
+## v20.2 Quality Safeguards
+
+This release preserves the translation/critique/refinement stages, refiner veto,
+four memory layers, style memory, chapter checkpoints and export identity gates.
+It adds no unconditional LLM call or hard prompt-character limit.
+
+- Funding and author-disclaimer paragraphs cannot teach prose style, including
+  warming-up fallback samples. Complete source/target evidence is retained.
+- Quantified verb fragments remain passage evidence, not reusable terminology.
+- Previous text is referenced once only when the committed source, target and
+  trust exactly match a complete rendered Layer-4 entry. Legacy identities or
+  different trust labels are never guessed or merged.
+- Explicit uploaded-edition dates are recorded separately by fact kind; conflicting
+  or unverified publication sentences are withheld from advisory research context.
+  Original research evidence and warnings remain available for review.
+- Clearly located body-prose double commas are repaired before canonical hashing.
+  Quotations, citation digits, structural rows and uncertain cases remain REVIEW.
+- Existing model prompts require contextual evidence for antecedent changes and
+  clear academic Persian without losing complexity or adding implications. These
+  instructions are not a guarantee of semantic accuracy.
+- Capability JSON uses stdout alone; library logs go to stderr.
+
+Book-term review remains unchecked by default. User-approved, occurrence-scoped
+terms remain mandatory only within their proven scope; suggestions never acquire
+authority automatically. The focused attachment reviewer remains off. Tables and
+prose-year digit changes are not part of this release.
+
+### Deployment And Audit
+
+Do not start or resume a job while deploying. Run the tagged
+`scripts/deploy_tarjomeh_v202.sh` on the VPS. It takes an integrity-checked SQLite
+snapshot, preserves configuration and the local glossary, frees only verified
+unused Tarjomeh space, checks health and exact image revision, and compares
+9router ID, image, start time and mounts. It stops if safe space is insufficient.
+It does not prune Docker globally or remove 9router backups/images. As previously
+chosen for this small VPS, the old Tarjomeh image is removed only after successful
+validation; the fresh database/configuration backup remains.
+
+After a fresh checkpoint, use its exact job ID:
+
+```bash
+JOB=YOUR_NEW_JOB_ID
+bash scripts/audit_tarjomeh_v202_reports.sh "$JOB"
+bash scripts/audit_tarjomeh_v202_companion.sh "$JOB"
+```
+
+Reports include QA, memory/style authority, research evidence, canonical/export
+identity and active/lifetime LLM attempts, served models, retries and failures.
+Hard failures cannot satisfy PASS. Send the source, DOCX, QA, both memory reports,
+both companion reports and deployment/console logs for source-based review.
+Local tests and one checkpoint do not certify full-book translation quality.
 
 Source mirrors:
 

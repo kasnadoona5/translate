@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v20"
+RUNTIME_RELEASE = "v20.2"
 RUNTIME_REVISION = 1
 
 
@@ -108,12 +108,18 @@ def runtime_capabilities() -> dict[str, Any]:
             "prompt_duplication_measurement": True,
             "selected_chapter_term_index": True,
             "bilingual_docx_identity": True,
+            "funding_disclaimer_style_exclusion": True,
+            "quantified_object_term_quarantine": True,
+            "exact_previous_context_reference": True,
+            "source_edition_metadata_guard": True,
+            "precanonical_duplicate_comma_repair": True,
+            "machine_json_separate_logging": True,
         },
         "policy_versions": {
             "structure_evidence": 2,
             "canonical_text": 3,
-            "layer1_admission": 9,
-            "style_evidence": 8,
+            "layer1_admission": 10,
+            "style_evidence": 9,
             "benchmark_schema": 1,
             "checkpoint_export": 3,
             "paragraph_identity": 1,
@@ -137,6 +143,9 @@ def runtime_capabilities() -> dict[str, Any]:
             "book_term_review": 2,
             "source_term_inventory": 3,
             "render_identity": 2,
+            "previous_context_identity": 1,
+            "research_edition_metadata": 1,
+            "comma_surface_admission": 1,
         },
     }
 
@@ -624,6 +633,67 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v10402_behavior_probes(),
         **_v10403_behavior_probes(),
         **_v20_behavior_probes(),
+        **_v202_behavior_probes(),
+    }
+
+
+def _v202_behavior_probes() -> dict[str, bool]:
+    """Synthetic in-memory controls; no LLM, network, database or job writes."""
+    from tarjomeh.context.book_researcher import BookResearcher
+    from tarjomeh.core.pipeline import _previous_context_reference
+    from tarjomeh.memory.manager import _is_paratext_style_source
+    from tarjomeh.memory.proper_nouns import is_reusable_terminology_mapping
+    from tarjomeh.quality.integrity import repair_proven_surface_artifacts
+
+    source = "Earlier prose."
+    target = "متن پیشین."
+
+    def sha(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    row = {"chunk_index": 0, "status": "completed", "text": source, "translation": target}
+    policy = {"canonical_target_hash": sha(target), "short_term_trust": "trusted"}
+    refs = {"short_term_identities": [{
+        "entry": 1, "chunk_index": 0, "source_sha256": sha(source),
+        "target_sha256": sha(target), "trust": "trusted",
+    }]}
+    valid_reference = _previous_context_reference(target, 0, row, policy, refs)
+    refs["short_term_identities"][0]["trust"] = "advisory_review"
+    unsafe_reference = _previous_context_reference(target, 0, row, policy, refs)
+    comma_target = "نهادهای محلی،، روابط اجتماعی."
+    repaired, edits = repair_proven_surface_artifacts(
+        "Local institutions, social relations.", comma_target,
+    )
+    quoted = "او گفت «نهادهای محلی،، روابط اجتماعی»."
+    context, conflicts = BookResearcher._reconcile_publication_context(
+        "First published in 2011. It concerns ecology.",
+        [{"kind": "first_publication", "year": 2012, "quote": "First published in 2012"}],
+    )
+    return {
+        "funding_paratext_never_teaches_style": (
+            _is_paratext_style_source(
+                "This book was written with support from a research fellowship."
+            )
+            and not _is_paratext_style_source(
+                "Research fellowships affect scientific institutions."
+            )
+        ),
+        "quantified_fragment_is_not_lexical_authority": (
+            not is_reusable_terminology_mapping(
+                "record every observed value", "ثبت مقادیر مشاهده‌شده"
+            )
+            and is_reusable_terminology_mapping("control theory", "نظریهٔ کنترل")
+        ),
+        "previous_context_reference_requires_matching_trust": (
+            bool(valid_reference) and not unsafe_reference
+        ),
+        "source_edition_conflict_is_disclosed": (
+            context == "It concerns ecology." and bool(conflicts)
+        ),
+        "duplicate_comma_repair_protects_quotes": (
+            repaired == comma_target.replace("،،", "،") and bool(edits)
+            and repair_proven_surface_artifacts("A quotation.", quoted)[0] == quoted
+        ),
     }
 
 

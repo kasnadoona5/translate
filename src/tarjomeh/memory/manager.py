@@ -30,6 +30,7 @@ from tarjomeh.memory.long_term import LongTermMemory
 from tarjomeh.memory.short_term import ShortTermMemory
 from tarjomeh.quality.integrity import (
     detached_ezafe_artifacts,
+    duplicated_comma_artifacts,
     foreign_script_artifacts,
     markup_wrapper_artifacts,
     mixed_script_artifacts,
@@ -69,6 +70,21 @@ _ACKNOWLEDGEMENT_STYLE_SOURCE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_BOOK_FUNDING_STYLE_SOURCE_RE = re.compile(
+    r"\b(?:this\s+(?:book|volume|work)\s+(?:was|is|has\s+been)\s+"
+    r"(?:written|prepared|produced|undertaken)|"
+    r"(?:writing|preparation|production)\s+of\s+(?:this|the)\s+(?:book|volume|work))"
+    r"\b.{0,300}\b(?:funded\s+by|(?:financial\s+)?support\s+from|research\s+fellowship|"
+    r"grant\s+from)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_AUTHOR_DISCLAIMER_STYLE_SOURCE_RE = re.compile(
+    r"(?:^\s*(?:the\s+)?usual\s+disclaimers?\s+apply\b|\b(?:I|we|the\s+author)\s+(?:alone\s+)?"
+    r"(?:remain|remains|am|are|is)\s+responsible\s+for\s+(?:any|all|remaining)\s+"
+    r"(?:errors|mistakes))\b",
+    re.IGNORECASE,
+)
+
 
 def _is_paratext_style_source(source: str) -> bool:
     value = (source or "").strip()
@@ -76,6 +92,8 @@ def _is_paratext_style_source(source: str) -> bool:
     return bool(
         _NONREPRESENTATIVE_STYLE_SOURCE_RE.search(value)
         or _ACKNOWLEDGEMENT_STYLE_SOURCE_RE.search(first_sentence)
+        or _BOOK_FUNDING_STYLE_SOURCE_RE.search(first_sentence)
+        or _AUTHOR_DISCLAIMER_STYLE_SOURCE_RE.search(first_sentence)
     )
 
 
@@ -288,6 +306,7 @@ def _style_record_is_authoritative(record: dict[str, Any]) -> bool:
     source = str(record.get("source_text", ""))
     if source and (
         _source_style_contradiction(source, cleaned)
+        or duplicated_comma_artifacts(source, cleaned)
         or spaced_optional_plural_artifacts(source, cleaned)
         or spaced_optional_prefix_artifacts(source, cleaned)
         or re.search(r"\s[\u2013\u2014]\s+\u0631\u0627(?:\s|$)", cleaned)
@@ -314,6 +333,7 @@ def _style_record_is_prompt_safe(record: dict[str, Any]) -> bool:
         and not _NON_PROSE_RE.search(source)
         and _clean_style_sample(target)
         and not _source_style_contradiction(source, target)
+        and not duplicated_comma_artifacts(source, target)
         and _numeric_score(record.get("quality_score")) >= 75.0
     )
 
@@ -522,7 +542,7 @@ class MemoryManager:
         short_term_str = ""
         if pairs:
             formatted_pairs = []
-            for pair in pairs:
+            for position, pair in enumerate(pairs, 1):
                 if pair.trust == "advisory_review":
                     guidance = (
                         "[continuity: needs review; preserve argument and references, "
@@ -539,7 +559,8 @@ class MemoryManager:
                     f" Chapter: {pair.chapter_title}." if pair.chapter_title else ""
                 )
                 formatted_pairs.append(
-                    f"{guidance}{chapter}\nEN: {pair.source}\nFA: {pair.translation}"
+                    f"[Layer 4 entry {position}]{guidance}{chapter}\n"
+                    f"EN: {pair.source}\nFA: {pair.translation}"
                 )
             short_term_str = "\n\n".join(formatted_pairs)
 
@@ -567,6 +588,15 @@ class MemoryManager:
                 ],
                 "short_term_window_size": len(pairs),
                 "short_term_trust": [pair.trust for pair in pairs],
+                "short_term_identities": [
+                    {
+                        "entry": position, "chunk_index": pair.chunk_index,
+                        "source_sha256": _style_hash(pair.source),
+                        "target_sha256": _style_hash(pair.translation),
+                        "trust": pair.trust,
+                    }
+                    for position, pair in enumerate(pairs, 1)
+                ],
                 "proper_noun_count": len(self.proper_nouns),
                 "has_bilingual_summary": bool(bilingual_summary_str),
                 # Measurement only: exact duplicates that reach the prompt.
@@ -664,6 +694,7 @@ class MemoryManager:
             trust=resolved_short_term_trust,
             structural_role=primary_role,
             chapter_title=chunk.chapter_title,
+            chunk_index=chunk.index,
         )
         self.long_term.add(
             chunk.text,

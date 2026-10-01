@@ -29,6 +29,9 @@ class BookResearchResult:
     status: str = "completed"
     error: str = ""
     evidence_warnings: list[str] = field(default_factory=list)
+    raw_book_context: str = ""
+    publication_evidence: list[dict[str, Any]] = field(default_factory=list)
+    publication_conflicts: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -41,6 +44,9 @@ class BookResearchResult:
             "status": self.status,
             "error": self.error,
             "evidence_warnings": self.evidence_warnings,
+            "raw_book_context": self.raw_book_context,
+            "publication_evidence": self.publication_evidence,
+            "publication_conflicts": self.publication_conflicts,
             "authority": "advisory_context_only",
             "evidence_policy": {
                 "source_identity_required": True,
@@ -75,6 +81,7 @@ class BookResearcher:
         ]
 
         sources: list[dict[str, Any]] = []
+        publication_evidence = self._publication_metadata_evidence(document)
         try:
             excerpt = self._book_excerpt(document)
             identifiers = self._book_identifiers(excerpt)
@@ -122,6 +129,15 @@ class BookResearcher:
                 str(data.get("book_context", "")).strip()[:4000],
                 sources,
             )
+            raw_book_context = str(data.get("book_context", "")).strip()[:4000]
+            context, publication_conflicts = self._reconcile_publication_context(
+                context, publication_evidence,
+            )
+            if publication_conflicts:
+                evidence_warnings.append(
+                    "Publication claims conflict with, or cannot be identified as, "
+                    "the uploaded edition's explicit metadata; excluded from prompt context."
+                )
             if sources and recovery_error and not context and not terms:
                 status = "partial"
             elif used_batches or not sources:
@@ -146,6 +162,9 @@ class BookResearcher:
                 status=status,
                 error=recovery_error,
                 evidence_warnings=evidence_warnings,
+                raw_book_context=raw_book_context,
+                publication_evidence=publication_evidence,
+                publication_conflicts=publication_conflicts,
             )
         except Exception as exc:
             logger.warning("Book research seed pass failed: %s", exc)
@@ -158,7 +177,110 @@ class BookResearcher:
                 providers_used=self._providers_used(),
                 status="partial" if sources else "failed",
                 error=f"{type(exc).__name__}: {exc}",
+                publication_evidence=publication_evidence,
             )
+
+    @staticmethod
+    def _publication_metadata_evidence(document: Document) -> list[dict[str, Any]]:
+        """Read explicit edition statements, separately from body sampling."""
+        import hashlib
+
+        patterns = {
+            "first_publication": r"first\s+published(?:\s+in)?\s+((?:1[5-9]|20)\d{2})\b",
+            "edition": (
+                r"(?:first|second|third|fourth|revised|new)\s+edition"
+                r"(?:\s+published)?(?:\s+in)?\s+((?:1[5-9]|20)\d{2})\b"
+            ),
+            "reprint": r"reprinted(?:\s+in)?\s+((?:1[5-9]|20)\d{2})\b",
+            "copyright": r"(?:copyright|\u00a9)(?:\s*\([cC]\))?\s+((?:1[5-9]|20)\d{2})\b",
+        }
+        evidence = []
+        paragraphs = document.all_paragraphs
+        publication_chapters = set()
+        cursor = 0
+        for chapter in getattr(document, "chapters", []):
+            count = len(chapter.all_paragraphs)
+            if re.search(r"\b(?:copyright|publication\s+data|imprint)\b", chapter.title, re.I):
+                publication_chapters.update(range(cursor, cursor + count))
+            cursor += count
+        for index, paragraph in enumerate(paragraphs):
+            role = str(getattr(paragraph, "metadata", {}).get("structure_role", ""))
+            if index >= 50 and role not in {"copyright", "front_matter", "metadata"}:
+                continue
+            nearby = "\n".join(
+                item.text for item in paragraphs[max(0, index - 6):index + 7]
+            )
+            if not (
+                role in {"copyright", "metadata"} or index in publication_chapters
+                or re.search(
+                    r"\b(?:all\s+rights\s+reserved|ISBN(?:-1[03])?|copyright)\b|\u00a9",
+                    nearby, re.I,
+                )
+            ):
+                continue
+            for line in paragraph.text.splitlines():
+                for kind, pattern in patterns.items():
+                    match = re.match(pattern, line.strip(), re.IGNORECASE)
+                    tail = line.strip()[match.end():] if match else ""
+                    publication_imprint = kind != "copyright" and re.fullmatch(
+                        r"\s+by\s+[^\n.;]{1,100}(?:Press|Publishing|Publishers|Ltd|Limited|Inc)\.?",
+                        tail, re.IGNORECASE,
+                    )
+                    if match and (re.fullmatch(r"[\s.]*", tail) or publication_imprint):
+                        evidence.append({
+                            "kind": kind, "year": int(match.group(1)),
+                            "quote": line.strip(), "paragraph_index": index,
+                            "source_sha256": hashlib.sha256(
+                                paragraph.text.encode("utf-8")
+                            ).hexdigest(),
+                        })
+        return evidence
+
+    @staticmethod
+    def _reconcile_publication_context(
+        context: str, evidence: list[dict[str, Any]],
+    ) -> tuple[str, list[dict[str, Any]]]:
+        patterns = {
+            "first_publication": r"\bfirst\s+published(?:\s+in)?\s+((?:1[5-9]|20)\d{2})\b",
+            "copyright": r"(?:\bcopyright|\u00a9)(?:\s*\([cC]\))?\s+((?:1[5-9]|20)\d{2})\b",
+            "reprint": r"\breprinted(?:\s+in)?\s+((?:1[5-9]|20)\d{2})\b",
+            "edition": (
+                r"\b(?:first|second|third|fourth|revised|new)\s+edition"
+                r"(?:\s+published)?(?:\s+in)?\s+((?:1[5-9]|20)\d{2})\b"
+            ),
+            "unspecified_publication": (
+                r"\b(?:press|publisher|publishers|publishing)\s*,\s*((?:1[5-9]|20)\d{2})\b"
+                r"|\bpublished\s+in\s+((?:1[5-9]|20)\d{2})\b"
+            ),
+        }
+        conflicts = []
+        kept = []
+        for sentence in re.split(r"(?<=[.!?])\s+", context):
+            excluded = False
+            typed_spans = []
+            for kind, pattern in patterns.items():
+                for match in re.finditer(pattern, sentence, re.IGNORECASE):
+                    if kind == "unspecified_publication" and any(
+                        start <= match.start() < end for start, end in typed_spans
+                    ):
+                        continue
+                    typed_spans.append(match.span())
+                    year = int(next(group for group in match.groups() if group))
+                    applicable = [item for item in evidence if item.get("kind") == kind]
+                    years = {item["year"] for item in applicable}
+                    if years == {year}:
+                        continue
+                    conflicts.append({
+                        "kind": kind, "claim": match.group(), "year": year,
+                        "source_evidence": applicable or evidence,
+                        "reason": (
+                            "edition_date_conflict" if years else "publication_fact_unverified"
+                        ),
+                    })
+                    excluded = True
+            if not excluded:
+                kept.append(sentence)
+        return " ".join(kept).strip(), conflicts
 
     async def _synthesise(
         self,

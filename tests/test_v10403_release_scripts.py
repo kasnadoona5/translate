@@ -63,7 +63,7 @@ def test_v10403_deploy_is_tarjomeh_only_and_disk_guarded() -> None:
 
 def test_v10403_runtime_capabilities_and_probes_are_pure_and_enabled() -> None:
     manifest = runtime_capabilities()
-    assert manifest["release"] == "v20"
+    assert manifest["release"] == "v20.2"
     for name in NEW_CAPABILITIES:
         assert manifest["capabilities"][name] is True
     assert manifest["policy_versions"]["render_identity"] == 2

@@ -110,6 +110,7 @@ from tarjomeh.quality.integrity import (
     source_unjustified_repeated_governed_span_artifacts,
     source_unjustified_repeated_word_artifacts,
     detached_ezafe_artifacts,
+    duplicated_comma_artifacts,
     spaced_optional_plural_artifacts,
     spaced_optional_prefix_artifacts,
     tatweel_separator_artifacts,
@@ -131,6 +132,47 @@ from tarjomeh.core.prompts import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _previous_context_reference(
+    previous: str,
+    chunk_index: int,
+    persisted: dict[str, Any] | None,
+    memory_policy: dict[str, Any],
+    references: dict[str, Any],
+) -> str:
+    """Reference a rendered Layer-4 entry only with committed exact identity."""
+    if not previous or not isinstance(persisted, dict):
+        return ""
+    if (
+        persisted.get("chunk_index") != chunk_index
+        or persisted.get("status") not in {"completed", "needs_review"}
+        or persisted.get("translation") != previous
+        or memory_policy.get("canonical_target_hash") != _candidate_text_hash(previous)
+    ):
+        return ""
+    trust = memory_policy.get("short_term_trust")
+    if trust not in {"trusted", "advisory_review", "structural_only"}:
+        return ""
+    source = persisted.get("text")
+    if not isinstance(source, str) or not source:
+        return ""
+    matches = [
+        item for item in references.get("short_term_identities", [])
+        if isinstance(item, dict)
+        and item.get("chunk_index") == chunk_index
+        and item.get("source_sha256") == hashlib.sha256(source.encode("utf-8")).hexdigest()
+        and item.get("target_sha256") == hashlib.sha256(previous.encode("utf-8")).hexdigest()
+        and item.get("trust") == trust
+        and type(item.get("entry")) is int
+    ]
+    if len(matches) != 1:
+        return ""
+    return (
+        f"The immediately previous chunk is Layer 4 entry {matches[0]['entry']} "
+        f"above (trust: {trust}). Its complete EN/FA text appears there once; "
+        "use that entry for continuity, not as text to translate."
+    )
 
 
 def _restore_source_bound_artifacts(
@@ -738,6 +780,9 @@ def audit_translation_language(
         source, translation, structural_role=structural_role
     )
     tatweel_separators = tatweel_separator_artifacts(translation)
+    duplicate_commas = duplicated_comma_artifacts(
+        source, translation, structural_role=structural_role,
+    )
     explanatory_dashes = _unbalanced_explanatory_dash_artifacts(
         source,
         translation,
@@ -759,6 +804,7 @@ def audit_translation_language(
             or spaced_optional_prefix
             or tatweel_separators
             or explanatory_dashes
+            or duplicate_commas
         ),
         "mixed_script_count": len(mixed),
         "mixed_script_artifacts": mixed,
@@ -788,6 +834,8 @@ def audit_translation_language(
         "tatweel_separator_artifacts": tatweel_separators,
         "unbalanced_explanatory_dash_count": len(explanatory_dashes),
         "unbalanced_explanatory_dash_artifacts": explanatory_dashes,
+        "duplicated_comma_count": len(duplicate_commas),
+        "duplicated_comma_artifacts": duplicate_commas,
         "policy": (
             "Source-grounded identifiers, citations, approved originals, acronyms, "
             "and multilingual apparatus are allowed; unexplained foreign prose or "
@@ -2193,6 +2241,7 @@ _LANGUAGE_QUALITY_COUNT_FIELDS = (
     "spaced_optional_prefix_count",
     "tatweel_separator_count",
     "unbalanced_explanatory_dash_count",
+    "duplicated_comma_count",
 )
 
 
@@ -9604,6 +9653,24 @@ class TranslationPipeline:
         else:
             prev_trans = translations.get(idx - 1, "")
 
+        previous_reference = ""
+        if prev_trans and any(
+            item.get("chunk_index") == idx - 1
+            for item in mem_context.references.get("short_term_identities", [])
+            if isinstance(item, dict)
+        ):
+            persisted_previous = self.db.get_chunk(job_id, idx - 1)
+            previous_policies = [
+                event.get("payload", {})
+                for event in self.db.get_chunk_events(job_id, idx - 1)
+                if event.get("event_type") == "memory_update_policy"
+            ]
+            previous_reference = _previous_context_reference(
+                prev_trans, idx - 1, persisted_previous,
+                previous_policies[-1] if previous_policies else {},
+                mem_context.references,
+            )
+
         matched_entries = glossary_manager.find_terms(
             chunk.text,
             context=f"{chunk.chapter_title}\n{chunk.section_title}",
@@ -9968,7 +10035,10 @@ class TranslationPipeline:
                 glossary_terms=glossary_terms_str,
                 memory_context=mem_context.format() + inline_policy_context,
                 web_context=web_context_str,
-                previous_translation=previous,
+                previous_translation=(
+                    previous_reference if previous_reference and previous == prev_trans
+                    else previous
+                ),
                 source_text=source_text,
                 paragraph_count=paragraph_count,
                 term_notes_instruction=term_notes_instruction,
@@ -10006,7 +10076,7 @@ class TranslationPipeline:
             "style": mem_context.style_profile,
             "book_context": mem_context.book_context,
             "web_context": web_context_str,
-            "previous_translation": prev_trans,
+            "previous_translation": previous_reference or prev_trans,
             "term_notes": term_notes_instruction,
             "inline_policy": inline_policy_context,
         }
@@ -10042,6 +10112,13 @@ class TranslationPipeline:
             "policy": "measurement_only_no_prompt_change",
         })
         self.db.log_chunk_event(job_id, idx, "translation_prompt_composition", {
+            "previous_context_deduplication": {
+                "applied": bool(previous_reference),
+                "saved_chars": (
+                    max(0, len(prev_trans) - len(previous_reference)) if previous_reference else 0
+                ),
+                "policy": "exact_committed_source_target_trust_identity_only",
+            },
             "components": component_sizes,
             "duplication": duplication,
             "total_chars": len(user_content),

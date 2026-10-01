@@ -20,6 +20,7 @@ class TranslationPair:
     trust: str = "trusted"
     structural_role: str = "body"
     chapter_title: str = ""
+    chunk_index: int | None = None
 
 
 class ShortTermMemory:
@@ -49,6 +50,7 @@ class ShortTermMemory:
         trust: str = "trusted",
         structural_role: str = "body",
         chapter_title: str = "",
+        chunk_index: int | None = None,
     ) -> None:
         """Push a new source / translation pair into the window.
 
@@ -60,6 +62,7 @@ class ShortTermMemory:
             trust=trust,
             structural_role=structural_role,
             chapter_title=chapter_title,
+            chunk_index=chunk_index,
         ))
 
     def get_context(self) -> list[tuple[str, str]]:
@@ -77,7 +80,7 @@ class ShortTermMemory:
         """Remove all entries from the window."""
         self._window.clear()
 
-    def serialize(self) -> list[dict[str, str]]:
+    def serialize(self) -> list[dict[str, Any]]:
         """Serialise the window for checkpoint persistence."""
         return [
             {
@@ -86,6 +89,7 @@ class ShortTermMemory:
                 "trust": p.trust,
                 "structural_role": p.structural_role,
                 "chapter_title": p.chapter_title,
+                **({"chunk_index": p.chunk_index} if p.chunk_index is not None else {}),
             }
             for p in self._window
         ]
@@ -107,6 +111,10 @@ class ShortTermMemory:
                 trust=str(pair.get("trust", "trusted")),
                 structural_role=str(pair.get("structural_role", "body")),
                 chapter_title=str(pair.get("chapter_title", "")),
+                chunk_index=(
+                    pair["chunk_index"]
+                    if type(pair.get("chunk_index")) is int else None
+                ),
             )
         return stm
 

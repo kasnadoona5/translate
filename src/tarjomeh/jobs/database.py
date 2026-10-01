@@ -1745,6 +1745,15 @@ class JobDatabase:
             conn.commit()
         return state
 
+    def get_chunk(self, job_id: str, chunk_index: int) -> dict[str, Any] | None:
+        """Read one persisted chunk without loading the whole book."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM chunks WHERE job_id=? AND chunk_index=?",
+                (job_id, chunk_index),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
     def get_chunks(self, job_id: str) -> list[dict[str, Any]]:
         """Retrieve all chunk records for a job."""
         with self._get_connection() as conn:

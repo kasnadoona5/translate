@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import hashlib
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
@@ -2191,6 +2192,64 @@ def _one_to_one_optional_prefixes(
     return len(set(source_forms)) == 1 and len(set(target_forms)) == 1
 
 
+def duplicated_comma_artifacts(
+    source: str, translation: str, *, structural_role: str = "body",
+) -> list[dict[str, Any]]:
+    """Locate accidental comma runs; protected/uncertain spans are review-only."""
+    sources = _paragraph_text_spans(source)
+    targets = _paragraph_text_spans(translation)
+    aligned = len(sources) == len(targets)
+    persian_letter = r"[\u0621-\u063a\u0641-\u064a\u067e\u0686\u0698\u06a9\u06af\u06cc]"
+    findings = []
+    for index, (start, _end, text) in enumerate(targets):
+        source_text = sources[index][2] if aligned else source
+        if re.search(r"[,\u060c]{2,}", source_text or ""):
+            continue
+        matches = list(re.finditer(r"[,\u060c]{2,}", text))
+        protected = set()
+        stack = []
+        malformed = False
+        closing = {
+            "(": ")", "[": "]", "{": "}", "\u00ab": "\u00bb",
+            "\u201c": "\u201d", "\u2018": "\u2019",
+        }
+        for offset, character in enumerate(text):
+            if character in {'"', "'"}:
+                if stack and stack[-1] == character:
+                    stack.pop()
+                else:
+                    stack.append(character)
+                protected.add(offset)
+            elif character in closing:
+                stack.append(closing[character])
+                protected.add(offset)
+            elif stack:
+                protected.add(offset)
+                if character == stack[-1]:
+                    stack.pop()
+                elif character in closing.values():
+                    malformed = True
+            elif character in closing.values():
+                malformed = True
+        for match in matches:
+            safe = bool(
+                aligned and structural_role == "body" and len(matches) == 1
+                and not stack and not malformed
+                and len(match.group()) == 2 and match.group() == "\u060c\u060c"
+                and not any(i in protected for i in range(match.start(), match.end()))
+                and re.search(persian_letter + r"[\u064b-\u065f]*$", text[:match.start()])
+                and re.match(r"[ \t]*" + persian_letter, text[match.end():])
+            )
+            findings.append({
+                "text": match.group(), "offset": start + match.start(),
+                "paragraph_index": index, "repairable": safe,
+                "reason": (
+                    "unique_body_comma_accident" if safe else "protected_or_uncertain_comma_run"
+                ),
+            })
+    return findings
+
+
 def repair_proven_surface_artifacts(
     source: str,
     translation: str,
@@ -2228,6 +2287,17 @@ def repair_proven_surface_artifacts(
                 "role": roles[paragraph_index],
             })
         if aligned and roles[paragraph_index] == "body":
+            comma_findings = duplicated_comma_artifacts(source_part, repaired)
+            for finding in reversed(comma_findings):
+                if finding["repairable"]:
+                    offset = finding["offset"]
+                    repaired = repaired[:offset] + "\u060c" + repaired[offset + 2:]
+                    edits.append({
+                        "type": "duplicate_comma", "paragraph": paragraph_index,
+                        "before": finding["text"], "after": "\u060c", "offset": offset,
+                        "source_sha256": hashlib.sha256(source_part.encode("utf-8")).hexdigest(),
+                        "proof": "unique_aligned_body_span_outside_protected_apparatus",
+                    })
             doubled_and = list(re.finditer(
                 r"(?<![\u0621-\u06ff])\u0648[ \t]+\u0648(?![\u0621-\u06ff])",
                 repaired,

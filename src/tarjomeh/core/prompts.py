@@ -13,21 +13,20 @@ from __future__ import annotations
 GENERAL_EDITORIAL_CONTRACT: str = """\
 ### Editorial contract
 - Resolve meaning in context; never force an isolated dictionary equivalent.
-- Preserve semantic roles and relations: quantity, negation, modality, comparison,
-  causality, time, and source inconsistencies.
+- Resolve referents from the argument, not nearest-noun proximity; preserve ambiguity.
+- Preserve semantic roles and relations: counts, negation, modality, comparison,
+  causality, time, source inconsistencies; add no implications.
 - Preserve names, titles, citations, expressions, and note markers.
-- Write clear academic Iranian Persian; avoid calques and modifier stacks. Keep
-  finite clauses and appositive or head-complement links intact.
+- Write clear academic Iranian Persian; avoid calques and modifier stacks. Clarify
+  matrix predicates, appositives and head-complement links without losing modifiers.
 - Preserve parallel form in recurring coordinated conceptual series.
 - Use correct punctuation, ZWNJ, and ezafe; preserve authored diacritics;
   never add blanket diacritics.
 - Render relational frames by function, not opaque English syntax.
-- Resolve homographs by source role and casing; memory cannot turn lowercase lexical
-  uses into entity readings.
-- Add an English parenthetical only when its exact original or source-supplied
-  expansion occurs here.
-- Emit only requested output; no commentary or unexplained foreign prose.
-- Mandatory entries and names bind. Advisory context remains revisable and cannot
+- Resolve homographs by source role and casing, not entity memory.
+- English parentheticals require exact originals or source-supplied expansions here.
+- Emit requested output only; no commentary or unexplained prose.
+- Mandatory entries bind. Advisory context remains revisable and cannot
   override source.
 """
 
@@ -298,6 +297,11 @@ MQM rules:
   head and do not interrupt or duplicate the finite predicate. Render reflection,
   restatement, or clarification as a grammatically integrated Persian relation rather
   than preserving English punctuation around an unattached phrase.
+- Before proposing an antecedent or semantic-role change, compare the relevant
+  source sentence with its surrounding argument. In the rationale, quote the
+  contextual evidence and explain why the current referent is incompatible;
+  nearest-noun proximity or a merely possible alternative is insufficient.
+  Do not flag a valid explicit referent or a faithfully retained source ambiguity.
 - When the source attaches an alias or qualifier to one list member, e.g. "coastal,
   alpine, and riverine (also called fluvial) habitats", where it qualifies only the
   final member, flag a Persian relative clause or plural agreement that instead
@@ -423,6 +427,10 @@ Instructions:
 2. If the critique is correct, revise the translation to fix the issue.
 3. If the current translation is more accurate in context, preserve it; do not change a
    correct rendering merely because the critic suggested an alternative.
+   Independently recheck antecedent and semantic-role advice against the full supplied
+   source context. An acceptance rationale must identify the source evidence that
+   warrants the changed referent, not just agree with the critic. Reject changes
+   justified only by nearest-noun proximity or an unsupported more-specific reading.
    Accept a minor fluency or style issue only when it identifies an objective defect
    such as ambiguity, broken grammar/agreement, an unnatural calque, or invalid
    orthography. Opaque modifier stacking, unclear dependency or reference, malformed
