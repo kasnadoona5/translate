@@ -47,7 +47,7 @@ def test_v1040_deploy_keeps_9router_out_of_cleanup() -> None:
 def test_v1040_runtime_reports_pure_behavior_guards() -> None:
     manifest = runtime_capabilities()
     probes = runtime_behavior_probes()
-    assert manifest["release"] == "v20.2"
+    assert manifest["release"] == "v20.3"
     for name in (
         "opt_in_book_term_review_is_off_by_default",
         "reviewed_terms_are_paragraph_scoped",

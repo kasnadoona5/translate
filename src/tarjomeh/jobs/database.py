@@ -1064,6 +1064,61 @@ class JobDatabase:
             )
             conn.commit()
 
+    def reserve_extra_final_refinement(
+        self, job_id: str, chunk_index: int, *, source_sha256: str,
+        candidate_sha256: str, issue_ids: list[str], worker_id: str,
+    ) -> bool:
+        """Consume one chunk budget before calling a model, even across restarts."""
+        import hashlib
+
+        key = "extra_final_refinement_v1"
+        timestamp = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            chunk = conn.execute(
+                "SELECT text FROM chunks WHERE job_id=? AND chunk_index=?",
+                (job_id, chunk_index),
+            ).fetchone()
+            lease = conn.execute(
+                "SELECT worker_id, state FROM job_workers WHERE job_id=?", (job_id,)
+            ).fetchone()
+            if (
+                not chunk or not issue_ids or not candidate_sha256
+                or hashlib.sha256(chunk["text"].encode()).hexdigest() != source_sha256
+                or not lease or lease["state"] not in {"active", "pausing"}
+                or lease["worker_id"] != worker_id
+            ):
+                conn.rollback()
+                return False
+            row = conn.execute(
+                "SELECT payload FROM job_artifacts WHERE job_id=? AND artifact_key=?",
+                (job_id, key),
+            ).fetchone()
+            try:
+                payload = json.loads(row["payload"]) if row else {"version": 1, "entries": {}}
+                entries = payload["entries"]
+                if not isinstance(entries, dict) or str(chunk_index) in entries:
+                    conn.rollback()
+                    return False
+            except (ValueError, TypeError, KeyError):
+                # Corrupt accounting must never grant a fresh allowance.
+                conn.rollback()
+                return False
+            entries[str(chunk_index)] = {
+                "consumed": 1, "reserved_at": timestamp, "worker_id": worker_id,
+                "source_sha256": source_sha256, "candidate_sha256": candidate_sha256,
+                "issue_ids": sorted(set(issue_ids)), "state": "reserved",
+                "policy": "one per chunk; an interrupted or unknown outcome stays consumed",
+            }
+            conn.execute(
+                """INSERT INTO job_artifacts (job_id, artifact_key, payload, updated_at)
+                   VALUES (?, ?, ?, ?) ON CONFLICT(job_id, artifact_key) DO UPDATE SET
+                   payload=excluded.payload, updated_at=excluded.updated_at""",
+                (job_id, key, json.dumps(payload, ensure_ascii=False), timestamp),
+            )
+            conn.commit()
+            return True
+
     def complete_book_term_review(
         self, job_id: str, review: dict[str, Any],
     ) -> bool:

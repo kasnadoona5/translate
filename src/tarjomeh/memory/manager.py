@@ -1470,6 +1470,23 @@ class MemoryManager:
                 english_prefix_stutters
             )
             if not candidate_quality["accepted"]:
+                def evidence_text(value: str) -> dict[str, Any]:
+                    return {
+                        "text": value[:24000], "chars": len(value),
+                        "sha256": _style_hash(value), "truncated": len(value) > 24000,
+                    }
+
+                self.last_rejected_summary = {
+                    "english_candidate": evidence_text(candidate.english_summary),
+                    "persian_candidate": evidence_text(candidate.persian_summary),
+                    "previous_english": evidence_text(self.bilingual_summary.english_summary),
+                    "previous_persian": evidence_text(self.bilingual_summary.persian_summary),
+                    "new_source": evidence_text(new_content),
+                    "new_translation": evidence_text(translation),
+                    "candidate_quality": candidate_quality,
+                    "candidate_committed": False,
+                    "policy": "audit only; never prompt context or memory authority",
+                }
                 return {
                     "replacement_count": 0,
                     "changes": [],
@@ -1513,12 +1530,17 @@ class MemoryManager:
             "bilingual_summary": self.bilingual_summary.serialize(),
             "past_translations": self.long_term.serialize(),
             "short_term_context": self.short_term.serialize(),
+            "last_rejected_summary": getattr(self, "last_rejected_summary", {}),
         }
 
     def from_dict(self, data: dict[str, Any]) -> None:
         """Restore memory state from a checkpoint dictionary."""
         self.book_context = str(data.get("book_context", ""))
         self.style_profile = str(data.get("style_profile", ""))
+        rejected_summary = data.get("last_rejected_summary", {})
+        self.last_rejected_summary = (
+            dict(rejected_summary) if isinstance(rejected_summary, dict) else {}
+        )
         self.style_samples = list(data.get("style_samples", []))
         raw_records = data.get("style_sample_records", [])
         self.style_sample_records = [

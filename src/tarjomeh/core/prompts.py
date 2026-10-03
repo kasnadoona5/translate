@@ -30,6 +30,20 @@ GENERAL_EDITORIAL_CONTRACT: str = """\
   override source.
 """
 
+SOURCE_FIDELITY_CHECKS: str = """\
+### Source-first checks (examples are not book terminology)
+- "Is or will remain valid" is present/future, not past. "At most two" means
+  حداکثر دو, not "eventually only two".
+- "Socially and legally mediated cooperation" retains mediation by both factors;
+  do not make one a property of cooperation and the other its mediation.
+- "Red, blue, and green methods (green methods are also called adaptive methods)"
+  renames only green methods, never all three.
+- Known-good: "two issues" remains دو مسئله. A clear, source-supported relative
+  clause needs no synonym or antecedent change.
+- Check Persian matrix-predicate government, including its required preposition;
+  repair grammar without adding or removing any source claim.
+"""
+
 # ---------------------------------------------------------------------------
 # 1. System-level translation prompt
 # ---------------------------------------------------------------------------
@@ -67,7 +81,7 @@ Core directives:
 • Use standard Persian punctuation: «» for quotation marks, ؛ for semicolons, etc.
 • Do NOT add personal commentary, footnotes, or translator's notes unless
   explicitly instructed.
-""" + "\n" + GENERAL_EDITORIAL_CONTRACT
+""" + "\n" + GENERAL_EDITORIAL_CONTRACT + SOURCE_FIDELITY_CHECKS
 
 ACADEMIC_REGISTER_MODIFIER: str = """\
 Use a highly formal, precise, fluent, and scholarly academic register. \
@@ -216,7 +230,7 @@ Use this only to resolve discourse, style, and reference ambiguity. Do not
 criticize text outside the current source/translation pair:
 {review_context}
 
-""" + GENERAL_EDITORIAL_CONTRACT + """
+""" + GENERAL_EDITORIAL_CONTRACT + SOURCE_FIDELITY_CHECKS + """
 
 Return a JSON object with exactly this schema:
 {{
@@ -420,7 +434,7 @@ The critique identifies high-risk passages; it is not automatically authoritativ
 ### Bounded review context
 {review_context}
 
-""" + GENERAL_EDITORIAL_CONTRACT + """
+""" + GENERAL_EDITORIAL_CONTRACT + SOURCE_FIDELITY_CHECKS + """
 
 Instructions:
 1. Evaluate each critique issue in severity order: "critical", then "major", then "minor".
@@ -452,6 +466,12 @@ Instructions:
 8. Include the complete Persian translation exactly once. Do not repeat it in
    issue decisions or rationales.
     Every resulting_span must be copied verbatim from that returned translation.
+   For an accepted edit, also quote original_span verbatim from the current Persian
+   paragraph. It must contain the critic's current_persian_quote and cover exactly
+   the text replaced by resulting_span, including any changed grammatical head.
+   Keep the pair local (original at most 320 characters, result at most 480);
+   do not expand a result beyond its original and duplicate adjacent words.
+   Reject advice if no unambiguous local pair can express a source-faithful repair.
    You may reorder or split sentences within the same paragraph to repair an objective
    fluency defect, but preserve every proposition and keep paragraph boundaries fixed.
    Before returning the candidate, verify every coordinated source member separately
@@ -471,6 +491,7 @@ Instructions:
     {{
       "issue_id": "<exact issue ID>",
       "decision": "accepted" | "rejected" | "partially_applied",
+      "original_span": "<exact local pre-edit Persian span; optional for rejection>",
       "resulting_span": "<short final Persian span, not the full translation>",
       "rationale": "<brief English reason, under 50 words>"
     }}

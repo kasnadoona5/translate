@@ -253,9 +253,32 @@ class BookResearcher:
                 r"|\bpublished\s+in\s+((?:1[5-9]|20)\d{2})\b"
             ),
         }
+        # A date before a publisher is also bibliography metadata, not a
+        # historical date in the argument. Keep the surrounding book context.
+        year = r"(?:1[5-9]|20)\d{2}"
+        years = rf"{year}(?:\s*(?:[/\u2013\u2014-]|\bor\b)\s*{year})*"
+        bibliography_date = re.compile(
+            rf"\(\s*(?P<years>{years})\s*,\s*"
+            r"[^()\d]{1,80}\b(?:press|publisher|publishers|publishing)\s*\)",
+            re.IGNORECASE,
+        )
+        for kind, pattern in list(patterns.items()):
+            patterns[kind] = pattern.replace(
+                "((?:1[5-9]|20)\\d{2})", f"({years})"
+            )
         conflicts = []
         kept = []
         for sentence in re.split(r"(?<=[.!?])\s+", context):
+            def exclude_bibliography_date(match: re.Match[str]) -> str:
+                conflicts.append({
+                    "kind": "unspecified_publication", "claim": match.group(),
+                    "years": [int(value) for value in re.findall(year, match["years"])],
+                    "source_evidence": evidence,
+                    "reason": "publication_fact_unverified",
+                })
+                return ""
+
+            sentence = bibliography_date.sub(exclude_bibliography_date, sentence)
             excluded = False
             typed_spans = []
             for kind, pattern in patterns.items():
@@ -265,16 +288,19 @@ class BookResearcher:
                     ):
                         continue
                     typed_spans.append(match.span())
-                    year = int(next(group for group in match.groups() if group))
+                    claimed_date = next(group for group in match.groups() if group)
+                    claimed_years = {int(value) for value in re.findall(year, claimed_date)}
                     applicable = [item for item in evidence if item.get("kind") == kind]
-                    years = {item["year"] for item in applicable}
-                    if years == {year}:
+                    source_years = {item["year"] for item in applicable}
+                    if re.fullmatch(year, claimed_date) and source_years == claimed_years:
                         continue
                     conflicts.append({
-                        "kind": kind, "claim": match.group(), "year": year,
+                        "kind": kind, "claim": match.group(),
+                        "year": min(claimed_years), "years": sorted(claimed_years),
                         "source_evidence": applicable or evidence,
                         "reason": (
-                            "edition_date_conflict" if years else "publication_fact_unverified"
+                            "edition_date_conflict" if source_years
+                            else "publication_fact_unverified"
                         ),
                     })
                     excluded = True

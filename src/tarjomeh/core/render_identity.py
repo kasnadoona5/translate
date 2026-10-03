@@ -484,6 +484,57 @@ def read_docx_units(path: Path) -> list[dict[str, Any]]:
     return units
 
 
+def docx_contents_evidence(path: Path, source_contents_rows: int) -> dict[str, Any]:
+    """Inspect native table units; mixed-role chunks do not hide contents rows."""
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    prefix = "{" + namespace["w"] + "}"
+    with zipfile.ZipFile(path) as archive:
+        root = ET.fromstring(archive.read("word/document.xml"))
+    units = read_docx_units(path)
+    tables = [unit for unit in units if unit["kind"] == "table"]
+    evidence = []
+    for table, element in zip(tables, root.findall("w:body/w:tbl", namespace), strict=True):
+        rows = table["rows"]
+        properties = element.find("w:tblPr", namespace)
+        if properties is None:
+            continue
+        bidi = properties.find("w:bidiVisual", namespace)
+        alignment = properties.find("w:jc", namespace)
+        layout = properties.find("w:tblLayout", namespace)
+        width = properties.find("w:tblW", namespace)
+        widths = [int(item.get(prefix + "w", "0")) for item in
+                  element.findall("w:tblGrid/w:gridCol", namespace)]
+        twips = int(width.get(prefix + "w", "0")) if width is not None else 0
+        page_column = bool(rows) and all(
+            len(row) == 2 and bool(re.fullmatch(
+                r"[0-9\u06f0-\u06f9ivxlcdmIVXLCDM\s.\u2013-]+", row[1].strip()
+            )) for row in rows
+        )
+        if not page_column:
+            continue
+        evidence.append({
+            "rows": len(rows), "columns": 2,
+            "rtl": bidi is not None and bidi.get(prefix + "val", "1") not in {"0", "false"},
+            "right_aligned": alignment is not None and alignment.get(prefix + "val") == "right",
+            "fixed_layout": layout is not None and layout.get(prefix + "type") == "fixed",
+            "table_width_twips": twips, "grid_widths_twips": widths,
+            "full_width": bool(twips >= 9000 and len(widths) == 2
+                               and sum(widths) == twips and widths[0] > widths[1] * 4),
+        })
+    matched = bool(source_contents_rows and evidence
+                   and sum(item["rows"] for item in evidence) == source_contents_rows
+                   and all(item["rtl"] for item in evidence))
+    return {
+        "source_contents_rows": source_contents_rows, "native_page_tables": evidence,
+        "docx_unit_count": len(units), "matched_native_rtl_rows": matched,
+        "status": "PASS" if matched else "REVIEW" if source_contents_rows else "NOT_APPLICABLE",
+        "scope": "table structure only; lexical identity uses the separate render identity gate",
+    }
+
+
 def compare_docx_to_rendered(
     document: TranslatedDocument,
     path: Path,

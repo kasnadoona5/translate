@@ -79,15 +79,15 @@ function setupSettingsControls() {
         const presets = {
             fast: {
                 critique: false, backTranslation: false, webContext: false,
-                refinements: 0, threshold: 9, sample: 0
+                refinements: 0, extraFinal: 0, threshold: 9, sample: 0
             },
             quality: {
                 critique: true, backTranslation: true, webContext: true,
-                refinements: 1, threshold: 9, sample: 5
+                refinements: 1, extraFinal: 0, threshold: 9, sample: 5
             },
             academic: {
                 critique: true, backTranslation: true, webContext: true,
-                refinements: 2, threshold: 9, sample: 20
+                refinements: 2, extraFinal: 1, threshold: 9, sample: 20
             }
         };
         const preset = presets[mode.value];
@@ -95,6 +95,7 @@ function setupSettingsControls() {
         document.getElementById("cfgBackTranslation").checked = preset.backTranslation;
         document.getElementById("cfgWebContext").checked = preset.webContext;
         document.getElementById("cfgRefineIterations").value = preset.refinements;
+        document.getElementById("cfgExtraFinalRefine").value = preset.extraFinal;
         document.getElementById("cfgCritiqueThreshold").value = preset.threshold;
         document.getElementById("cfgBackSample").value = preset.sample;
         updateRunSummary();
@@ -263,6 +264,7 @@ async function startTranslation() {
     formData.append("scholarly_mode", String(document.getElementById("cfgScholarly").checked));
     formData.append("chapter_page_breaks", String(document.getElementById("cfgChapterPageBreaks").checked));
     formData.append("max_refine_iterations", document.getElementById("cfgRefineIterations").value);
+    formData.append("extra_final_refine_attempts", document.getElementById("cfgExtraFinalRefine").value);
     formData.append("critique_threshold", document.getElementById("cfgCritiqueThreshold").value);
     formData.append("qa_json_retries", document.getElementById("cfgQaJsonRetries").value);
     formData.append("recovery_model", document.getElementById("cfgRecoveryModel").value.trim());

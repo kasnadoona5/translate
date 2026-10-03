@@ -302,7 +302,9 @@ class TranslationRefiner:
                 decisions.append({
                     "issue_id": issue_id,
                     "decision": item_decision,
-                    "resulting_span": resulting_span[:320],
+                    "resulting_span": resulting_span,
+                    **({"original_span": str(item["original_span"]).strip()}
+                       if isinstance(item.get("original_span"), str) else {}),
                     "rationale": reason[:500],
                 })
             for issue_id in expected:

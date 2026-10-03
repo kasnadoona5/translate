@@ -262,6 +262,11 @@
                                                value="{{ ui_defaults.qa_json_retries }}">
                                     </label>
                                     <label class="field compact-field">
+                                        <span>Extra final repair attempts</span>
+                                        <input id="cfgExtraFinalRefine" type="number" min="0" max="1" step="1"
+                                               value="{{ ui_defaults.extra_final_refine_attempts }}">
+                                    </label>
+                                    <label class="field compact-field">
                                         <span>Translator fallback</span>
                                         <input id="cfgRecoveryModel" type="text"
                                                placeholder="Optional fallback model or combo">

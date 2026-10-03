@@ -28,6 +28,7 @@ _MODE_PRESETS: dict[str, dict[str, Any]] = {
         "translation.enable_web_context": False,
         "translation.back_translation_sample_pct": 0,
         "translation.max_refine_iterations": 0,
+        "translation.extra_final_refine_attempts": 0,
         # parallel_workers stays user-configurable in fast mode
     },
     "quality": {
@@ -37,6 +38,7 @@ _MODE_PRESETS: dict[str, dict[str, Any]] = {
         "translation.enable_web_context": True,
         "translation.back_translation_sample_pct": 5,
         "translation.max_refine_iterations": 1,
+        "translation.extra_final_refine_attempts": 0,
         # parallel_workers stays user-configurable in quality mode
     },
     "academic": {
@@ -46,6 +48,7 @@ _MODE_PRESETS: dict[str, dict[str, Any]] = {
         "translation.enable_web_context": True,
         "translation.back_translation_sample_pct": 20,
         "translation.max_refine_iterations": 2,
+        "translation.extra_final_refine_attempts": 1,
         "translation.parallel_workers": 1,  # forced to 1
     },
 }
@@ -211,6 +214,7 @@ class TranslationConfig:
     enable_web_context: bool = True
     parallel_workers: int = 1
     max_refine_iterations: int = 2
+    extra_final_refine_attempts: int = 1
     critique_threshold: float = 9.0
     enable_integrity_gate: bool = True
     integrity_min_retention_ratio: float = 0.65
@@ -452,6 +456,9 @@ class TarjomehConfig:
         expanded = _expand_env_recursive(data)
         config = cls._from_raw(expanded)
         config._apply_mode_preset(expanded)
+        # Missing in a saved job means the historical, zero-extra-call policy.
+        if "extra_final_refine_attempts" not in expanded.get("translation", {}):
+            config.translation.extra_final_refine_attempts = 0
         config._apply_env_overrides()
         # Persisted configs carry redacted credentials; refill from the
         # environment before validation rejects the empty key list.
@@ -814,6 +821,11 @@ class TarjomehConfig:
             )
 
         # Style register check
+        if type(self.translation.extra_final_refine_attempts) is not int or (
+            self.translation.extra_final_refine_attempts not in (0, 1)
+        ):
+            errors.append("translation.extra_final_refine_attempts must be 0 or 1")
+
         valid_registers = ("academic", "literary", "general")
         if self.translation.style_register not in valid_registers:
             errors.append(

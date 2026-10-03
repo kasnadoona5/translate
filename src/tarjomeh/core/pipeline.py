@@ -18,6 +18,7 @@ import httpx
 import unicodedata
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, cast
@@ -132,6 +133,9 @@ from tarjomeh.core.prompts import (
 )
 
 logger = logging.getLogger(__name__)
+_QUALITY_ATTEMPT_CONTEXT: ContextVar[dict[str, Any] | None] = ContextVar(
+    "tarjomeh_quality_attempt_context", default=None
+)
 
 
 def _previous_context_reference(
@@ -3191,6 +3195,58 @@ def _minimal_unique_local_edit(
     return None
 
 
+def _refinement_span_contract(
+    source: str, previous: str, proposed: str, source_segment_id: str,
+    quoted_span: str, original_span: str, resulting_span: str,
+) -> str:
+    """Check quote location and the actual paragraph diff, without guessing scope."""
+    match = re.fullmatch(r"p(\d+):s\d+", source_segment_id, re.IGNORECASE)
+    if original_span and not match:
+        return "original_span_requires_source_paragraph"
+    scoped = _paragraph_scoped_span_start(
+        previous, source_segment_id, original_span or quoted_span
+    )
+    if scoped is None:
+        return "current_span_not_unique_in_source_paragraph"
+    paragraph = scoped[1]
+    before_parts = previous.split("\n\n")
+    after_parts = proposed.split("\n\n")
+    source_parts = source.split("\n\n")
+    if len(before_parts) != len(after_parts) or (
+        original_span and len(before_parts) != len(source_parts)
+    ):
+        return "uncertain_candidate_paragraph_alignment"
+    before = before_parts[paragraph]
+    after = apply_safe_persian_orthography(after_parts[paragraph])[0]
+    old = original_span or quoted_span
+    if original_span and (not quoted_span or quoted_span not in original_span):
+        return "original_span_does_not_cover_critic_quote"
+    if after.count(resulting_span) != 1:
+        return "resulting_span_not_unique_in_candidate_paragraph"
+    start = before.find(old)
+    end = start + len(old)
+    result_start = after.find(resulting_span)
+    result_end = result_start + len(resulting_span)
+    if after == before[:start] + resulting_span + before[end:]:
+        return ""
+    # Boundaries must agree with the real edit. Merely quoting a larger
+    # candidate fragment would otherwise copy its unchanged head twice.
+    boundaries: dict[int, set[int]] = {start: set(), end: set()}
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+        None, before, after, autojunk=False
+    ).get_opcodes():
+        for boundary in boundaries:
+            if tag == "equal" and i1 <= boundary <= i2:
+                boundaries[boundary].add(j1 + boundary - i1)
+            elif boundary == i1:
+                boundaries[boundary].add(j1)
+            elif boundary == i2:
+                boundaries[boundary].add(j2)
+    if result_start not in boundaries[start] or result_end not in boundaries[end]:
+        return "local_span_disagrees_with_candidate_diff"
+    return ""
+
+
 def _salvage_local_refinement_edits(
     *,
     source: str,
@@ -3223,7 +3279,8 @@ def _salvage_local_refinement_edits(
             issues.get(issue_id, {}).get("source_segment_id", "")
         ).strip()
         current_span = str(
-            issues.get(issue_id, {}).get("current_persian_quote", "")
+            raw.get("original_span")
+            or issues.get(issue_id, {}).get("current_persian_quote", "")
         ).strip()
         scoped = _paragraph_scoped_span_start(
             previous, source_segment_id, current_span
@@ -3260,7 +3317,8 @@ def _salvage_local_refinement_edits(
         issue_id = str(decision.get("issue_id", "")).strip()
         choice = str(decision.get("decision", "")).strip().lower()
         current_span = str(
-            issues.get(issue_id, {}).get("current_persian_quote", "")
+            decision.get("original_span")
+            or issues.get(issue_id, {}).get("current_persian_quote", "")
         ).strip()
         source_quote = str(
             issues.get(issue_id, {}).get("source_quote", "")
@@ -3271,6 +3329,7 @@ def _salvage_local_refinement_edits(
         resulting_span = apply_safe_persian_orthography(
             str(decision.get("resulting_span", "")).strip()
         )[0]
+        contract_resulting_span = resulting_span
         reason = ""
         if choice not in {"accepted", "partially_applied"}:
             reason = "refiner_rejected"
@@ -3315,6 +3374,12 @@ def _salvage_local_refinement_edits(
                     scoped = _paragraph_scoped_span_start(
                         previous, source_segment_id, current_span
                     )
+        if not reason:
+            reason = _refinement_span_contract(
+                source, previous, proposed, source_segment_id,
+                str(issues.get(issue_id, {}).get("current_persian_quote", "")).strip(),
+                str(decision.get("original_span", "")).strip(), contract_resulting_span,
+            )
         item = {
             "order": order,
             "decision": decision,
@@ -6115,6 +6180,9 @@ class TranslationPipeline:
         if not hasattr(self, "_active_llm_calls"):
             self._active_llm_calls = {}
         payload = dict(event)
+        quality_context = _QUALITY_ATTEMPT_CONTEXT.get()
+        if quality_context:
+            payload["quality_attempt_context"] = dict(quality_context)
         job_id = payload.pop("job_id", None) or self.current_job_id
         chunk_index = payload.pop("chunk_index", None)
         if not job_id:
@@ -9560,6 +9628,218 @@ class TranslationPipeline:
                 ),
             },
         )
+
+    def _extra_final_quality_repair(
+        self, job_id: str, chunk: Chunk, translation: str, *,
+        critique_tool: Any, refiner_tool: Any, integrity_gate: PostEditIntegrityGate,
+        terminology: str, review_context: str, enforced_entries: list[Any],
+        enforce_auto: bool, protected_terms: list[str], protect_inline_english: bool,
+        allowed_inline_originals: list[str], reviewed_matches: list[Any], threshold: float,
+    ) -> str:
+        """One persisted extra adjudication; unchanged text needs no new critique."""
+        if not self.config.translation.enable_critique or (
+            self.config.translation.extra_final_refine_attempts != 1
+        ):
+            return translation
+        idx = chunk.index
+        final = _canonical_final_quality_record(self.db, job_id, idx, translation)
+        unresolved = {
+            item["issue_id"] for item in final["issues"]
+            if item["status"] == "unresolved_grounded"
+        }
+        if not unresolved or not final["critique_valid"]:
+            return translation
+        latest = next((
+            event.get("payload", {}) for event in reversed(self.db.get_chunk_events(job_id, idx))
+            if event.get("event_type") == "critique_completed"
+            and event.get("payload", {}).get("candidate_target_hash")
+            == _candidate_text_hash(translation)
+        ), {})
+        if not latest.get("valid", False) or not latest.get("coverage_complete", False):
+            return translation
+        actionable = [
+            item for item in _unresolved_grounded_memory_issues(latest)
+            if item.get("issue_id") in unresolved
+        ]
+        if not actionable:
+            return translation
+        reserve = getattr(self.db, "reserve_extra_final_refinement", None)
+        if reserve is None or not reserve(
+            job_id, idx, source_sha256=_candidate_text_hash(chunk.text),
+            candidate_sha256=_candidate_text_hash(translation),
+            issue_ids=sorted(unresolved), worker_id=self.worker_id,
+        ):
+            self.db.log_chunk_event(job_id, idx, "extra_final_refinement_skipped", {
+                "reason": "budget_consumed_or_reservation_unavailable",
+                "candidate_target_hash": _candidate_text_hash(translation),
+            })
+            return translation
+        from tarjomeh.quality.critique import CritiqueResult
+
+        baseline = CritiqueResult.from_dict({**latest, **latest.get("scores", {})})
+        # Only existing grounded issues are adjudicated, not advisory synonyms
+        # or findings already vetoed by the source-aware refiner.
+        routed = CritiqueResult.from_dict({
+            **baseline.to_dict(), "issue_details": actionable,
+            "issues": [str(item.get("formatted") or item["issue_id"]) for item in actionable],
+        })
+        report: dict[str, Any] = {
+            "attempted": True, "accepted": False, "budget_consumed": 1,
+            "baseline_target_hash": _candidate_text_hash(translation),
+            "actionable_issue_ids": sorted(unresolved),
+            "trigger": "exact_final_candidate_unresolved_grounded_issues",
+            "decisions": [],
+        }
+        self.db.log_chunk_event(job_id, idx, "extra_final_refinement_reserved", report)
+        started = time.monotonic()
+        context_token = _QUALITY_ATTEMPT_CONTEXT.set({
+            "stage": "extra_final_refinement", "db_chunk_index": idx,
+            "ui_chunk_number": idx + 1, "baseline_target_hash": report["baseline_target_hash"],
+        })
+        retained = translation
+        accepted_review = None
+        accepted_review_details = []
+        try:
+            result = self._run_async(refiner_tool.refine_with_decision(
+                chunk.text, translation, routed, terminology=terminology,
+                review_context=review_context,
+            ))
+            report.update({"refiner_valid": result.valid, "refiner_attempts": result.attempts})
+            if result.valid:
+                candidate, decisions, salvage = _salvage_local_refinement_edits(
+                    source=chunk.text, previous=translation, proposed=result.translation,
+                    issue_details=actionable,
+                    issue_decisions=[item for item in result.issue_decisions
+                                     if item.get("issue_id") in unresolved],
+                    integrity_gate=integrity_gate, protected_terms=protected_terms,
+                    protect_inline_english=protect_inline_english,
+                    allowed_inline_originals=allowed_inline_originals,
+                )
+                report.update({"decisions": decisions, "salvage": salvage})
+                if candidate != translation:
+                    candidate = self._canonicalize_final_translation(job_id, idx, chunk, candidate)
+                    candidate, identity = _canonical_chunk_paragraph_identity(chunk, candidate)
+                    integrity = integrity_gate.evaluate(
+                        chunk.text, candidate, previous=translation,
+                        stage="extra_final_refinement", protected_terms=protected_terms,
+                        protect_inline_english=protect_inline_english,
+                        allowed_inline_originals=allowed_inline_originals,
+                        enforce_all_terms=self.config.glossary.enable_compliance_check,
+                    )
+                    structure = _actionable_structure_findings(chunk.text, candidate)
+                    term_violations = []
+                    term_uncertain = []
+                    if reviewed_matches:
+                        from tarjomeh.glossary.book_review import check_reviewed_book_terms
+
+                        compliance, term_uncertain = check_reviewed_book_terms(
+                            candidate, chunk.text, chunk.metadata, reviewed_matches
+                        )
+                        term_violations = compliance.violations
+                    report.update({
+                        "integrity": integrity.to_dict(), "paragraph_identity": identity,
+                        "structure_findings": structure,
+                        "book_term_violation_count": len(term_violations),
+                        "book_term_review_count": len(term_uncertain),
+                        "candidate_target_hash": _candidate_text_hash(candidate),
+                    })
+                    # Deterministic admission is required before paying for the
+                    # changed-candidate review. No failed candidate is published.
+                    if (
+                        integrity.accepted and not structure and not identity.get("reconstructed")
+                        and not term_violations and not term_uncertain
+                    ):
+                        review = self._run_async(critique_tool.critique(
+                            chunk.text, candidate, terminology=terminology,
+                            review_context=review_context,
+                        ))
+                        if review.valid:
+                            _filter_critique_policy_conflicts(
+                                review, chunk.text, allowed_inline_originals
+                            )
+                            _filter_critique_glossary_conflicts(
+                                review, enforced_entries, include_auto=enforce_auto
+                            )
+                        old_issues: list[dict[str, Any]] = []
+                        regressions = _candidate_regression_details(
+                            review, baseline, _changed_candidate_spans(translation, candidate),
+                            source_text=chunk.text, previous_text=translation,
+                            candidate_text=candidate, newly_observed_unchanged=old_issues,
+                        )
+                        old_keys = {_quality_issue_fingerprint(item) for item in old_issues}
+                        remaining = [item for item in _unresolved_grounded_memory_issues(review)
+                                     if _quality_issue_fingerprint(item) not in old_keys]
+                        old_blocking = {str(item.get("formatted") or item.get("issue_id") or item)
+                                        for item in old_issues}
+                        scores = [getattr(review, name) for name in
+                                  ("accuracy", "fluency", "terminology", "register")]
+                        report.update({
+                            "regressions": regressions,
+                            "newly_observed_unchanged_issues": old_issues,
+                            "before_actionable_count": len(actionable),
+                            "after_actionable_count": len(remaining),
+                        })
+                        reviewed = _critique_for_event(
+                            review, threshold, -3, candidate_text=candidate,
+                            candidate_stage="extra_final_refinement_validation",
+                        )
+                        accepted = bool(
+                            review.valid and review.coverage_complete and not regressions
+                            and len(remaining) < len(actionable) and min(scores) >= 8.0
+                            and set(_blocking_critique_issues(review)) <= old_blocking
+                        )
+                        self.db.log_chunk_event(
+                            job_id, idx, "extra_final_candidate_review", reviewed
+                        )
+                        if accepted:
+                            retained = candidate
+                            report["accepted"] = True
+                            accepted_review = reviewed
+                            accepted_review_details = review.issue_details
+                        for item in old_issues:
+                            self.db.log_chunk_event(job_id, idx, "newly_observed_unchanged_issue", {
+                                "issue": item, "stage": "extra_final_refinement",
+                                "disposition": "review_without_vetoing_independent_edit",
+                            })
+                        for item in regressions:
+                            self.db.log_chunk_event(
+                                job_id, idx, "candidate_attribution_uncertain", {
+                                    "issue": item, "stage": "extra_final_refinement",
+                                    "edit_blocked": True,
+                                },
+                            )
+                if retained == translation:
+                    for decision in decisions:
+                        if decision.get("decision") != "rejected":
+                            decision["commit_status"] = "not_committed_final_admission"
+                self.db.log_chunk_event(job_id, idx, "refinement_completed", {
+                    "stage": "extra_final_refinement", "valid": True,
+                    "candidate_target_hash": report["baseline_target_hash"],
+                    "retained_target_hash": _candidate_text_hash(retained),
+                    "issue_decisions": decisions,
+                })
+                self.db.save_issue_decisions(
+                    job_id, idx, -3, -1, decisions, candidate_accepted=bool(report["accepted"])
+                )
+                # The changed-candidate critique supersedes the refiner's
+                # optimistic accepted decisions, never the reverse.
+                if accepted_review is not None:
+                    self.db.log_chunk_event(job_id, idx, "critique_completed", accepted_review)
+                    self.db.save_qa_issues(job_id, idx, -3, accepted_review_details)
+        except _QUALITY_STAGE_ERRORS as exc:
+            report.update({"failure_type": type(exc).__name__, "error": str(exc)})
+        finally:
+            _QUALITY_ATTEMPT_CONTEXT.reset(context_token)
+            report["elapsed_seconds"] = round(time.monotonic() - started, 3)
+            report["retained_target_hash"] = _candidate_text_hash(retained)
+            reservation = self.db.get_job_artifact(job_id, "extra_final_refinement_v1") or {}
+            entry = (reservation.get("entries", {}) or {}).get(str(idx), {})
+            self.db.merge_job_artifact_entry(
+                job_id, "extra_final_refinement_v1", "entries", str(idx),
+                {**entry, "state": "finished", "result": report},
+            )
+            self.db.log_chunk_event(job_id, idx, "extra_final_refinement_completed", report)
+        return retained
 
     def _translate_single_chunk(
         self,
@@ -14047,6 +14327,20 @@ Output ONLY the corrected Persian translation.
                             "failure_type": type(exc).__name__,
                             "error": str(exc),
                         })
+                    if final_repair_event.get("refiner_valid"):
+                        decisions = final_repair_event.get("decisions", [])
+                        if not final_repair_accepted:
+                            for decision in decisions:
+                                if decision.get("decision") != "rejected":
+                                    decision["commit_status"] = "not_committed_final_admission"
+                        self.db.log_chunk_event(job_id, idx, "refinement_completed", {
+                            "stage": "exact_final_quality_repair", "valid": True,
+                            "candidate_target_hash": _candidate_text_hash(translation),
+                            "issue_decisions": [
+                                decision for decision in decisions
+                                if decision.get("decision") == "rejected"
+                            ],
+                        })
                     self.db.log_chunk_event(
                         job_id,
                         idx,
@@ -14071,24 +14365,6 @@ Output ONLY the corrected Persian translation.
                                 "edit_blocked": True,
                             },
                         )
-                if _critique_requires_refinement(
-                    final_critique_rep, threshold
-                ):
-                    self.db.log_chunk_event(
-                        job_id,
-                        idx,
-                        "critique_needs_review",
-                        _explicit_chunk_review_payload(
-                            "final_retained_candidate_quality",
-                            detail="candidate_hash_matched_final_critique",
-                            message=(
-                                "The exact canonical candidate still has grounded "
-                                "source or Persian-quality concerns after bounded "
-                                "repair. It remains advisory rather than teaching "
-                                "trusted memory or style."
-                            ),
-                        ),
-                    )
             except _QUALITY_STAGE_ERRORS as exc:
                 failure = _qa_provider_failure_payload(
                     "critic",
@@ -14107,6 +14383,31 @@ Output ONLY the corrected Persian translation.
                         detail="candidate_hash_matched_final_critique",
                     ),
                 )
+        translation = self._extra_final_quality_repair(
+            job_id, chunk, translation, critique_tool=critique_tool,
+            refiner_tool=refiner_tool, integrity_gate=integrity_gate,
+            terminology=terminology_ctx, review_context=qa_context,
+            enforced_entries=enforced_entries, enforce_auto=enforce_auto_terms,
+            protected_terms=protected_targets, protect_inline_english=protect_inline_english,
+            allowed_inline_originals=allowed_inline_originals,
+            reviewed_matches=reviewed_matches,
+            threshold=self.config.translation.critique_threshold,
+        )
+        language_quality = audit_translation_language(
+            chunk.text, translation, allowed_originals=allowed_language_originals,
+            structural_role=language_role, chapter_title=chunk.chapter_title,
+        )
+        canonical_candidate_hash = _candidate_text_hash(translation)
+        final_after_repair = _canonical_final_quality_record(self.db, job_id, idx, translation)
+        if final_after_repair["unresolved_grounded_issue_ids"]:
+            self.db.log_chunk_event(job_id, idx, "critique_needs_review", {
+                **_explicit_chunk_review_payload(
+                    "final_retained_candidate_quality",
+                    detail="candidate_hash_matched_final_critique",
+                ),
+                "candidate_target_hash": canonical_candidate_hash,
+                "unresolved_issue_ids": final_after_repair["unresolved_grounded_issue_ids"],
+            })
         if reviewed_matches:
             from tarjomeh.glossary.book_review import check_reviewed_book_terms
 

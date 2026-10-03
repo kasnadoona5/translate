@@ -118,6 +118,9 @@ domain = "political theory, sociology, philosophy"
 
 enable_critique = true
 max_refine_iterations = 2
+# One conditional, source-grounded final pass; set 0 for an off/on comparison.
+# Missing in an older saved job retains the historical zero-extra-call policy.
+extra_final_refine_attempts = 1
 critique_threshold = 9.0
 
 enable_back_translation = true

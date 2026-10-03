@@ -3,7 +3,28 @@
 English-to-Persian academic book translation with persistent terminology,
 book-level memory, independent quality review, and RTL document export.
 
-Current runtime release: **v20.2**. Tarjomeh is licensed under AGPL-3.0.
+Current runtime release: **v20.3**. Tarjomeh is licensed under AGPL-3.0.
+
+## v20.3 Bounded Final Repair
+
+Fresh academic jobs allow one additional conditional refiner attempt when the
+exact final candidate still has a grounded issue under the existing quality
+policy. A changed candidate must pass the source-aware critic and all existing
+admission gates. An unchanged, refiner-rejected suggestion needs no extra
+critique. The durable allowance is consumed before the request and cannot reset
+on resume. Older saved jobs without the setting keep zero extra attempts.
+Set **Extra final repair attempts** to `0` or `1` in Advanced settings.
+
+Repairs bind exact original/result quotes to the corresponding paragraph diff.
+Reports distinguish proposal approval, occurrence scope and lexical presence,
+retain rejected-summary evidence for audit only, inspect native DOCX contents,
+and measure the extra pass's active/lifetime calls, failures, tokens and time.
+Unverified publication-date alternatives are disclosed, not guessed.
+
+Stage order, four memory layers, style thresholds, source-first accuracy,
+refiner veto, term approval and the focused reviewer's OFF policy are unchanged.
+Local tests do not certify live Persian quality: a fresh source-versus-DOCX
+comparison and deployment audit remain required before production acceptance.
 
 ## v20.2 Quality Safeguards
 

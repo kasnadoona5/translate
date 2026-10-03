@@ -372,6 +372,7 @@ def _register_routes(app: Flask) -> None:
         runtime_config = app.config["TARJOMEH_CONFIG"]
         return render_template("index.html", ui_defaults={
             "qa_json_retries": runtime_config.translation.qa_json_retries,
+            "extra_final_refine_attempts": runtime_config.translation.extra_final_refine_attempts,
             "translation_reasoning": runtime_config.llm.translation_reasoning,
             "enforce_auto_extracted_terms": (
                 runtime_config.glossary.enforce_auto_extracted_terms
@@ -530,6 +531,7 @@ def _register_api(app: Flask) -> None:
                 config_overrides[dotted_key] = value == "true"
 
         _numeric_field_map = {
+            "extra_final_refine_attempts": ("translation.extra_final_refine_attempts", int),
             "max_refine_iterations": (
                 "translation.max_refine_iterations",
                 int,
@@ -565,6 +567,9 @@ def _register_api(app: Flask) -> None:
                     config_overrides[dotted_key] = converter(value)
                 except ValueError:
                     return _reject(f"Invalid numeric setting: {form_key}")
+        extra_budget = config_overrides.get("translation.extra_final_refine_attempts")
+        if extra_budget is not None and extra_budget not in (0, 1):
+            return _reject("extra_final_refine_attempts must be 0 or 1")
 
         selected_raw = request.form.get("selected_chapters", "").strip()
         if selected_raw:
@@ -1045,6 +1050,8 @@ def _register_api(app: Flask) -> None:
             f"  critique={translation_config.get('enable_critique')} "
             f"threshold={translation_config.get('critique_threshold')} "
             f"refinements={translation_config.get('max_refine_iterations')}",
+            "  extra_final_refine_attempts="
+            + str(translation_config.get("extra_final_refine_attempts", 0)),
             f"  critic_recovery_attempts={critic_config.get('recovery_max_attempts')} "
             f"fallback={critic_config.get('recovery_model') or '(same model)'} "
             f"final_tokens={critic_config.get('recovery_max_tokens')}",
@@ -1154,7 +1161,7 @@ def _register_api(app: Flask) -> None:
                     for term in research.get("terms", []) if isinstance(term, dict)
                 )),
                 f"  source_family_candidates={len(candidates)}",
-                "  approved_book_terms_active="
+                "  legacy_snapshot_approved_entries="
                 + str(len((book_term_snapshot or {}).get("applied", []))),
                 "  curated_conflicts="
                 + str((book_term_snapshot or {}).get("conflicts", [])),
@@ -1318,6 +1325,34 @@ def _register_api(app: Flask) -> None:
             lines.append("")
         all_events = db.get_chunk_events(job_id)
         all_chunks = db.get_chunks(job_id)
+        from tarjomeh.core.evidence_audit import extra_final_refinement_evidence
+        from tarjomeh.glossary.book_review import book_term_review_evidence
+
+        term_evidence = book_term_review_evidence(
+            db.get_job_artifact(job_id, "book_term_review_v1") or {}, all_events, all_chunks
+        )
+        lines.extend([
+            "Book-Term Approval Evidence (current review record):",
+            "  approved_proposals=" + str(term_evidence["approved_proposal_count"]),
+            "  ticked_occurrences=" + str(term_evidence["ticked_occurrence_count"]),
+            "  scoped_paragraphs=" + str(term_evidence["scoped_paragraph_count"]),
+            "  lexically_present_paragraph_terms="
+            + str(term_evidence["lexically_present_paragraph_term_count"]),
+            "  Semantic accuracy still requires source-based human review.",
+            "",
+        ])
+        extra_evidence = extra_final_refinement_evidence(
+            db.get_job_artifact(job_id, "extra_final_refinement_v1") or {},
+            all_events, int(translation_config.get("extra_final_refine_attempts", 0)),
+        )
+        lines.extend([
+            "Extra Final Repair Accounting:",
+            "  consumed_chunks=" + str(extra_evidence["consumed_chunk_count"]),
+            "  active=" + json.dumps(extra_evidence["active"], ensure_ascii=False),
+            "  lifetime=" + json.dumps(extra_evidence["lifetime"], ensure_ascii=False),
+            "  budget_violations=" + str(extra_evidence["budget_violations"]),
+            "",
+        ])
         events_by_chunk: dict[int, list[dict[str, Any]]] = {}
         for event in all_events:
             events_by_chunk.setdefault(int(event["chunk_index"]), []).append(event)

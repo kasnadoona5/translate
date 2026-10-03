@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v20.2"
+RUNTIME_RELEASE = "v20.3"
 RUNTIME_REVISION = 1
 
 
@@ -114,6 +114,11 @@ def runtime_capabilities() -> dict[str, Any]:
             "source_edition_metadata_guard": True,
             "precanonical_duplicate_comma_repair": True,
             "machine_json_separate_logging": True,
+            "bounded_extra_final_refinement": True,
+            "candidate_diff_bound_refinement_spans": True,
+            "rejected_summary_full_evidence": True,
+            "current_book_term_review_audit": True,
+            "native_contents_unit_audit": True,
         },
         "policy_versions": {
             "structure_evidence": 2,
@@ -133,7 +138,7 @@ def runtime_capabilities() -> dict[str, Any]:
             "critique_canonical_rebind": 1,
             "final_quality_checkpoint": 3,
             "source_obligation_recovery": 2,
-            "local_refiner_salvage": 2,
+            "local_refiner_salvage": 3,
             "research_prompt_admission": 2,
             "targeted_language_repair": 2,
             "post_edit_issue_attribution": 1,
@@ -144,7 +149,8 @@ def runtime_capabilities() -> dict[str, Any]:
             "source_term_inventory": 3,
             "render_identity": 2,
             "previous_context_identity": 1,
-            "research_edition_metadata": 1,
+            "research_edition_metadata": 2,
+            "extra_final_refinement": 1,
             "comma_surface_admission": 1,
         },
     }
@@ -634,6 +640,45 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v10403_behavior_probes(),
         **_v20_behavior_probes(),
         **_v202_behavior_probes(),
+        **_v203_behavior_probes(),
+    }
+
+
+def _v203_behavior_probes() -> dict[str, bool]:
+    """Synthetic policy checks: no LLM, file I/O, DB writes or job changes."""
+    from tarjomeh.context.book_researcher import BookResearcher
+    from tarjomeh.core.config import TarjomehConfig
+    from tarjomeh.core.pipeline import _refinement_span_contract
+    from tarjomeh.glossary.book_review import book_term_review_evidence
+
+    config = TarjomehConfig.from_dict(
+        {"llm": {"provider": "ollama"}}, credential_source=TarjomehConfig()
+    )
+    context, conflicts = BookResearcher._reconcile_publication_context(
+        "A general book (2015/2016, Example Press) examines institutions.",
+        [{"kind": "first_publication", "year": 2016}],
+    )
+    terms = book_term_review_evidence({"proposals": [{"status": "approved"}]}, [], [])
+    return {
+        "legacy_job_has_no_extra_allowance": config.translation.extra_final_refine_attempts == 0,
+        "fresh_academic_has_one_extra_allowance": (
+            TarjomehConfig().translation.extra_final_refine_attempts == 1
+        ),
+        "year_before_publisher_is_disclosed": bool(conflicts and "2015/2016" not in context),
+        "changed_head_requires_original_span": bool(
+            not _refinement_span_contract(
+                "This theory is clear.", "این رویکرد مبهم است.", "این نظریه روشن است.",
+                "p1:s1", "مبهم", "رویکرد مبهم", "نظریه روشن",
+            ) and _refinement_span_contract(
+                "This theory is clear.", "این رویکرد مبهم است.", "این نظریه روشن است.",
+                "p1:s1", "مبهم", "", "نظریه روشن",
+            )
+        ),
+        "approval_is_not_occurrence_or_semantic_verification": (
+            terms["approved_proposal_count"] == 1
+            and terms["ticked_occurrence_count"] == terms["scoped_paragraph_count"] == 0
+            and terms["lexically_present_paragraph_term_count"] == 0
+        ),
     }
 
 

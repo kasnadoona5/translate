@@ -365,6 +365,85 @@ def resolve_reviewed_book_terms(
     return matches, review
 
 
+def book_term_review_evidence(
+    review: dict[str, Any], events: list[dict[str, Any]], chunks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Report current approvals separately from scope and lexical presence."""
+    proposals = [item for item in (review.get("proposals") or []) if isinstance(item, dict)]
+    approved = [item for item in proposals if item.get("status") == "approved"]
+    ticks = [tick for term in approved for tick in (term.get("approved_occurrences") or [])
+             if isinstance(tick, dict)]
+    by_chunk: dict[int, list[dict[str, Any]]] = {}
+    for event in events:
+        if not isinstance(event.get("chunk_index"), int):
+            continue
+        index = event["chunk_index"]
+        if event.get("event_type") == "chunk_started":
+            by_chunk[index] = []
+        by_chunk.setdefault(index, []).append(event)
+    retained = {int(chunk["chunk_index"]): chunk for chunk in chunks
+                if chunk.get("status") in {"completed", "needs_review"}}
+    evidence_events = []
+    scoped = set()
+    lexical = []
+    for index, generation in by_chunk.items():
+        evidence_events.extend(event for event in generation if event.get("event_type") in {
+            "book_term_scope_resolved", "book_term_final_compliance",
+        })
+        latest_scope = next((event.get("payload", {}) for event in reversed(generation)
+                             if event.get("event_type") == "book_term_scope_resolved"), {})
+        chunk = retained.get(index, {})
+        metadata = chunk.get("metadata") or {}
+        metadata_valid = True
+        if isinstance(metadata, str):
+            import json
+
+            try:
+                metadata = json.loads(metadata)
+            except (ValueError, TypeError):
+                metadata = {}
+                metadata_valid = False
+        if not isinstance(metadata, dict):
+            metadata = {}
+            metadata_valid = False
+        source_parts = _verified_source_paragraphs(str(chunk.get("text", "")), metadata)
+        targets = split_paragraphs(str(chunk.get("translation") or ""))
+        for match in latest_scope.get("matched", []):
+            paragraph = match.get("paragraph_index")
+            scoped.add((index, paragraph, match.get("source_paragraph_hash")))
+            proven = bool(
+                metadata_valid and source_parts is not None and len(source_parts) == len(targets)
+                and isinstance(paragraph, int) and 0 <= paragraph < len(source_parts)
+                and _sha(source_parts[paragraph]) == match.get("source_paragraph_hash")
+            )
+            lexical.append({
+                "db_chunk_index": index, "ui_chunk_number": index + 1, **match,
+                "presence": (
+                    "lexically_present" if target_present(
+                        str(match.get("target", "")), targets[paragraph]
+                    )
+                    else "missing"
+                ) if proven else "REVIEW",
+                "semantic_accuracy": "requires_source_based_human_review",
+            })
+    return {
+        "phase": review.get("phase", "off"), "source_sha256": review.get("source_sha256"),
+        "approved_proposal_count": len(approved), "ticked_occurrence_count": len(ticks),
+        "ticked_paragraph_count": len({
+            (tick.get("paragraph_index"), tick.get("paragraph_sha256")) for tick in ticks
+        }),
+        "scoped_paragraph_count": len(scoped),
+        "lexically_present_paragraph_term_count": sum(
+            item["presence"] == "lexically_present" for item in lexical
+        ),
+        "proposal_decisions": proposals, "scope_and_compliance_events": evidence_events,
+        "paragraph_term_presence": lexical,
+        "policy": (
+            "approval, scope and lexical presence are distinct; none proves semantic accuracy"
+        ),
+    }
+
+
 def check_reviewed_book_terms(
     translation: str,
     source_text: str,
