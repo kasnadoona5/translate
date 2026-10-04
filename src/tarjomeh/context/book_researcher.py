@@ -695,6 +695,13 @@ class BookResearcher:
             from tarjomeh.glossary.book_review import persian_option_defect
 
             target_defect = persian_option_defect(target)
+            persian_option_excerpts = [
+                {"url": excerpt["url"], "quote": target, "match_kind": "exact_text_quotation"}
+                for excerpt in term_supporting_excerpts
+                if target and not target_defect
+                and re.search(r"[\u0621-\u06ff]", target)
+                and target in str(excerpt.get("snippet", ""))
+            ]
             terms.append({
                 "source": source,
                 "target": "" if target_defect else target,
@@ -716,6 +723,10 @@ class BookResearcher:
                 "term_supporting_excerpts": term_supporting_excerpts,
                 "term_evidence_terms": evidence_terms,
                 "term_supported": term_supported,
+                "english_term_attested": term_supported,
+                "persian_option_quote_present": bool(persian_option_excerpts),
+                "persian_option_supporting_excerpts": persian_option_excerpts,
+                "persian_semantic_accuracy": "unverified",
                 "identity_supported": identity_supported,
                 "evidence_type": (
                     "source_supported"

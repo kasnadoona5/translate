@@ -3,7 +3,33 @@
 English-to-Persian academic book translation with persistent terminology,
 book-level memory, independent quality review, and RTL document export.
 
-Current runtime release: **v20.3**. Tarjomeh is licensed under AGPL-3.0.
+Current runtime release: **v20.4**. Tarjomeh is licensed under AGPL-3.0.
+
+## v20.4 Evidence Safeguards
+
+Repeated approved terms remain REVIEW when individual source/target occurrences
+cannot be proven, including legacy evidence-paragraph approvals. Automatic bare
+infinitival fragments are retained as passage evidence, not reusable terminology.
+Fallback and authoritative style samples share source-proven artifact guards.
+English annotations with proven authority, position and source-parenthetical
+counts no longer trigger a depth-only warning. Unknown wrappers remain REVIEW;
+independent single dashes are not inferred to be a paired aside.
+
+Research reporting separates English attestation, an exact Persian quotation,
+and unverified semantic accuracy. Actual bounded prompt components and the
+initial body extraction sample are hash-linked for audit. Storage bounds do not
+limit translation prompts. Historical missing context is disclosed, not guessed.
+
+Production prompts, stage order, four memories, approval workflow, refiner veto,
+style floors and the existing 0/1 conditional extra-repair budget are unchanged.
+An optional isolated fluency experiment does not activate production guidance.
+This release requires a fresh source-versus-DOCX audit before quality acceptance.
+
+Use `scripts/deploy_tarjomeh_v204.sh` and the matching `v204_reports.sh` /
+`v204_companion.sh` audits. Deployment checks active worker leases, verifies a
+consistent SQLite backup by restoring it in isolation, frees only verified unused
+Tarjomeh space, and verifies runtime/revision, health and unchanged 9router state.
+See [v20.4 deployment, audit and trial instructions](docs/V20.4_RELEASE.md).
 
 ## v20.3 Bounded Final Repair
 

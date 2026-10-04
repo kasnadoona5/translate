@@ -247,7 +247,9 @@ def _style_paragraph_shape_reason(text: str) -> str:
     return ""
 
 
-def _clean_style_sample(text: str) -> str:
+def _clean_style_sample(
+    text: str, *, source: str = "", anchor_context: dict[str, Any] | None = None,
+) -> str:
     """Return the complete paragraph when it is safe style evidence, else "".
 
     The paragraph is never clipped and no citation sentence is removed, so a
@@ -273,7 +275,7 @@ def _clean_style_sample(text: str) -> str:
     if (
         foreign_script_artifacts("", sample)
         or markup_wrapper_artifacts("", sample)
-        or parenthesis_artifacts("", sample)
+        or parenthesis_artifacts(source, sample, anchor_context=anchor_context)
         or detached_ezafe_artifacts(sample)
         or repeated_persian_clause_artifacts(sample)
         or repeated_persian_word_artifacts(sample)
@@ -288,6 +290,16 @@ def _clean_style_sample(text: str) -> str:
     return sample
 
 
+def _source_style_artifacts(source: str, target: str) -> bool:
+    return bool(
+        _source_style_contradiction(source, target)
+        or duplicated_comma_artifacts(source, target)
+        or spaced_optional_plural_artifacts(source, target)
+        or spaced_optional_prefix_artifacts(source, target)
+        or re.search(r"\s[\u2013\u2014]\s+\u0631\u0627(?:\s|$)", target)
+    )
+
+
 def _style_record_is_authoritative(record: dict[str, Any]) -> bool:
     """Return whether persisted evidence may actively teach book-level style."""
     if not bool(record.get("representative")):
@@ -298,19 +310,16 @@ def _style_record_is_authoritative(record: dict[str, Any]) -> bool:
         return False
     if _is_paratext_style_source(str(record.get("source_text", ""))):
         return False
-    cleaned = _clean_style_sample(str(record.get("text", "")))
+    cleaned = _clean_style_sample(
+        str(record.get("text", "")), source=str(record.get("source_text", "")),
+        anchor_context=record.get("inline_anchor_context"),
+    )
     if not cleaned:
         return False
     if _numeric_score(record.get("quality_score")) < 75.0:
         return False
     source = str(record.get("source_text", ""))
-    if source and (
-        _source_style_contradiction(source, cleaned)
-        or duplicated_comma_artifacts(source, cleaned)
-        or spaced_optional_plural_artifacts(source, cleaned)
-        or spaced_optional_prefix_artifacts(source, cleaned)
-        or re.search(r"\s[\u2013\u2014]\s+\u0631\u0627(?:\s|$)", cleaned)
-    ):
+    if source and _source_style_artifacts(source, cleaned):
         return False
     scores = dict(record.get("final_scores", {}) or {})
     return bool(
@@ -331,9 +340,10 @@ def _style_record_is_prompt_safe(record: dict[str, Any]) -> bool:
         and source
         and not _is_paratext_style_source(source)
         and not _NON_PROSE_RE.search(source)
-        and _clean_style_sample(target)
-        and not _source_style_contradiction(source, target)
-        and not duplicated_comma_artifacts(source, target)
+        and _clean_style_sample(
+            target, source=source, anchor_context=record.get("inline_anchor_context"),
+        )
+        and not _source_style_artifacts(source, target)
         and _numeric_score(record.get("quality_score")) >= 75.0
     )
 
@@ -354,14 +364,16 @@ def _source_style_contradiction(source: str, target: str) -> list[str]:
     ]
 
 
-def _style_sample_quality(text: str) -> dict[str, Any]:
+def _style_sample_quality(
+    text: str, *, source: str = "", anchor_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Score fluent-academic style evidence without choosing terminology.
 
     The thresholds reject paragraphs that are technically clean but too dense
     to serve as a reusable voice anchor. They do not reject complexity in the
     translation itself; this function controls style-memory admission only.
     """
-    sample = _clean_style_sample(text)
+    sample = _clean_style_sample(text, source=source, anchor_context=anchor_context)
     if not sample:
         return {
             "approved": False,
@@ -907,14 +919,27 @@ class MemoryManager:
                 and paragraph_index < len(source_paragraph_indices)
                 else paragraph_index
             )
-            quality = _style_sample_quality(paragraph)
-            quality["paragraph_index"] = paragraph_index
             source_paragraph = (
                 source_paragraphs[source_paragraph_index]
                 if source_paragraphs
                 and 0 <= source_paragraph_index < len(source_paragraphs)
                 else ""
             )
+            anchor_context = {
+                "authorized": {
+                    key: value for key, value in self.proper_nouns.inline_eligible_nouns().items()
+                    if self.proper_nouns.applies_to_source(key, source_paragraph)
+                },
+            }
+            anchor_context["aliases"] = {
+                key: self.proper_nouns.aliases_for(key)
+                for key in anchor_context["authorized"]
+            }
+            quality = _style_sample_quality(
+                paragraph, source=source_paragraph, anchor_context=anchor_context,
+            )
+            quality["paragraph_index"] = paragraph_index
+            quality["inline_anchor_context"] = anchor_context
             quality["source_text"] = source_paragraph
             # Exact only when the stored sample is the whole paragraph and the
             # paragraph itself is proven aligned with its source paragraph.
@@ -1006,6 +1031,7 @@ class MemoryManager:
             record = {
                 "text": text,
                 "source_text": source_text,
+                "inline_anchor_context": selected.get("inline_anchor_context", {}),
                 "alignment_status": selected.get("alignment_status", "uncertain"),
                 "sample_scope": (
                     _STYLE_SAMPLE_SCOPE
@@ -1145,8 +1171,14 @@ class MemoryManager:
         clean_records = [
             (record, cleaned)
             for record in active_records
-            if (cleaned := _clean_style_sample(str(record.get("text", ""))))
-            and float(_style_sample_quality(cleaned).get("score", 0.0))
+            if (cleaned := _clean_style_sample(
+                str(record.get("text", "")), source=str(record.get("source_text", "")),
+                anchor_context=record.get("inline_anchor_context"),
+            ))
+            and float(_style_sample_quality(
+                cleaned, source=str(record.get("source_text", "")),
+                anchor_context=record.get("inline_anchor_context"),
+            ).get("score", 0.0))
             >= self._style_min_score
         ][:5]
         if not clean_records:

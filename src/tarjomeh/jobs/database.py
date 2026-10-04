@@ -1025,7 +1025,8 @@ class JobDatabase:
         entry: dict[str, Any],
         *,
         version: int = 1,
-    ) -> None:
+        entry_limit: int | None = None,
+    ) -> bool | None:
         """Merge one JSON artifact entry without losing concurrent writers."""
         timestamp = datetime.utcnow().isoformat()
         with self._get_connection() as conn:
@@ -1044,6 +1045,9 @@ class JobDatabase:
             collection = payload.get(collection_key, {})
             if not isinstance(collection, dict):
                 collection = {}
+            if entry_limit is not None and entry_key not in collection and len(collection) >= entry_limit:
+                conn.commit()
+                return False
             collection[entry_key] = entry
             payload["version"] = int(version)
             payload[collection_key] = collection
@@ -1063,6 +1067,7 @@ class JobDatabase:
                 ),
             )
             conn.commit()
+            return True if entry_limit is not None else None
 
     def reserve_extra_final_refinement(
         self, job_id: str, chunk_index: int, *, source_sha256: str,

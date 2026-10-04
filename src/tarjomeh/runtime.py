@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v20.3"
+RUNTIME_RELEASE = "v20.4"
 RUNTIME_REVISION = 1
 
 
@@ -119,12 +119,19 @@ def runtime_capabilities() -> dict[str, Any]:
             "rejected_summary_full_evidence": True,
             "current_book_term_review_audit": True,
             "native_contents_unit_audit": True,
+            "all_approved_scopes_count_occurrences": True,
+            "infinitival_passage_memory_guard": True,
+            "shared_objective_style_guard": True,
+            "source_authorized_annotation_nesting": True,
+            "sentence_proven_dash_review": True,
+            "research_evidence_kind_reporting": True,
+            "bounded_exact_prompt_component_evidence": True,
         },
         "policy_versions": {
             "structure_evidence": 2,
             "canonical_text": 3,
-            "layer1_admission": 10,
-            "style_evidence": 9,
+            "layer1_admission": 11,
+            "style_evidence": 10,
             "benchmark_schema": 1,
             "checkpoint_export": 3,
             "paragraph_identity": 1,
@@ -143,8 +150,8 @@ def runtime_capabilities() -> dict[str, Any]:
             "targeted_language_repair": 2,
             "post_edit_issue_attribution": 1,
             "attachment_trial": 1,
-            "book_term_scope": 4,
-            "final_language_admission": 5,
+            "book_term_scope": 5,
+            "final_language_admission": 6,
             "book_term_review": 2,
             "source_term_inventory": 3,
             "render_identity": 2,
@@ -152,6 +159,8 @@ def runtime_capabilities() -> dict[str, Any]:
             "research_edition_metadata": 2,
             "extra_final_refinement": 1,
             "comma_surface_admission": 1,
+            "prompt_component_evidence": 1,
+            "research_evidence_reporting": 1,
         },
     }
 
@@ -463,10 +472,10 @@ def runtime_behavior_probes() -> dict[str, bool]:
         ),
         "contextual_person_name_quarantine": bool(
             is_bounded_person_name_target(
-                "Manuela Tecusan", "\u0645\u0627\u0646\u0648\u0626\u0644\u0627 \u062a\u06a9\u0648\u0634\u0627\u0646"
+                "Ada North", "\u0622\u062f\u0627 \u0646\u0648\u0631\u062b"
             )
             and not is_bounded_person_name_target(
-                "Manuela Tecusan", "\u0648\u06cc\u0631\u0627\u0633\u062a\u0627\u0631\u06cc \u0639\u0627\u0644\u0645\u0627\u0646\u0647 \u0648 \u06a9\u0627\u0645\u0644\u0627 \u062a\u062e\u0635\u0635\u06cc \u0645\u0627\u0646\u0648\u0626\u0644\u0627 \u062a\u06a9\u0648\u0634\u0627\u0646"
+                "Ada North", "\u0648\u06cc\u0631\u0627\u0633\u062a\u0627\u0631\u06cc \u0639\u0627\u0644\u0645\u0627\u0646\u0647 \u0648 \u06a9\u0627\u0645\u0644\u0627 \u062a\u062e\u0635\u0635\u06cc \u0622\u062f\u0627 \u0646\u0648\u0631\u062b"
             )
         ),
         "orphan_object_marker_dash_repair": "\u2014 \u0631\u0627" not in dash_repaired,
@@ -641,6 +650,75 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v20_behavior_probes(),
         **_v202_behavior_probes(),
         **_v203_behavior_probes(),
+        **_v204_behavior_probes(),
+    }
+
+
+def _v204_behavior_probes() -> dict[str, bool]:
+    """Pure synthetic inputs, with no configuration, network or database I/O."""
+    from tarjomeh.context.book_researcher import BookResearcher
+    from tarjomeh.core.config import TarjomehConfig
+    from tarjomeh.core.pipeline import audit_translation_language
+    from tarjomeh.core.prompt_evidence import component_evidence
+    from tarjomeh.glossary.book_review import check_reviewed_book_terms, resolve_reviewed_book_terms
+    from tarjomeh.memory.manager import _style_record_is_authoritative, _style_record_is_prompt_safe
+    from tarjomeh.memory.proper_nouns import is_reusable_terminology_mapping
+    from tarjomeh.quality.integrity import parenthesis_artifacts
+
+    source = "A control network connects to a second control network."
+    target = "\u0634\u0628\u06a9\u0647\u0654 \u06a9\u0646\u062a\u0631\u0644"
+    def digest(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    metadata = {"structural_roles": ["body"]}
+    matches, _ = resolve_reviewed_book_terms(source, metadata, 0, [{
+        "source": "control network", "target": target, "status": "approved",
+        "scope_mode": "evidence_paragraph", "source_evidence_sha256": digest(source),
+    }])
+    compliance, reviews = check_reviewed_book_terms(target, source, metadata, matches)
+    dash_review = audit_translation_language(
+        "One change - its cause is clear. Another - its effect is uncertain.",
+        "\u06cc\u06a9 \u062a\u063a\u06cc\u06cc\u0631 \u2014 \u0639\u0644\u062a\u0634 \u0631\u0648\u0634\u0646 \u0627\u0633\u062a. \u0627\u062b\u0631 \u062f\u06cc\u06af\u0631\u06cc \u2014 \u0646\u0627\u0645\u0639\u0644\u0648\u0645 \u2014 \u0627\u0633\u062a.",
+    )
+    original_source = "Researchers (Ada North) studied the network."
+    original_target = "\u067e\u0698\u0648\u0647\u0634\u06af\u0631\u0627\u0646 (\u0622\u062f\u0627 \u0646\u0648\u0631\u062b (Ada North)) \u0634\u0628\u06a9\u0647 \u0631\u0627 \u0628\u0631\u0631\u0633\u06cc \u06a9\u0631\u062f\u0646\u062f."
+    anchor = {"authorized": {"Ada North": "\u0622\u062f\u0627 \u0646\u0648\u0631\u062b"}}
+    style_source = "This (meta)theoretical account preserves the distinctions."
+    style_target = "\u0627\u06cc\u0646 \u062a\u062d\u0644\u06cc\u0644 (\u0641\u0631\u0627) \u0646\u0638\u0631\u06cc \u062a\u0645\u0627\u06cc\u0632\u0647\u0627 \u0631\u0627 \u062d\u0641\u0638 \u0645\u06cc\u200c\u06a9\u0646\u062f."
+    record = {"source_text": style_source, "text": style_target,
+              "source_text_hash": digest(style_source), "text_hash": digest(style_target),
+              "sample_scope": "complete_paragraph", "alignment_status": "exact_paragraph",
+              "quality_score": 95, "representative": True,
+              "final_scores": dict.fromkeys(("accuracy", "fluency", "terminology", "register"), 9.5)}
+    researcher = object.__new__(BookResearcher)
+    researcher.config = TarjomehConfig()
+    research = researcher._normalise_terms([
+        {"source": "control network", "target": target, "source_urls": ["https://example.invalid/book"]}
+    ], [{"url": "https://example.invalid/book", "snippet": source}])[0]
+    snapshots, refs = component_evidence({"book_context": "Exact context."}, {})
+    return {
+        "legacy_scope_repeats_are_review_only": bool(
+            matches[0]["source_occurrence_count"] == 2 and compliance.total_checked == 0 and reviews
+        ),
+        "bare_infinitive_is_passage_evidence": bool(
+            not is_reusable_terminology_mapping("to reduce uncertainty", target)
+            and is_reusable_terminology_mapping("right to information", target)
+        ),
+        "fallback_and_authority_share_prefix_guard": bool(
+            not _style_record_is_prompt_safe(record) and not _style_record_is_authoritative(record)
+        ),
+        "independent_single_dashes_are_not_a_pair": not dash_review["unbalanced_explanatory_dash_artifacts"],
+        "authorized_annotations_preserve_source_parentheses": bool(
+            not parenthesis_artifacts(original_source, original_target, anchor_context=anchor)
+            and parenthesis_artifacts(original_source, original_target)
+        ),
+        "english_attestation_does_not_verify_persian": bool(
+            research["english_term_attested"] and not research["persian_option_quote_present"]
+            and research["persian_semantic_accuracy"] == "unverified"
+        ),
+        "prompt_evidence_is_complete_and_deduplicated": bool(
+            refs["book_context"]["available"]
+            and not component_evidence({"book_context": "Exact context."}, snapshots)[0]
+        ),
     }
 
 
@@ -832,10 +910,10 @@ def _v10401_behavior_probes() -> dict[str, bool]:
         ),
         "name_guard_rejects_surrounding_prose": bool(
             not is_bounded_person_name_target(
-                "Manuela Tecusan", "تخصصیِ مانوئلا تکوشان"
+                "Ada North", "تخصصیِ آدا نورث"
             )
-            and not is_bounded_person_name_target("Hegel", "فیلسوف هگل")
-            and is_bounded_person_name_target("Hegel", "گ. و. ف. هگل")
+            and not is_bounded_person_name_target("Ben West", "فیلسوف بن وست")
+            and is_bounded_person_name_target("Ben West", "ب. وست")
         ),
         "acknowledgement_is_not_style_evidence": bool(
             _is_paratext_style_source("Special thanks are also due to the editors.")

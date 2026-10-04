@@ -276,7 +276,7 @@ def test_genre_guidance_changes_style_dimensions_not_terminology_authority() -> 
 def test_runtime_capability_manifest_is_versioned_and_complete() -> None:
     manifest = runtime_capabilities()
 
-    assert manifest["release"] == "v20.3"
+    assert manifest["release"] == "v20.4"
     assert manifest["revision"] >= 1
     assert all(manifest["capabilities"].values())
     assert manifest["capabilities"]["four_layer_memory"] is True

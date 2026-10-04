@@ -2072,7 +2072,9 @@ def markup_wrapper_artifacts(source: str, translation: str) -> list[dict[str, An
     ]
 
 
-def parenthesis_artifacts(source: str, translation: str) -> list[dict[str, Any]]:
+def parenthesis_artifacts(
+    source: str, translation: str, *, anchor_context: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     """Report unbalanced or newly nested ASCII parentheses in the target."""
     def scan(value: str) -> tuple[list[dict[str, Any]], int]:
         stack: list[int] = []
@@ -2094,6 +2096,15 @@ def parenthesis_artifacts(source: str, translation: str) -> list[dict[str, Any]]
 
     findings, target_depth = scan(translation or "")
     _source_findings, source_depth = scan(source or "")
+    if anchor_context and not findings and not _source_findings and source_depth:
+        from tarjomeh.core.render_identity import proven_inline_original_spans
+
+        masked = list(translation)
+        for start, end in proven_inline_original_spans(
+            source, translation, anchor_context, source_parenthetical_only=True,
+        ):
+            masked[start:end] = " " * (end - start)
+        _masked_findings, target_depth = scan("".join(masked))
     if target_depth > max(1, source_depth):
         findings.append({
             "type": "new_nested_parentheses",

@@ -168,6 +168,64 @@ def _proof_anchor(source: str, before: str, after: str, context: dict[str, Any])
     return ""
 
 
+def proven_inline_original_spans(
+    source: str, target: str, context: dict[str, Any],
+    *, source_parenthetical_only: bool = False,
+) -> list[tuple[int, int]]:
+    """Locate authorized leaf annotations without excusing malformed wrappers."""
+    if not isinstance(context, dict) or not isinstance(context.get("authorized"), dict):
+        return []
+    aliases = context.get("aliases", {})
+    context = {
+        "authorized": {
+            key: value for key, value in context["authorized"].items()
+            if isinstance(key, str) and isinstance(value, str) and value.strip()
+        },
+        "aliases": {
+            key: [value for value in values if isinstance(value, str)]
+            for key, values in (aliases.items() if isinstance(aliases, dict) else [])
+            if isinstance(key, str) and isinstance(values, list)
+        },
+    }
+    originals = Counter()
+    for original, count in _latin_parentheticals(target).items():
+        originals[original.casefold()] += count
+    annotations = list(_LATIN_PARENTHETICAL_RE.finditer(target))
+
+    def enclosed(text: str, position: int) -> bool:
+        prefix = text[:position]
+        return prefix.count("(") > prefix.count(")")
+
+    spans = []
+    for match in annotations:
+        original = _squash(match.group(1))
+        targets = _anchor_targets(original, context)
+        count = _word_count(source, original)
+        if not targets or not count or originals[original.casefold()] > count:
+            continue
+        if source_parenthetical_only:
+            if not enclosed(target, match.start()):
+                continue
+            source_count = sum(
+                enclosed(source, occurrence.start()) for occurrence in re.finditer(
+                    rf"(?<!\w){re.escape(original)}(?!\w)", source, re.IGNORECASE,
+                )
+            )
+            nested_target_count = sum(
+                _squash(item.group(1)).casefold() == original.casefold()
+                and enclosed(target, item.start()) for item in annotations
+            )
+            if not source_count or nested_target_count > source_count:
+                continue
+        if re.search(r"\[\s*$", target[:match.start()]) or re.match(
+            r"\s*\]", target[match.end():]
+        ):
+            continue
+        if _anchor_position_proven(target, match.start(), targets):
+            spans.append(match.span())
+    return spans
+
+
 def _citation_names(text: str) -> set[str]:
     return {
         word for word in _LATIN_WORD_RE.findall(text or "")

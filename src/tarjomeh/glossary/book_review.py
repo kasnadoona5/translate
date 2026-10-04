@@ -330,8 +330,10 @@ def resolve_reviewed_book_terms(
                 review.append({"source": source, "reason": "invalid_approved_scope"})
                 continue
             pattern = re.compile(rf"(?<!\w){re.escape(source)}(?!\w)", re.IGNORECASE)
-            if pattern.search(paragraph):
+            count = len(pattern.findall(paragraph))
+            if count:
                 candidates.setdefault(source.casefold(), []).append(term)
+                occurrence_counts[id(term)] = count
         for source_key, options in candidates.items():
             scope_reason = ""
             if role not in _BODY_ROLES:
@@ -460,11 +462,25 @@ def check_reviewed_book_terms(
     checked = 0
     for match in matches:
         index = match["paragraph_index"]
-        if index >= len(source_parts) or (
+        if type(index) is not int or not 0 <= index < len(source_parts) or (
             hashlib.sha256(source_parts[index].encode("utf-8")).hexdigest()
             != match["source_paragraph_hash"]
         ):
             return ComplianceReport(), [{"reason": "source_paragraph_changed"}]
+        source_count = len(_term_pattern(str(match["source"])).findall(source_parts[index]))
+        recorded_count = match.get("source_occurrence_count")
+        if not source_count or (
+            recorded_count is not None
+            and (type(recorded_count) is not int or recorded_count != source_count)
+        ):
+            review.append({
+                "paragraph_index": index,
+                "source": match["source"],
+                "reason": "source_occurrence_count_mismatch",
+                "source_occurrence_count": source_count,
+                "recorded_occurrence_count": recorded_count,
+            })
+            continue
         present = target_present(str(match["target"]), target_parts[index])
         if not present:
             violations.append(Violation(
@@ -472,7 +488,6 @@ def check_reviewed_book_terms(
                 expected=str(match["target"]),
                 chunk_location=f"Paragraph {index + 1}",
             ))
-        source_count = int(match.get("source_occurrence_count", 1) or 1)
         if source_count > 1:
             # Presence proves one rendering somewhere in the paragraph, not
             # one per occurrence; repeated terms are never counted as checked.

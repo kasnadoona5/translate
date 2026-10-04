@@ -1151,9 +1151,12 @@ def _register_api(app: Flask) -> None:
                 "  authority: identity_supported="
                 + str(sum(bool(term.get("identity_supported")) for term in suggested))
                 + " english_term_attested="
-                + str(sum(bool(term.get("exact_evidence_quote")) for term in suggested))
-                + " persian_equivalent_evidenced="
                 + str(sum(bool(term.get("term_supported")) for term in suggested))
+                + " exact_english_evidence_quote="
+                + str(sum(bool(term.get("exact_evidence_quote")) for term in suggested))
+                + " persian_option_quote_present="
+                + str(sum(bool(term.get("persian_option_quote_present")) for term in suggested))
+                + " persian_semantic_accuracy=unverified"
                 + f" user_approved={len(approved)}"
                 + " malformed_persian_withheld="
                 + str(sum(
@@ -1808,9 +1811,11 @@ def _register_api(app: Flask) -> None:
                         )
                 elif event["event_type"] == "refinement_completed":
                     lines.append(
-                        f"  Refinement: iteration={payload.get('iteration')} "
-                        f"decision={payload.get('decision')} "
-                        f"before={payload.get('before_chars')} after={payload.get('after_chars')}"
+                        f"  Refinement: stage={payload.get('stage', 'ordinary_refinement')} "
+                        f"iteration={payload.get('iteration', 'not_applicable')} "
+                        f"decision={payload.get('decision', 'per_issue')} "
+                        f"before={payload.get('before_chars', 'not_recorded')} "
+                        f"after={payload.get('after_chars', 'not_recorded')}"
                     )
                     lines.append(
                         f"    Commit: mode={payload.get('commit_mode', 'legacy')} "

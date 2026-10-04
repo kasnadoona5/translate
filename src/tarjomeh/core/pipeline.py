@@ -33,6 +33,7 @@ from tarjomeh.core.render_identity import (
     RenderChangeLedger,
     compare_docx_to_rendered,
 )
+from tarjomeh.core.prompt_evidence import component_evidence
 from tarjomeh.core.paragraph_protocol import (
     decode_paragraphs,
     encode_paragraphs,
@@ -698,8 +699,26 @@ def _unbalanced_explanatory_dash_artifacts(
             if target_em_count
             else target_en_count
         )
-        if (
-            source_count >= 2
+        from tarjomeh.quality.grounding import source_segments
+        from tarjomeh.quality.integrity import _sentence_scoped_orphan_dash
+
+        paired_source_sentences = [
+            segment for segment in source_segments(source_part)
+            if len(_SPACED_EXPLANATORY_DASH_RE.findall(segment["text"])) == 2
+        ]
+        proven_orphan = _sentence_scoped_orphan_dash(source_part, target_part)
+        if proven_orphan is not None:
+            findings.append({
+                "paragraph_index": index,
+                "target_offset": proven_orphan[0],
+                "source_dash_count": source_count,
+                "target_dash_count": target_aside_count,
+                "target_preview": target_part[:500],
+                "reason": "persian_object_marker_after_unmatched_dash",
+            })
+        elif (
+            paired_source_sentences
+            and source_count >= 2
             and source_count % 2 == 0
             and target_aside_count % 2 == 1
         ):
@@ -710,7 +729,10 @@ def _unbalanced_explanatory_dash_artifacts(
                 "target_em_dash_count": target_em_count,
                 "target_en_dash_count": target_en_count,
                 "target_preview": target_part[:500],
-                "reason": "source_paired_explanatory_dash_became_unbalanced",
+                "reason": "explanatory_dash_alignment_unproven",
+                "report_only": True,
+                "disposition": "REVIEW",
+                "source_segment_ids": [item["segment_id"] for item in paired_source_sentences],
             })
         for match in _DANGLING_OBJECT_MARKER_DASH_RE.finditer(target_part):
             findings.append({
@@ -750,6 +772,7 @@ def audit_translation_language(
     allowed_originals: list[str] | tuple[str, ...] = (),
     structural_role: str = "body",
     chapter_title: str = "",
+    anchor_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Report deterministic foreign-script leakage without rewriting semantics."""
     mixed = mixed_script_artifacts(translation)
@@ -772,7 +795,7 @@ def audit_translation_language(
     )
     foreign_scripts = foreign_script_artifacts(source, translation)
     markup = markup_wrapper_artifacts(source, translation)
-    parentheses = parenthesis_artifacts(source, translation)
+    parentheses = parenthesis_artifacts(source, translation, anchor_context=anchor_context)
     detached_ezafe = [
         item for item in detached_ezafe_artifacts(translation)
         if str(item.get("text", "")) not in source
@@ -792,6 +815,8 @@ def audit_translation_language(
         translation,
         structural_role=structural_role,
     )
+    dash_reviews = [item for item in explanatory_dashes if item.get("report_only")]
+    explanatory_dashes = [item for item in explanatory_dashes if not item.get("report_only")]
     return {
         "review_required": bool(
             mixed
@@ -838,6 +863,7 @@ def audit_translation_language(
         "tatweel_separator_artifacts": tatweel_separators,
         "unbalanced_explanatory_dash_count": len(explanatory_dashes),
         "unbalanced_explanatory_dash_artifacts": explanatory_dashes,
+        "explanatory_dash_review": dash_reviews,
         "duplicated_comma_count": len(duplicate_commas),
         "duplicated_comma_artifacts": duplicate_commas,
         "policy": (
@@ -857,6 +883,7 @@ def audit_document_final_text(
     document: TranslatedDocument,
     *,
     allowed_originals: list[str] | tuple[str, ...] = (),
+    anchor_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Recheck final assembled text after every deterministic transformation."""
     paragraph_findings: list[dict[str, Any]] = []
@@ -867,6 +894,7 @@ def audit_document_final_text(
             paragraph.source_text,
             paragraph.translated_text,
             allowed_originals=allowed_originals,
+            anchor_context=anchor_context,
             structural_role=str(
                 paragraph.metadata.get("structure_role", "body")
             ),
@@ -881,6 +909,10 @@ def audit_document_final_text(
             })
         target = paragraph.translated_text
         source = paragraph.source_text
+        report_only_findings.extend({
+            **item, "paragraph_index": paragraph.index,
+            "check_id": "explanatory_dash_alignment_unproven",
+        } for item in language.get("explanatory_dash_review", []))
         source_superscripts = paragraph.metadata.get("superscript_markers", []) or []
         if isinstance(source_superscripts, list) and source_superscripts:
             from tarjomeh.exporters.docx_exporter import source_superscript_spans
@@ -6994,6 +7026,12 @@ class TranslationPipeline:
                 first_text = book_term_extraction_sample(research_document)
                 if not first_text:
                     raise ValueError("No eligible body-prose term evidence")
+                self.db.save_job_artifact(job_id, "auto_extraction_source_evidence_v1", {
+                    "text": first_text,
+                    "sha256": hashlib.sha256(first_text.encode("utf-8")).hexdigest(),
+                    "chars": len(first_text), "complete": True,
+                    "source_scope": "body_term_inventory", "authority": "source_evidence_only",
+                })
                 self.db.log_chunk_event(
                     job_id, 0, "auto_extraction_started", {
                         "source_chars": len(first_text),
@@ -8486,6 +8524,7 @@ class TranslationPipeline:
         final_text_audit = audit_document_final_text(
             trans_doc,
             allowed_originals=tuple(proper_nouns),
+            anchor_context={"authorized": dict(proper_nouns), "aliases": noun_aliases},
         )
         self.db.save_job_artifact(
             job_id, "final_text_quality_audit", final_text_audit
@@ -8861,6 +8900,7 @@ class TranslationPipeline:
         final_text_audit = audit_document_final_text(
             trans_doc,
             allowed_originals=tuple(proper_nouns),
+            anchor_context={"authorized": dict(proper_nouns), "aliases": noun_aliases},
         )
         self.db.save_job_artifact(
             job_id, "final_text_quality_audit", final_text_audit
@@ -10361,6 +10401,25 @@ class TranslationPipeline:
             "inline_policy": inline_policy_context,
         }
         component_sizes = {}
+        evidence_artifact = self.db.get_job_artifact(job_id, "prompt_component_evidence_v1")
+        existing_evidence = (
+            evidence_artifact.get("entries", {})
+            if isinstance(evidence_artifact, dict) else {}
+        )
+        if not isinstance(existing_evidence, dict):
+            existing_evidence = {}
+        new_evidence, evidence_references = component_evidence(
+            prompt_components, existing_evidence,
+        )
+        for evidence_key, evidence in new_evidence.items():
+            saved = self.db.merge_job_artifact_entry(
+                job_id, "prompt_component_evidence_v1", "entries", evidence_key,
+                evidence, version=1, entry_limit=128,
+            )
+            if saved is False:
+                reference = evidence_references[evidence["component"]]
+                reference.pop("artifact_entry", None)
+                reference.update({"available": False, "reason": "job_storage_bound"})
         for name, value in prompt_components.items():
             try:
                 estimated_tokens = int(self.llm_client.count_tokens(value)) if value else 0
@@ -10400,6 +10459,8 @@ class TranslationPipeline:
                 "policy": "exact_committed_source_target_trust_identity_only",
             },
             "components": component_sizes,
+            "component_evidence": evidence_references,
+            "source_sha256": hashlib.sha256(chunk.text.encode("utf-8")).hexdigest(),
             "duplication": duplication,
             "total_chars": len(user_content),
             "total_estimated_tokens": total_estimated_tokens,
@@ -13365,10 +13426,22 @@ Output ONLY the corrected Persian translation.
         allowed_language_originals = tuple(
             source_applicable_originals.union(source_entity_candidates)
         )
+        language_anchor_context = {
+            "authorized": {
+                source: target
+                for source, target in memory_manager.proper_nouns.inline_eligible_nouns().items()
+                if source in source_applicable_originals
+            },
+            "aliases": {
+                source: memory_manager.proper_nouns.aliases_for(source)
+                for source in source_applicable_originals
+            },
+        }
         language_quality = audit_translation_language(
             chunk.text,
             translation,
             allowed_originals=allowed_language_originals,
+            anchor_context=language_anchor_context,
             structural_role=language_role,
             chapter_title=chunk.chapter_title,
         )
@@ -13493,6 +13566,7 @@ Output ONLY the corrected Persian translation.
                         source_part,
                         target_part,
                         allowed_originals=allowed_language_originals,
+                        anchor_context=language_anchor_context,
                         structural_role=paragraph_role,
                         chapter_title=chunk.chapter_title,
                     )
@@ -13564,6 +13638,7 @@ Output ONLY the corrected Persian translation.
                             source_part,
                             candidate_part,
                             allowed_originals=allowed_language_originals,
+                            anchor_context=language_anchor_context,
                             structural_role=paragraph_role,
                             chapter_title=chunk.chapter_title,
                         )
@@ -13792,6 +13867,7 @@ Output ONLY the corrected Persian translation.
                         chunk.text,
                         translation,
                         allowed_originals=allowed_language_originals,
+                        anchor_context=language_anchor_context,
                         structural_role=language_role,
                         chapter_title=chunk.chapter_title,
                     )
@@ -14293,6 +14369,7 @@ Output ONLY the corrected Persian translation.
                                         chunk.text,
                                         translation,
                                         allowed_originals=allowed_language_originals,
+                                        anchor_context=language_anchor_context,
                                         structural_role=language_role,
                                         chapter_title=chunk.chapter_title,
                                     )
@@ -14395,6 +14472,7 @@ Output ONLY the corrected Persian translation.
         )
         language_quality = audit_translation_language(
             chunk.text, translation, allowed_originals=allowed_language_originals,
+            anchor_context=language_anchor_context,
             structural_role=language_role, chapter_title=chunk.chapter_title,
         )
         canonical_candidate_hash = _candidate_text_hash(translation)

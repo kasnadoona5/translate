@@ -630,6 +630,10 @@ def is_reusable_terminology_mapping(english: str, persian: str) -> bool:
         return False
     if source_words[0].casefold() in _SOURCE_NONTERM_LEADERS:
         return False
+    if len(source_words) > 1 and source_words[0].casefold() == "to":
+        # A bare infinitival construction is passage wording unless explicitly
+        # curated. Nominal terms containing "to" keep their existing path.
+        return False
     if source_words[-1].casefold() in _SOURCE_NONTERM_TRAILERS:
         return False
     if source_words[0].casefold() in _SOURCE_DETERMINER_LEADERS:
@@ -777,6 +781,8 @@ def automatic_terminology_risk_reasons(
         return ["missing_lexical_span"]
     if _has_quantified_object_context(source_words):
         reasons.append("quantified_object_passage_fragment")
+    if len(source_words) > 1 and source_words[0].casefold() == "to":
+        reasons.append("bare_infinitival_passage_fragment")
     if len(source_words) == 1 and len(target_words) > 3:
         reasons.append("target_scope_wider_than_source")
     # Persian lexical equivalents are often shorter than English compounds.
