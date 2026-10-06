@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v20.4"
+RUNTIME_RELEASE = "v20.5"
 RUNTIME_REVISION = 1
 
 
@@ -126,19 +126,22 @@ def runtime_capabilities() -> dict[str, Any]:
             "sentence_proven_dash_review": True,
             "research_evidence_kind_reporting": True,
             "bounded_exact_prompt_component_evidence": True,
+            "reference_scoped_count_evidence": True,
+            "shared_object_marker_dash_style_evidence": True,
+            "bounded_prompt_component_export": True,
         },
         "policy_versions": {
-            "structure_evidence": 2,
+            "structure_evidence": 3,
             "canonical_text": 3,
             "layer1_admission": 11,
-            "style_evidence": 10,
+            "style_evidence": 11,
             "benchmark_schema": 1,
             "checkpoint_export": 3,
             "paragraph_identity": 1,
             "critic_source_coverage": 1,
             "final_identifier_admission": 1,
             "recovery_segments": 1,
-            "summary_admission": 2,
+            "summary_admission": 3,
             "final_candidate_selection": 2,
             "final_quality_authority": 1,
             "note_marker_recovery": 5,
@@ -151,7 +154,7 @@ def runtime_capabilities() -> dict[str, Any]:
             "post_edit_issue_attribution": 1,
             "attachment_trial": 1,
             "book_term_scope": 5,
-            "final_language_admission": 6,
+            "final_language_admission": 7,
             "book_term_review": 2,
             "source_term_inventory": 3,
             "render_identity": 2,
@@ -161,6 +164,7 @@ def runtime_capabilities() -> dict[str, Any]:
             "comma_surface_admission": 1,
             "prompt_component_evidence": 1,
             "research_evidence_reporting": 1,
+            "prompt_component_export": 1,
         },
     }
 
@@ -651,6 +655,53 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v202_behavior_probes(),
         **_v203_behavior_probes(),
         **_v204_behavior_probes(),
+        **_v205_behavior_probes(),
+    }
+
+
+def _v205_behavior_probes() -> dict[str, bool]:
+    """Pure invented controls: no files, configuration, model calls or DB access."""
+    from tarjomeh.core.evidence_audit import _bounded_component_export
+    from tarjomeh.memory.manager import _style_record_is_authoritative, _style_record_is_prompt_safe
+    from tarjomeh.quality.integrity import _sentence_scoped_orphan_dash
+    from tarjomeh.quality.structure_audit import announced_count_evidence, audit_payload
+
+    source = "Teams inspect samples - their own and those of others - in laboratories."
+    bad = "گروه‌ها نمونه‌های خود—را در آزمایشگاه بررسی می‌کنند."
+    good = "گروه‌ها نمونه‌های خود — و نمونه‌های دیگران — را در آزمایشگاه بررسی می‌کنند."
+    def digest(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    def record(target: str) -> dict[str, Any]:
+        return {"source_text": source, "text": target, "source_text_hash": digest(source),
+                "text_hash": digest(target), "alignment_status": "exact_paragraph",
+                "sample_scope": "complete_paragraph", "representative": True, "quality_score": 95,
+                "final_scores": dict.fromkeys(
+                    ("accuracy", "fluency", "terminology", "register"), 9.5)}
+    text = "Exact bounded context."
+    key = f"book_context:{digest(text)}"
+    entry = {"component": "book_context", "text": text, "sha256": digest(text),
+             "chars": len(text), "complete": True}
+    exported, invalid = _bounded_component_export({key: entry})
+    secret = "token=synthetic-placeholder"
+    hidden_key = f"book_context:{digest(secret)}"
+    hidden, _ = _bounded_component_export({hidden_key: {
+        **entry, "text": secret, "sha256": digest(secret), "chars": len(secret),
+    }})
+    count = announced_count_evidence("شش رهیافت تحلیلی. (فصل‌های ۲ تا ۴) به رویکرد می‌پردازد.")
+    wrong = audit_payload("Six approaches explain the result.", "پنج رهیافت نتیجه را توضیح می‌دهند.")
+    return {
+        "chapter_ranges_do_not_invent_approach_counts": [item.value for item in count] == [6],
+        "real_approach_count_mismatch_still_blocks": any(
+            item["classification"] == "translation_structure_mismatch" for item in wrong["findings"]
+        ),
+        "glued_orphan_has_local_proof": _sentence_scoped_orphan_dash(source, bad) is not None,
+        "style_paths_reject_glued_orphan": not _style_record_is_prompt_safe(record(bad))
+            and not _style_record_is_authoritative(record(bad)),
+        "valid_closed_aside_remains_style_eligible": _style_record_is_prompt_safe(record(good))
+            and _style_record_is_authoritative(record(good)),
+        "bounded_context_export_is_exact": not invalid and exported["entries"][key]["text"] == text,
+        "secret_bearing_context_is_not_exported": hidden_key not in hidden["entries"]
+            and hidden["withheld"][hidden_key]["reason"] == "possible_secret_bearing_text",
     }
 
 

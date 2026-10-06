@@ -734,33 +734,15 @@ def _unbalanced_explanatory_dash_artifacts(
                 "disposition": "REVIEW",
                 "source_segment_ids": [item["segment_id"] for item in paired_source_sentences],
             })
-        for match in _DANGLING_OBJECT_MARKER_DASH_RE.finditer(target_part):
-            findings.append({
-                "paragraph_index": index,
-                "source_dash_count": source_count,
-                "target_dash_count": target_aside_count,
-                "target_em_dash_count": target_em_count,
-                "target_en_dash_count": target_en_count,
-                "target_preview": target_part[:500],
-                "target_offset": match.start(),
-                "reason": "persian_object_marker_detached_by_dash",
-            })
-        for match in _UNPAIRED_OBJECT_MARKER_DASH_RE.finditer(target_part):
-            sentence_start = max(
-                target_part.rfind(boundary, 0, match.start())
-                for boundary in ".!?\u061f"
-            ) + 1
-            if target_part[sentence_start:match.start()].count("\u2014") % 2:
+        from tarjomeh.quality.integrity import object_marker_dash_artifacts
+
+        for finding in object_marker_dash_artifacts(source_part, target_part):
+            if proven_orphan is not None and finding["target_offset"] == proven_orphan[0]:
                 continue
             findings.append({
-                "paragraph_index": index,
-                "source_dash_count": source_count,
-                "target_dash_count": target_aside_count,
-                "target_em_dash_count": target_em_count,
-                "target_en_dash_count": target_en_count,
-                "target_preview": target_part[:500],
-                "target_offset": match.start("dash"),
-                "reason": "persian_object_marker_after_unmatched_dash",
+                "paragraph_index": index, "source_dash_count": source_count,
+                "target_dash_count": target_aside_count, "target_preview": target_part[:500],
+                **finding,
             })
     return findings
 

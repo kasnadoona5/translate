@@ -225,8 +225,31 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?؟])\s+")
 _SPACED_DASH_RE = re.compile(r"\s[–—]\s")
 _SOURCE_SPACED_DASH_RE = re.compile(r"\s[-–—]\s")
 _ORPHAN_DASH_BEFORE_RA_RE = re.compile(
-    r"(?P<dash>\s[–—]\s)(?=را(?:\s|$))"
+    r"(?P<dash>[ \t]*[–—][ \t]*)(?=را(?:$|[\s،؛؟.!?:)\]]))"
 )
+
+
+def _orphan_object_marker_matches(target: str) -> list[re.Match[str]]:
+    matches = []
+    for match in _ORPHAN_DASH_BEFORE_RA_RE.finditer(target or ""):
+        start = max(target.rfind(boundary, 0, match.start()) for boundary in ".!?؟") + 1
+        kind = match.group("dash").strip()
+        # A closing dash with an opening mate before it is not an orphan.
+        if target[start:match.start()].count(kind) % 2 == 0:
+            matches.append(match)
+    return matches
+
+
+def object_marker_dash_artifacts(source: str, target: str) -> list[dict[str, Any]]:
+    """Shared report/style evidence; never edits text or guesses alignment."""
+    findings = [{
+        "target_offset": match.start("dash"),
+        "reason": "persian_object_marker_after_unmatched_dash",
+    } for match in _orphan_object_marker_matches(target)]
+    for match in re.finditer(r"(?:^|[\s،؛])را[ \t]+(?P<dash>[–—])[ \t]+", target or ""):
+        findings.append({"target_offset": match.start(),
+                         "reason": "persian_object_marker_detached_by_dash"})
+    return findings
 
 
 def _sentence_scoped_orphan_dash(source: str, target: str) -> tuple[int, int] | None:
@@ -237,7 +260,7 @@ def _sentence_scoped_orphan_dash(source: str, target: str) -> tuple[int, int] | 
     the aligned source sentence holds exactly two; and no other target
     sentence has an unpaired dash. Anything else is left for REVIEW.
     """
-    orphans = list(_ORPHAN_DASH_BEFORE_RA_RE.finditer(target))
+    orphans = _orphan_object_marker_matches(target)
     if len(orphans) != 1:
         return None
     source_sentences = [part for part in _SENTENCE_SPLIT_RE.split(source.strip()) if part]
@@ -255,14 +278,14 @@ def _sentence_scoped_orphan_dash(source: str, target: str) -> tuple[int, int] | 
     orphan_start = orphans[0].start("dash")
     for index, (start, end) in enumerate(target_spans):
         sentence = target[start:end]
-        dash_count = len(_SPACED_DASH_RE.findall(" " + sentence + " "))
+        dash_count = sentence.count("–") + sentence.count("—")
         contains = start <= orphan_start < end
         if contains:
             if dash_count != 1:
                 return None
             if len(_SOURCE_SPACED_DASH_RE.findall(source_sentences[index])) != 2:
                 return None
-        elif dash_count % 2:
+        elif sentence.count("–") % 2 or sentence.count("—") % 2:
             return None
     return orphans[0].start("dash"), orphans[0].end("dash")
 
@@ -2498,10 +2521,8 @@ def repair_source_grounded_language_artifacts(
     # A single orphan dash before the Persian object marker is not a
     # parenthetical aside when the source has a matched dash pair.
     if structural_role == "body" and "\n" not in repaired.strip():
-        source_dashes = len(re.findall(r"\s[-\u2013\u2014]\s", source or ""))
-        target_dashes = list(re.finditer(r"\s[\u2013\u2014]\s", repaired))
         orphan = _sentence_scoped_orphan_dash(source or "", repaired)
-        if orphan is not None and len(target_dashes) > 1:
+        if orphan is not None:
             start, end = orphan
             before = repaired[start:end]
             repaired = repaired[:start] + " " + repaired[end:]
@@ -2512,17 +2533,6 @@ def repair_source_grounded_language_artifacts(
                 "offset": start,
                 "scope": "aligned_sentence",
             })
-        elif source_dashes >= 2 and source_dashes % 2 == 0 and len(target_dashes) == 1:
-            match = re.search(r"(?P<dash>\s[\u2013\u2014]\s)(?=\u0631\u0627(?:\s|$))", repaired)
-            if match and match.start("dash") == target_dashes[0].start():
-                before = match.group("dash")
-                repaired = repaired[:match.start()] + " " + repaired[match.end():]
-                edits.append({
-                    "type": "orphaned_object_marker_dash",
-                    "before": before,
-                    "after": " ",
-                    "offset": match.start(),
-                })
 
     source_folded = unicodedata.normalize("NFKC", source or "").casefold()
     # An ezafe/diacritic stranded after an inserted English original belongs

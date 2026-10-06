@@ -31,6 +31,8 @@ TRIAL_GUIDANCE = (
     "\n\nOFFLINE EXPERIMENT ONLY: assess understandable, fluent academic Persian "
     "without simplifying the argument. Preserve the source head and every dependent, "
     "antecedent, qualifier, list scope, count, negation, temporal relation and modality. "
+    "Preserve specific participant roles rather than replacing them with broader "
+    "labels, and distinguish habitual or ongoing statements from completed changes. "
     "An opaque nominal stack or dangling complement is actionable only when exact "
     "source and Persian spans demonstrate the defect. Name the dependency in the "
     "rationale; do not mistake correct conceptual complexity for an error. A rewrite "
@@ -194,6 +196,10 @@ async def replay(config: TarjomehConfig, pairs: list[dict[str, Any]], *, with_re
                 ),
                 "runs": [],
                 "adjudication": "PENDING human source comparison",
+                "existing_deterministic_baseline": audit_translation_language(source, target),
+                "historical_report_baseline": (
+                    "Requires matching saved text AND full review context; never assumed exact."
+                ),
             }
             results = []
             for name, reviewer in (

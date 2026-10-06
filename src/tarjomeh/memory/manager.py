@@ -34,6 +34,7 @@ from tarjomeh.quality.integrity import (
     foreign_script_artifacts,
     markup_wrapper_artifacts,
     mixed_script_artifacts,
+    object_marker_dash_artifacts,
     parenthesis_artifacts,
     repeated_persian_clause_artifacts,
     repeated_persian_word_artifacts,
@@ -296,7 +297,7 @@ def _source_style_artifacts(source: str, target: str) -> bool:
         or duplicated_comma_artifacts(source, target)
         or spaced_optional_plural_artifacts(source, target)
         or spaced_optional_prefix_artifacts(source, target)
-        or re.search(r"\s[\u2013\u2014]\s+\u0631\u0627(?:\s|$)", target)
+        or object_marker_dash_artifacts(source, target)
     )
 
 

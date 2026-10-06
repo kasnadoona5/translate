@@ -47,37 +47,55 @@ SEVERITY = {
 
 _CARDINALS: dict[str, int] = {
     # English
-    "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
-    "seven": 7, "eight": 8, "nine": 9, "ten": 10,
-    "eleven": 11, "twelve": 12,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
     # Persian
-    "دو": 2,                      # do
-    "سه": 3,                      # se
-    "چهار": 4,          # chahar
-    "پنج": 5,                # panj
-    "شش": 6,                      # shesh
-    "هفت": 7,                # haft
-    "هشت": 8,                # hasht
+    "دو": 2,  # do
+    "سه": 3,  # se
+    "چهار": 4,  # chahar
+    "پنج": 5,  # panj
+    "شش": 6,  # shesh
+    "هفت": 7,  # haft
+    "هشت": 8,  # hasht
     # "نه" (nine) and "ده" (ten) are omitted on purpose: they collide with
     # the common function words "no/nor" and the verb stem "give". Because the
     # candidate is the Persian side, a stray match would invent a mismatch.
     # The unambiguous ordinals "نهم"/"دهم" are still recognised below.
-    "یازده": 11,   # yazdah
+    "یازده": 11,  # yazdah
     "دوازده": 12,  # davazdah
 }
 
 # Ordinal position -> the words that can express it, in either language.
 _ORDINALS: dict[str, int] = {
     # English
-    "first": 1, "firstly": 1, "second": 2, "secondly": 2,
-    "third": 3, "thirdly": 3, "fourth": 4, "fourthly": 4,
-    "fifth": 5, "sixth": 6, "seventh": 7, "eighth": 8,
-    "ninth": 9, "tenth": 10,
+    "first": 1,
+    "firstly": 1,
+    "second": 2,
+    "secondly": 2,
+    "third": 3,
+    "thirdly": 3,
+    "fourth": 4,
+    "fourthly": 4,
+    "fifth": 5,
+    "sixth": 6,
+    "seventh": 7,
+    "eighth": 8,
+    "ninth": 9,
+    "tenth": 10,
     # Persian
-    "نخست": 1,          # nokhost
-    "اول": 1,                # avval
-    "دوم": 2,                # dovvom
-    "سوم": 3,                # sevvom
+    "نخست": 1,  # nokhost
+    "اول": 1,  # avval
+    "دوم": 2,  # dovvom
+    "سوم": 3,  # sevvom
     "چهارم": 4,
     "پنجم": 5,
     "ششم": 6,
@@ -94,32 +112,117 @@ _WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 _ANNOUNCEMENT_CATEGORIES: dict[str, str] = {
     # Argumentative units. These are deliberately language concepts rather
     # than book terminology, so ordinary translation synonyms can align.
-    **dict.fromkeys((
-        "issue", "issues", "objection", "objections", "point", "points",
-        "reason", "reasons", "argument", "arguments", "question", "questions",
-        "problem", "problems", "claim", "claims", "proposition", "propositions",
-        "theme", "themes", "مدعا", "مسئله", "ایراد", "نکته", "دلیل",
-        "استدلال",
-        "پرسش", "مشکل", "ادعا", "گزاره", "مضمون",
-    ), "argument_item"),
-    **dict.fromkeys((
-        "perspective", "perspectives", "approach", "approaches", "way", "ways",
-        "axis", "axes", "منظر", "رویکرد", "شیوه", "محور", "جهت", "جهات",
-        "راه", "روش", "وجه",
-    ), "approach"),
-    **dict.fromkeys((
-        "element", "elements", "dimension", "dimensions", "factor", "factors",
-        "feature", "features", "difference", "differences", "عنصر", "بعد",
-        "عامل", "ویژگی", "تفاوت", "جنبه",
-    ), "component"),
-    **dict.fromkeys((
-        "task", "tasks", "objective", "objectives", "step", "steps",
-        "وظیفه", "هدف", "گام",
-    ), "procedure"),
-    **dict.fromkeys((
-        "part", "parts", "category", "categories", "type", "types", "case",
-        "cases", "بخش", "دسته", "نوع", "مورد",
-    ), "classification"),
+    **dict.fromkeys(
+        (
+            "issue",
+            "issues",
+            "objection",
+            "objections",
+            "point",
+            "points",
+            "reason",
+            "reasons",
+            "argument",
+            "arguments",
+            "question",
+            "questions",
+            "problem",
+            "problems",
+            "claim",
+            "claims",
+            "proposition",
+            "propositions",
+            "theme",
+            "themes",
+            "مدعا",
+            "مسئله",
+            "ایراد",
+            "نکته",
+            "دلیل",
+            "استدلال",
+            "پرسش",
+            "مشکل",
+            "ادعا",
+            "گزاره",
+            "مضمون",
+        ),
+        "argument_item",
+    ),
+    **dict.fromkeys(
+        (
+            "perspective",
+            "perspectives",
+            "approach",
+            "approaches",
+            "way",
+            "ways",
+            "axis",
+            "axes",
+            "منظر",
+            "رویکرد",
+            "شیوه",
+            "محور",
+            "جهت",
+            "جهات",
+            "راه",
+            "روش",
+            "وجه",
+            "رهیافت",
+        ),
+        "approach",
+    ),
+    **dict.fromkeys(
+        (
+            "element",
+            "elements",
+            "dimension",
+            "dimensions",
+            "factor",
+            "factors",
+            "feature",
+            "features",
+            "difference",
+            "differences",
+            "عنصر",
+            "بعد",
+            "عامل",
+            "ویژگی",
+            "تفاوت",
+            "جنبه",
+        ),
+        "component",
+    ),
+    **dict.fromkeys(
+        (
+            "task",
+            "tasks",
+            "objective",
+            "objectives",
+            "step",
+            "steps",
+            "وظیفه",
+            "هدف",
+            "گام",
+        ),
+        "procedure",
+    ),
+    **dict.fromkeys(
+        (
+            "part",
+            "parts",
+            "category",
+            "categories",
+            "type",
+            "types",
+            "case",
+            "cases",
+            "بخش",
+            "دسته",
+            "نوع",
+            "مورد",
+        ),
+        "classification",
+    ),
     **dict.fromkeys(("chapter", "chapters", "فصل"), "chapter"),
     **dict.fromkeys(("source", "sources", "منبع"), "source"),
 }
@@ -134,8 +237,7 @@ _PERSIAN_ANNOUNCEMENT_SUFFIXES = (
     "\u06cc",
 )
 _DIGIT_TRANSLATION = str.maketrans(
-    "۰۱۲۳۴۵۶۷۸۹"
-    "٠١٢٣٤٥٦٧٨٩",
+    "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩",
     "01234567890123456789",
 )
 # "(1)" / "( ۲ )" style list markers, in either digit script.
@@ -144,6 +246,107 @@ _CHAPTER_MARKER_RE = re.compile(
     r"(?<!\w)(?:chapter|فصل)\s*([0-9۰-۹]{1,2})(?!\d)",
     re.IGNORECASE,
 )
+_REFERENCE_HEADS = frozenset(
+    {
+        "chapter",
+        "chapters",
+        "page",
+        "pages",
+        "section",
+        "sections",
+        "table",
+        "tables",
+        "figure",
+        "figures",
+        "part",
+        "parts",
+        "فصل",
+        "صفحه",
+        "صفحات",
+        "بخش",
+        "جدول",
+        "شکل",
+    }
+)
+_COUNT_SCOPE_BREAKERS = frozenset(
+    {
+        "of",
+        "in",
+        "on",
+        "to",
+        "and",
+        "or",
+        "but",
+        "is",
+        "are",
+        "was",
+        "were",
+        "have",
+        "has",
+        "discuss",
+        "discusses",
+        "develop",
+        "develops",
+        "concern",
+        "concerns",
+        "به",
+        "در",
+        "از",
+        "تا",
+        "و",
+        "یا",
+        "اما",
+        "است",
+        "هستند",
+    }
+)
+
+
+def _reference_number_indices(text: str, matches: list[re.Match[str]]) -> set[int]:
+    """Protect explicitly headed reference numbers and range endpoints."""
+    words = [match.group().casefold() for match in matches]
+    protected: set[int] = set()
+    for index, word in enumerate(words):
+        if word not in _REFERENCE_HEADS:
+            continue
+        number = index + 1
+        if number < len(words) and words[number] in {"ها", "های", "هایی"}:
+            number += 1
+        if number >= len(words):
+            continue
+        if not re.fullmatch(
+            r"\s*\u200c?\s*", text[matches[number - 1].end() : matches[number].start()]
+        ):
+            continue
+        if not (
+            words[number].translate(_DIGIT_TRANSLATION).isdecimal() or words[number] in _CARDINALS
+        ):
+            continue
+        # Persian can omit a verb after a demonstrative topic: "this chapter,
+        # three issues ...". A word cardinal directly governing another noun
+        # is then a quantity, not the chapter's identifier.
+        if (
+            index > 0
+            and words[index - 1] in {"این", "آن"}
+            and number == index + 1
+            and words[number] in _CARDINALS
+            and number + 1 < len(words)
+            and _announcement_category(words[number + 1]) is not None
+            and re.fullmatch(r"\s+", text[matches[number].end() : matches[number + 1].start()])
+        ):
+            continue
+        protected.add(number)
+        following = number + 1
+        if following < len(words) and words[following] in {"to", "through", "تا"}:
+            following += 1
+        if following < len(words):
+            gap = text[matches[number].end() : matches[following].start()].strip().casefold()
+            if re.fullmatch(r"[-–—]|to|through|تا", gap) and (
+                words[following].translate(_DIGIT_TRANSLATION).isdecimal()
+                or words[following] in _CARDINALS
+            ):
+                protected.add(following)
+    return protected
 
 
 @dataclass
@@ -178,7 +381,7 @@ def _announcement_category(token: str) -> str | None:
         return _ANNOUNCEMENT_CATEGORIES[token]
     for suffix in _PERSIAN_ANNOUNCEMENT_SUFFIXES:
         if token.endswith(suffix):
-            stem = token[:-len(suffix)]
+            stem = token[: -len(suffix)]
             if stem in _ANNOUNCEMENT_CATEGORIES:
                 return _ANNOUNCEMENT_CATEGORIES[stem]
     return None
@@ -219,38 +422,53 @@ def announced_count_evidence(text: str) -> list[AnnouncementEvidence]:
     """
     matches = list(_WORD_RE.finditer(text or ""))
     words = [match.group(0).casefold() for match in matches]
+    reference_indices = _reference_number_indices(text or "", matches)
     evidence: list[AnnouncementEvidence] = []
     for index, word in enumerate(words):
+        if index in reference_indices:
+            continue
         value: int | None = _CARDINALS.get(word)
         if value is None:
             normalised = word.translate(_DIGIT_TRANSLATION)
-            if (
-                len(normalised) == 1
-                and normalised.isdecimal()
-                and int(normalised) >= 2
-            ):
+            if len(normalised) == 1 and normalised.isdecimal() and int(normalised) >= 2:
                 value = int(normalised)
         if value is None:
             continue
         # Only a following noun can be governed by this count. Stop at another
         # number so two unrelated quantities are never bridged.
         for noun_index in range(index + 1, min(len(words), index + 6)):
-            if words[noun_index] in _CARDINALS or words[noun_index].translate(
-                _DIGIT_TRANSLATION
-            ).isdecimal():
+            gap = (text or "")[matches[noun_index - 1].end() : matches[noun_index].start()]
+            # A parenthesized cardinal may govern the immediately following
+            # noun, but list labels and unrelated closing references may not.
+            wrapped_cardinal = (
+                noun_index == index + 1
+                and word in _CARDINALS
+                and gap.strip() == ")"
+                and (text or "")[: matches[index].start()].rstrip().endswith("(")
+            )
+            if not re.fullmatch(r"[\s\u200c-]*", gap) and not wrapped_cardinal:
+                break
+            if words[noun_index] in _COUNT_SCOPE_BREAKERS:
+                break
+            if (
+                words[noun_index] in _CARDINALS
+                or words[noun_index].translate(_DIGIT_TRANSLATION).isdecimal()
+            ):
                 break
             category = _announcement_category(words[noun_index])
             if category is None:
                 continue
             start = matches[index].start()
             end = matches[noun_index].end()
-            evidence.append(AnnouncementEvidence(
-                value=value,
-                semantic_category=category,
-                count_span=(matches[index].start(), matches[index].end()),
-                noun_span=(matches[noun_index].start(), matches[noun_index].end()),
-                exact_span=(text or "")[start:end],
-            ))
+            evidence.append(
+                AnnouncementEvidence(
+                    value=value,
+                    semantic_category=category,
+                    count_span=(matches[index].start(), matches[index].end()),
+                    noun_span=(matches[noun_index].start(), matches[noun_index].end()),
+                    exact_span=(text or "")[start:end],
+                )
+            )
             break
     return evidence
 
@@ -276,7 +494,7 @@ def ordinal_sequence_length(text: str) -> int:
         if position != 1:
             continue
         length = 1
-        for value in positions[start + 1:]:
+        for value in positions[start + 1 :]:
             if value == length + 1:
                 length = value
             elif value <= length:
@@ -312,7 +530,7 @@ def chapter_marker_count(text: str) -> int:
     for start, first in enumerate(values):
         length = 1
         previous = first
-        for value in values[start + 1:]:
+        for value in values[start + 1 :]:
             if value == previous + 1:
                 length += 1
                 previous = value
@@ -357,9 +575,7 @@ def _enumeration_evidence(text: str) -> tuple[int, str]:
 
 def _paragraphs(text: str) -> list[str]:
     return [
-        paragraph.strip()
-        for paragraph in re.split(r"\n\s*\n", text or "")
-        if paragraph.strip()
+        paragraph.strip() for paragraph in re.split(r"\n\s*\n", text or "") if paragraph.strip()
     ]
 
 
@@ -391,7 +607,8 @@ def _structural_episodes(
         if items < minimum_items:
             continue
         evidence = [
-            item for item in all_evidence
+            item
+            for item in all_evidence
             if (
                 enumeration_category == "generic"
                 and item.semantic_category not in {"chapter", "source"}
@@ -406,15 +623,17 @@ def _structural_episodes(
         announced = next((value for value in counts if value == items), None)
         if announced is None and len(set(counts)) == 1 and category != "ambiguous":
             announced = counts[0]
-        episodes.append(_StructuralEpisode(
-            paragraph_index=index,
-            paragraph_span=span,
-            announced=announced,
-            items=items,
-            announcement_candidates=tuple(counts),
-            semantic_category=category,
-            announcement_evidence=tuple(evidence),
-        ))
+        episodes.append(
+            _StructuralEpisode(
+                paragraph_index=index,
+                paragraph_span=span,
+                announced=announced,
+                items=items,
+                announcement_candidates=tuple(counts),
+                semantic_category=category,
+                announcement_evidence=tuple(evidence),
+            )
+        )
     return episodes
 
 
@@ -453,23 +672,25 @@ def _direct_announcement_mismatches(
             candidate_item = candidate_items[0]
             if source_item.value == candidate_item.value:
                 continue
-            findings.append(StructureFinding(
-                "announced_count_lexical_mismatch",
-                TRANSLATION_STRUCTURE_MISMATCH,
-                "The translation changes an explicit source announcement count.",
-                {
-                    "source_announced": source_item.value,
-                    "candidate_announced": candidate_item.value,
-                    "semantic_category": category,
-                    "source_announcement": source_item.to_dict(),
-                    "candidate_announcement": candidate_item.to_dict(),
-                    "source_paragraph": index,
-                    "candidate_paragraph": index,
-                    "source_excerpt": source_paragraph[:360],
-                    "candidate_excerpt": candidate_paragraphs[index][:360],
-                    "admission": "blocking",
-                },
-            ))
+            findings.append(
+                StructureFinding(
+                    "announced_count_lexical_mismatch",
+                    TRANSLATION_STRUCTURE_MISMATCH,
+                    "The translation changes an explicit source announcement count.",
+                    {
+                        "source_announced": source_item.value,
+                        "candidate_announced": candidate_item.value,
+                        "semantic_category": category,
+                        "source_announcement": source_item.to_dict(),
+                        "candidate_announcement": candidate_item.to_dict(),
+                        "source_paragraph": index,
+                        "candidate_paragraph": index,
+                        "source_excerpt": source_paragraph[:360],
+                        "candidate_excerpt": candidate_paragraphs[index][:360],
+                        "admission": "blocking",
+                    },
+                )
+            )
     return findings
 
 
@@ -491,38 +712,34 @@ def audit_structure(source: str, candidate: str) -> list[StructureFinding]:
         if not candidate_episodes:
             return []
         episode = candidate_episodes[0]
-        return [StructureFinding(
-            "announced_count_unverifiable",
-            INSUFFICIENT_SOURCE_EVIDENCE,
-            "The translation enumerates items but a local source announcement "
-            "could not be established; no automatic action.",
-            {
-                "source_announced": None,
-                "source_items": 0,
-                "candidate_announced": episode.announced,
-                "candidate_items": episode.items,
-                "candidate_paragraph": episode.paragraph_index,
-            },
-        )]
+        return [
+            StructureFinding(
+                "announced_count_unverifiable",
+                INSUFFICIENT_SOURCE_EVIDENCE,
+                "The translation enumerates items but a local source announcement "
+                "could not be established; no automatic action.",
+                {
+                    "source_announced": None,
+                    "source_items": 0,
+                    "candidate_announced": episode.announced,
+                    "candidate_items": episode.items,
+                    "candidate_paragraph": episode.paragraph_index,
+                },
+            )
+        ]
 
     findings: list[StructureFinding] = []
-    candidate_by_paragraph = {
-        episode.paragraph_index: episode for episode in candidate_episodes
-    }
+    candidate_by_paragraph = {episode.paragraph_index: episode for episode in candidate_episodes}
     source_paragraphs = _paragraphs(source)
     candidate_paragraphs = _paragraphs(candidate)
     for source_episode in source_episodes:
-        candidate_episode = candidate_by_paragraph.get(
-            source_episode.paragraph_index
-        )
+        candidate_episode = candidate_by_paragraph.get(source_episode.paragraph_index)
         aligned_candidate_paragraph = (
             candidate_paragraphs[source_episode.paragraph_index]
             if source_episode.paragraph_index < len(candidate_paragraphs)
             else ""
         )
-        candidate_announced = (
-            candidate_episode.announced if candidate_episode else None
-        )
+        candidate_announced = candidate_episode.announced if candidate_episode else None
         candidate_items = candidate_episode.items if candidate_episode else 0
         details: dict[str, Any] = {
             "source_announced": source_episode.announced,
@@ -536,20 +753,16 @@ def audit_structure(source: str, candidate: str) -> list[StructureFinding]:
             ),
             "candidate_episode_recognized": candidate_episode is not None,
             "candidate_cardinal_tokens_untyped": (
-                [word for word in _words(aligned_candidate_paragraph)
-                 if word in _CARDINALS]
-                if candidate_episode is None else []
+                [word for word in _words(aligned_candidate_paragraph) if word in _CARDINALS]
+                if candidate_episode is None
+                else []
             ),
-            "source_announcement_candidates": list(
-                source_episode.announcement_candidates
-            ),
+            "source_announcement_candidates": list(source_episode.announcement_candidates),
             "semantic_category": source_episode.semantic_category,
             "source_announcement_evidence": [
                 item.to_dict() for item in source_episode.announcement_evidence
             ],
-            "source_excerpt": source_paragraphs[
-                source_episode.paragraph_index
-            ][:360],
+            "source_excerpt": source_paragraphs[source_episode.paragraph_index][:360],
             "candidate_excerpt": (
                 candidate_paragraphs[candidate_episode.paragraph_index][:360]
                 if candidate_episode
@@ -557,66 +770,68 @@ def audit_structure(source: str, candidate: str) -> list[StructureFinding]:
                 else aligned_candidate_paragraph[:360]
             ),
             "admission": (
-                "blocking"
-                if source_episode.semantic_category != "ambiguous"
-                else "review"
+                "blocking" if source_episode.semantic_category != "ambiguous" else "review"
             ),
         }
         if source_episode.announced is None:
-            findings.append(StructureFinding(
-                "announced_count_unverifiable",
-                INSUFFICIENT_SOURCE_EVIDENCE,
-                "Several local source counts could apply to this enumeration; "
-                "no automatic action.",
-                details,
-            ))
+            findings.append(
+                StructureFinding(
+                    "announced_count_unverifiable",
+                    INSUFFICIENT_SOURCE_EVIDENCE,
+                    "Several local source counts could apply to this enumeration; "
+                    "no automatic action.",
+                    details,
+                )
+            )
             continue
 
         source_consistent = source_episode.announced == source_episode.items
         candidate_consistent = (
-            candidate_announced is not None
-            and candidate_announced == candidate_items
+            candidate_announced is not None and candidate_announced == candidate_items
         )
         if not source_consistent:
-            if (
-                candidate_consistent
-                and candidate_announced != source_episode.announced
-            ):
-                findings.append(StructureFinding(
-                    "announced_count_source_corrected",
-                    UNAUTHORIZED_SOURCE_CORRECTION,
-                    "The source announcement and its local enumeration disagree, "
-                    "and the translation silently reconciles them.",
-                    details,
-                ))
+            if candidate_consistent and candidate_announced != source_episode.announced:
+                findings.append(
+                    StructureFinding(
+                        "announced_count_source_corrected",
+                        UNAUTHORIZED_SOURCE_CORRECTION,
+                        "The source announcement and its local enumeration disagree, "
+                        "and the translation silently reconciles them.",
+                        details,
+                    )
+                )
             else:
-                findings.append(StructureFinding(
-                    "announced_count_source_anomaly",
-                    SOURCE_ANOMALY_PRESERVED,
-                    "The source announcement and its local enumeration disagree; "
-                    "the translation preserves the discrepancy.",
-                    details,
-                ))
+                findings.append(
+                    StructureFinding(
+                        "announced_count_source_anomaly",
+                        SOURCE_ANOMALY_PRESERVED,
+                        "The source announcement and its local enumeration disagree; "
+                        "the translation preserves the discrepancy.",
+                        details,
+                    )
+                )
             continue
 
         if (
             candidate_items != source_episode.items
             or candidate_announced != source_episode.announced
         ):
-            findings.append(StructureFinding(
-                "announced_count_mismatch",
-                TRANSLATION_STRUCTURE_MISMATCH,
-                "The source announces and delivers a locally consistent number "
-                "of items; the translation does not match it.",
-                details,
-            ))
-    findings.extend(_direct_announcement_mismatches(
-        source,
-        candidate,
-        covered_source_paragraphs={
-            episode.paragraph_index for episode in source_episodes
-        },
-    ))
+            findings.append(
+                StructureFinding(
+                    "announced_count_mismatch",
+                    TRANSLATION_STRUCTURE_MISMATCH,
+                    "The source announces and delivers a locally consistent number "
+                    "of items; the translation does not match it.",
+                    details,
+                )
+            )
+    findings.extend(
+        _direct_announcement_mismatches(
+            source,
+            candidate,
+            covered_source_paragraphs={episode.paragraph_index for episode in source_episodes},
+        )
+    )
     return findings
 
 
