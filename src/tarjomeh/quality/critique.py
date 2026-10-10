@@ -171,10 +171,13 @@ class TranslationCritique:
         llm_client: Any,
         quality_threshold: float = 7.0,
         max_parse_retries: int = 1,
+        *,
+        prompt_template: str | None = None,
     ) -> None:
         self._llm = llm_client
         self.quality_threshold = quality_threshold
         self.max_parse_retries = max(0, max_parse_retries)
+        self._prompt_template = CRITIQUE_PROMPT if prompt_template is None else prompt_template
 
     async def critique(
         self,
@@ -201,7 +204,7 @@ class TranslationCritique:
         CritiqueResult
             Structured scores and issue list.
         """
-        prompt = CRITIQUE_PROMPT.format(
+        prompt = self._prompt_template.format(
             source_text=indexed_source(source_text),
             translation=translation,
             terminology=terminology or "(no glossary terms apply to this chunk)",

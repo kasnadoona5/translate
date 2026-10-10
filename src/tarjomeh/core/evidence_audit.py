@@ -16,6 +16,31 @@ _POSSIBLE_SECRET_RE = re.compile(
 )
 
 
+def model_identity_counts(attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Keep requested routes separate from model identities actually returned."""
+    served: Counter[str] = Counter()
+    requested: Counter[str] = Counter()
+    successful: Counter[str] = Counter()
+    failed = 0
+    for attempt in attempts:
+        returned = str(attempt.get("response_model") or "").strip() or "unknown"
+        route = str(attempt.get("model") or "").strip() or "unknown"
+        served[returned] += 1
+        requested[route] += 1
+        failed += attempt.get("success") is False
+        if attempt.get("success") is True:
+            successful[returned] += 1
+    return {
+        "physical_attempts": len(attempts),
+        "failed_attempts": failed,
+        "failure_rate": failed / len(attempts) if attempts else None,
+        "served_models": dict(served),
+        "successful_served_models": dict(successful),
+        "requested_models": dict(requested),
+        "identity_rule": "returned_response_model_only_missing_is_unknown",
+    }
+
+
 def _bounded_component_export(entries: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     exported: dict[str, Any] = {}
     withheld: dict[str, Any] = {}
@@ -99,6 +124,7 @@ def extra_final_refinement_evidence(
                 Counter(item.get("response_model") or "unknown" for item in attempts)
             ),
             "operations": dict(Counter(item.get("operation") or "unknown" for item in attempts)),
+            "model_identity_accounting": model_identity_counts(attempts),
         }
 
     lifetime = []
@@ -221,6 +247,10 @@ def quality_safeguard_evidence(
             "stored_representative": bool(item.get("representative")),
             "current_prompt_eligible": _style_record_is_prompt_safe(item),
             "current_authoritative": _style_record_is_authoritative(item),
+            "alignment_evidence": "mechanical_source_target_pair_not_semantic_proof",
+            "quality_evidence": "stored_model_scores_not_human_verification",
+            "stored_final_scores": item.get("final_scores"),
+            "independent_semantic_adjudication": "not_recorded",
         }
         for item in state.get("style_sample_records", [])
         if isinstance(item, dict)
@@ -323,6 +353,9 @@ def quality_safeguard_evidence(
                     re.search(r"[\u0621-\u06ff]", str(item.get("target") or ""))
                     and not persian_option_defect(str(item.get("target") or ""))
                 ),
+                "approval_evidence": "consult_separate_review_records_and_occurrence_scopes",
+                "english_support_recorded": bool(item.get("term_supported")),
+                "persian_semantic_accuracy": "unverified",
                 "authority": "coverage_report_only_not_sense_or_approval_evidence",
             }
         )
@@ -352,4 +385,10 @@ def quality_safeguard_evidence(
         "focused_attachment_reviewer": "OFF",
         "extra_final_refinement_budget_changed": False,
         "semantic_accuracy": "requires_source_based_human_review",
+        "evidence_labels_change_authority": False,
+        "memory_evidence_semantics": {
+            "reliable_pair": "existing_policy_admission_not_independent_semantic_verification",
+            "summary": "advisory_context_not_source_authority",
+            "term_approval": "approved_meaning_and_proven_occurrence_scope_not_global_replacement",
+        },
     }

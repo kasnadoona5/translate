@@ -16,14 +16,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_new_runtime_probes_do_not_read_config_or_open_files(monkeypatch):
-    from tarjomeh.runtime import _v205_behavior_probes
+    from tarjomeh.runtime import _v206_behavior_probes
 
     def forbidden(*args, **kwargs):
         raise AssertionError("A synthetic runtime probe tried file I/O")
 
     monkeypatch.setattr(Path, "is_file", forbidden)
     monkeypatch.setattr(Path, "open", forbidden)
-    assert all(_v205_behavior_probes().values())
+    assert all(_v206_behavior_probes().values())
 
 
 def _blocks(source):
@@ -33,9 +33,9 @@ def _blocks(source):
 @pytest.mark.parametrize(
     "name",
     [
-        "deploy_tarjomeh_v205.sh",
-        "audit_tarjomeh_v205_reports.sh",
-        "audit_tarjomeh_v205_companion.sh",
+        "deploy_tarjomeh_v206.sh",
+        "audit_tarjomeh_v206_reports.sh",
+        "audit_tarjomeh_v206_companion.sh",
     ],
 )
 def test_release_shell_and_embedded_python_are_parseable(name):
@@ -60,8 +60,8 @@ def test_release_shell_and_embedded_python_are_parseable(name):
 
 
 def test_deploy_checks_revision_space_and_only_tarjomeh_cleanup():
-    source = (ROOT / "scripts/deploy_tarjomeh_v205.sh").read_text(encoding="utf-8")
-    assert 'TAG="v20.5"' in source
+    source = (ROOT / "scripts/deploy_tarjomeh_v206.sh").read_text(encoding="utf-8")
+    assert 'TAG="v20.6"' in source
     assert "flock -n 9" in source
     assert "source.backup(snapshot)" in source
     assert 'snapshot.execute("PRAGMA integrity_check")' in source
@@ -90,12 +90,10 @@ def test_deploy_checks_revision_space_and_only_tarjomeh_cleanup():
 
 
 def test_embedded_image_and_running_source_gates_pass_on_candidate():
-    source = (ROOT / "scripts/deploy_tarjomeh_v205.sh").read_text(encoding="utf-8")
+    source = (ROOT / "scripts/deploy_tarjomeh_v206.sh").read_text(encoding="utf-8")
     blocks = re.findall(r"-c '\n(.*?)\n'", source, re.S)
     assert len(blocks) == 3
     for block in blocks:
-        from tarjomeh.runtime import RUNTIME_RELEASE
-        block = block.replace('"v20.5"', repr(RUNTIME_RELEASE))
         result = subprocess.run(
             [sys.executable, "-c", block],
             capture_output=True,
@@ -108,7 +106,7 @@ def test_embedded_image_and_running_source_gates_pass_on_candidate():
 
 
 def test_companion_follows_the_shared_dash_helper_ownership():
-    source = (ROOT / "scripts/audit_tarjomeh_v205_companion.sh").read_text(encoding="utf-8")
+    source = (ROOT / "scripts/audit_tarjomeh_v206_companion.sh").read_text(encoding="utf-8")
     block = next(block for block in _blocks(source) if '"typed_dash_attachment_audit"' in block)
     tree = ast.parse(block)
     expression = next(
@@ -131,17 +129,17 @@ def test_companion_follows_the_shared_dash_helper_ownership():
 
 def test_audits_use_distinct_artifacts_and_do_not_hide_hard_failures():
     for kind, artifact in (("reports", "memory"), ("companion", "companion")):
-        source = (ROOT / f"scripts/audit_tarjomeh_v205_{kind}.sh").read_text(encoding="utf-8")
-        assert f"_v205_{artifact}_audit.json" in source
-        assert f"_v205_{artifact}_audit.txt" in source
+        source = (ROOT / f"scripts/audit_tarjomeh_v206_{kind}.sh").read_text(encoding="utf-8")
+        assert f"_v206_{artifact}_audit.json" in source
+        assert f"_v206_{artifact}_audit.txt" in source
         assert 'if verdict == "FAIL":\n    raise SystemExit(2)' in source
         assert 'exit "$AUDIT_RC"' in source
-        assert '"v205_remediation"' in source
+        assert '"v206_remediation"' in source
         assert "requires_source_based_human_review" in source
 
 
 def test_deployment_sqlite_snapshot_includes_uncheckpointed_wal(tmp_path):
-    source = (ROOT / "scripts/deploy_tarjomeh_v205.sh").read_text(encoding="utf-8")
+    source = (ROOT / "scripts/deploy_tarjomeh_v206.sh").read_text(encoding="utf-8")
     block = next(block for block in _blocks(source) if "source.backup(snapshot)" in block)
     database = tmp_path / "live.db"
     snapshot = tmp_path / "snapshot.db"
@@ -169,7 +167,7 @@ def test_deployment_sqlite_snapshot_includes_uncheckpointed_wal(tmp_path):
 
 
 def test_compressed_database_is_restored_verified_and_never_overwritten(tmp_path):
-    source = (ROOT / "scripts/deploy_tarjomeh_v205.sh").read_text(encoding="utf-8")
+    source = (ROOT / "scripts/deploy_tarjomeh_v206.sh").read_text(encoding="utf-8")
     block = next(block for block in _blocks(source) if 'destination.open("xb")' in block)
     original = tmp_path / "original.db"
     restored = tmp_path / "restored.db"
@@ -192,8 +190,8 @@ def test_compressed_database_is_restored_verified_and_never_overwritten(tmp_path
 
 
 def test_deploy_checks_worker_leases_before_backup_and_before_replacement():
-    source = (ROOT / "scripts/deploy_tarjomeh_v205.sh").read_text(encoding="utf-8")
+    source = (ROOT / "scripts/deploy_tarjomeh_v206.sh").read_text(encoding="utf-8")
     blocks = [block for block in _blocks(source) if "state IN ('active','pausing')" in block]
     assert len(blocks) == 2
     assert source.index(blocks[0]) < source.index("source.backup(snapshot)")
-    assert source.index(blocks[1]) > source.index("IMAGE_V205_CONFIRMED")
+    assert source.index(blocks[1]) > source.index("IMAGE_V206_CONFIRMED")

@@ -62,6 +62,8 @@ class TranslationRefiner:
         max_iterations: int | None = None,
         mode: str = "academic",
         max_parse_retries: int = 1,
+        *,
+        prompt_template: str | None = None,
     ) -> None:
         self._llm = llm_client
 
@@ -70,6 +72,7 @@ class TranslationRefiner:
         else:
             self.max_iterations = _MODE_MAX_ITERATIONS.get(mode, 1)
         self.max_parse_retries = max(0, max_parse_retries)
+        self._prompt_template = REFINE_PROMPT if prompt_template is None else prompt_template
 
     async def refine(
         self,
@@ -156,7 +159,7 @@ class TranslationRefiner:
             },
             "issues": compact_issues,
         }
-        prompt = REFINE_PROMPT.format(
+        prompt = self._prompt_template.format(
             source_text=source_text,
             translation=translation,
             critique=json.dumps(

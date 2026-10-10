@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v20.5"
+RUNTIME_RELEASE = "v20.6"
 RUNTIME_REVISION = 1
 
 
@@ -129,6 +129,8 @@ def runtime_capabilities() -> dict[str, Any]:
             "reference_scoped_count_evidence": True,
             "shared_object_marker_dash_style_evidence": True,
             "bounded_prompt_component_export": True,
+            "requested_and_returned_model_reporting": True,
+            "report_only_semantic_evidence_labels": True,
         },
         "policy_versions": {
             "structure_evidence": 3,
@@ -656,6 +658,25 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v203_behavior_probes(),
         **_v204_behavior_probes(),
         **_v205_behavior_probes(),
+        **_v206_behavior_probes(),
+    }
+
+
+def _v206_behavior_probes() -> dict[str, bool]:
+    """Synthetic report checks; no model, file, configuration or database access."""
+    from tarjomeh.core.evidence_audit import model_identity_counts
+
+    result = model_identity_counts([
+        {"model": "requested-route", "response_model": "", "success": False},
+        {"model": "requested-route", "response_model": "returned-model", "success": True},
+    ])
+    return {
+        "missing_returned_model_is_unknown": result["served_models"] == {
+            "unknown": 1, "returned-model": 1,
+        },
+        "requested_route_is_separate": result["requested_models"] == {"requested-route": 2},
+        "identity_reporting_keeps_attempt_denominator": result["physical_attempts"] == 2
+            and result["failed_attempts"] == 1 and result["failure_rate"] == 0.5,
     }
 
 

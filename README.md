@@ -3,7 +3,24 @@
 English-to-Persian academic book translation with persistent terminology,
 book-level memory, independent quality review, and RTL document export.
 
-Current runtime release: **v20.5**. Tarjomeh is licensed under AGPL-3.0.
+Current runtime release: **v20.6**. Tarjomeh is licensed under AGPL-3.0.
+
+## v20.6 Truthful Evidence And Trial Tooling
+
+Audits separate requested routes from returned model identities; failed calls
+without a returned model stay unknown. Mechanical alignment and model scores
+are not independent semantic verification. These are report-only changes:
+production prompts, stages, four memories, style policy and call budgets remain.
+
+An opt-in isolated trial compares guidance in the existing critic/refiner steps.
+It cannot enable itself or certify full admission/export; paid evidence and
+human approval remain pending. The safe deploy retains the current Tarjomeh
+rollback image and stops when verified Tarjomeh-only cleanup cannot provide
+enough space, without changing any 9router resource.
+
+Use `scripts/deploy_tarjomeh_v206.sh` and the matching reports/companion audits.
+See [v20.6 deployment, audit and trial instructions](docs/V20.6_RELEASE.md).
+This release is ready for live testing, not a claim of improved book translation.
 
 ## v20.5 Memory And Evidence Repairs
 

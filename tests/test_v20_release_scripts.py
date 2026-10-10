@@ -59,7 +59,7 @@ def test_v20_audits_are_parseable_and_fail_closed() -> None:
 
 def test_v20_runtime_capabilities_and_pure_probes() -> None:
     manifest = runtime_capabilities()
-    assert manifest["release"] == "v20.5"
+    assert manifest["release"] == "v20.6"
     assert manifest["capabilities"]["selected_chapter_term_index"]
     assert manifest["capabilities"]["bilingual_docx_identity"]
     assert manifest["policy_versions"]["book_term_scope"] == 5

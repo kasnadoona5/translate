@@ -807,9 +807,8 @@ class TestConcurrencyAndEventLoop(unittest.TestCase):
             def log_message(self, format, *args):
                 pass
             def do_POST(self):
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
+                # Consume the request before closing, avoiding TCP resets on Windows.
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
                 response = {
                     "choices": [
                         {
@@ -824,7 +823,12 @@ class TestConcurrencyAndEventLoop(unittest.TestCase):
                         "total_tokens": 15
                     }
                 }
-                self.wfile.write(json.dumps(response).encode("utf-8"))
+                body = json.dumps(response).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
 
         cls.server = HTTPServer(("127.0.0.1", 0), MockLLMHandler)
         cls.port = cls.server.server_port
