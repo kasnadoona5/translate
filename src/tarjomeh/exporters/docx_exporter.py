@@ -88,6 +88,7 @@ def source_superscript_spans(
     superscripted and the final audit reports the paragraph for REVIEW.
     """
     from tarjomeh.parsers.pdf_parser import locate_source_marker
+    from tarjomeh.quality.integrity import source_note_cue_inventory
 
     records = metadata.get("superscript_markers", []) or []
     if not isinstance(records, list):
@@ -100,6 +101,17 @@ def source_superscript_spans(
         if source_text and locate_source_marker(source_text, record) is None:
             continue
         normalized = raw.translate(_DIGIT_TO_ASCII)
+        if source_text and normalized.isdigit():
+            inventory = source_note_cue_inventory(source_text, text or "")
+            if inventory["available"].get(normalized, 0) > inventory["required"].get(normalized, 0):
+                continue
+            # A Unicode superscript already renders the cue; do not also style
+            # an unrelated plain digit with the same value.
+            if inventory["required"].get(normalized) == 1 and any(
+                item["marker"] == normalized and "unicode_superscript" in item["representations"]
+                for item in inventory["occurrences"]
+            ):
+                continue
         if normalized.isdigit():
             pattern = "".join(
                 f"[{_DIGIT_EQUIVALENTS[digit]}]" for digit in normalized

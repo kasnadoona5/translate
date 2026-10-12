@@ -180,17 +180,26 @@ def quality_safeguard_evidence(
     )
     from tarjomeh.memory.manager import _style_record_is_authoritative, _style_record_is_prompt_safe
     from tarjomeh.memory.proper_nouns import ProperNouns
+    from tarjomeh.quality.integrity import source_note_cue_inventory
 
     nouns = ProperNouns()
     nouns.deserialize(state.get("proper_nouns", {}) or {})
     decisions = [item for item in review.get("proposals", []) if isinstance(item, dict)]
     language = []
     occurrence_reviews = []
+    note_cues = []
     for chunk in chunks:
         source, target = chunk.get("text") or "", chunk.get("translation") or ""
         if not source or not target or chunk.get("status") not in {"completed", "needs_review"}:
             continue
         metadata = chunk.get("metadata") or {}
+        note_cues.append({
+            "chunk_index": chunk["chunk_index"],
+            "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+            "target_sha256": hashlib.sha256(target.encode("utf-8")).hexdigest(),
+            **source_note_cue_inventory(source, target),
+            "authority": "current_policy_evaluation_not_historical_rewrite",
+        })
         if isinstance(metadata, str):
             metadata = json.loads(metadata)
         context = {
@@ -362,6 +371,7 @@ def quality_safeguard_evidence(
     return {
         "current_language_evaluation": language,
         "current_occurrence_evaluation": occurrence_reviews,
+        "current_note_cue_evaluation": note_cues,
         "current_style_eligibility": style,
         "research_evidence_kinds": research_quotes,
         "prompt_component_references": references,

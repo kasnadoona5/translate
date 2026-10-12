@@ -94,6 +94,9 @@ def test_embedded_image_and_running_source_gates_pass_on_candidate():
     blocks = re.findall(r"-c '\n(.*?)\n'", source, re.S)
     assert len(blocks) == 3
     for block in blocks:
+        from tarjomeh.runtime import RUNTIME_RELEASE
+
+        block = block.replace('"v20.6"', repr(RUNTIME_RELEASE))
         result = subprocess.run(
             [sys.executable, "-c", block],
             capture_output=True,

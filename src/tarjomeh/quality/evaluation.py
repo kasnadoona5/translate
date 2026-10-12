@@ -108,13 +108,14 @@ def inspect_chunk(
 
     source_notes = extract_note_markers(source)
     required_notes = Counter(source_notes)
-    target_notes = available_note_markers(translation, required_notes)
+    target_notes = available_note_markers(translation, required_notes, source=source)
     missing_notes = list((required_notes - target_notes).elements())
+    surplus_notes = list((target_notes - required_notes).elements())
     checks.append(_check(
-        "note_markers_preserved", not missing_notes, "blocking",
+        "note_markers_preserved", not missing_notes and not surplus_notes, "blocking",
         "Footnote/endnote markers are preserved."
-        if not missing_notes else "Footnote/endnote markers are missing.",
-        {"missing": missing_notes},
+        if not missing_notes and not surplus_notes else "Footnote/endnote marker counts disagree.",
+        {"missing": missing_notes, "surplus": surplus_notes},
     ))
 
     source_paragraphs = _paragraphs(source)

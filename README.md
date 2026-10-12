@@ -3,7 +3,22 @@
 English-to-Persian academic book translation with persistent terminology,
 book-level memory, independent quality review, and RTL document export.
 
-Current runtime release: **v20.6**. Tarjomeh is licensed under AGPL-3.0.
+Current runtime release: **v20.7**. Tarjomeh is licensed under AGPL-3.0.
+
+## v20.7 Source-Proven Note And Review Repairs
+
+Integrity and DOCX read-back count physical footnote cues across plain, Unicode
+and styled representations. A duplicate is removed only with a unique retained
+source anchor; ordinary numerals and uncertain locations remain protected.
+An unchanged paragraph-scoped terminology REVIEW no longer vetoes an independent
+repair elsewhere. The REVIEW remains unresolved and cannot gain trusted authority.
+Current approvals, occurrence ticks and legacy counters are reported separately.
+
+Stages, all four memory layers, style thresholds, research and LLM budgets remain.
+Experimental guidance stays OFF. Local checks do not establish improved academic
+translation or whole-book publication readiness; a fresh checkpoint is required.
+Use `scripts/deploy_tarjomeh_v207.sh` and the matching audits. See
+[v20.7 deployment and verification](docs/V20.7_RELEASE.md).
 
 ## v20.6 Truthful Evidence And Trial Tooling
 

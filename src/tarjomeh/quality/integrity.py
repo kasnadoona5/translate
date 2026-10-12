@@ -821,8 +821,212 @@ def extract_note_markers(text: str, *, allow_spaced: bool = False) -> list[str]:
     return markers
 
 
-def available_note_markers(text: str, required: Counter[str]) -> Counter[str]:
+def _anchored_note_source_part(source: str, text: str, marker: str, position: int) -> str | None:
+    """Locate source scope through a unique retained note anchor, not paragraph order."""
+    proven = []
+    target_paragraph = len(list(re.finditer(r"\n\s*\n", text[:position])))
+    for part in _paragraphs(source):
+        for occurrence in re.finditer(
+            rf"\((?P<anchor>[^()\n]{{2,240}})\)(?P<gap>\s*){re.escape(marker)}"
+            r"(?=$|[-\s,.;:!?\u060c\u061b\u061f\u2010-\u2015])",
+            part.translate(_DIGIT_MAP).translate(_SUPERSCRIPT_MAP),
+        ):
+            anchors = [occurrence.group("anchor")]
+            tail = re.search(
+                r"[A-Z\u00c0-\u00de][A-Za-z\u00c0-\u024f'\u2019-]+"
+                r"(?:\s+[A-Z\u00c0-\u00de][A-Za-z\u00c0-\u024f'\u2019-]+){1,5}$",
+                anchors[0],
+            )
+            if tail:
+                anchors.append(tail.group())
+            for anchor in anchors:
+                token = "(" + anchor + ")"
+                if not re.search(r"[A-Za-z\u00c0-\u024f]", anchor):
+                    continue
+                if source.count(anchor) != 1 or text.count(token) != 1:
+                    continue
+                end = text.index(token) + len(token)
+                rich = _NOTE_RE.match(text, end + len(text[end:]) - len(text[end:].lstrip()))
+                if rich is None:
+                    continue
+                value = (
+                    (rich.group(1) or rich.group(2))
+                    .translate(_SUPERSCRIPT_MAP)
+                    .translate(_DIGIT_MAP)
+                )
+                if (
+                    value == marker
+                    and len(list(re.finditer(r"\n\s*\n", text[: rich.start()]))) == target_paragraph
+                ):
+                    proven.append(part)
+    parts = set(proven)
+    return parts.pop() if len(parts) == 1 else None
+
+
+def _word_dash_note_matches(source: str, text: str) -> list[re.Match[str]]:
+    """Source-confirmed extra cues; never classify an ordinary source digit."""
+    required = Counter(extract_note_markers(source))
+    cardinal_words = (
+        "zero",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+        "twenty",
+    )
+    ordinal_words = (
+        "zeroth",
+        "first",
+        "second",
+        "third",
+        "fourth",
+        "fifth",
+        "sixth",
+        "seventh",
+        "eighth",
+        "ninth",
+        "tenth",
+        "eleventh",
+        "twelfth",
+        "thirteenth",
+        "fourteenth",
+        "fifteenth",
+        "sixteenth",
+        "seventeenth",
+        "eighteenth",
+        "nineteenth",
+        "twentieth",
+    )
+    pattern = re.compile(
+        r"(?<=[\u0621-\u063a\u0641-\u064a\u0671-\u06d3\u064b-\u065f])"
+        rf"(?P<gap>[ \t]+)(?P<marker>[{_PLAIN_NOTE_DIGITS}]{{1,3}})"
+        r"(?=[ \t]*[-\u2010-\u2015](?:[ \t]+|$))"
+    )
+    matches = []
+    for match in pattern.finditer((text or "").translate(_DIGIT_MAP)):
+        marker = match.group("marker")
+        source_scope = _anchored_note_source_part(source, text, marker, match.start()) or source
+        ordinary = extract_numbers(source_scope)
+        number = int(marker)
+        verbal_number = number < len(cardinal_words) and re.search(
+            rf"\b(?:{cardinal_words[number]}|{ordinal_words[number]})\b",
+            source_scope,
+            re.IGNORECASE,
+        )
+        if number >= len(cardinal_words):
+            verbal_number = re.search(
+                r"\b(?:"
+                + "|".join(cardinal_words[1:] + ordinal_words[1:])
+                + r"|hundred|thousand|million|billion|dozen)\b",
+                source_scope,
+                re.IGNORECASE,
+            )
+        before = text[max(0, match.start() - 80) : match.start()]
+        if (
+            required[marker]
+            and not ordinary[marker]
+            and not verbal_number
+            and not _structural_label(before, text[match.end() : match.end() + 50])
+            and text[: match.start()].count("(") <= text[: match.start()].count(")")
+            and text[: match.start()].count("[") <= text[: match.start()].count("]")
+            and not re.search(r"[=+*/^]\s*\S*\s*$", before)
+        ):
+            matches.append(match)
+    return matches
+
+
+def source_note_cue_inventory(
+    source: str,
+    text: str,
+    *,
+    styled_spans: Iterable[tuple[int, int]] = (),
+    excluded_spans: Iterable[tuple[int, int]] = (),
+) -> dict[str, Any]:
+    """Count physical cues once, including Unicode and DOCX run representations."""
+    required = Counter(extract_note_markers(source))
+    excluded = list(excluded_spans)
+    cues: dict[tuple[int, int], dict[str, Any]] = {}
+
+    def add(start: int, end: int, marker: str, representation: str) -> None:
+        if any(start < right and end > left for left, right in excluded):
+            return
+        base = re.search(r"(?<!\w)([A-Za-z])(?:\^|\*\*)?$", (text or "")[:start])
+        if base and re.search(
+            rf"(?<!\w){re.escape(base.group(1))}(?:\^|\*\*){re.escape(marker)}(?!\d)",
+            (source or "").translate(_DIGIT_MAP),
+        ):
+            return
+        item = cues.setdefault(
+            (start, end),
+            {
+                "start": start,
+                "end": end,
+                "marker": marker,
+                "representations": [],
+            },
+        )
+        if representation not in item["representations"]:
+            item["representations"].append(representation)
+
+    for match in _NOTE_RE.finditer(text or ""):
+        group = 1 if match.group(1) is not None else 2
+        marker = match.group(group).translate(_SUPERSCRIPT_MAP).translate(_DIGIT_MAP)
+        add(*match.span(group), marker, "bracket" if group == 1 else "unicode_superscript")
+    for match in _plain_note_matches(text, allow_spaced=True):
+        marker = match.group("marker")
+        if required[marker]:
+            add(*match.span("marker"), marker, "plain_boundary")
+    for match in _word_dash_note_matches(source, text):
+        add(*match.span("marker"), match.group("marker"), "source_confirmed_word_dash")
+    merged_styles: list[tuple[int, int]] = []
+    for start, end in sorted(styled_spans):
+        if merged_styles and start <= merged_styles[-1][1]:
+            merged_styles[-1] = (merged_styles[-1][0], max(end, merged_styles[-1][1]))
+        else:
+            merged_styles.append((start, end))
+    for start, end in merged_styles:
+        # A run can contain more than one glyph; offsets still identify each cue.
+        for match in re.finditer(
+            rf"[{_PLAIN_NOTE_DIGITS}\u00b9\u00b2\u00b3\u2070-\u2079]+", (text or "")[start:end]
+        ):
+            marker = match.group().translate(_SUPERSCRIPT_MAP).translate(_DIGIT_MAP)
+            if required[marker]:
+                add(start + match.start(), start + match.end(), marker, "docx_superscript")
+    available = Counter(item["marker"] for item in cues.values())
+    return {
+        "required": dict(required),
+        "available": dict(available),
+        "missing": list((required - available).elements()),
+        "surplus": list((available - required).elements()),
+        "occurrences": sorted(cues.values(), key=lambda item: item["start"]),
+        "policy": "physical_cues_not_run_count; source_numbers_and_generated_terms_protected",
+    }
+
+
+def available_note_markers(
+    text: str,
+    required: Counter[str],
+    *,
+    source: str = "",
+) -> Counter[str]:
     """Return target note evidence without treating arbitrary numbers as notes."""
+    if source:
+        return Counter(source_note_cue_inventory(source, text)["available"])
     strict = Counter(extract_note_markers(text))
     if not required:
         return strict
@@ -844,7 +1048,7 @@ def restore_source_note_markers(
     """
     repaired = translation or ""
     required = Counter(extract_note_markers(source))
-    missing = required - available_note_markers(repaired, required)
+    missing = required - available_note_markers(repaired, required, source=source)
     repairs: list[dict[str, Any]] = []
     ambiguous: list[dict[str, Any]] = []
 
@@ -854,10 +1058,11 @@ def restore_source_note_markers(
         for digit in marker:
             value = int(digit)
             variants.append(
-                "[" + re.escape(
-                    f"{digit}{chr(0x06F0 + value)}{chr(0x0660 + value)}"
-                    f"{superscripts[value]}"
-                ) + "]"
+                "["
+                + re.escape(
+                    f"{digit}{chr(0x06F0 + value)}{chr(0x0660 + value)}{superscripts[value]}"
+                )
+                + "]"
             )
         return "".join(variants)
 
@@ -902,7 +1107,7 @@ def restore_source_note_markers(
     target_paragraphs = _paragraphs(repaired)
     if len(source_paragraphs) == len(target_paragraphs):
         for marker, count in required.items():
-            if count != 1 or available_note_markers(repaired, required)[marker] != 1:
+            if count != 1 or available_note_markers(repaired, required, source=source)[marker] != 1:
                 continue
             token = marker_pattern(marker)
             source_locations: list[tuple[int, int]] = []
@@ -972,7 +1177,7 @@ def restore_source_note_markers(
     # plain copy. Remove only that uniquely proven duplicate; never choose among
     # two equivalent superscripts or among multiple plain candidates.
     for marker, required_count in required.items():
-        available_count = available_note_markers(repaired, required)[marker]
+        available_count = available_note_markers(repaired, required, source=source)[marker]
         if required_count != 1 or available_count != 2:
             continue
         rich_matches = [
@@ -981,7 +1186,10 @@ def restore_source_note_markers(
             .translate(_DIGIT_MAP) == marker
         ]
         plain_matches = [
-            match for match in _plain_note_matches(repaired, allow_spaced=True)
+            match for match in (
+                _plain_note_matches(repaired, allow_spaced=True)
+                + _word_dash_note_matches(source, repaired)
+            )
             if match.group("marker") == marker
             and not any(
                 rich.start() <= match.start("marker") < rich.end()
@@ -998,8 +1206,16 @@ def restore_source_note_markers(
             continue
         rich_match = rich_matches[0]
         plain_match = plain_matches[0]
-        rich_paragraph = repaired.count("\n\n", 0, rich_match.start())
-        plain_paragraph = repaired.count("\n\n", 0, plain_match.start())
+        if plain_match.span("marker") in {
+            match.span("marker") for match in _word_dash_note_matches(source, repaired)
+        }:
+            # The new word-before-dash shape needs an exact retained Latin anchor,
+            # not merely equal paragraph counts or two equal numeric values.
+            if _anchored_note_source_part(source, repaired, marker, plain_match.start()) is None:
+                ambiguous.append({"marker": marker, "reason": "duplicate_retained_anchor_unproved"})
+                continue
+        rich_paragraph = len(list(re.finditer(r"\n\s*\n", repaired[:rich_match.start()])))
+        plain_paragraph = len(list(re.finditer(r"\n\s*\n", repaired[:plain_match.start()])))
         if rich_paragraph != plain_paragraph:
             ambiguous.append({
                 "marker": marker,
@@ -1020,7 +1236,7 @@ def restore_source_note_markers(
         if "gap" in plain_match.groupdict():
             removal_start = plain_match.start("gap")
         candidate = repaired[:removal_start] + repaired[marker_end:]
-        if available_note_markers(candidate, required)[marker] != required_count:
+        if available_note_markers(candidate, required, source=source)[marker] != required_count:
             ambiguous.append({
                 "marker": marker,
                 "reason": "surplus_note_marker_removal_not_cardinality_safe",
@@ -1035,9 +1251,9 @@ def restore_source_note_markers(
             "paragraph_index": rich_paragraph,
         })
 
-    missing = required - available_note_markers(repaired, required)
+    missing = required - available_note_markers(repaired, required, source=source)
     if not missing:
-        surplus = available_note_markers(repaired, required) - required
+        surplus = available_note_markers(repaired, required, source=source) - required
         return repaired, {
             "repair_count": len(repairs),
             "repairs": repairs,
@@ -1167,7 +1383,7 @@ def restore_source_note_markers(
             zip(source_paragraphs, target_paragraphs, strict=True)
         ):
             local_required = Counter(extract_note_markers(source_part))
-            local_available = available_note_markers(target_part, local_required)
+            local_available = available_note_markers(target_part, local_required, source=source_part)
             for marker in list((local_required - local_available).elements()):
                 if missing[marker] <= 0:
                     continue
@@ -1203,10 +1419,10 @@ def restore_source_note_markers(
                     del missing[marker]
 
     unresolved = list(
-        (required - available_note_markers(repaired, required)).elements()
+        (required - available_note_markers(repaired, required, source=source)).elements()
     )
     surplus = list(
-        (available_note_markers(repaired, required) - required).elements()
+        (available_note_markers(repaired, required, source=source) - required).elements()
     )
     return repaired, {
         "repair_count": len(repairs),
@@ -3536,10 +3752,10 @@ class PostEditIntegrityGate:
         if previous:
             required_notes |= Counter(extract_note_markers(previous))
         missing_note_counts = required_notes - available_note_markers(
-            candidate, required_notes
+            candidate, required_notes, source=source
         )
         previous_missing_note_counts = (
-            required_notes - available_note_markers(previous, required_notes)
+            required_notes - available_note_markers(previous, required_notes, source=source)
             if previous else Counter()
         )
         newly_missing_note_counts = (
@@ -3559,10 +3775,10 @@ class PostEditIntegrityGate:
                 missing=list(missing_note_counts.elements()),
             )
         surplus_note_counts = (
-            available_note_markers(candidate, required_notes) - required_notes
+            available_note_markers(candidate, required_notes, source=source) - required_notes
         )
         previous_surplus_note_counts = (
-            available_note_markers(previous, required_notes) - required_notes
+            available_note_markers(previous, required_notes, source=source) - required_notes
             if previous else Counter()
         )
         newly_surplus_note_counts = (

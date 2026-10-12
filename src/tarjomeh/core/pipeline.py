@@ -4705,6 +4705,55 @@ def _proven_unchanged_issue(
     return True
 
 
+def _partition_unchanged_book_term_reviews(
+    source: str,
+    previous: str,
+    candidate: str,
+    metadata: dict[str, Any],
+    matches: list[dict[str, Any]],
+    candidate_reviews: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Carry only scoped, byte-identical old REVIEW, never clear its authority risk."""
+    from tarjomeh.glossary.book_review import check_reviewed_book_terms
+
+    _compliance, baseline_reviews = check_reviewed_book_terms(previous, source, metadata, matches)
+    source_parts = split_paragraphs(source)
+    before_parts = [part for part in re.split(r"\n\s*\n", previous) if part.strip()]
+    after_parts = [part for part in re.split(r"\n\s*\n", candidate) if part.strip()]
+    if len(source_parts) != len(before_parts) or len(before_parts) != len(after_parts):
+        return candidate_reviews, []
+    baseline_keys = {
+        json.dumps(item, sort_keys=True, ensure_ascii=True) for item in baseline_reviews
+    }
+    blocked, carried = [], []
+    for item in candidate_reviews:
+        index = item.get("paragraph_index")
+        matching = [
+            match
+            for match in matches
+            if (
+                match.get("paragraph_index") == index
+                and match.get("source") == item.get("source")
+                and match.get("target") == item.get("target")
+            )
+        ]
+        reasons = item.get("reasons", [])
+        proven = bool(
+            type(index) is int
+            and 0 <= index < len(source_parts)
+            and before_parts[index] == after_parts[index]
+            and len(matching) == 1
+            and matching[0].get("source_paragraph_hash")
+            == _candidate_text_hash(source_parts[index])
+            and isinstance(reasons, list)
+            and "multiple_occurrences_unverifiable" in reasons
+            and set(reasons) <= {"multiple_occurrences_unverifiable", "rendering_count_short"}
+            and json.dumps(item, sort_keys=True, ensure_ascii=True) in baseline_keys
+        )
+        (carried if proven else blocked).append(item)
+    return blocked, carried
+
+
 def _candidate_regression_details(
     critique: Any,
     baseline_critique: Any,
@@ -9751,6 +9800,7 @@ class TranslationPipeline:
                     structure = _actionable_structure_findings(chunk.text, candidate)
                     term_violations = []
                     term_uncertain = []
+                    carried_term_reviews = []
                     if reviewed_matches:
                         from tarjomeh.glossary.book_review import check_reviewed_book_terms
 
@@ -9758,11 +9808,18 @@ class TranslationPipeline:
                             candidate, chunk.text, chunk.metadata, reviewed_matches
                         )
                         term_violations = compliance.violations
+                        term_uncertain, carried_term_reviews = _partition_unchanged_book_term_reviews(
+                            chunk.text, translation, candidate, chunk.metadata,
+                            reviewed_matches, term_uncertain,
+                        )
                     report.update({
                         "integrity": integrity.to_dict(), "paragraph_identity": identity,
                         "structure_findings": structure,
                         "book_term_violation_count": len(term_violations),
-                        "book_term_review_count": len(term_uncertain),
+                        "book_term_review_count": len(term_uncertain) + len(carried_term_reviews),
+                        "book_term_blocking_review_count": len(term_uncertain),
+                        "book_term_unchanged_reviews": carried_term_reviews,
+                        "book_term_review_disposition": "unchanged_review_carried_not_resolved",
                         "candidate_target_hash": _candidate_text_hash(candidate),
                     })
                     # Deterministic admission is required before paying for the

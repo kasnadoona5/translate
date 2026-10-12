@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v20.6"
+RUNTIME_RELEASE = "v20.7"
 RUNTIME_REVISION = 1
 
 
@@ -31,6 +31,9 @@ def runtime_capabilities() -> dict[str, Any]:
             "evidence_bound_research": True,
             "source_bound_foreign_expressions": True,
             "four_layer_memory": True,
+            "physical_source_note_cue_inventory": True,
+            "docx_visible_note_cardinality": True,
+            "unchanged_scoped_term_review_is_not_edit_veto": True,
             "offline_model_benchmark": True,
             "durable_worker_lease": True,
             "checkpoint_preview_atomic_publish": True,
@@ -659,6 +662,65 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v204_behavior_probes(),
         **_v205_behavior_probes(),
         **_v206_behavior_probes(),
+        **_v207_behavior_probes(),
+    }
+
+
+def _v207_behavior_probes() -> dict[str, bool]:
+    """General synthetic note and scope checks; no I/O or LLM calls."""
+    from tarjomeh.core.pipeline import _partition_unchanged_book_term_reviews
+    from tarjomeh.glossary.book_review import check_reviewed_book_terms
+    from tarjomeh.quality.integrity import restore_source_note_markers, source_note_cue_inventory
+
+    source = "Consider (Example Author)1 - the claim follows."
+    target = "(Example Author)\u00b9 \u0628\u062e\u0648\u0627\u0646\u06cc\u062f \u06f1 \u2014 \u0627\u062f\u0639\u0627."
+    fixed, report = restore_source_note_markers(source, target)
+    cue = fixed.index("\u00b9")
+    source_term = "A civic institution meets another civic institution."
+    target_term = "\u0646\u0647\u0627\u062f \u0645\u062f\u0646\u06cc \u0628\u0627 \u0646\u0647\u0627\u062f \u0645\u062f\u0646\u06cc \u062f\u06cc\u062f\u0627\u0631 \u0645\u06cc\u200c\u06a9\u0646\u062f."
+    matches = [
+        {
+            "paragraph_index": 0,
+            "source": "civic institution",
+            "target": "\u0646\u0647\u0627\u062f \u0645\u062f\u0646\u06cc",
+            "source_paragraph_hash": hashlib.sha256(source_term.encode()).hexdigest(),
+            "source_occurrence_count": 2,
+        }
+    ]
+    _compliance, reviews = check_reviewed_book_terms(target_term, source_term, {}, matches)
+    blocked, carried = _partition_unchanged_book_term_reviews(
+        source_term,
+        target_term,
+        target_term,
+        {},
+        matches,
+        reviews,
+    )
+    return {
+        "word_dash_duplicate_note_is_source_proven": report["repair_count"] == 1
+        and "\u06f1" not in fixed,
+        "unicode_and_docx_style_count_one_physical_cue": (
+            source_note_cue_inventory(source, fixed, styled_spans=[(cue, cue + 1)])["available"]
+            == {"1": 1}
+        ),
+        "ordinary_source_number_is_not_deleted_as_note": restore_source_note_markers(
+            source + " It has 1 member.",
+            target,
+        )[0]
+        == target,
+        "unchanged_term_review_is_carried_not_cleared": not blocked
+        and carried == reviews
+        and bool(reviews),
+        "changed_term_paragraph_still_blocks": bool(
+            _partition_unchanged_book_term_reviews(
+                source_term,
+                target_term,
+                target_term + " ",
+                {},
+                matches,
+                reviews,
+            )[0]
+        ),
     }
 
 

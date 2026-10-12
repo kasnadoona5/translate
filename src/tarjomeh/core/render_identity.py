@@ -18,7 +18,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from tarjomeh.exporters.base import TranslatedDocument
+from tarjomeh.exporters.base import TranslatedDocument, TranslatedParagraph
 
 _ZWNJ = chr(0x200C)
 _COMBINING_MARKS = "".join(chr(code) for code in range(0x064B, 0x0653)) + chr(0x0654)
@@ -521,7 +521,7 @@ def expected_delivered_units(
     return units
 
 
-def read_docx_units(path: Path) -> list[dict[str, Any]]:
+def read_docx_units(path: Path, *, include_note_styles: bool = False) -> list[dict[str, Any]]:
     """Read body paragraphs and tables of a DOCX in document order."""
     from docx import Document
     from docx.table import Table
@@ -529,17 +529,106 @@ def read_docx_units(path: Path) -> list[dict[str, Any]]:
 
     document = Document(str(path))
     units: list[dict[str, Any]] = []
+
+    def styles(paragraphs: Any) -> list[tuple[int, int]]:
+        spans = []
+        cursor = 0
+        for paragraph in paragraphs:
+            for run in paragraph.runs:
+                superscript = run.font.superscript
+                if superscript is None:
+                    for initial_style in (run.style, paragraph.style):
+                        current = initial_style
+                        visited = set()
+                        while current is not None and current.style_id not in visited:
+                            visited.add(current.style_id)
+                            superscript = current.font.superscript
+                            if superscript is not None:
+                                break
+                            current = current.base_style
+                        if superscript is not None:
+                            break
+                if superscript:
+                    spans.append((cursor, cursor + len(run.text)))
+                cursor += len(run.text)
+            cursor += 1
+        return spans
+
     for element in document.element.body.iterchildren():
         tag = element.tag.rsplit("}", 1)[-1]
         if tag == "p":
-            units.append({"kind": "paragraph", "text": Paragraph(element, document).text})
+            paragraph = Paragraph(element, document)
+            unit = {"kind": "paragraph", "text": paragraph.text}
+            if include_note_styles:
+                unit["superscript_spans"] = styles([paragraph])
+            units.append(unit)
         elif tag == "tbl":
             table = Table(element, document)
-            units.append({
+            unit = {
                 "kind": "table",
                 "rows": [[cell.text for cell in row.cells] for row in table.rows],
-            })
+            }
+            if include_note_styles:
+                unit["superscript_spans"] = [
+                    [styles(cell.paragraphs) for cell in row.cells] for row in table.rows
+                ]
+            units.append(unit)
     return units
+
+
+def _delivered_note_cue_evidence(
+    document: TranslatedDocument,
+    expected: list[dict[str, Any]],
+    actual: list[dict[str, Any]],
+    bilingual_mode: str,
+) -> list[dict[str, Any]]:
+    """Check target cues only, excluding explicitly generated terminology notes."""
+    from tarjomeh.exporters.term_notes import paragraph_note_parts
+    from tarjomeh.quality.integrity import extract_note_markers, source_note_cue_inventory
+
+    by_index = {paragraph.index: paragraph for paragraph in document.paragraphs}
+    evidence = []
+
+    def inspect(paragraph: TranslatedParagraph, text: str, spans: list) -> None:
+        if not extract_note_markers(paragraph.source_text):
+            return
+        generated = []
+        cursor = 0
+        for segment, ref in paragraph_note_parts(paragraph.translated_text, paragraph.metadata):
+            cursor += len(segment)
+            if ref is not None:
+                length = len(str(ref.get("display_number", ref["number"])))
+                generated.append((cursor, cursor + length))
+                cursor += length
+        inventory = source_note_cue_inventory(
+            paragraph.source_text,
+            text,
+            styled_spans=spans,
+            excluded_spans=generated,
+        )
+        evidence.append(
+            {
+                "paragraph_index": paragraph.index,
+                **inventory,
+                "passed": not inventory["missing"] and not inventory["surplus"],
+            }
+        )
+
+    if bilingual_mode == "side_by_side" and actual and actual[0]["kind"] == "table":
+        unit = actual[0]
+        for index, paragraph in enumerate(document.paragraphs):
+            if index < len(unit["rows"]) and len(unit["rows"][index]) == 2:
+                inspect(paragraph, unit["rows"][index][1], unit["superscript_spans"][index][1])
+    else:
+        for index, (want, got) in enumerate(zip(expected, actual, strict=False)):
+            if want["kind"] != "paragraph" or got["kind"] != "paragraph":
+                continue
+            if bilingual_mode == "inline" and index % 2 == 0:
+                continue
+            paragraph = by_index.get(want.get("paragraph_index"))
+            if paragraph is not None:
+                inspect(paragraph, got["text"], got["superscript_spans"])
+    return evidence
 
 
 def docx_contents_evidence(path: Path, source_contents_rows: int) -> dict[str, Any]:
@@ -607,7 +696,7 @@ def compare_docx_to_rendered(
             "passed": False,
             "mismatches": [],
         }
-    actual = read_docx_units(path)
+    actual = read_docx_units(path, include_note_styles=True)
     mismatches: list[dict[str, Any]] = []
     for index in range(max(len(expected), len(actual))):
         want = expected[index] if index < len(expected) else None
@@ -629,11 +718,13 @@ def compare_docx_to_rendered(
         })
         if len(mismatches) >= 20:
             break
+    note_evidence = _delivered_note_cue_evidence(document, expected, actual, bilingual_mode)
     return {
         "mapping": f"exporter_{bilingual_mode}",
         "verified": True,
         "expected_unit_count": len(expected),
         "actual_unit_count": len(actual),
         "mismatches": mismatches,
-        "passed": not mismatches,
+        "source_note_cues": note_evidence,
+        "passed": not mismatches and all(item["passed"] for item in note_evidence),
     }
