@@ -586,7 +586,6 @@ def _delivered_note_cue_evidence(
     from tarjomeh.exporters.term_notes import paragraph_note_parts
     from tarjomeh.quality.integrity import extract_note_markers, source_note_cue_inventory
 
-    by_index = {paragraph.index: paragraph for paragraph in document.paragraphs}
     evidence = []
 
     def inspect(paragraph: TranslatedParagraph, text: str, spans: list) -> None:
@@ -620,13 +619,21 @@ def _delivered_note_cue_evidence(
             if index < len(unit["rows"]) and len(unit["rows"][index]) == 2:
                 inspect(paragraph, unit["rows"][index][1], unit["superscript_spans"][index][1])
     else:
+        targets = iter(
+            document.paragraphs if bilingual_mode == "inline" else [
+                paragraph for paragraph in document.paragraphs
+                if paragraph.metadata.get("structure_role") != "contents_entry"
+                and not (paragraph.metadata.get("suppress_empty_target_export")
+                         and not paragraph.translated_text.strip())
+            ]
+        )
         for index, (want, got) in enumerate(zip(expected, actual, strict=False)):
-            if want["kind"] != "paragraph" or got["kind"] != "paragraph":
+            if want["kind"] != "paragraph" or want.get("paragraph_index") is None:
                 continue
             if bilingual_mode == "inline" and index % 2 == 0:
                 continue
-            paragraph = by_index.get(want.get("paragraph_index"))
-            if paragraph is not None:
+            paragraph = next(targets, None)
+            if paragraph is not None and got["kind"] == "paragraph":
                 inspect(paragraph, got["text"], got["superscript_spans"])
     return evidence
 

@@ -277,6 +277,22 @@ def test_generated_term_note_is_not_a_duplicate_source_note(tmp_path, mode):
     assert audit["passed"] and audit["source_note_cues"][0]["available"] == {"1": 1}
 
 
+@pytest.mark.parametrize("mode", ["target_only", "inline", "side_by_side"])
+def test_chapter_local_duplicate_index_labels_do_not_change_note_mapping(tmp_path, mode):
+    document = TranslatedDocument(
+        paragraphs=[
+            TranslatedParagraph(index=0, source_text=SOURCE, translated_text=REPAIRED),
+            TranslatedParagraph(
+                index=0,
+                source_text="(Second Writer)2 - the second claim.",
+                translated_text="(Second Writer)² ادعای دوم.",
+            ),
+        ]
+    )
+    path = DocxExporter().export(document, tmp_path / "local-indices.docx", bilingual_mode=mode)
+    assert compare_docx_to_rendered(document, path, mode)["passed"]
+
+
 def term_case():
     paragraphs = [
         "The report raises at most two issues.",
