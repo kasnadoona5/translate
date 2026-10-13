@@ -42,6 +42,11 @@ _PERSIAN_WORD_RE = re.compile(
     r"[\u064b-\u065f\u0670\u06d6-\u06ed]*)+)*"
 )
 _PERSIAN_DIACRITICS_RE = re.compile(r"[\u064b-\u065f\u0670\u06d6-\u06ed]")
+# Clause dashes are separators for names, not lexical compound joins.
+_PERSON_NAME_WORD_RE = re.compile(
+    _PERSIAN_WORD_RE.pattern.replace(r"\u2010-\u2015", r"\u2010-\u2011")
+)
+_NAME_CLAUSE_DASH_RE = re.compile(r"[\u2012-\u2015]|(?<=\s)-(?=\s)")
 _OBSERVED_MAPPING_BOUNDARY_RE = re.compile(
     r"[\n\r.!?,;:\u060c\u061b\u061f]"
 )
@@ -459,6 +464,22 @@ def observed_bilingual_target(
         max(1, len(re.findall(r"[A-Za-z\u00c0-\u024f]+", word)))
         for word in source_words
     )
+    if requires_bounded_name_target(_normalise_category(category), source):
+        boundaries = list(_NAME_CLAUSE_DASH_RE.finditer(local_prefix))
+        if boundaries:
+            suffix = local_prefix[boundaries[-1].end():].lstrip()
+            suffix_components = sum(
+                len(re.findall(_PERSIAN_LETTER_RE.pattern + "+", token.group()))
+                for token in _PERSON_NAME_WORD_RE.finditer(
+                    _PERSIAN_DIACRITICS_RE.sub("", suffix)
+                )
+            )
+            if suffix_components != source_components:
+                return ""
+            local_prefix = suffix
+            tokens = list(_PERSIAN_WORD_RE.finditer(local_prefix))
+            if not tokens:
+                return ""
     selected = tokens[-min(source_components, 7):]
     terminal = source_words[-1].casefold()
     required_heads = _ORGANIZATION_TARGET_HEADS.get(terminal, ())
@@ -715,7 +736,7 @@ def is_bounded_person_name_target(source: str, target: str) -> bool:
     source_words = re.findall(r"[A-Za-z\u00c0-\u024f]+", source or "")
     value = target or ""
     remainder = _PERSIAN_INITIAL_RE.sub(" ", value)
-    target_words = _PERSIAN_WORD_RE.findall(remainder)
+    target_words = _PERSON_NAME_WORD_RE.findall(remainder)
     if not source_words or not target_words:
         return False
     edges = [target_words[0], target_words[-1]]
@@ -1411,13 +1432,19 @@ class ProperNouns:
         self._provenance[key] = provenance
         return True
 
-    def is_context_deferred(self, english: str) -> bool:
-        """Return whether a contradicted automatic mapping is prompt-deferred."""
+    def context_deferral_reason(self, english: str) -> str:
+        """Explain effective deferral without rewriting historical evidence."""
         key = self._stored_key(english) or english.strip()
         provenance = self._provenance.get(key, {})
         if provenance.get("context_deferred"):
-            return True
-        return bool(
+            return str(provenance.get("context_deferred_reason") or "context_conflict")
+        if (
+            provenance.get("origin") not in {"curated_glossary", "approved_research"}
+            and requires_bounded_name_target(self.category_for(key), key)
+            and not is_bounded_person_name_target(key, self._nouns.get(key, ""))
+        ):
+            return "person_name_contains_context"
+        if (
             provenance.get("origin") == "accepted_correction"
             and (
                 provenance.get("alignment_status") != "exact_local"
@@ -1431,7 +1458,13 @@ class ProperNouns:
                     )
                 )
             )
-        )
+        ):
+            return "accepted_correction_not_reusable"
+        return ""
+
+    def is_context_deferred(self, english: str) -> bool:
+        """Return whether a contradicted automatic mapping is prompt-deferred."""
+        return bool(self.context_deferral_reason(english))
 
     def is_inline_eligible(self, english: str) -> bool:
         """Return whether a noun may carry a first-occurrence English original."""

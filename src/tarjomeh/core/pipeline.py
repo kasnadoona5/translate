@@ -846,6 +846,7 @@ def audit_translation_language(
         "unbalanced_explanatory_dash_count": len(explanatory_dashes),
         "unbalanced_explanatory_dash_artifacts": explanatory_dashes,
         "explanatory_dash_review": dash_reviews,
+        "quoted_suffix_review": quoted_suffix_review_findings(source, translation),
         "duplicated_comma_count": len(duplicate_commas),
         "duplicated_comma_artifacts": duplicate_commas,
         "policy": (
@@ -859,6 +860,30 @@ def audit_translation_language(
             "are review evidence."
         ),
     }
+
+
+def quoted_suffix_review_findings(source: str, translation: str) -> list[dict[str, Any]]:
+    """Locate possible suffix spacing; correspondence is not a repair proof."""
+    letters = r"\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff"
+    pattern = (
+        rf"\u00bb[ \t]+(?:\u0647\u0627\u06cc\u06cc|\u0647\u0627\u06cc|\u0647\u0627)"
+        rf"(?![{letters}\u200c])"
+    )
+    return [
+        {
+            "check_id": "detached_quoted_suffix_unproven",
+            "target_offset": match.start(),
+            "target_end": match.end(),
+            "text": match.group(),
+            "target_context": translation[max(0, match.start() - 60):match.end() + 60],
+            "source_context": source[:500],
+            "source_sha256": _candidate_text_hash(source),
+            "reason": "suffix_attachment_and_source_correspondence_unproven",
+            "disposition": "REVIEW",
+            "report_only": True,
+        }
+        for match in re.finditer(pattern, translation or "")
+    ]
 
 
 def audit_document_final_text(
@@ -895,6 +920,9 @@ def audit_document_final_text(
             **item, "paragraph_index": paragraph.index,
             "check_id": "explanatory_dash_alignment_unproven",
         } for item in language.get("explanatory_dash_review", []))
+        report_only_findings.extend({
+            **item, "paragraph_index": paragraph.index,
+        } for item in language.get("quoted_suffix_review", []))
         source_superscripts = paragraph.metadata.get("superscript_markers", []) or []
         if isinstance(source_superscripts, list) and source_superscripts:
             from tarjomeh.exporters.docx_exporter import source_superscript_spans
@@ -4703,6 +4731,41 @@ def _proven_unchanged_issue(
     ):
         return False
     return True
+
+
+def _partition_unchanged_quality_count(
+    details: list[dict[str, Any]],
+    *,
+    source_text: str,
+    previous_text: str,
+    candidate_text: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Exclude independently proven old findings only from improvement counts."""
+    raw_source = re.split(r"\n\s*\n", source_text or "")
+    raw_before = re.split(r"\n\s*\n", previous_text or "")
+    raw_after = re.split(r"\n\s*\n", candidate_text or "")
+    remaining: list[dict[str, Any]] = []
+    carried: list[dict[str, Any]] = []
+    for detail in details:
+        segment = re.fullmatch(r"p(\d+):s\d+", str(detail.get("source_segment_id", "")), re.I)
+        index = int(segment.group(1)) - 1 if segment else -1
+        quote = str(detail.get("current_persian_quote", "")).strip()
+        source_quote = str(detail.get("source_quote", "")).strip()
+        proven = bool(
+            len(raw_source) == len(raw_before) == len(raw_after)
+            and 0 <= index < len(raw_after)
+            and raw_before[index] == raw_after[index]
+            and quote and previous_text.count(quote) == candidate_text.count(quote) == 1
+            and source_quote and source_text.count(source_quote) == 1
+            and quote in raw_before[index] and quote in raw_after[index]
+            and source_quote in raw_source[index]
+            and _proven_unchanged_issue(
+                detail, source_text=source_text, previous_text=previous_text,
+                candidate_text=candidate_text,
+            )
+        )
+        (carried if proven else remaining).append(detail)
+    return remaining, carried
 
 
 def _partition_unchanged_book_term_reviews(
@@ -9845,9 +9908,14 @@ class TranslationPipeline:
                             source_text=chunk.text, previous_text=translation,
                             candidate_text=candidate, newly_observed_unchanged=old_issues,
                         )
+                        raw_remaining = _unresolved_grounded_memory_issues(review)
+                        remaining, count_carried = _partition_unchanged_quality_count(
+                            raw_remaining, source_text=chunk.text,
+                            previous_text=translation, candidate_text=candidate,
+                        )
                         old_keys = {_quality_issue_fingerprint(item) for item in old_issues}
-                        remaining = [item for item in _unresolved_grounded_memory_issues(review)
-                                     if _quality_issue_fingerprint(item) not in old_keys]
+                        old_issues.extend(item for item in count_carried
+                                          if _quality_issue_fingerprint(item) not in old_keys)
                         old_blocking = {str(item.get("formatted") or item.get("issue_id") or item)
                                         for item in old_issues}
                         scores = [getattr(review, name) for name in
@@ -9857,6 +9925,10 @@ class TranslationPipeline:
                             "newly_observed_unchanged_issues": old_issues,
                             "before_actionable_count": len(actionable),
                             "after_actionable_count": len(remaining),
+                            "after_actionable_count_raw": len(raw_remaining),
+                            "count_excluded_unchanged_issue_ids": [
+                                str(item.get("issue_id", "")) for item in count_carried
+                            ],
                         })
                         reviewed = _critique_for_event(
                             review, threshold, -3, candidate_text=candidate,

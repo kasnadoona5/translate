@@ -1300,7 +1300,7 @@ def _register_api(app: Flask) -> None:
                     "span={span!r}".format(
                         paragraph=finding.get("paragraph_index"),
                         check=finding.get("check_id", ""),
-                        span=finding.get("target_span", ""),
+                        span=finding.get("target_span", finding.get("text", "")),
                     )
                 )
             for finding in final_text_audit.get("paragraph_findings", []) or []:
@@ -1356,6 +1356,18 @@ def _register_api(app: Flask) -> None:
             "  budget_violations=" + str(extra_evidence["budget_violations"]),
             "",
         ])
+        for event in extra_evidence.get("outcomes", []):
+            if event.get("event_type") == "extra_final_refinement_completed":
+                payload = event.get("payload", {})
+                lines.append(
+                    f"  chunk={event.get('chunk_index')} "
+                    "after_actionable_count_raw="
+                    f"{payload.get('after_actionable_count_raw', 'unavailable')} "
+                    "after_actionable_count="
+                    f"{payload.get('after_actionable_count', 'unavailable')} "
+                    "count_excluded_unchanged_issue_ids="
+                    f"{payload.get('count_excluded_unchanged_issue_ids', 'unavailable')}"
+                )
         events_by_chunk: dict[int, list[dict[str, Any]]] = {}
         for event in all_events:
             events_by_chunk.setdefault(int(event["chunk_index"]), []).append(event)

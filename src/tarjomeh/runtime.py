@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v20.7"
+RUNTIME_RELEASE = "v20.8"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,9 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "dash_clause_bounded_person_names": True,
+            "extra_final_unchanged_minor_not_counted": True,
+            "quoted_suffix_review_reporting": True,
             "typed_structure_evidence": True,
             "reviewable_uncertain_structure": True,
             "source_aware_fluency_admission": True,
@@ -663,6 +666,64 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v205_behavior_probes(),
         **_v206_behavior_probes(),
         **_v207_behavior_probes(),
+        **_v208_behavior_probes(),
+    }
+
+
+def _v208_behavior_probes() -> dict[str, bool]:
+    """Name, attribution and reporting controls; no providers or persistent I/O."""
+    from tarjomeh.core.pipeline import (
+        _partition_unchanged_quality_count,
+        audit_translation_language,
+    )
+    from tarjomeh.memory.proper_nouns import (
+        ProperNouns,
+        is_bounded_person_name_target,
+        observed_bilingual_target,
+    )
+
+    name = "Nora-Lynn Vale"
+    clean = "\u0646\u0648\u0631\u0627-\u0644\u06cc\u0646 \u0648\u06cc\u0644"
+    bad = "\u062f\u06cc\u06af\u0631\u0627\u0646 \u0646\u06cc\u0633\u062a\u2014" + clean
+    nouns = ProperNouns()
+    nouns.deserialize({"nouns": {name: bad}, "categories": {name: "person"},
+                       "provenance": {name: {"origin": "observed_translation"}}})
+    source = "They act.\n\nA civic institution meets."
+    before = (
+        "\u0622\u0646\u0647\u0627 \u0645\u06cc\u200c\u0631\u0648\u0646\u062f.\n\n"
+        "\u0646\u0647\u0627\u062f \u0645\u062f\u0646\u06cc "
+        "\u062f\u06cc\u062f\u0627\u0631 \u0645\u06cc\u200c\u06a9\u0646\u062f."
+    )
+    after = before.replace(
+        "\u0645\u06cc\u200c\u0631\u0648\u0646\u062f",
+        "\u06a9\u0646\u0634 \u0645\u06cc\u200c\u06a9\u0646\u0646\u062f",
+    )
+    issue = {"issue_id": "old", "severity": "minor", "confidence": 0.6,
+             "category": "terminology", "source_segment_id": "p2:s1",
+             "source_quote": "civic institution",
+             "current_persian_quote": "\u0646\u0647\u0627\u062f \u0645\u062f\u0646\u06cc"}
+    remaining, carried = _partition_unchanged_quality_count(
+        [issue], source_text=source, previous_text=before, candidate_text=after,
+    )
+    blocked, _ = _partition_unchanged_quality_count(
+        [issue], source_text=source, previous_text=before, candidate_text=after + " ",
+    )
+    suffix = audit_translation_language(
+        "A quoted concept.", "\u00ab\u0645\u0641\u0647\u0648\u0645\u00bb \u0647\u0627\u06cc",
+    )
+    return {
+        "dash_clause_bounded_person_names": bool(
+            observed_bilingual_target(bad + " (" + name + ")", name, "person") == clean
+            and not is_bounded_person_name_target(name, bad)
+            and is_bounded_person_name_target(name, clean.replace("-", "\u2013"))
+            and nouns.all_nouns().get(name) == bad and nouns.is_context_deferred(name)
+            and not nouns.inline_eligible_nouns()
+        ),
+        "extra_final_unchanged_minor_not_counted": (
+            not remaining and carried == [issue] and bool(blocked)
+        ),
+        "quoted_suffix_review_reporting": bool(suffix["quoted_suffix_review"])
+        and not suffix["review_required"],
     }
 
 

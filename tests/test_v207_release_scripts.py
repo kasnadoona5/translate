@@ -93,7 +93,9 @@ def test_embedded_image_and_running_source_gates_pass_on_candidate():
     source = (ROOT / "scripts/deploy_tarjomeh_v207.sh").read_text(encoding="utf-8")
     blocks = re.findall(r"-c '\n(.*?)\n'", source, re.S)
     assert len(blocks) == 3
+    from tarjomeh.runtime import RUNTIME_RELEASE
     for block in blocks:
+        block = block.replace('== "v20.7"', f'== "{RUNTIME_RELEASE}"')
         result = subprocess.run(
             [sys.executable, "-c", block],
             capture_output=True,
