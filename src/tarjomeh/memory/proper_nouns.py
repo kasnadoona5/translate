@@ -464,6 +464,7 @@ def observed_bilingual_target(
         max(1, len(re.findall(r"[A-Za-z\u00c0-\u024f]+", word)))
         for word in source_words
     )
+    selected = tokens[-min(source_components, 7):]
     if requires_bounded_name_target(_normalise_category(category), source):
         boundaries = list(_NAME_CLAUSE_DASH_RE.finditer(local_prefix))
         if boundaries:
@@ -480,7 +481,7 @@ def observed_bilingual_target(
             tokens = list(_PERSIAN_WORD_RE.finditer(local_prefix))
             if not tokens:
                 return ""
-    selected = tokens[-min(source_components, 7):]
+            selected = tokens
     terminal = source_words[-1].casefold()
     required_heads = _ORGANIZATION_TARGET_HEADS.get(terminal, ())
     def has_required_head(items: list[re.Match[str]]) -> bool:

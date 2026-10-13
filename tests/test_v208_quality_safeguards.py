@@ -39,6 +39,18 @@ def test_ambiguous_dash_within_an_unapproved_name_cannot_clip_its_first_part():
     assert observed_bilingual_target(target, NAME, "person") == ""
 
 
+def test_source_proven_long_name_suffix_cannot_be_clipped_by_the_old_token_cap():
+    source = "Ada Bela Cora Dora Eva Fara Gina Hana"
+    target = (
+        "\u0622\u062f\u0627 \u0628\u0644\u0627 \u06a9\u0648\u0631\u0627 \u062f\u0648\u0631\u0627 "
+        "\u0627\u0648\u0627 \u0641\u0627\u0631\u0627 \u062c\u06cc\u0646\u0627 \u0647\u0627\u0646\u0627"
+    )
+    sentence = "\u062f\u06cc\u06af\u0631\u0627\u0646 \u0646\u06cc\u0633\u062a\u2014" + target
+    assert (
+        observed_bilingual_target(sentence + " (" + source + ")", source, "person") == target
+    )
+
+
 def test_shared_technical_compound_tokenization_is_unchanged():
     from tarjomeh.memory.proper_nouns import _PERSIAN_WORD_RE
 
