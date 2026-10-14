@@ -476,7 +476,8 @@ def observed_bilingual_target(
         source_parts = list(_PERSON_SOURCE_COMPONENT_RE.finditer(source))
         source_components = len(source_parts)
         hyphen_boundaries = {
-            index + 1 for index, (left, right) in enumerate(zip(source_parts, source_parts[1:]))
+            index + 1
+            for index, (left, right) in enumerate(zip(source_parts, source_parts[1:], strict=False))
             if re.fullmatch(r"[-\u2010-\u2015]", source[left.end():right.start()])
         }
         selected = []
