@@ -125,7 +125,10 @@ def test_observed_name_alignment_handles_diacritics_and_hyphens() -> None:
         "\u0627\u0650\u0645\u0631\u06cc\u0634 \u062f\u0648 \u0648\u0627\u062a\u0644 (Emmerich de Vattel)",
         "Emmerich de Vattel",
         "person",
-    ) == "\u0627\u0650\u0645\u0631\u06cc\u0634 \u062f\u0648 \u0648\u0627\u062a\u0644"
+    ) == ""  # Selected conservative particle-name policy, not failed transliteration.
+    assert observed_bilingual_target(
+        "\u0622\u0650\u062f\u0627 \u0648\u06cc\u0644 (Ada Vale)", "Ada Vale", "person",
+    ) == "\u0622\u0650\u062f\u0627 \u0648\u06cc\u0644"
 
 
 def test_uncertain_coordinated_entity_is_not_admitted() -> None:

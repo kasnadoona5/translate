@@ -299,7 +299,9 @@ def test_name_guard_rejects_descriptor_words():
     assert not is_bounded_person_name_target(
         "Manuela Tecusan", "ویراستاری مانوئلا تکوسان"
     )
-    assert is_bounded_person_name_target("Emmerich de Vattel", "امریک دو واتل")
+    # v20.8.1 withholds automatic particle names, not their explicitly approved forms.
+    assert not is_bounded_person_name_target("Emmerich de Vattel", "امریک دو واتل")
+    assert is_bounded_person_name_target("Ada Vale", "آدا ویل")
     assert is_bounded_person_name_target("Den Haag", "لاهه")
 
 

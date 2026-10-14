@@ -466,22 +466,33 @@ def observed_bilingual_target(
     )
     selected = tokens[-min(source_components, 7):]
     if requires_bounded_name_target(_normalise_category(category), source):
-        boundaries = list(_NAME_CLAUSE_DASH_RE.finditer(local_prefix))
-        if boundaries:
-            suffix = local_prefix[boundaries[-1].end():].lstrip()
-            suffix_components = sum(
-                len(re.findall(_PERSIAN_LETTER_RE.pattern + "+", token.group()))
-                for token in _PERSON_NAME_WORD_RE.finditer(
-                    _PERSIAN_DIACRITICS_RE.sub("", suffix)
-                )
+        source_parts = list(re.finditer(r"[A-Za-z\u00c0-\u024f]+", source))
+        hyphen_boundaries = {
+            index + 1 for index, (left, right) in enumerate(zip(source_parts, source_parts[1:]))
+            if re.fullmatch(r"[-\u2010-\u2015]", source[left.end():right.start()])
+        }
+        selected = []
+        components = 0
+        cursor = len(local_prefix)
+        for token in reversed(list(_PERSON_NAME_WORD_RE.finditer(local_prefix))):
+            gap = local_prefix[token.end():cursor]
+            source_hyphen_join = (
+                gap.strip() == "\u0640" and source_components - components in hyphen_boundaries
             )
-            if suffix_components != source_components:
+            if _NAME_CLAUSE_DASH_RE.search(gap) or (gap.strip() and not source_hyphen_join):
                 return ""
-            local_prefix = suffix
-            tokens = list(_PERSIAN_WORD_RE.finditer(local_prefix))
-            if not tokens:
+            components += _person_name_component_count(token.group())
+            if components > source_components:
                 return ""
-            selected = tokens
+            selected.insert(0, token)
+            cursor = token.start()
+            if components == source_components:
+                break
+        if components != source_components:
+            return ""
+        target = local_prefix[selected[0].start():selected[-1].end()].strip()
+        if not is_bounded_person_name_target(source, target):
+            return ""
     terminal = source_words[-1].casefold()
     required_heads = _ORGANIZATION_TARGET_HEADS.get(terminal, ())
     def has_required_head(items: list[re.Match[str]]) -> bool:
@@ -707,6 +718,35 @@ _PERSIAN_CONTEXT_EDGE_WORDS = frozenset({
     "\u0628\u0631\u0627\u06cc",
 })
 _PERSIAN_INITIAL_RE = re.compile(r"(?<![\u0600-\u06ff])[\u0600-\u06ff]\.")
+_PERSON_CONTEXT_EDGES = _PERSIAN_CONTEXT_EDGE_WORDS | _PERSIAN_CONTEXT_LEADERS | frozenset({
+    "\u0646\u0632\u062f",
+})
+_PERSON_TITLE_SOURCES = {
+    "\u062f\u06a9\u062a\u0631": frozenset({"doctor", "dr"}),
+    "\u067e\u0631\u0648\u0641\u0633\u0648\u0631": frozenset({"professor", "prof"}),
+    "\u0627\u0633\u062a\u0627\u062f": frozenset({"professor", "prof", "master"}),
+    "\u0698\u0646\u0631\u0627\u0644": frozenset({"general"}),
+    "\u0641\u06cc\u0644\u0633\u0648\u0641": frozenset({"philosopher"}),
+    "\u0646\u0648\u06cc\u0633\u0646\u062f\u0647": frozenset({"writer", "author"}),
+}
+
+
+def _person_name_component_count(value: str) -> int:
+    """Count lexical hyphen components, never Persian intra-word ZWNJ."""
+    plain = _PERSIAN_DIACRITICS_RE.sub("", value or "")
+    return sum(
+        len(re.split(r"[-\u2010-\u2015]", token))
+        for token in _PERSIAN_WORD_RE.findall(plain)
+    )
+
+
+def _automatic_name_ambiguity_reason(source: str, target: str) -> str:
+    words = re.findall(r"[A-Za-z\u00c0-\u024f]+", source or "")
+    if any(word.casefold() in _PERSON_NAME_CONNECTORS for word in words):
+        return "automatic_particle_name_unverified"
+    if len(words) > 1 and "\u200c" in (target or ""):
+        return "ambiguous_name_component_alignment"
+    return ""
 
 
 def name_shaped_source(source: str) -> bool:
@@ -736,12 +776,18 @@ def is_bounded_person_name_target(source: str, target: str) -> bool:
     """
     source_words = re.findall(r"[A-Za-z\u00c0-\u024f]+", source or "")
     value = target or ""
+    if _automatic_name_ambiguity_reason(source, value):
+        return False
     remainder = _PERSIAN_INITIAL_RE.sub(" ", value)
     target_words = _PERSON_NAME_WORD_RE.findall(remainder)
     if not source_words or not target_words:
         return False
-    edges = [target_words[0], target_words[-1]]
-    if any(word in _PERSIAN_CONTEXT_EDGE_WORDS for word in edges):
+    plain_words = [_PERSIAN_DIACRITICS_RE.sub("", word) for word in target_words]
+    edges = [plain_words[0].split("\u200c")[0], plain_words[-1].split("\u200c")[-1]]
+    if any(word in _PERSON_CONTEXT_EDGES for word in edges):
+        return False
+    title_sources = _PERSON_TITLE_SOURCES.get(edges[0])
+    if title_sources and not title_sources.intersection(word.casefold() for word in source_words):
         return False
     edge_tokens = remainder.split()
     if edge_tokens and any(
@@ -751,7 +797,7 @@ def is_bounded_person_name_target(source: str, target: str) -> bool:
     # A transliterated name never needs more Persian words than the source has
     # name words (initials aside). An extra word is a descriptor or context
     # from the sentence ("فیلسوف هگل", "ویراستاری مانوئلا تکوسان").
-    return len(target_words) <= len(source_words)
+    return _person_name_component_count(remainder) <= len(source_words)
 
 
 def _context_bound_persian_target(value: str) -> bool:
@@ -1442,9 +1488,13 @@ class ProperNouns:
         if (
             provenance.get("origin") not in {"curated_glossary", "approved_research"}
             and requires_bounded_name_target(self.category_for(key), key)
-            and not is_bounded_person_name_target(key, self._nouns.get(key, ""))
         ):
-            return "person_name_contains_context"
+            target = self._nouns.get(key, "")
+            ambiguity = _automatic_name_ambiguity_reason(key, target)
+            if ambiguity:
+                return ambiguity
+            if not is_bounded_person_name_target(key, target):
+                return "person_name_contains_context"
         if (
             provenance.get("origin") == "accepted_correction"
             and (
@@ -1633,6 +1683,12 @@ class ProperNouns:
                 normalized = low_authority_mapping_category(
                     source_text, target_text, str(category)
                 )
+                if (
+                    requires_bounded_name_target(normalized, source_text)
+                    and _automatic_name_ambiguity_reason(source_text, target_text)
+                ):
+                    # Retain historical evidence; effective deferral denies authority.
+                    return True
                 if is_automatic_entity_category(normalized):
                     return is_safe_low_authority_mapping(
                         source_text, target_text, normalized
@@ -1695,8 +1751,10 @@ class ProperNouns:
                         record.update({
                             "context_deferred": True,
                             "context_deferred_reason": (
-                                "noncanonical_automatic_mapping"
-                            ),
+                                _automatic_name_ambiguity_reason(source, self._nouns[source])
+                                if requires_bounded_name_target(category, source)
+                                else ""
+                            ) or "noncanonical_automatic_mapping",
                         })
                 if (
                     record.get("origin") == "accepted_correction"
@@ -1719,7 +1777,10 @@ class ProperNouns:
                 ):
                     record.update({
                         "context_deferred": True,
-                        "context_deferred_reason": "person_name_contains_context",
+                        "context_deferred_reason": (
+                            _automatic_name_ambiguity_reason(source, self._nouns[source])
+                            or "person_name_contains_context"
+                        ),
                     })
             stored_aliases = data.get("aliases", {})
             self._aliases = {

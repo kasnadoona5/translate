@@ -56,6 +56,9 @@ def targeted_quality_evidence(
         for index, paragraph in enumerate(target):
             for finding in quoted_suffix_review_findings(
                 source[index] if aligned else str(chunk.get("text") or ""), paragraph,
+                source_context_scope=(
+                    "unverified_same_index_paragraph_prefix" if aligned else "chunk_source_prefix"
+                ),
             ):
                 suffixes.append({**finding, "chunk_index": chunk.get("chunk_index"),
                                  "local_paragraph_index": index,

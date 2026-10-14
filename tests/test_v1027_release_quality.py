@@ -139,8 +139,8 @@ def test_incomplete_coordinated_term_cannot_become_canonical() -> None:
 class _EntityResponse:
     async def chat(self, _prompt: str) -> str:
         return (
-            '[{"term":"Emmerich de Vattel",'
-            '"suggested_persian":"امریش دو واتل",'
+            '[{"term":"Ada Vale",'
+            '"suggested_persian":"آدا ویل",'
             '"category":"technical_loanword",'
             '"context_independent":true}]'
         )
@@ -151,18 +151,18 @@ class _EntityResponse:
 
 def test_source_entity_role_overrides_mislabeled_technical_loanword() -> None:
     manager = MemoryManager(TarjomehConfig())
-    source = "Emmerich de Vattel (1714) developed the argument."
-    target = "امریش دو واتل (Emmerich de Vattel, 1714) این استدلال را بسط داد."
+    source = "Ada Vale (1714) developed the argument."
+    target = "آدا ویل (Ada Vale, 1714) این استدلال را بسط داد."
 
     result = asyncio.run(manager.update_proper_nouns(
         _EntityResponse(),
         source,
         target,
-        source_categories={"Emmerich de Vattel": "person"},
+        source_categories={"Ada Vale": "person"},
     ))
 
     assert result["accepted_count"] == 1
-    assert manager.proper_nouns.category_for("Emmerich de Vattel") == "person"
+    assert manager.proper_nouns.category_for("Ada Vale") == "person"
 
 
 _STYLE_SAMPLE_A = (
@@ -276,7 +276,7 @@ def test_genre_guidance_changes_style_dimensions_not_terminology_authority() -> 
 def test_runtime_capability_manifest_is_versioned_and_complete() -> None:
     manifest = runtime_capabilities()
 
-    assert manifest["release"] == "v20.8"
+    assert manifest["release"] == "v20.8.1"
     assert manifest["revision"] >= 1
     assert all(manifest["capabilities"].values())
     assert manifest["capabilities"]["four_layer_memory"] is True

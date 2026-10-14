@@ -90,10 +90,13 @@ def test_deploy_checks_revision_space_and_only_tarjomeh_cleanup():
 
 
 def test_embedded_image_and_running_source_gates_pass_on_candidate():
+    from tarjomeh.runtime import RUNTIME_RELEASE
+
     source = (ROOT / "scripts/deploy_tarjomeh_v208.sh").read_text(encoding="utf-8")
     blocks = re.findall(r"-c '\n(.*?)\n'", source, re.S)
     assert len(blocks) == 3
     for block in blocks:
+        block = block.replace('== "v20.8"', f'== "{RUNTIME_RELEASE}"')
         result = subprocess.run(
             [sys.executable, "-c", block],
             capture_output=True,

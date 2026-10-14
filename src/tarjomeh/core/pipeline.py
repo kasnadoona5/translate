@@ -862,7 +862,9 @@ def audit_translation_language(
     }
 
 
-def quoted_suffix_review_findings(source: str, translation: str) -> list[dict[str, Any]]:
+def quoted_suffix_review_findings(
+    source: str, translation: str, *, source_context_scope: str = "provided_source_prefix",
+) -> list[dict[str, Any]]:
     """Locate possible suffix spacing; correspondence is not a repair proof."""
     letters = r"\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff"
     pattern = (
@@ -877,6 +879,7 @@ def quoted_suffix_review_findings(source: str, translation: str) -> list[dict[st
             "text": match.group(),
             "target_context": translation[max(0, match.start() - 60):match.end() + 60],
             "source_context": source[:500],
+            "source_context_scope": source_context_scope,
             "source_sha256": _candidate_text_hash(source),
             "reason": "suffix_attachment_and_source_correspondence_unproven",
             "disposition": "REVIEW",
@@ -922,6 +925,7 @@ def audit_document_final_text(
         } for item in language.get("explanatory_dash_review", []))
         report_only_findings.extend({
             **item, "paragraph_index": paragraph.index,
+            "source_context_scope": "source_paragraph_prefix",
         } for item in language.get("quoted_suffix_review", []))
         source_superscripts = paragraph.metadata.get("superscript_markers", []) or []
         if isinstance(source_superscripts, list) and source_superscripts:
@@ -4739,6 +4743,7 @@ def _partition_unchanged_quality_count(
     source_text: str,
     previous_text: str,
     candidate_text: str,
+    r109_unchanged: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Exclude independently proven old findings only from improvement counts."""
     raw_source = re.split(r"\n\s*\n", source_text or "")
@@ -4746,6 +4751,8 @@ def _partition_unchanged_quality_count(
     raw_after = re.split(r"\n\s*\n", candidate_text or "")
     remaining: list[dict[str, Any]] = []
     carried: list[dict[str, Any]] = []
+    r109_keys = {_quality_issue_fingerprint(item) for item in r109_unchanged or []}
+    carried_keys: set[str] = set()
     for detail in details:
         segment = re.fullmatch(r"p(\d+):s\d+", str(detail.get("source_segment_id", "")), re.I)
         index = int(segment.group(1)) - 1 if segment else -1
@@ -4764,7 +4771,17 @@ def _partition_unchanged_quality_count(
                 candidate_text=candidate_text,
             )
         )
-        (carried if proven else remaining).append(detail)
+        key = _quality_issue_fingerprint(detail)
+        if key in r109_keys:
+            proven = proven or _proven_unchanged_issue(
+                detail, source_text=source_text, previous_text=previous_text,
+                candidate_text=candidate_text,
+            )
+        if not proven:
+            remaining.append(detail)
+        elif key not in carried_keys:
+            carried.append(detail)
+            carried_keys.add(key)
     return remaining, carried
 
 
@@ -9912,12 +9929,18 @@ class TranslationPipeline:
                         remaining, count_carried = _partition_unchanged_quality_count(
                             raw_remaining, source_text=chunk.text,
                             previous_text=translation, candidate_text=candidate,
+                            r109_unchanged=old_issues,
                         )
-                        old_keys = {_quality_issue_fingerprint(item) for item in old_issues}
-                        old_issues.extend(item for item in count_carried
-                                          if _quality_issue_fingerprint(item) not in old_keys)
+                        old_by_key: dict[str, dict[str, Any]] = {}
+                        for item in [*old_issues, *count_carried]:
+                            old_by_key.setdefault(_quality_issue_fingerprint(item), item)
+                        excluded_items = [item for item in raw_remaining if item not in remaining]
+                        excluded_ids = list(dict.fromkeys(
+                            str(item.get("issue_id", "")) for item in excluded_items
+                        ))
                         old_blocking = {str(item.get("formatted") or item.get("issue_id") or item)
-                                        for item in old_issues}
+                                        for item in [*old_issues, *excluded_items]}
+                        old_issues = list(old_by_key.values())
                         scores = [getattr(review, name) for name in
                                   ("accuracy", "fluency", "terminology", "register")]
                         report.update({
@@ -9926,9 +9949,7 @@ class TranslationPipeline:
                             "before_actionable_count": len(actionable),
                             "after_actionable_count": len(remaining),
                             "after_actionable_count_raw": len(raw_remaining),
-                            "count_excluded_unchanged_issue_ids": [
-                                str(item.get("issue_id", "")) for item in count_carried
-                            ],
+                            "count_excluded_unchanged_issue_ids": excluded_ids,
                         })
                         reviewed = _critique_for_event(
                             review, threshold, -3, candidate_text=candidate,

@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v20.8"
+RUNTIME_RELEASE = "v20.8.1"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,10 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "r109_serious_unchanged_count_preserved": True,
+            "bounded_name_suffix_components": True,
+            "conservative_automatic_name_ambiguity": True,
+            "quoted_suffix_source_scope": True,
             "dash_clause_bounded_person_names": True,
             "extra_final_unchanged_minor_not_counted": True,
             "quoted_suffix_review_reporting": True,
@@ -667,6 +671,80 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v206_behavior_probes(),
         **_v207_behavior_probes(),
         **_v208_behavior_probes(),
+        **_v2081_behavior_probes(),
+    }
+
+
+def _v2081_behavior_probes() -> dict[str, bool]:
+    """Pure corrective controls; no config, provider, job or file access."""
+    from types import SimpleNamespace
+
+    from tarjomeh.core.pipeline import (
+        _candidate_regression_details,
+        _partition_unchanged_quality_count,
+        quoted_suffix_review_findings,
+    )
+    from tarjomeh.memory.proper_nouns import ProperNouns, observed_bilingual_target
+
+    source = "They act at a civic institution.\n\nA civic institution meets."
+    before = (
+        "\u0622\u0646\u0647\u0627 \u0645\u06cc\u200c\u0631\u0648\u0646\u062f.\n\n"
+        "\u0646\u0647\u0627\u062f \u0645\u062f\u0646\u06cc."
+    )
+    after = before.replace(
+        "\u0645\u06cc\u200c\u0631\u0648\u0646\u062f",
+        "\u06a9\u0646\u0634 \u0645\u06cc\u200c\u06a9\u0646\u0646\u062f",
+    )
+    issue = {"issue_id": "old", "severity": "major", "confidence": 0.9,
+             "category": "terminology", "source_segment_id": "p2:s1",
+             "source_quote": "civic institution",
+             "current_persian_quote": "\u0646\u0647\u0627\u062f \u0645\u062f\u0646\u06cc"}
+    old: list[dict[str, Any]] = []
+    regressions = _candidate_regression_details(
+        SimpleNamespace(issue_details=[issue]), SimpleNamespace(issue_details=[]), [],
+        source_text=source, previous_text=before, candidate_text=after,
+        newly_observed_unchanged=old,
+    )
+    remaining, carried = _partition_unchanged_quality_count(
+        [issue], source_text=source, previous_text=before, candidate_text=after,
+        r109_unchanged=old,
+    )
+    name = "Nora-Lynn Vale"
+    target = "\u0646\u0648\u0631\u0627-\u0644\u06cc\u0646 \u0648\u06cc\u0644"
+    prefix = "\u0686\u06cc\u0632\u06cc\u2014\u0628\u0647 "
+    single = "McExample"
+    joined = "\u0645\u06a9\u200c\u0627\u06af\u0632\u0627\u0645\u067e\u0644"
+    particle = "Ada de Example"
+    particle_target = "\u0622\u062f\u0627 \u062f\u0648 \u0627\u06af\u0632\u0627\u0645\u067e\u0644"
+    contracted = target.replace("-", "\u200c")
+    nouns = ProperNouns()
+    nouns.deserialize({"nouns": {particle: particle_target, name: contracted},
+                       "categories": {particle: "person", name: "person"},
+                       "provenance": {particle: {"origin": "observed_translation"},
+                                      name: {"origin": "observed_translation"}}})
+    suffix = quoted_suffix_review_findings(
+        "First.\n\nSecond.", "\u00ab\u0645\u0641\u0647\u0648\u0645\u00bb \u0647\u0627",
+    )
+    return {
+        "r109_serious_unchanged_count_preserved": (
+            not regressions and old == [issue] and not remaining and carried == [issue]
+        ),
+        "bounded_name_suffix_components": (
+            observed_bilingual_target(prefix + target + " (" + name + ")", name, "person") == target
+            and observed_bilingual_target(joined + " (" + single + ")", single, "person") == joined
+        ),
+        "conservative_automatic_name_ambiguity": (
+            len(nouns.all_nouns()) == 2 and not nouns.inline_eligible_nouns()
+            and nouns.context_deferral_reason(particle) == "automatic_particle_name_unverified"
+            and nouns.context_deferral_reason(name) == "ambiguous_name_component_alignment"
+            and not observed_bilingual_target(
+                particle_target + " (" + particle + ")", particle, "person",
+            )
+            and not observed_bilingual_target(contracted + " (" + name + ")", name, "person")
+        ),
+        "quoted_suffix_source_scope": bool(suffix)
+        and suffix[0]["source_context_scope"] == "provided_source_prefix"
+        and suffix[0]["report_only"],
     }
 
 
