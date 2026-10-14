@@ -498,6 +498,14 @@ def observed_bilingual_target(
                 break
         if components != source_components:
             return ""
+        if re.search(r"['\u2019]", source):
+            preceding = list(_PERSON_NAME_WORD_RE.finditer(local_prefix[:cursor]))
+            if preceding:
+                previous = preceding[-1]
+                gap = local_prefix[previous.end():cursor]
+                previous_word = _PERSIAN_DIACRITICS_RE.sub("", previous.group())
+                if not gap.strip() and previous_word not in _PERSON_CONTEXT_EDGES:
+                    return ""
         target = local_prefix[selected[0].start():selected[-1].end()].strip()
         if not is_bounded_person_name_target(source, target):
             return ""
@@ -753,6 +761,11 @@ def _automatic_name_ambiguity_reason(source: str, target: str) -> str:
     if any(word.casefold() in _PERSON_NAME_CONNECTORS for word in words):
         return "automatic_particle_name_unverified"
     if len(words) > 1 and "\u200c" in (target or ""):
+        return "ambiguous_name_component_alignment"
+    if (
+        re.search(r"['\u2019]", source or "")
+        and _person_name_component_count(target) > len(words)
+    ):
         return "ambiguous_name_component_alignment"
     return ""
 

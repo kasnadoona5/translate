@@ -181,9 +181,32 @@ def test_apostrophe_inside_source_name_cannot_pull_in_an_ordinary_word(apostroph
     source = "O" + apostrophe + "Connor"
     clean = "\u0627\u06a9\u0627\u0646\u0631"
     contaminated = "\u0627\u0646\u062f\u06cc\u0634\u0647 " + clean
-    assert observed_bilingual_target(contaminated + " (" + source + ")", source, "person") == clean
+    assert not observed_bilingual_target(contaminated + " (" + source + ")", source, "person")
+    assert observed_bilingual_target(clean + " (" + source + ")", source, "person") == clean
+    assert (
+        observed_bilingual_target("\u0628\u0647 " + clean + " (" + source + ")", source, "person")
+        == clean
+    )
     assert not is_bounded_person_name_target(source, contaminated)
     assert is_bounded_person_name_target(source, clean)
+
+
+@pytest.mark.parametrize("source", ["O'Connor", "O'Connor Vale"])
+def test_apostrophe_multiword_rendering_is_withheld_never_clipped_and_history_kept(source):
+    target = "\u0627\u0648 \u06a9\u0627\u0646\u0631"
+    if source.endswith(" Vale"):
+        target += " \u0648\u06cc\u0644"
+    assert not observed_bilingual_target(target + " (" + source + ")", source, "person")
+    nouns = ProperNouns()
+    nouns.deserialize(
+        {
+            "nouns": {source: target},
+            "categories": {source: "person"},
+            "provenance": {source: {"origin": "observed_translation"}},
+        }
+    )
+    assert nouns.all_nouns()[source] == target
+    assert nouns.context_deferral_reason(source) == "ambiguous_name_component_alignment"
 
 
 def test_non_person_categories_do_not_acquire_the_new_particle_restriction():
