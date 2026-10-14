@@ -732,6 +732,10 @@ def _v2081_behavior_probes() -> dict[str, bool]:
         "bounded_name_suffix_components": (
             observed_bilingual_target(prefix + target + " (" + name + ")", name, "person") == target
             and observed_bilingual_target(joined + " (" + single + ")", single, "person") == joined
+            and observed_bilingual_target(
+                "\u0627\u0646\u062f\u06cc\u0634\u0647 \u0627\u06af\u0632\u0627\u0645\u067e\u0644 (O'Example)",
+                "O'Example", "person",
+            ) == "\u0627\u06af\u0632\u0627\u0645\u067e\u0644"
         ),
         "conservative_automatic_name_ambiguity": (
             len(nouns.all_nouns()) == 2 and not nouns.inline_eligible_nouns()

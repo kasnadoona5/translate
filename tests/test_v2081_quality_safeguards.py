@@ -176,6 +176,16 @@ def test_existing_typographic_compound_join_requires_the_source_hyphen_boundary(
     )
 
 
+@pytest.mark.parametrize("apostrophe", ["'", "\u2019"])
+def test_apostrophe_inside_source_name_cannot_pull_in_an_ordinary_word(apostrophe):
+    source = "O" + apostrophe + "Connor"
+    clean = "\u0627\u06a9\u0627\u0646\u0631"
+    contaminated = "\u0627\u0646\u062f\u06cc\u0634\u0647 " + clean
+    assert observed_bilingual_target(contaminated + " (" + source + ")", source, "person") == clean
+    assert not is_bounded_person_name_target(source, contaminated)
+    assert is_bounded_person_name_target(source, clean)
+
+
 def test_non_person_categories_do_not_acquire_the_new_particle_restriction():
     source, target = (
         "St Ives PLC",

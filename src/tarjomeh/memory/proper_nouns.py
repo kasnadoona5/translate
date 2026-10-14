@@ -46,6 +46,9 @@ _PERSIAN_DIACRITICS_RE = re.compile(r"[\u064b-\u065f\u0670\u06d6-\u06ed]")
 _PERSON_NAME_WORD_RE = re.compile(
     _PERSIAN_WORD_RE.pattern.replace(r"\u2010-\u2015", r"\u2010-\u2011")
 )
+_PERSON_SOURCE_COMPONENT_RE = re.compile(
+    r"[A-Za-z\u00c0-\u024f]+(?:['\u2019][A-Za-z\u00c0-\u024f]+)*"
+)
 _NAME_CLAUSE_DASH_RE = re.compile(r"[\u2012-\u2015]|(?<=\s)-(?=\s)")
 _OBSERVED_MAPPING_BOUNDARY_RE = re.compile(
     r"[\n\r.!?,;:\u060c\u061b\u061f]"
@@ -348,10 +351,14 @@ def is_usable_observed_mapping(
     if _context_bound_persian_target(raw_target):
         return False
 
-    source_words = re.findall(r"[A-Za-z\u00c0-\u024f]+", source)
+    normalized_category = _normalise_category(category)
+    source_words = (
+        _PERSON_SOURCE_COMPONENT_RE.findall(source)
+        if requires_bounded_name_target(normalized_category, source)
+        else re.findall(r"[A-Za-z\u00c0-\u024f]+", source)
+    )
     target_plain = _PERSIAN_DIACRITICS_RE.sub("", raw_target)
     target_words = _PERSIAN_WORD_RE.findall(target_plain)
-    normalized_category = _normalise_category(category)
     if not source_words or not target_words:
         return False
     if (
@@ -466,7 +473,8 @@ def observed_bilingual_target(
     )
     selected = tokens[-min(source_components, 7):]
     if requires_bounded_name_target(_normalise_category(category), source):
-        source_parts = list(re.finditer(r"[A-Za-z\u00c0-\u024f]+", source))
+        source_parts = list(_PERSON_SOURCE_COMPONENT_RE.finditer(source))
+        source_components = len(source_parts)
         hyphen_boundaries = {
             index + 1 for index, (left, right) in enumerate(zip(source_parts, source_parts[1:]))
             if re.fullmatch(r"[-\u2010-\u2015]", source[left.end():right.start()])
@@ -741,7 +749,7 @@ def _person_name_component_count(value: str) -> int:
 
 
 def _automatic_name_ambiguity_reason(source: str, target: str) -> str:
-    words = re.findall(r"[A-Za-z\u00c0-\u024f]+", source or "")
+    words = _PERSON_SOURCE_COMPONENT_RE.findall(source or "")
     if any(word.casefold() in _PERSON_NAME_CONNECTORS for word in words):
         return "automatic_particle_name_unverified"
     if len(words) > 1 and "\u200c" in (target or ""):
@@ -774,7 +782,7 @@ def is_bounded_person_name_target(source: str, target: str) -> bool:
     trailing Persian function word, or an edge word carrying an ezafe kasra
     (``\u062a\u062e\u0635\u0635\u06cc\u0650``), is context from the surrounding sentence, not the name.
     """
-    source_words = re.findall(r"[A-Za-z\u00c0-\u024f]+", source or "")
+    source_words = _PERSON_SOURCE_COMPONENT_RE.findall(source or "")
     value = target or ""
     if _automatic_name_ambiguity_reason(source, value):
         return False
