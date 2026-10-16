@@ -241,7 +241,10 @@ class BookResearcher:
         context: str, evidence: list[dict[str, Any]],
     ) -> tuple[str, list[dict[str, Any]]]:
         patterns = {
-            "first_publication": r"\bfirst\s+published(?:\s+in)?\s+((?:1[5-9]|20)\d{2})\b",
+            "first_publication": (
+                r"\bfirst\s+published(?:\s+in|\s+by\s+[^,.;()]{1,100},)?"
+                r"\s+((?:1[5-9]|20)\d{2})\b"
+            ),
             "copyright": r"(?:\bcopyright|\u00a9)(?:\s*\([cC]\))?\s+((?:1[5-9]|20)\d{2})\b",
             "reprint": r"\breprinted(?:\s+in)?\s+((?:1[5-9]|20)\d{2})\b",
             "edition": (
@@ -251,6 +254,7 @@ class BookResearcher:
             "unspecified_publication": (
                 r"\b(?:press|publisher|publishers|publishing)\s*,\s*((?:1[5-9]|20)\d{2})\b"
                 r"|\bpublished\s+in\s+((?:1[5-9]|20)\d{2})\b"
+                r"|\bpublished\s+by\s+[^,.;()]{1,100},\s*((?:1[5-9]|20)\d{2})\b"
             ),
         }
         # A date before a publisher is also bibliography metadata, not a
