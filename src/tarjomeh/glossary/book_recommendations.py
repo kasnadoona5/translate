@@ -240,6 +240,10 @@ def recommendation_presence(
             "canonical_target_hash": _sha(translation),
             "target_excerpt": "",
             "presence": "alignment_unavailable_usage_unknown",
+            "occurrence_usage": (
+                "not_proven_for_repeated_source"
+                if len(item["occurrences"]) > 1 else "lexical_presence_only"
+            ),
         }
         local = item["paragraph_index"]
         if proven and type(local) is int and 0 <= local < len(sources):
@@ -271,6 +275,7 @@ def recommendation_presence(
         "locations": rows,
         "normalization": "existing glossary target_present; no synonym equivalence",
         "semantic_accuracy": "not_verified_by_lexical_presence",
+        "count_scope": "source occurrences grouped by paragraph lexical presence; not target usage counts",
         "occurrence_counts": {
             state: sum(len(row["occurrences"]) for row in rows if row["presence"] == state)
             for state in (
@@ -333,5 +338,6 @@ def recommendation_evidence(
             )
         },
         "semantic_accuracy": "not_verified_by_lexical_presence",
+        "count_scope": "source occurrences grouped by paragraph lexical presence; not target usage counts",
         "normalization": "existing glossary target_present; no synonym equivalence",
     }

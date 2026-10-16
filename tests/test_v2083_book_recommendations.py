@@ -116,6 +116,29 @@ def test_long_paragraph_quote_contains_the_actual_matched_term(data):
     assert advice[0]["occurrences"][0]["start"] > 500
 
 
+@pytest.mark.parametrize("target", ["دستگاه باقی می‌ماند.", "سازوکار باقی می‌ماند."])
+def test_repeated_source_is_never_reported_as_verified_target_usage(data, target):
+    source, metadata, review, body = data
+    first, second = source.split("\n\n")
+    second += " The apparatus changes."
+    source = first + "\n\n" + second
+    metadata["source_paragraph_hashes"][1] = _sha(second)
+    metadata["source_paragraph_spans"][1] = [len(first) + 2, len(source)]
+    body["entries"][1]["paragraph_sha256"] = _sha(second)
+    advice = resolve_book_recommendations(source, metadata, 0, review, body)["recommendations"]
+    canonical, identity = _canonical_chunk_paragraph_identity(
+        SimpleNamespace(text=source, metadata=metadata), "دستگاه عمل می‌کند.\n\n" + target,
+    )
+    report = recommendation_presence(source, canonical, metadata, advice, identity)
+    row = report["locations"][0]
+    assert len(row["occurrences"]) == 2
+    assert row["occurrence_usage"] == "not_proven_for_repeated_source"
+    assert row["presence"] == (
+        "lexically_present" if "دستگاه" in target else "preferred_wording_not_found"
+    )
+    assert "not target usage counts" in report["count_scope"]
+
+
 @pytest.mark.parametrize(
     "change,expected",
     [

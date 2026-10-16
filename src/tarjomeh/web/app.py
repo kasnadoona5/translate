@@ -1458,10 +1458,12 @@ def _register_api(app: Flask) -> None:
             "  No issue, REVIEW, memory/style penalty or automatic correction from non-use.",
             "  Lexical presence does not verify meaning or repeated-occurrence alignment.",
             "  normalization=" + optional_consistency["normalization"],
+            "  count_scope=" + optional_consistency["count_scope"],
             "  occurrence_counts=" + json.dumps(optional_consistency["occurrence_counts"]),
         ])
         for location in optional_consistency["locations"]:
-            if location["presence"] != "lexically_present":
+            if (location["presence"] != "lexically_present"
+                    or location["occurrence_usage"] == "not_proven_for_repeated_source"):
                 lines.append("  " + json.dumps(location, ensure_ascii=False))
         for deferred in optional_consistency["deferred"]:
             lines.append("  advice unavailable: " + json.dumps(deferred, ensure_ascii=False))
