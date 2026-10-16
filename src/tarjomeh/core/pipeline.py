@@ -5765,14 +5765,18 @@ def _reconcile_committed_terminology(
             ),
             alignment_status="exact_local",
         )
-        if outcome.get("action") in {"replaced_lower_authority", "confirmed"}:
+        if outcome.get("action") in {"added", "replaced_lower_authority", "confirmed"}:
             report["reconciled"].append({"issue_id": issue_id, **outcome})
+        elif outcome.get("action") == "context_deferred":
+            report["context_deferred"].append({"issue_id": issue_id, **outcome})
         elif memory_manager.proper_nouns.add_alias(source, target):
             report["aliases_added"].append({
                 "issue_id": issue_id,
                 "source": source,
                 "target": target,
             })
+        else:
+            report["skipped"].append({"issue_id": issue_id, **outcome})
         if outcome.get("action") in {
             "added", "replaced_lower_authority", "confirmed"
         }:
@@ -14611,6 +14615,7 @@ Output ONLY the corrected Persian translation.
         if (
             reconciliation_report.get("reconciled")
             or reconciliation_report.get("aliases_added")
+            or reconciliation_report.get("context_deferred")
             or reconciliation_report.get("skipped")
         ):
             self.db.log_chunk_event(

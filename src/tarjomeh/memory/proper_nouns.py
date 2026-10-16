@@ -1188,6 +1188,21 @@ def _mapping_authority_class(
     return "legacy_advisory"
 
 
+def lexical_annotation_deferral(source: str, target: str) -> str:
+    """Reject a leading display label not lexically present in the source key."""
+    prefix = re.match(
+        r"^([A-Za-z0-9][A-Za-z0-9./_-]*(?:\s+[A-Za-z0-9][A-Za-z0-9./_-]*)*)"
+        r"\s+(?=[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff])",
+        target.strip(),
+    )
+    if prefix and any(
+        not re.search(rf"(?<!\w){re.escape(token)}(?!\w)", source, re.IGNORECASE)
+        for token in prefix[1].split()
+    ):
+        return "unrelated_leading_latin_display_label"
+    return ""
+
+
 class ProperNouns:
     """Proper noun translation memory layer.
 
@@ -1241,6 +1256,13 @@ class ProperNouns:
         fa_val, stripped_annotation = _strip_redundant_entity_original(
             en_key, persian, new_category
         )
+        if origin not in {"curated_glossary", "approved_research"}:
+            lexical_risk = lexical_annotation_deferral(en_key, fa_val)
+            if lexical_risk:
+                return {
+                    "action": "context_deferred", "source": en_key,
+                    "target": fa_val, "reason": lexical_risk,
+                }
         if origin in _LOW_AUTHORITY_ORIGINS:
             new_category = low_authority_mapping_category(
                 en_key, fa_val, new_category
@@ -1526,6 +1548,10 @@ class ProperNouns:
         provenance = self._provenance.get(key, {})
         if provenance.get("context_deferred"):
             return str(provenance.get("context_deferred_reason") or "context_conflict")
+        if provenance.get("origin") not in {"curated_glossary", "approved_research"}:
+            lexical_risk = lexical_annotation_deferral(key, self._nouns.get(key, ""))
+            if lexical_risk:
+                return lexical_risk
         if (
             provenance.get("origin") not in {"curated_glossary", "approved_research"}
             and requires_bounded_name_target(self.category_for(key), key)
