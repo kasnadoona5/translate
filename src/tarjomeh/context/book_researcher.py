@@ -277,17 +277,18 @@ class BookResearcher:
             )
         conflicts = []
         kept = []
-        for sentence in re.split(r"(?<=[.!?])\s+", context):
-            # Other works' dates are not evidence about the uploaded edition.
-            other_work = re.search(
-                r"\b(?:other|another|earlier|previous|later|companion)\s+"
-                r"(?:book|work|study|volume)\b", sentence, re.IGNORECASE,
-            )
-            if other_work:
-                kept.append(sentence)
-                continue
 
+        def other_work_claim(text: str, start: int) -> bool:
+            return bool(re.search(
+                r"\b(?:other|another|earlier|previous|later|companion)\s+"
+                r"(?:book|work|study|volume)\s*(?:was\s+)?$",
+                text[:start], re.IGNORECASE,
+            ))
+
+        for sentence in re.split(r"(?<=[.!?])\s+", context):
             def exclude_publisher_before_date(match: re.Match[str]) -> str:
+                if other_work_claim(match.string, match.start()):
+                    return match.group()
                 kind = "first_publication" if match["first"] else "unspecified_publication"
                 claimed = {int(value) for value in re.findall(year, match["years"])}
                 applicable = [item for item in evidence if item.get("kind") == kind]
@@ -305,6 +306,8 @@ class BookResearcher:
             sentence = publisher_before_date.sub(exclude_publisher_before_date, sentence)
 
             def exclude_bibliography_date(match: re.Match[str]) -> str:
+                if other_work_claim(match.string, match.start()):
+                    return match.group()
                 conflicts.append({
                     "kind": "unspecified_publication", "claim": match.group(),
                     "years": [int(value) for value in re.findall(year, match["years"])],
@@ -316,8 +319,19 @@ class BookResearcher:
             sentence = bibliography_date.sub(exclude_bibliography_date, sentence)
             excluded = False
             typed_spans = [match.span() for match in publisher_before_date.finditer(sentence)]
+            other_work_spans = [
+                match.span() for match in publisher_before_date.finditer(sentence)
+                if other_work_claim(sentence, match.start())
+            ]
             for kind, pattern in patterns.items():
                 for match in re.finditer(pattern, sentence, re.IGNORECASE):
+                    if other_work_claim(sentence, match.start()) or any(
+                        match.start() >= left and match.end() <= right
+                        for left, right in other_work_spans
+                    ):
+                        other_work_spans.append(match.span())
+                        typed_spans.append(match.span())
+                        continue
                     if kind == "unspecified_publication" and any(
                         start <= match.start() < end for start, end in typed_spans
                     ):

@@ -39,6 +39,25 @@ def test_other_works_and_historical_dates_are_not_uploaded_metadata():
     assert BookResearcher._reconcile_publication_context(value, []) == (value, [])
 
 
+@pytest.mark.parametrize("context", [
+    "This book (published by Example, 2004/2005) improves on an earlier work.",
+    "An earlier work (first published by Example, 1992) inspired this book "
+    "(published by Example, 2004/2005).",
+])
+def test_other_work_exception_does_not_exempt_uploaded_book_in_same_sentence(context):
+    text, conflicts = BookResearcher._reconcile_publication_context(context, [])
+    assert "2004/2005" not in text and conflicts
+    assert any("2004/2005" in item["claim"] for item in conflicts)
+    if "1992" in context:
+        assert "1992" in text
+        assert not any("1992" in item["claim"] for item in conflicts)
+
+
+def test_plain_other_work_publication_is_locally_exempted():
+    value = "An earlier work was first published by Example, 1992."
+    assert BookResearcher._reconcile_publication_context(value, []) == (value, [])
+
+
 def test_unparenthesized_publication_clause_is_reconciled_without_touching_history():
     context, conflicts = BookResearcher._reconcile_publication_context(
         "This book was published by Example, 2004/2005. The council began in 1848.",
