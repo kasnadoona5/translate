@@ -23,6 +23,7 @@ from tarjomeh.memory.proper_nouns import (
     is_automatic_entity_category,
     is_safe_automatic_entity_mapping,
     is_usable_memory_mapping,
+    lexical_annotation_deferral,
     low_authority_mapping_category,
 )
 from tarjomeh.memory.bilingual_summary import BilingualSummary
@@ -1430,6 +1431,8 @@ class MemoryManager:
         for source, target in self.proper_nouns.all_nouns().items():
             provenance = self.proper_nouns.provenance_for(source)
             if provenance.get("origin") != "accepted_correction":
+                continue
+            if lexical_annotation_deferral(source, target):
                 continue
             for record in list(provenance.get("superseded", []) or []):
                 if not isinstance(record, dict):

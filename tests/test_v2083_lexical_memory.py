@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from tarjomeh.core.pipeline import _reconcile_committed_terminology
+from tarjomeh.memory.manager import MemoryManager
 from tarjomeh.memory.proper_nouns import ProperNouns, lexical_annotation_deferral
 
 
@@ -54,6 +55,32 @@ def test_scientific_member_and_explicit_authority_are_preserved():
         == "added"
     )
     assert not nouns.context_deferral_reason("Canada")
+
+
+@pytest.mark.parametrize("target,expected", [("CA کانادا", []), ("کانادا", [("کاندا", "کانادا")])])
+def test_summary_reconciliation_cannot_reintroduce_the_deferred_display_label(target, expected):
+    nouns = ProperNouns()
+    raw = {
+        "nouns": {"Canada": target},
+        "categories": {"Canada": "term"},
+        "provenance": {
+            "Canada": {
+                "origin": "accepted_correction",
+                "alignment_status": "exact_local",
+                "superseded": [{"target": "کاندا"}],
+            },
+        },
+    }
+    nouns.deserialize(raw)
+    seen = []
+    manager = SimpleNamespace(
+        proper_nouns=nouns,
+        bilingual_summary=SimpleNamespace(
+            reconcile_persian_terms=lambda replacements: seen.extend(replacements),
+        ),
+    )
+    MemoryManager.reconcile_bilingual_summary(manager)
+    assert seen == expected and nouns.all_nouns() == raw["nouns"]
 
 
 @pytest.mark.parametrize("target,action", [("CA کانادا", "context_deferred"), ("کانادا", "added")])
