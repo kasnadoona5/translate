@@ -21,6 +21,9 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "explicit_hyphen_name_group_alignment": True,
+            "final_heh_ezafe_name_edges": True,
+            "source_local_annotation_syntax": True,
             "r109_serious_unchanged_count_preserved": True,
             "bounded_name_suffix_components": True,
             "conservative_automatic_name_ambiguity": True,
@@ -672,6 +675,36 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v207_behavior_probes(),
         **_v208_behavior_probes(),
         **_v2081_behavior_probes(),
+        **_v2082_behavior_probes(),
+    }
+
+
+def _v2082_behavior_probes() -> dict[str, bool]:
+    """Synthetic boundary/syntax checks, without providers, jobs or file I/O."""
+    from tarjomeh.memory.proper_nouns import is_bounded_person_name_target, observed_bilingual_target
+    from tarjomeh.quality.integrity import parenthesis_artifacts
+
+    source = "Researchers (Ada North, Emmerich de Vale, G. W. F. Hale) studied the network."
+    target = (
+        "پژوهشگران (آدا نورث (Ada North)، امریش دو ویل (Emmerich de Vale)، "
+        "گ. و. ف. هیل (G. W. F. Hale)) شبکه را بررسی کردند."
+    )
+    return {
+        "explicit_hyphen_name_group_alignment": bool(
+            not observed_bilingual_target("اندیشه آنماری ویل (Anne-Marie Vale)", "Anne-Marie Vale", "person")
+            and is_bounded_person_name_target("Anne-Marie Vale", "آن-ماری ویل")
+            and not is_bounded_person_name_target("Anne-Marie Vale", "آن ماری ویل")
+        ),
+        "final_heh_ezafe_name_edges": bool(
+            not is_bounded_person_name_target("Ada Vail", "گفتهٔ آداویل")
+            and not is_bounded_person_name_target("Ada Vail", "گفتۀ آداویل")
+        ),
+        "source_local_annotation_syntax": bool(
+            not parenthesis_artifacts(source, target)
+            and parenthesis_artifacts(source, target + ")")
+            and parenthesis_artifacts(source, target.replace("(Ada North)", "[(Ada North)]"))
+            and parenthesis_artifacts(source, target.replace("(Ada North)", "(Ada North) (Ada North)"))
+        ),
     }
 
 
@@ -986,7 +1019,8 @@ def _v204_behavior_probes() -> dict[str, bool]:
         "independent_single_dashes_are_not_a_pair": not dash_review["unbalanced_explanatory_dash_artifacts"],
         "authorized_annotations_preserve_source_parentheses": bool(
             not parenthesis_artifacts(original_source, original_target, anchor_context=anchor)
-            and parenthesis_artifacts(original_source, original_target)
+            and not parenthesis_artifacts(original_source, original_target)
+            and parenthesis_artifacts(original_source, original_target.replace("(Ada North)", "[(Ada North)]"))
         ),
         "english_attestation_does_not_verify_persian": bool(
             research["english_term_attested"] and not research["persian_option_quote_present"]

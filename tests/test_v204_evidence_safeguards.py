@@ -157,7 +157,8 @@ def test_authorized_nested_annotations_preserve_source_list_parentheses():
     source, target, context = anchor_fixture()
     assert len(proven_inline_original_spans(source, target, context)) == 2
     assert not parenthesis_artifacts(source, target, anchor_context=context)
-    assert parenthesis_artifacts(source, target)
+    # Syntax evidence no longer depends on a reusable Persian-name mapping.
+    assert not parenthesis_artifacts(source, target)
     assert not audit_translation_language(source, target, anchor_context=context)[
         "parenthesis_artifacts"
     ]
@@ -187,8 +188,11 @@ def test_annotation_exemption_never_hides_broken_wrappers(defect):
     source, target, context = anchor_fixture()
     if defect == "unknown":
         context = {"authorized": {}}
+        target = target.replace("(Ada North)", "(Ada Other)")
     elif defect == "misplaced":
-        context["authorized"]["Ada North"] = "\u062f\u06cc\u06af\u0631"
+        target = target.replace("(Ada North)", "(TEMP)").replace(
+            "(Ben West)", "(Ada North)"
+        ).replace("(TEMP)", "(Ben West)")
     elif defect == "surplus":
         target = target.replace("(Ada North)", "(Ada North) (Ada North)")
     elif defect == "case_surplus":

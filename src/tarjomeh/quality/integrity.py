@@ -2311,6 +2311,105 @@ def markup_wrapper_artifacts(source: str, translation: str) -> list[dict[str, An
     ]
 
 
+def _source_annotation_spans(
+    source: str, target: str, anchor_context: dict[str, Any] | None = None,
+) -> list[tuple[int, int]]:
+    """Prove annotation syntax from source lists, not reusable name mappings.
+
+    Only a uniquely located, complete, ordered entity list qualifies. This
+    recognizes delimiters; it does not validate the Persian name or authorize
+    an insertion, a memory mapping, or a render-time change.
+    """
+    from tarjomeh.context.source_entities import _source_entity_inventory
+
+    def groups(text: str) -> list[tuple[int, int]] | None:
+        stack: list[int] = []
+        result: list[tuple[int, int]] = []
+        for offset, char in enumerate(text):
+            if char == "(":
+                stack.append(offset)
+            elif char == ")":
+                if not stack:
+                    return None
+                start = stack.pop()
+                if not stack:
+                    result.append((start, offset + 1))
+        return None if stack else result
+
+    source_groups, target_groups = groups(source), groups(target)
+    if source_groups is None or target_groups is None:
+        return []
+    inventory = _source_entity_inventory(source)
+    # Preserve independently proved legacy anchors (including a one-word
+    # surname). They still need the same unique, ordered source-list proof.
+    if anchor_context:
+        from tarjomeh.core.render_identity import proven_inline_original_spans
+
+        for start, end in proven_inline_original_spans(
+            source, target, anchor_context, source_parenthetical_only=True,
+        ):
+            original = target[start + 1:end - 1].strip()
+            if original not in inventory:
+                inventory.append(original)
+    occurrences: list[tuple[int, int, str]] = []
+    for entity in inventory:
+        matches = list(re.finditer(rf"(?<!\w){re.escape(entity)}(?!\w)", source))
+        if len(matches) == 1:
+            occurrences.append((*matches[0].span(), entity))
+    occurrences.sort()
+    source_lists: list[tuple[tuple[str, ...], int]] = []
+    for start, end in source_groups:
+        if "(" in source[start + 1:end - 1]:
+            continue
+        names = tuple(name for left, right, name in occurrences if start < left < right < end)
+        if names:
+            source_lists.append((names, start))
+    proved: list[tuple[int, int]] = []
+    used_source_groups: set[int] = set()
+    last_source_group = -1
+    for start, end in target_groups:
+        inner = target[start + 1:end - 1]
+        leaves = list(re.finditer(r"\(([^()\n]+)\)", inner))
+        if not leaves:
+            continue
+        names = tuple(leaf.group(1).strip() for leaf in leaves)
+        matching = [position for group, position in source_lists if group == names]
+        if (
+            len(matching) != 1
+            or matching[0] in used_source_groups
+            or matching[0] < last_source_group
+        ):
+            continue
+        spans: list[tuple[int, int]] = []
+        for leaf, name in zip(leaves, names, strict=True):
+            left, right = start + 1 + leaf.start(), start + 1 + leaf.end()
+            # A foreign-expression wrapper or bare bracket is not a name
+            # annotation. The preceding word must be Persian, not punctuation.
+            prefix = target[start + 1:left].rstrip().rstrip("\u00bb\u201d")
+            if (
+                name not in inventory
+                or len(re.findall(rf"(?<!\w){re.escape(name)}(?!\w)", source, re.IGNORECASE)) != 1
+                or len(re.findall(rf"(?<!\w){re.escape(name)}(?!\w)", target, re.IGNORECASE)) != 1
+                or not re.search(
+                    r"[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]"
+                    r"[\u064b-\u065f]*$", prefix,
+                )
+                or re.match(r"\s*\]", target[right:])
+            ):
+                break
+            spans.append((left, right))
+        else:
+            # Removing just these leaves must leave the single outer pair.
+            masked = list(target[start:end])
+            for left, right in spans:
+                masked[left - start:right - start] = " " * (right - left)
+            if "(" not in "".join(masked)[1:-1] and ")" not in "".join(masked)[1:-1]:
+                proved.extend(spans)
+                used_source_groups.add(matching[0])
+                last_source_group = matching[0]
+    return proved
+
+
 def parenthesis_artifacts(
     source: str, translation: str, *, anchor_context: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
@@ -2334,14 +2433,13 @@ def parenthesis_artifacts(
         return findings, maximum
 
     findings, target_depth = scan(translation or "")
+    for wrapper in re.finditer(r"\[\s*\([^()\n]*[A-Za-z][^()\n]*\)\s*\]", translation or ""):
+        if wrapper.group() not in (source or ""):
+            findings.append({"type": "new_bracketed_parenthetical", "offset": wrapper.start()})
     _source_findings, source_depth = scan(source or "")
-    if anchor_context and not findings and not _source_findings and source_depth:
-        from tarjomeh.core.render_identity import proven_inline_original_spans
-
+    if not findings and not _source_findings and source_depth:
         masked = list(translation)
-        for start, end in proven_inline_original_spans(
-            source, translation, anchor_context, source_parenthetical_only=True,
-        ):
+        for start, end in _source_annotation_spans(source, translation, anchor_context):
             masked[start:end] = " " * (end - start)
         _masked_findings, target_depth = scan("".join(masked))
     if target_depth > max(1, source_depth):

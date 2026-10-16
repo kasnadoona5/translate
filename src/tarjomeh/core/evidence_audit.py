@@ -22,6 +22,7 @@ def targeted_quality_evidence(
     """Expose effective deferral and current report-only checks without authority."""
     from tarjomeh.core.pipeline import quoted_suffix_review_findings
     from tarjomeh.memory.proper_nouns import ProperNouns, requires_bounded_name_target
+    from tarjomeh.quality.integrity import _source_annotation_spans
 
     memory = ProperNouns()
     memory.deserialize(proper)
@@ -49,7 +50,21 @@ def targeted_quality_evidence(
             "count_evidence_available": "after_actionable_count_raw" in payload,
         })
     suffixes = []
+    annotation_syntax = []
     for chunk in chunks:
+        source_text = str(chunk.get("text") or "")
+        target_text = str(chunk.get("translation") or "")
+        spans = _source_annotation_spans(source_text, target_text)
+        if spans:
+            annotation_syntax.append({
+                "chunk_index": chunk.get("chunk_index"),
+                "source_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+                "target_sha256": hashlib.sha256(target_text.encode("utf-8")).hexdigest(),
+                "spans": [{"start": start, "end": end, "text": target_text[start:end]}
+                          for start, end in spans],
+                "proof_scope": "unique_ordered_current_source_parenthetical_entities",
+                "authority": "syntax_only_no_mapping_or_render_approval",
+            })
         source = re.split(r"\n\s*\n", str(chunk.get("text") or ""))
         target = re.split(r"\n\s*\n", str(chunk.get("translation") or ""))
         aligned = len(source) == len(target)
@@ -64,9 +79,9 @@ def targeted_quality_evidence(
                                  "local_paragraph_index": index,
                                  "paragraph_alignment_verified": False,
                                  "paragraph_count_matches": aligned})
-    return {"version": 1, "policy": "report_only_no_authority_or_text_change",
+    return {"version": 2, "policy": "report_only_no_authority_or_text_change",
             "deferred_name_mappings": deferred, "extra_final_counts": counts,
-            "quoted_suffix_reports": suffixes}
+            "quoted_suffix_reports": suffixes, "source_annotation_syntax": annotation_syntax}
 
 
 def model_identity_counts(attempts: list[dict[str, Any]]) -> dict[str, Any]:

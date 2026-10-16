@@ -768,6 +768,23 @@ def _automatic_name_ambiguity_reason(source: str, target: str) -> str:
         and _person_name_component_count(target) > len(words)
     ):
         return "ambiguous_name_component_alignment"
+    if (
+        re.search(r"[-\u2010\u2011]", source or "")
+        and _person_name_component_count(target) <= len(words)
+    ):
+        source_groups = [
+            len(_PERSON_SOURCE_COMPONENT_RE.findall(word))
+            for word in (source or "").split()
+        ]
+        # The existing source-proven spaced tatweel join is one compound,
+        # not three words. ZWNJ is deliberately not a component boundary.
+        grouped_target = re.sub(r"\s+\u0640\s+", "-", target or "")
+        target_groups = [
+            _person_name_component_count(word)
+            for word in grouped_target.split()
+        ]
+        if source_groups != target_groups:
+            return "automatic_hyphen_name_alignment_unverified"
     return ""
 
 
@@ -813,7 +830,9 @@ def is_bounded_person_name_target(source: str, target: str) -> bool:
         return False
     edge_tokens = remainder.split()
     if edge_tokens and any(
-        token.endswith("\u0650") for token in (edge_tokens[0], edge_tokens[-1])
+        token.endswith("\u0650")
+        or re.search(r"[\u0647\u06d5]\u0654$", unicodedata.normalize("NFKD", token))
+        for token in (edge_tokens[0], edge_tokens[-1])
     ):
         return False
     # A transliterated name never needs more Persian words than the source has
