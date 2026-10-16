@@ -5572,6 +5572,8 @@ def _reconcile_committed_terminology(
         "aliases_added": [],
         "context_deferred": [],
         "skipped": [],
+        "source_sha256": _candidate_text_hash(source_text),
+        "candidate_target_hash": _candidate_text_hash(final_translation),
     }
     if _chunk_needs_review(db, job_id, chunk_index):
         report["policy"] = "skipped_unresolved_chunk"
@@ -5771,6 +5773,7 @@ def _reconcile_committed_terminology(
             report["context_deferred"].append({"issue_id": issue_id, **outcome})
         elif memory_manager.proper_nouns.add_alias(source, target):
             report["aliases_added"].append({
+                "action": "alias_added",
                 "issue_id": issue_id,
                 "source": source,
                 "target": target,
@@ -10039,6 +10042,7 @@ class TranslationPipeline:
             if not bool(getattr(entry, "is_auto", False)) or enforce_auto_terms
         ]
         reviewed_matches: list[dict[str, Any]] = []
+        book_recommendations: list[dict[str, Any]] = []
         if self.config.translation.review_book_terms_before_translating:
             from tarjomeh.glossary.book_review import resolve_reviewed_book_terms
 
@@ -10046,6 +10050,8 @@ class TranslationPipeline:
             if review_artifact.get("source_sha256") != self.db.get_job_source_hash(job_id):
                 raise ValueError("Book-term approval belongs to a different source")
             if review_artifact.get("phase") == "started":
+                if int(review_artifact.get("review_version", 1)) not in {1, 2, 3}:
+                    raise ValueError("Unsupported book-term review version")
                 reviewed_matches, scoped_review = resolve_reviewed_book_terms(
                     chunk.text,
                     chunk.metadata,
@@ -10063,6 +10069,18 @@ class TranslationPipeline:
                         "review": scoped_review,
                         "message": "Approved book-term scope could not be proven for this source paragraph.",
                     })
+                from tarjomeh.glossary.book_recommendations import resolve_book_recommendations
+
+                recommendation_scope = resolve_book_recommendations(
+                    chunk.text, chunk.metadata, idx, review_artifact,
+                    self.db.get_job_artifact(job_id, "book_term_body_index_v1") or {},
+                    [{"source": entry.source, "target": entry.target}
+                     for entry in enforced_entries],
+                )
+                book_recommendations = recommendation_scope["recommendations"]
+                self.db.log_chunk_event(
+                    job_id, idx, "book_term_recommendations_resolved", recommendation_scope,
+                )
             elif review_artifact.get("phase") != "skipped":
                 raise ValueError("Book-term review is not complete")
         advisory_entries = [
@@ -10135,6 +10153,15 @@ class TranslationPipeline:
             from tarjomeh.glossary.book_review import format_reviewed_book_terms
 
             glossary_prompt_parts.append(format_reviewed_book_terms(reviewed_matches))
+        if book_recommendations:
+            from tarjomeh.glossary.book_recommendations import format_book_recommendations
+
+            advice_context = format_book_recommendations(book_recommendations)
+            glossary_prompt_parts.append(advice_context)
+            self.db.log_chunk_event(job_id, idx, "book_term_recommendation_prompt", {
+                "chars": len(advice_context), "authority": "advisory_only",
+                "recommendation_ids": [item["recommendation_id"] for item in book_recommendations],
+            })
         glossary_terms_str = "\n\n".join(
             part for part in glossary_prompt_parts if part
         ) or "(no glossary terms matched in this chunk)"
@@ -14476,6 +14503,18 @@ Output ONLY the corrected Persian translation.
                     "review": final_book_uncertain,
                     "candidate_target_hash": _candidate_text_hash(translation),
                 })
+        if book_recommendations:
+            from tarjomeh.glossary.book_recommendations import recommendation_presence
+
+            identity_text, advice_identity = _canonical_chunk_paragraph_identity(chunk, translation)
+            if identity_text != translation:
+                advice_identity = {}
+            self.db.log_chunk_event(job_id, idx, "book_term_recommendation_presence", {
+                **recommendation_presence(
+                    chunk.text, translation, chunk.metadata, book_recommendations, advice_identity,
+                ),
+                "candidate_target_hash": _candidate_text_hash(translation),
+            })
         self.db.log_chunk_event(
             job_id,
             idx,

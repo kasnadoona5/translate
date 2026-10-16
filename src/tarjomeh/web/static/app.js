@@ -1011,6 +1011,10 @@ async function openBookTermReview(jobId) {
         ].filter(Boolean).join(" | ");
         const status = document.createElement("small");
         status.textContent = term.status || "proposed";
+        if (term.scope_counts) {
+            status.textContent += ` | Evidence: ${term.scope_counts.evidence}` +
+                ` | Elsewhere: ${term.scope_counts.elsewhere} occurrence(s)`;
+        }
         details.append(source, evidence, status);
         const controls = document.createElement("div");
         controls.className = "book-term-controls";
@@ -1027,10 +1031,14 @@ async function openBookTermReview(jobId) {
         scope.className = "book-term-scope";
         scope.setAttribute("aria-label", `Approval scope for ${term.source}`);
         const scopeOptions = currentBookTermReviewVersion >= 2
-            ? [{ value: "evidence_paragraph", label: "Evidence paragraph" },
-               { value: "reviewed_occurrences", label: "Reviewed occurrences" }]
+            ? [{ value: "evidence_paragraph", label: "Required in evidence paragraph" },
+               { value: "reviewed_occurrences", label: "Required at reviewed occurrences" }]
             : [{ value: "evidence_paragraph", label: "Evidence paragraph" },
                { value: "all_body", label: "All body paragraphs" }];
+        if (currentBookTermReviewVersion === 3) {
+            scopeOptions.push({ value: "book_wide_recommended",
+                label: "Required here, suggested elsewhere" });
+        }
         scopeOptions.forEach(option => {
             const element = document.createElement("option");
             element.value = option.value;

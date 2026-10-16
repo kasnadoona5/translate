@@ -1447,6 +1447,25 @@ def _register_api(app: Flask) -> None:
             event for event in current_events
             if event["event_type"] == "terminology_consistency_advisory"
         ]
+        from tarjomeh.glossary.book_recommendations import recommendation_evidence
+
+        optional_consistency = recommendation_evidence(
+            current_events, all_chunks,
+            (db.get_job_artifact(job_id, "canonical_chunk_paragraphs_v1") or {}).get("chunks", {}),
+        )
+        lines.extend([
+            "Optional book-term wording consistency (report only):",
+            "  No issue, REVIEW, memory/style penalty or automatic correction from non-use.",
+            "  Lexical presence does not verify meaning or repeated-occurrence alignment.",
+            "  normalization=" + optional_consistency["normalization"],
+            "  occurrence_counts=" + json.dumps(optional_consistency["occurrence_counts"]),
+        ])
+        for location in optional_consistency["locations"]:
+            if location["presence"] != "lexically_present":
+                lines.append("  " + json.dumps(location, ensure_ascii=False))
+        for deferred in optional_consistency["deferred"]:
+            lines.append("  advice unavailable: " + json.dumps(deferred, ensure_ascii=False))
+        lines.append("")
         consistency_issues = [
             issue
             for event in consistency_events
@@ -2355,6 +2374,7 @@ def _register_api(app: Flask) -> None:
         from tarjomeh.glossary.book_review import (
             REVIEW_VERSION,
             REVIEWED_OCCURRENCES,
+            BOOK_WIDE_RECOMMENDED,
             verify_ticked_occurrences,
         )
 
@@ -2383,7 +2403,7 @@ def _register_api(app: Flask) -> None:
 
             index = db.get_job_artifact(job_id, "book_term_body_index_v1") or {}
             if (
-                review_version < REVIEW_VERSION
+                review_version not in {2, 3}
                 or index.get("source_sha256") != review.get("source_sha256")
             ):
                 return None
@@ -2403,7 +2423,20 @@ def _register_api(app: Flask) -> None:
         if request.method == "GET":
             occurrence_index = request.args.get("occurrences")
             if occurrence_index is None:
-                return jsonify({"job_id": job_id, "review": review})
+                display_review = copy.deepcopy(review)
+                for term in display_review.get("proposals", []):
+                    known = term_occurrences(str(term.get("source", "")))
+                    if known is None:
+                        continue
+                    known = [item for item in known if not term.get("chapter_positions")
+                             or item["chapter_position"] in term["chapter_positions"]]
+                    evidence_count = sum(
+                        item["paragraph_sha256"] == term.get("source_evidence_sha256")
+                        for item in known
+                    )
+                    term["scope_counts"] = {"matched": len(known), "evidence": evidence_count,
+                                            "elsewhere": len(known) - evidence_count}
+                return jsonify({"job_id": job_id, "review": display_review})
             proposals = review.get("proposals", [])
             try:
                 proposal = proposals[int(occurrence_index)]
@@ -2425,6 +2458,8 @@ def _register_api(app: Flask) -> None:
             })
         if job.get("raw_status") != JobStatus.AWAITING_BOOK_TERM_REVIEW or review.get("phase") != "awaiting":
             return jsonify({"error": "Book-term review is no longer awaiting decisions"}), 409
+        if review_version not in {1, 2, REVIEW_VERSION}:
+            return jsonify({"error": "Unsupported book-term review version"}), 409
         try:
             if db.get_job_source_hash(job_id) != review.get("source_sha256"):
                 return jsonify({"error": "Source identity changed"}), 409
@@ -2528,11 +2563,11 @@ def _register_api(app: Flask) -> None:
                         or any(not isinstance(value, int) or value < 1 for value in positions)):
                     return jsonify({"error": "Invalid chapter positions"}), 400
                 scope_mode = str(decision.get("scope_mode", "evidence_paragraph"))
-                allowed_scopes = (
-                    {"evidence_paragraph", REVIEWED_OCCURRENCES}
-                    if review_version >= REVIEW_VERSION
-                    else {"evidence_paragraph", "all_body"}
-                )
+                allowed_scopes = {"evidence_paragraph", REVIEWED_OCCURRENCES}
+                if review_version == 1:
+                    allowed_scopes = {"evidence_paragraph", "all_body"}
+                elif review_version == 3:
+                    allowed_scopes.add(BOOK_WIDE_RECOMMENDED)
                 if scope_mode not in allowed_scopes:
                     if scope_mode == "all_body":
                         return jsonify({

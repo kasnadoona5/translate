@@ -80,6 +80,8 @@ class CritiqueResult:
     valid: bool = True
     validation_errors: list[str] = field(default_factory=list)
     attempts: int = 1
+    advisory_term_observations: list[dict[str, Any]] = field(default_factory=list)
+    advisory_term_observation_errors: list[str] = field(default_factory=list)
 
     def passes_threshold(self, threshold: float = 7.0) -> bool:
         """Return ``True`` if the average score meets *threshold*."""
@@ -103,6 +105,8 @@ class CritiqueResult:
             "valid": self.valid,
             "validation_errors": self.validation_errors,
             "attempts": self.attempts,
+            "advisory_term_observations": self.advisory_term_observations,
+            "advisory_term_observation_errors": self.advisory_term_observation_errors,
         }
 
     @classmethod
@@ -128,6 +132,14 @@ class CritiqueResult:
             valid=bool(data.get("valid", True)),
             validation_errors=list(data.get("validation_errors", [])),
             attempts=int(data.get("attempts", 1)),
+            advisory_term_observations=(
+                list(data["advisory_term_observations"])
+                if isinstance(data.get("advisory_term_observations"), list) else []
+            ),
+            advisory_term_observation_errors=(
+                list(data["advisory_term_observation_errors"])
+                if isinstance(data.get("advisory_term_observation_errors"), list) else []
+            ),
         )
 
 
@@ -210,12 +222,25 @@ class TranslationCritique:
             terminology=terminology or "(no glossary terms apply to this chunk)",
             review_context=review_context or "(no additional review context)",
         )
+        from tarjomeh.glossary.book_recommendations import recommendations_from_context
+
+        optional_terms = recommendations_from_context(terminology)
+        if optional_terms:
+            prompt += (
+                "\nOptional term advice is not a scoring obligation. Never put mere "
+                "non-use in issues or deduct scores for it. For such preferences only, "
+                "you may add one optional JSON field advisory_term_observations, an array "
+                "of {recommendation_id, source_paragraph_hash, note} matching the supplied "
+                "recommendation. It is report-only. A genuine source-meaning error still "
+                "belongs in the ordinary issues with exact source/target evidence."
+            )
 
         if hasattr(self._llm, "set_operation"):
             self._llm.set_operation("critique")
         raw = await self._llm.chat(prompt)
         result = self._parse_response(
-            raw, source_text, translation, require_coverage=True
+            raw, source_text, translation, require_coverage=True,
+            advisory_recommendations=optional_terms,
         )
         result.attempts = 1
         all_errors = list(result.validation_errors)
@@ -232,7 +257,8 @@ class TranslationCritique:
                 self._llm.set_operation("critique_json_repair")
             raw = await self._llm.chat(repair_prompt)
             result = self._parse_response(
-                raw, source_text, translation, require_coverage=True
+                raw, source_text, translation, require_coverage=True,
+                advisory_recommendations=optional_terms,
             )
             result.attempts = retry + 2
             all_errors.extend(result.validation_errors)
@@ -481,6 +507,7 @@ empty. Every uncovered label needs a grounded omission or accuracy issue."""
         translation: str = "",
         *,
         require_coverage: bool = False,
+        advisory_recommendations: list[dict[str, Any]] | None = None,
     ) -> CritiqueResult:
         """Parse a JSON response from the LLM into a CritiqueResult.
 
@@ -780,6 +807,11 @@ empty. Every uncovered label needs a grounded omission or accuracy issue."""
             if coverage_complete == bool(uncovered_source_segment_ids):
                 errors.append("coverage_complete_flag_inconsistent")
 
+        from tarjomeh.glossary.book_recommendations import parse_advisory_observations
+
+        optional_observations, optional_errors = parse_advisory_observations(
+            data.get("advisory_term_observations"), advisory_recommendations or [],
+        )
         return CritiqueResult(
             accuracy=accuracy,
             fluency=fluency,
@@ -795,6 +827,8 @@ empty. Every uncovered label needs a grounded omission or accuracy issue."""
             raw_response=raw,
             valid=not errors,
             validation_errors=errors,
+            advisory_term_observations=optional_observations,
+            advisory_term_observation_errors=optional_errors,
         )
 
 

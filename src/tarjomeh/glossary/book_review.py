@@ -18,8 +18,9 @@ _PUBLISHER_LINE = re.compile(
     re.IGNORECASE,
 )
 REVIEWED_OCCURRENCES = "reviewed_occurrences"
-# Reviews created from v10.40.3 on accept only evidence or per-occurrence scope.
-REVIEW_VERSION = 2
+BOOK_WIDE_RECOMMENDED = "book_wide_recommended"
+# v2 individual ticks remain valid; v3 adds advice, never all-body enforcement.
+REVIEW_VERSION = 3
 _OCCURRENCE_KEYS = ("paragraph_index", "paragraph_sha256", "start", "end", "matched")
 
 
@@ -321,12 +322,12 @@ def resolve_reviewed_book_terms(
                 candidates.setdefault(source.casefold(), []).append(term)
                 occurrence_counts[id(term)] = int(decision["count"])
                 continue
-            if scope_mode == "evidence_paragraph" and (
+            if scope_mode in {"evidence_paragraph", BOOK_WIDE_RECOMMENDED} and (
                 hashlib.sha256(paragraph.encode("utf-8")).hexdigest()
                 != str(term.get("source_evidence_sha256", ""))
             ):
                 continue
-            if scope_mode not in {"evidence_paragraph", "all_body"}:
+            if scope_mode not in {"evidence_paragraph", "all_body", BOOK_WIDE_RECOMMENDED}:
                 review.append({"source": source, "reason": "invalid_approved_scope"})
                 continue
             pattern = re.compile(rf"(?<!\w){re.escape(source)}(?!\w)", re.IGNORECASE)
@@ -513,7 +514,7 @@ def format_reviewed_book_terms(matches: list[dict[str, Any]]) -> str:
     if not matches:
         return ""
     lines = [
-        "Approved book terms. Apply each rendering only in its named source "
+        "Approved book terms (Mandatory). Apply each rendering only in its named source "
         "paragraph and sense; preserve all other paragraphs and the source meaning:"
     ]
     for match in matches:
