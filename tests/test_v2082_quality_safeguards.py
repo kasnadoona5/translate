@@ -159,4 +159,6 @@ def test_existing_proved_single_surname_anchor_is_not_lost():
     context = {"authorized": {"Hale": "هیل"}}
     assert not parenthesis_artifacts(source, target, anchor_context=context)
     assert parenthesis_artifacts(source, target)
-    assert parenthesis_artifacts(source, target.replace("(Hale)", "[(Hale)]"), anchor_context=context)
+    assert parenthesis_artifacts(
+        source, target.replace("(Hale)", "[(Hale)]"), anchor_context=context,
+    )
