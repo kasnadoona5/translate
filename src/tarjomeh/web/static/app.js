@@ -1034,7 +1034,7 @@ async function openBookTermReview(jobId) {
             ? [{ value: "evidence_paragraph", label: "Required in evidence paragraph" },
                { value: "reviewed_occurrences", label: "Required at reviewed occurrences" }]
             : [{ value: "evidence_paragraph", label: "Evidence paragraph" },
-               { value: "all_body", label: "All body paragraphs" }];
+               { value: "all_body", label: "Legacy all-body approval", disabled: true }];
         if (currentBookTermReviewVersion === 3) {
             scopeOptions.push({ value: "book_wide_recommended",
                 label: "Required here, suggested elsewhere" });
@@ -1043,6 +1043,7 @@ async function openBookTermReview(jobId) {
             const element = document.createElement("option");
             element.value = option.value;
             element.textContent = option.label;
+            element.disabled = option.disabled === true;
             scope.appendChild(element);
         });
         scope.value = term.scope_mode || "evidence_paragraph";

@@ -17,6 +17,8 @@ from tarjomeh.web.app import create_app
         (2, "evidence_paragraph", 200),
         (2, "all_body", 409),
         (3, "all_body", 409),
+        (1, "all_body", 409),
+        (1, "evidence_paragraph", 200),
         (99, "evidence_paragraph", 409),
     ],
 )

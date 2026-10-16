@@ -6,6 +6,7 @@ import pytest
 
 from tarjomeh.core.pipeline import (
     _canonical_chunk_paragraph_identity,
+    _chunk_needs_review,
     _high_confidence_minor_issues,
     _unresolved_grounded_memory_issues,
 )
@@ -84,6 +85,15 @@ def test_required_here_is_not_whole_book_enforcement(data):
     assert result["occurrence_counts"]["preferred_wording_not_found"] == 1
     assert result["locations"][0]["target_excerpt"] == "سازوکار دیگری باقی می‌ماند."
     assert "issues" not in result and "review" not in result
+    advice_events = [
+        {"event_type": "book_term_recommendations_resolved", "payload": scope},
+        {"event_type": "book_term_recommendation_presence", "payload": result},
+    ]
+    assert not _chunk_needs_review(
+        SimpleNamespace(get_chunk_events=lambda *args: advice_events),
+        "test",
+        0,
+    )
     identity["canonical_target_hash"] = "wrong"
     assert (
         recommendation_presence(source, canonical, metadata, advice, identity)["occurrence_counts"][

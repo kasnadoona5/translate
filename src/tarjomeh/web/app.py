@@ -2565,7 +2565,9 @@ def _register_api(app: Flask) -> None:
                 scope_mode = str(decision.get("scope_mode", "evidence_paragraph"))
                 allowed_scopes = {"evidence_paragraph", REVIEWED_OCCURRENCES}
                 if review_version == 1:
-                    allowed_scopes = {"evidence_paragraph", "all_body"}
+                    # Previously saved legacy approvals still resolve unchanged;
+                    # a new decision may not create another all-body mandate.
+                    allowed_scopes = {"evidence_paragraph"}
                 elif review_version == 3:
                     allowed_scopes.add(BOOK_WIDE_RECOMMENDED)
                 if scope_mode not in allowed_scopes:
