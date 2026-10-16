@@ -504,16 +504,22 @@ def test_api_adds_a_job_scoped_term_without_touching_the_shared_glossary(review_
     assert duplicate.status_code == 409
 
 
-def test_legacy_review_keeps_accepting_confirmed_all_body(tmp_path, monkeypatch):
+@pytest.mark.parametrize("already_approved", [False, True])
+def test_legacy_all_body_is_preserved_but_cannot_be_newly_approved(
+    tmp_path, monkeypatch, already_approved,
+):
     source = tmp_path / "book.txt"
     source.write_text("book", encoding="utf-8")
     db = JobDatabase(tmp_path / "jobs.db")
     db.create_job("old", source, {})
     db.update_job_status("old", JobStatus.AWAITING_BOOK_TERM_REVIEW)
+    proposal = {"source": "apparatus", "target": "", "status": "proposed",
+                "source_evidence": SINGLE, "source_evidence_sha256": _sha(SINGLE)}
+    if already_approved:
+        proposal.update(status="approved", target="دستگاه", scope_mode="all_body")
     db.save_job_artifact("old", "book_term_review_v1", {
         "phase": "awaiting", "source_sha256": db.get_job_source_hash("old"),
-        "proposals": [{"source": "apparatus", "target": "", "status": "proposed",
-                       "source_evidence": SINGLE, "source_evidence_sha256": _sha(SINGLE)}],
+        "proposals": [proposal],
     })
     monkeypatch.setenv("UI_SECRET_TOKEN", "test-token")
     from tarjomeh.web.app import create_app
@@ -521,6 +527,20 @@ def test_legacy_review_keeps_accepting_confirmed_all_body(tmp_path, monkeypatch)
     app = create_app()
     app.config["TESTING"] = True
     with patch("tarjomeh.jobs.database.JobDatabase", return_value=db):
+        if already_approved:
+            response = app.test_client().get(
+                "/api/jobs/old/book-term-review",
+                headers={"Authorization": "Bearer test-token"},
+            )
+            assert response.status_code == 200
+            stored = db.get_job_artifact("old", "book_term_review_v1")["proposals"]
+            assert stored == [proposal]
+            matches, review = resolve_reviewed_book_terms(
+                SINGLE, {"structural_roles": ["body"]}, 1, stored,
+            )
+            assert matches and matches[0]["target"] == "دستگاه"
+            assert not review
+            return
         response = app.test_client().post(
             "/api/jobs/old/book-term-review",
             headers={"Authorization": "Bearer test-token"},
@@ -528,7 +548,8 @@ def test_legacy_review_keeps_accepting_confirmed_all_body(tmp_path, monkeypatch)
                   "decisions": [{"index": 0, "status": "approved", "target": "دستگاه",
                                  "scope_mode": "all_body"}]},
         )
-    assert response.status_code == 200
+    assert response.status_code == 409
+    assert db.get_job_artifact("old", "book_term_review_v1")["proposals"] == [proposal]
 
 
 # --- 5. Printer imprint names (R131) --------------------------------------
