@@ -275,7 +275,9 @@ def recommendation_presence(
         "locations": rows,
         "normalization": "existing glossary target_present; no synonym equivalence",
         "semantic_accuracy": "not_verified_by_lexical_presence",
-        "count_scope": "source occurrences grouped by paragraph lexical presence; not target usage counts",
+        "count_scope": (
+            "source occurrences grouped by paragraph lexical presence; not target usage counts"
+        ),
         "occurrence_counts": {
             state: sum(len(row["occurrences"]) for row in rows if row["presence"] == state)
             for state in (
@@ -338,6 +340,8 @@ def recommendation_evidence(
             )
         },
         "semantic_accuracy": "not_verified_by_lexical_presence",
-        "count_scope": "source occurrences grouped by paragraph lexical presence; not target usage counts",
+        "count_scope": (
+            "source occurrences grouped by paragraph lexical presence; not target usage counts"
+        ),
         "normalization": "existing glossary target_present; no synonym equivalence",
     }
