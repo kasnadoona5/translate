@@ -262,6 +262,11 @@ class BookResearcher:
             r"[^()\d]{1,80}\b(?:press|publisher|publishers|publishing)\s*\)",
             re.IGNORECASE,
         )
+        publisher_before_date = re.compile(
+            rf"\(\s*(?P<first>first\s+)?published\s+by\s+"
+            rf"[^()\d,;]{{1,100}},\s*(?P<years>{years})\s*\)",
+            re.IGNORECASE,
+        )
         for kind, pattern in list(patterns.items()):
             patterns[kind] = pattern.replace(
                 "((?:1[5-9]|20)\\d{2})", f"({years})"
@@ -269,6 +274,32 @@ class BookResearcher:
         conflicts = []
         kept = []
         for sentence in re.split(r"(?<=[.!?])\s+", context):
+            # Other works' dates are not evidence about the uploaded edition.
+            other_work = re.search(
+                r"\b(?:other|another|earlier|previous|later|companion)\s+"
+                r"(?:book|work|study|volume)\b", sentence, re.IGNORECASE,
+            )
+            if other_work:
+                kept.append(sentence)
+                continue
+
+            def exclude_publisher_before_date(match: re.Match[str]) -> str:
+                kind = "first_publication" if match["first"] else "unspecified_publication"
+                claimed = {int(value) for value in re.findall(year, match["years"])}
+                applicable = [item for item in evidence if item.get("kind") == kind]
+                source_years = {item["year"] for item in applicable}
+                if re.fullmatch(year, match["years"]) and claimed == source_years:
+                    return match.group()
+                conflicts.append({
+                    "kind": kind, "claim": match.group(),
+                    "years": sorted(claimed), "source_evidence": applicable or evidence,
+                    "reason": "edition_date_conflict" if source_years
+                    else "publication_fact_unverified",
+                })
+                return ""
+
+            sentence = publisher_before_date.sub(exclude_publisher_before_date, sentence)
+
             def exclude_bibliography_date(match: re.Match[str]) -> str:
                 conflicts.append({
                     "kind": "unspecified_publication", "claim": match.group(),
@@ -280,7 +311,7 @@ class BookResearcher:
 
             sentence = bibliography_date.sub(exclude_bibliography_date, sentence)
             excluded = False
-            typed_spans = []
+            typed_spans = [match.span() for match in publisher_before_date.finditer(sentence)]
             for kind, pattern in patterns.items():
                 for match in re.finditer(pattern, sentence, re.IGNORECASE):
                     if kind == "unspecified_publication" and any(
