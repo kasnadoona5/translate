@@ -634,19 +634,7 @@ Instructions:
 7. Treat the English source as factual authority when it conflicts with wording in
    the translation. Preserve explicit quantities and established Persian terms;
    do not coin a near-copy spelling or broaden a term with contextual material.
-8. Preserve who or what each claim is about: keep the subject, predicate and
-   participants attached to the same claim. Do not transfer a property, action
-   or definition to a nearby concept when compressing the passage.
-9. Preserve the source relation between concepts: conjunction is not opposition,
-   association is not causation, and mentioning a problem is not asserting failure.
-   Retain negation, modality, quantities and temporal scope. Do not infer a relation
-   from abbreviations, a contents list, or adjacent names alone.
-10. The previous summary is fallible context, not independent evidence. If the
-    current source contradicts it, correct only the contradicted claim. When the
-    source relation is uncertain, use a narrower supported statement rather than
-    inventing a synthesis. Keep academic Persian natural without simplifying or
-    weakening the source meaning.
-11. Return plain text under the required headers. Do not emit HTML or XML tags.
+8. Return plain text under the required headers. Do not emit HTML or XML tags.
 
 Output format (use these exact headers):
 

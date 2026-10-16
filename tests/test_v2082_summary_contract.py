@@ -18,10 +18,9 @@ def test_existing_summary_operation_keeps_format_and_inputs():
     assert "The council and board act." in rendered
 
 
-def test_general_subject_and_relation_guidance_is_explicit():
-    assert "subject, predicate and" in SUMMARY_UPDATE_PROMPT
-    assert "conjunction is not opposition" in SUMMARY_UPDATE_PROMPT
-    assert "previous summary is fallible context" in SUMMARY_UPDATE_PROMPT
-    assert "negation, modality, quantities and temporal scope" in SUMMARY_UPDATE_PROMPT
-    assert "narrower supported statement" in SUMMARY_UPDATE_PROMPT
-    assert "without simplifying or" in SUMMARY_UPDATE_PROMPT
+def test_failed_guidance_experiment_is_withdrawn_without_changing_source_authority():
+    # The agreed live semantic gate failed; this is not a semantic-fix claim.
+    assert "subject, predicate and" not in SUMMARY_UPDATE_PROMPT
+    assert "conjunction is not opposition" not in SUMMARY_UPDATE_PROMPT
+    assert "Treat the English source as factual authority" in SUMMARY_UPDATE_PROMPT
+    assert "8. Return plain text under the required headers." in SUMMARY_UPDATE_PROMPT

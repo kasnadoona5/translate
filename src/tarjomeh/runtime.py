@@ -24,7 +24,6 @@ def runtime_capabilities() -> dict[str, Any]:
             "explicit_hyphen_name_group_alignment": True,
             "final_heh_ezafe_name_edges": True,
             "source_local_annotation_syntax": True,
-            "summary_subject_relation_guidance": True,
             "r109_serious_unchanged_count_preserved": True,
             "bounded_name_suffix_components": True,
             "conservative_automatic_name_ambiguity": True,
@@ -677,20 +676,7 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v208_behavior_probes(),
         **_v2081_behavior_probes(),
         **_v2082_behavior_probes(),
-        **_v2082_summary_probes(),
     }
-
-
-def _v2082_summary_probes() -> dict[str, bool]:
-    """Template contract only; no claim of semantic entailment or quality."""
-    from tarjomeh.core.prompts import SUMMARY_UPDATE_PROMPT
-
-    return {"summary_subject_relation_guidance": all(
-        phrase in SUMMARY_UPDATE_PROMPT for phrase in (
-            "subject, predicate and", "conjunction is not opposition",
-            "previous summary is fallible context", "narrower supported statement",
-        )
-    )}
 
 
 def _v2082_behavior_probes() -> dict[str, bool]:
