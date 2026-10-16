@@ -64,6 +64,22 @@ if [ -n "$OTHER_TRACKED" ]; then
     exit 1
 fi
 
+command -v python3 >/dev/null || { echo "STOPPED: python3 is required for SQLite backup."; exit 1; }
+echo "========== VERIFY HOST JOBS BACKUP SOURCE =========="
+docker inspect -f '{{json .Mounts}}' "$CONTAINER" | python3 -c '
+import json
+import sys
+
+mounts = json.load(sys.stdin)
+jobs = [mount for mount in mounts if mount.get("Destination") == "/app/jobs"]
+if len(jobs) != 1 or jobs[0].get("Type") != "bind" or jobs[0].get("Source") != "/opt/translate/jobs":
+    raise SystemExit("STOPPED: running Tarjomeh jobs bind differs from the host backup source.")
+if any(mount.get("Destination") == "/app/jobs/jobs.db" for mount in mounts):
+    raise SystemExit("STOPPED: a nested database mount overrides the jobs bind.")
+print("Host SQLite backup source matches the running jobs bind.")
+'
+[ ! -L /opt/translate/jobs/jobs.db ] || { echo "STOPPED: jobs.db is a symlink."; exit 1; }
+
 if ! ACTIVE_JOBS="$(
     docker exec -i "$CONTAINER" python - <<'PY'
 import sqlite3
@@ -769,7 +785,7 @@ checks = {
 }
 print(checks)
 assert all(checks.values()), checks
-print("IMAGE_V2081_CONFIRMED")
+print("IMAGE_V2082_CONFIRMED")
 '
 
 echo "========== RECREATE TARJOMEH ONLY =========="
@@ -802,7 +818,7 @@ for attempt in $(seq 1 30); do
 done
 [ "$(docker inspect -f '{{.State.Health.Status}}' "$CONTAINER")" = "healthy" ]
 
-echo "========== VERIFY RUNNING V20.7 =========="
+echo "========== VERIFY RUNNING V20.8.2 =========="
 [ "$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$CONTAINER")" = "$(git rev-parse HEAD)" ]
 [ "$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.version"}}' "$CONTAINER")" = "$TAG" ]
 docker exec -i "$CONTAINER" tarjomeh capabilities --verify --json
@@ -855,7 +871,7 @@ required = (
 )
 missing = [name for name in required if not manifest["capabilities"].get(name)]
 assert not missing, missing
-print("RUNTIME_V2081_BEHAVIOR_CONFIRMED", len(probes))
+print("RUNTIME_V2082_BEHAVIOR_CONFIRMED", len(probes))
 '
 docker exec -i "$CONTAINER" python -c '
 from pathlib import Path
@@ -1231,7 +1247,7 @@ checks = {
 }
 print(checks)
 assert all(checks.values()), checks
-print("RUNNING_V2081_CONFIRMED")
+print("RUNNING_V2082_CONFIRMED")
 '
 
 echo "========== VERIFY 9ROUTER UNCHANGED =========="

@@ -3,6 +3,7 @@
 import ast
 import gzip
 import hashlib
+import json
 import re
 import shutil
 import sqlite3
@@ -146,6 +147,7 @@ def test_deploy_checks_revision_space_and_only_tarjomeh_cleanup():
     assert "--no-deps" in source
     assert "STOPPED: a job became active during build." in source
     assert "350000000" in source
+    assert "VERIFY HOST JOBS BACKUP SOURCE" in source
     for marker in ("NINE_CONTAINER_ID", "NINE_IMAGE", "NINE_STARTED", "NINE_MOUNTS"):
         assert source.count(marker) >= 3
     for forbidden in (
@@ -158,6 +160,29 @@ def test_deploy_checks_revision_space_and_only_tarjomeh_cleanup():
         "docker stop 9router",
     ):
         assert forbidden not in source
+
+
+@pytest.mark.parametrize(
+    "mounts,accepted",
+    [
+        ([{"Type": "bind", "Source": "/opt/translate/jobs", "Destination": "/app/jobs"}], True),
+        ([{"Type": "bind", "Source": "/another/jobs", "Destination": "/app/jobs"}], False),
+        ([], False),
+        ([
+            {"Type": "bind", "Source": "/opt/translate/jobs", "Destination": "/app/jobs"},
+            {"Type": "bind", "Source": "/another/jobs.db", "Destination": "/app/jobs/jobs.db"},
+        ], False),
+    ],
+)
+def test_host_backup_cannot_silently_copy_a_different_database(mounts, accepted):
+    source = (ROOT / "scripts/deploy_tarjomeh_v2082.sh").read_text(encoding="utf-8")
+    block = next(block for block in re.findall(r"-c '\n(.*?)\n'", source, re.S)
+                 if "mounts = json.load(sys.stdin)" in block)
+    result = subprocess.run(
+        [sys.executable, "-c", block], input=json.dumps(mounts),
+        capture_output=True, text=True,
+    )
+    assert (result.returncode == 0) is accepted
 
 
 @pytest.mark.parametrize("reports,companion,expected", [(0, 0, 0), (2, 0, 2), (0, 2, 2), (2, 3, 3)])
@@ -185,8 +210,10 @@ def test_embedded_image_and_running_source_gates_pass_on_candidate():
 
     source = (ROOT / "scripts/deploy_tarjomeh_v2082.sh").read_text(encoding="utf-8")
     blocks = re.findall(r"-c '\n(.*?)\n'", source, re.S)
-    assert len(blocks) == 3
+    assert len(blocks) == 4
     for block in blocks:
+        if "mounts = json.load(sys.stdin)" in block:
+            continue
         block = block.replace('== "v20.8.2"', f'== "{RUNTIME_RELEASE}"')
         result = subprocess.run(
             [sys.executable, "-c", block],
@@ -292,4 +319,4 @@ def test_deploy_checks_worker_leases_before_backup_and_before_replacement():
     blocks = [block for block in _blocks(source) if "state IN ('active','pausing')" in block]
     assert len(blocks) == 2
     assert source.index(blocks[0]) < source.index("source.backup(snapshot)")
-    assert source.index(blocks[1]) > source.index("IMAGE_V2081_CONFIRMED")
+    assert source.index(blocks[1]) > source.index("IMAGE_V2082_CONFIRMED")

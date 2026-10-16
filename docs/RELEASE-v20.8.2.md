@@ -66,7 +66,7 @@ This collects QA plus both JSON/TXT audit sets, the server-wide companion,
 active/lifetime calls, retries/schema failures, served models, memory/style,
 source/canonical/DOCX identity, research and new safeguard evidence. It calls no
 LLM and does not change the job. A hard failure returns nonzero, not PASS.
-Send those seven usual artifacts, the DOCX, and the full deployment log. Human
+Send the six audit artifacts, the DOCX, and the full deployment log. Human
 source-vs-DOCX and summary-snapshot review remains necessary. Unsupported subject
 transfer or invented opposition fails the summary-guidance experiment; missing
 evidence is UNKNOWN. Do not repair canonical memory by importing an edited DOCX.
