@@ -81,7 +81,37 @@ def targeted_quality_evidence(
                                  "paragraph_count_matches": aligned})
     return {"version": 2, "policy": "report_only_no_authority_or_text_change",
             "deferred_name_mappings": deferred, "extra_final_counts": counts,
+            "deferred_terminology_mappings": [
+                {"source": source, "target": target,
+                 "reason": memory.context_deferral_reason(source), "active": False}
+                for source, target in memory.all_nouns().items()
+                if memory.is_context_deferred(source)
+                and not requires_bounded_name_target(memory.category_for(source), source)
+            ],
+            "accepted_terminology_reconciliation": [
+                {"chunk_index": event.get("chunk_index"), **(event.get("payload") or {})}
+                for event in events if event.get("event_type") == "accepted_terminology_reconciled"
+            ],
+            "readability_call_accounting": readability_call_accounting(events),
             "quoted_suffix_reports": suffixes, "source_annotation_syntax": annotation_syntax}
+
+
+def readability_call_accounting(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Count physical attempts separately from the two existing logical routes."""
+    attempts = [event.get("payload") or {} for event in events
+                if event.get("event_type") == "llm_call_attempt"
+                and (event.get("payload") or {}).get("operation") == "persian_readability_review"]
+    ordinary = sum(event.get("event_type") == "persian_readability_review" for event in events)
+    rollback = sum(event.get("event_type") == "post_rollback_final_validation"
+                   and bool((event.get("payload") or {}).get("readability_review_attempted"))
+                   for event in events)
+    return {"physical_attempts": len(attempts), "ordinary_result_batches": ordinary,
+            "post_rollback_logical_attempts": rollback,
+            "failed_physical_attempts": sum(item.get("success") is False for item in attempts),
+            "policy": (
+                "logical route counts are not transport retries; "
+                "physical attempts retain their own denominator"
+            )}
 
 
 def model_identity_counts(attempts: list[dict[str, Any]]) -> dict[str, Any]:

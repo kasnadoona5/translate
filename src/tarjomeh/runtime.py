@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v20.8.2"
+RUNTIME_RELEASE = "v20.8.3"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,13 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "shared_source_entity_inventory_contract": True,
+            "lexical_annotation_memory_deferral": True,
+            "complete_terminology_reconciliation_events": True,
+            "optional_book_term_recommendations": True,
+            "advisory_term_observations_nonblocking": True,
+            "report_only_book_term_presence": True,
+            "publisher_before_date_research_guard": True,
             "explicit_hyphen_name_group_alignment": True,
             "final_heh_ezafe_name_edges": True,
             "source_local_annotation_syntax": True,
@@ -148,7 +155,7 @@ def runtime_capabilities() -> dict[str, Any]:
         "policy_versions": {
             "structure_evidence": 3,
             "canonical_text": 3,
-            "layer1_admission": 11,
+            "layer1_admission": 12,
             "style_evidence": 11,
             "benchmark_schema": 1,
             "checkpoint_export": 3,
@@ -168,13 +175,13 @@ def runtime_capabilities() -> dict[str, Any]:
             "targeted_language_repair": 2,
             "post_edit_issue_attribution": 1,
             "attachment_trial": 1,
-            "book_term_scope": 5,
+            "book_term_scope": 6,
             "final_language_admission": 7,
-            "book_term_review": 2,
+            "book_term_review": 3,
             "source_term_inventory": 3,
             "render_identity": 2,
             "previous_context_identity": 1,
-            "research_edition_metadata": 2,
+            "research_edition_metadata": 3,
             "extra_final_refinement": 1,
             "comma_surface_admission": 1,
             "prompt_component_evidence": 1,
@@ -676,6 +683,89 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v208_behavior_probes(),
         **_v2081_behavior_probes(),
         **_v2082_behavior_probes(),
+        **_v2083_behavior_probes(),
+    }
+
+
+def _v2083_behavior_probes() -> dict[str, bool]:
+    """General pure probes; no configuration, database, provider or job I/O."""
+    import json
+    from types import SimpleNamespace
+
+    from tarjomeh.context.book_researcher import BookResearcher
+    from tarjomeh.context.source_entities import _source_entity_inventory
+    from tarjomeh.core import pipeline as core_pipeline
+    from tarjomeh.core.pipeline import (
+        _canonical_chunk_paragraph_identity,
+        _reconcile_committed_terminology,
+    )
+    from tarjomeh.glossary.book_recommendations import (
+        recommendation_presence,
+        resolve_book_recommendations,
+    )
+    from tarjomeh.glossary.book_review import _sha, resolve_reviewed_book_terms
+    from tarjomeh.memory.proper_nouns import ProperNouns
+    from tarjomeh.quality.critique import TranslationCritique
+
+    nouns = ProperNouns()
+    unsafe = nouns.add_noun("Canada", "CA \u06a9\u0627\u0646\u0627\u062f\u0627", category="term")
+    db = SimpleNamespace(
+        get_chunk_events=lambda *args: [],
+        get_qa_issues=lambda *args: [{"issue_id": "probe", "category": "terminology",
+                                    "source_quote": "Canada"}],
+        get_issue_decisions=lambda *args: [{"issue_id": "probe",
+            "resulting_span": "\u06a9\u0627\u0646\u0627\u062f\u0627",
+            "payload": {"commit_status": "committed_local"}}],
+    )
+    reconciliation = _reconcile_committed_terminology(
+        db, "synthetic", 0, SimpleNamespace(proper_nouns=nouns), "Canada",
+        "\u06a9\u0627\u0646\u0627\u062f\u0627",
+    )
+    source = "The apparatus acts."
+    metadata = {"structural_roles": ["body"], "paragraph_indices": [17],
+                "source_paragraph_spans": [[0, len(source)]],
+                "source_paragraph_hashes": [_sha(source)]}
+    decision = {
+        "source": "apparatus", "target": "\u062f\u0633\u062a\u06af\u0627\u0647",
+        "status": "approved",
+        "scope_mode": "book_wide_recommended", "source_evidence_sha256": _sha("Other paragraph."),
+    }
+    matches, _ = resolve_reviewed_book_terms(source, metadata, 1, [decision])
+    advice = resolve_book_recommendations(source, metadata, 0, {
+        "review_version": 3, "phase": "started", "source_sha256": "synthetic",
+        "proposals": [decision],
+    }, {"source_sha256": "synthetic", "entries": [{
+        "chunk_index": 0, "local_paragraph": 0, "paragraph_index": 17,
+        "paragraph_sha256": _sha(source), "chapter_position": 1,
+    }]})["recommendations"]
+    optional = TranslationCritique._parse_response(json.dumps({
+        "scores": {name: 9 for name in ("accuracy", "fluency", "terminology", "register")},
+        "issues": [], "advisory_term_observations": "invalid optional data",
+    }))
+    target, identity = _canonical_chunk_paragraph_identity(
+        SimpleNamespace(text=source, metadata=metadata),
+        "\u0633\u0627\u0632\u0648\u06a9\u0627\u0631",
+    )
+    presence = recommendation_presence(source, target, metadata, advice, identity)
+    context, conflicts = BookResearcher._reconcile_publication_context(
+        "A study (published by Example, 2004/2005).", [],
+    )
+    return {
+        "shared_source_entity_inventory_contract": (
+            core_pipeline._source_entity_inventory is _source_entity_inventory
+            and not _source_entity_inventory("Nora\nVale")
+        ) and _source_entity_inventory(
+            "Nora Vale spoke. Omar Reed replied."
+        ) == ["Nora Vale", "Omar Reed"],
+        "lexical_annotation_memory_deferral": unsafe.get("action") == "context_deferred",
+        "complete_terminology_reconciliation_events": bool(reconciliation["reconciled"])
+        and reconciliation["reconciled"][0]["action"] == "added",
+        "optional_book_term_recommendations": not matches and len(advice) == 1,
+        "advisory_term_observations_nonblocking": optional.valid and not optional.issue_details
+        and bool(optional.advisory_term_observation_errors),
+        "report_only_book_term_presence": presence["authority"] == "report_only"
+        and presence["occurrence_counts"]["preferred_wording_not_found"] == 1,
+        "publisher_before_date_research_guard": bool(conflicts) and "2004/2005" not in context,
     }
 
 

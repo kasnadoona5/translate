@@ -1,4 +1,4 @@
-"""Release safety checks without contacting Docker, a VPS or an LLM."""
+"""Current release safety checks; historical tagged scripts remain immutable."""
 
 import ast
 import gzip
@@ -18,7 +18,13 @@ CORRECTIVE_CAPABILITIES = (
     "explicit_hyphen_name_group_alignment",
     "final_heh_ezafe_name_edges",
     "source_local_annotation_syntax",
-    "summary_subject_relation_guidance",
+    "shared_source_entity_inventory_contract",
+    "lexical_annotation_memory_deferral",
+    "complete_terminology_reconciliation_events",
+    "optional_book_term_recommendations",
+    "advisory_term_observations_nonblocking",
+    "report_only_book_term_presence",
+    "publisher_before_date_research_guard",
     "r109_serious_unchanged_count_preserved",
     "bounded_name_suffix_components",
     "conservative_automatic_name_ambiguity",
@@ -27,14 +33,14 @@ CORRECTIVE_CAPABILITIES = (
 
 
 def test_new_runtime_probes_do_not_read_config_or_open_files(monkeypatch):
-    from tarjomeh.runtime import _v2082_behavior_probes
+    from tarjomeh.runtime import _v2083_behavior_probes
 
     def forbidden(*args, **kwargs):
         raise AssertionError("A synthetic runtime probe tried file I/O")
 
     monkeypatch.setattr(Path, "is_file", forbidden)
     monkeypatch.setattr(Path, "open", forbidden)
-    assert all(_v2082_behavior_probes().values())
+    assert all(_v2083_behavior_probes().values())
 
 
 @pytest.mark.parametrize("missing", CORRECTIVE_CAPABILITIES)
@@ -44,7 +50,7 @@ def test_deploy_cannot_pass_with_a_missing_corrective_capability(monkeypatch, mi
     manifest = runtime.runtime_capabilities()
     del manifest["capabilities"][missing]
     monkeypatch.setattr(runtime, "runtime_capabilities", lambda: manifest)
-    source = (ROOT / "scripts/deploy_tarjomeh_v2082.sh").read_text(encoding="utf-8")
+    source = (ROOT / "scripts/deploy_tarjomeh_v2083.sh").read_text(encoding="utf-8")
     block = next(
         block for block in re.findall(r"-c '\n(.*?)\n'", source, re.S) if "required = (" in block
     )
@@ -60,9 +66,9 @@ def test_each_collector_requires_corrective_capabilities_and_probes():
         "runtime_probes": runtime_behavior_probes(),
     }
     for kind in ("reports", "companion"):
-        source = (ROOT / f"scripts/audit_tarjomeh_v2082_{kind}.sh").read_text(encoding="utf-8")
+        source = (ROOT / f"scripts/audit_tarjomeh_v2083_{kind}.sh").read_text(encoding="utf-8")
         block = next(
-            block for block in _blocks(source) if "v2082_targeted_runtime_contract" in block
+            block for block in _blocks(source) if "v2083_targeted_runtime_contract" in block
         )
         tree = ast.parse(block)
         if kind == "reports":
@@ -73,7 +79,7 @@ def test_each_collector_requires_corrective_capabilities_and_probes():
                 and isinstance(node.test, ast.UnaryOp)
                 and any(
                     isinstance(child, ast.Constant)
-                    and child.value == "v2082_targeted_runtime_contract_failed"
+                    and child.value == "v2083_targeted_runtime_contract_failed"
                     for child in ast.walk(node)
                 )
             )
@@ -83,7 +89,7 @@ def test_each_collector_requires_corrective_capabilities_and_probes():
                 for node in ast.walk(tree)
                 if isinstance(node, ast.Dict)
                 for key, value in zip(node.keys, node.values, strict=True)
-                if isinstance(key, ast.Constant) and key.value == "v2082_targeted_runtime_contract"
+                if isinstance(key, ast.Constant) and key.value == "v2083_targeted_runtime_contract"
             )
         compiled = compile(ast.Expression(expression), "<synthetic-audit-contract>", "eval")
         assert eval(compiled, namespace)
@@ -104,10 +110,10 @@ def _blocks(source):
 @pytest.mark.parametrize(
     "name",
     [
-        "deploy_tarjomeh_v2082.sh",
-        "audit_tarjomeh_v2082_reports.sh",
-        "audit_tarjomeh_v2082_companion.sh",
-        "run_tarjomeh_v2082_audits.sh",
+        "deploy_tarjomeh_v2083.sh",
+        "audit_tarjomeh_v2083_reports.sh",
+        "audit_tarjomeh_v2083_companion.sh",
+        "run_tarjomeh_v2083_audits.sh",
     ],
 )
 def test_release_shell_and_embedded_python_are_parseable(name):
@@ -132,8 +138,8 @@ def test_release_shell_and_embedded_python_are_parseable(name):
 
 
 def test_deploy_checks_revision_space_and_only_tarjomeh_cleanup():
-    source = (ROOT / "scripts/deploy_tarjomeh_v2082.sh").read_text(encoding="utf-8")
-    assert 'TAG="v20.8.2"' in source
+    source = (ROOT / "scripts/deploy_tarjomeh_v2083.sh").read_text(encoding="utf-8")
+    assert 'TAG="v20.8.3"' in source
     assert "flock -n 9" in source
     assert "source.backup(snapshot)" in source
     assert 'snapshot.execute("PRAGMA integrity_check")' in source
@@ -175,7 +181,7 @@ def test_deploy_checks_revision_space_and_only_tarjomeh_cleanup():
     ],
 )
 def test_host_backup_cannot_silently_copy_a_different_database(mounts, accepted):
-    source = (ROOT / "scripts/deploy_tarjomeh_v2082.sh").read_text(encoding="utf-8")
+    source = (ROOT / "scripts/deploy_tarjomeh_v2083.sh").read_text(encoding="utf-8")
     block = next(block for block in re.findall(r"-c '\n(.*?)\n'", source, re.S)
                  if "mounts = json.load(sys.stdin)" in block)
     result = subprocess.run(
@@ -187,7 +193,7 @@ def test_host_backup_cannot_silently_copy_a_different_database(mounts, accepted)
 
 @pytest.mark.parametrize("reports,companion,expected", [(0, 0, 0), (2, 0, 2), (0, 2, 2), (2, 3, 3)])
 def test_combined_audit_runs_both_and_never_hides_a_failure(reports, companion, expected):
-    source = (ROOT / "scripts/run_tarjomeh_v2082_audits.sh").read_text(encoding="utf-8")
+    source = (ROOT / "scripts/run_tarjomeh_v2083_audits.sh").read_text(encoding="utf-8")
     source = source.replace("cd /opt/translate", "cd .")
     stub = f'''bash() {{
         case "$1" in
@@ -208,13 +214,13 @@ def test_combined_audit_runs_both_and_never_hides_a_failure(reports, companion, 
 def test_embedded_image_and_running_source_gates_pass_on_candidate():
     from tarjomeh.runtime import RUNTIME_RELEASE
 
-    source = (ROOT / "scripts/deploy_tarjomeh_v2082.sh").read_text(encoding="utf-8")
+    source = (ROOT / "scripts/deploy_tarjomeh_v2083.sh").read_text(encoding="utf-8")
     blocks = re.findall(r"-c '\n(.*?)\n'", source, re.S)
     assert len(blocks) == 4
     for block in blocks:
         if "mounts = json.load(sys.stdin)" in block:
             continue
-        block = block.replace('== "v20.8.2"', f'== "{RUNTIME_RELEASE}"')
+        block = block.replace('== "v20.8.3"', f'== "{RUNTIME_RELEASE}"')
         result = subprocess.run(
             [sys.executable, "-c", block],
             capture_output=True,
@@ -227,7 +233,7 @@ def test_embedded_image_and_running_source_gates_pass_on_candidate():
 
 
 def test_companion_follows_the_shared_dash_helper_ownership():
-    source = (ROOT / "scripts/audit_tarjomeh_v2082_companion.sh").read_text(encoding="utf-8")
+    source = (ROOT / "scripts/audit_tarjomeh_v2083_companion.sh").read_text(encoding="utf-8")
     block = next(block for block in _blocks(source) if '"typed_dash_attachment_audit"' in block)
     tree = ast.parse(block)
     expression = next(
@@ -250,21 +256,21 @@ def test_companion_follows_the_shared_dash_helper_ownership():
 
 def test_audits_use_distinct_artifacts_and_do_not_hide_hard_failures():
     for kind, artifact in (("reports", "memory"), ("companion", "companion")):
-        source = (ROOT / f"scripts/audit_tarjomeh_v2082_{kind}.sh").read_text(encoding="utf-8")
-        assert f"_v2082_{artifact}_audit.json" in source
-        assert f"_v2082_{artifact}_audit.txt" in source
+        source = (ROOT / f"scripts/audit_tarjomeh_v2083_{kind}.sh").read_text(encoding="utf-8")
+        assert f"_v2083_{artifact}_audit.json" in source
+        assert f"_v2083_{artifact}_audit.txt" in source
         assert 'if verdict == "FAIL":\n    raise SystemExit(2)' in source
         assert 'exit "$AUDIT_RC"' in source
-        assert '"v2082_remediation"' in source
+        assert '"v2083_remediation"' in source
         assert "requires_source_based_human_review" in source
-        assert '"v2082_targeted_evidence": quality_v2082' in source
-        assert 'quality_v2082["deferred_name_mappings"]' in source
-        assert 'quality_v2082["extra_final_counts"]' in source
-        assert 'quality_v2082["quoted_suffix_reports"]' in source
+        assert '"v2083_targeted_evidence": quality_v2083' in source
+        assert 'quality_v2083["deferred_name_mappings"]' in source
+        assert 'quality_v2083["extra_final_counts"]' in source
+        assert 'quality_v2083["quoted_suffix_reports"]' in source
 
 
 def test_deployment_sqlite_snapshot_includes_uncheckpointed_wal(tmp_path):
-    source = (ROOT / "scripts/deploy_tarjomeh_v2082.sh").read_text(encoding="utf-8")
+    source = (ROOT / "scripts/deploy_tarjomeh_v2083.sh").read_text(encoding="utf-8")
     block = next(block for block in _blocks(source) if "source.backup(snapshot)" in block)
     database = tmp_path / "live.db"
     snapshot = tmp_path / "snapshot.db"
@@ -292,7 +298,7 @@ def test_deployment_sqlite_snapshot_includes_uncheckpointed_wal(tmp_path):
 
 
 def test_compressed_database_is_restored_verified_and_never_overwritten(tmp_path):
-    source = (ROOT / "scripts/deploy_tarjomeh_v2082.sh").read_text(encoding="utf-8")
+    source = (ROOT / "scripts/deploy_tarjomeh_v2083.sh").read_text(encoding="utf-8")
     block = next(block for block in _blocks(source) if 'destination.open("xb")' in block)
     original = tmp_path / "original.db"
     restored = tmp_path / "restored.db"
@@ -315,8 +321,8 @@ def test_compressed_database_is_restored_verified_and_never_overwritten(tmp_path
 
 
 def test_deploy_checks_worker_leases_before_backup_and_before_replacement():
-    source = (ROOT / "scripts/deploy_tarjomeh_v2082.sh").read_text(encoding="utf-8")
+    source = (ROOT / "scripts/deploy_tarjomeh_v2083.sh").read_text(encoding="utf-8")
     blocks = [block for block in _blocks(source) if "state IN ('active','pausing')" in block]
     assert len(blocks) == 2
     assert source.index(blocks[0]) < source.index("source.backup(snapshot)")
-    assert source.index(blocks[1]) > source.index("IMAGE_V2082_CONFIRMED")
+    assert source.index(blocks[1]) > source.index("IMAGE_V2083_CONFIRMED")
