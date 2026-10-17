@@ -2603,6 +2603,15 @@ def _register_api(app: Flask) -> None:
                             "error": f"Occurrence check failed for {source}: {failure}"
                         }), 409
                 evidence_hash = str(item.get("source_evidence_sha256", ""))
+                if status == "approved" and review_version in {2, 3}:
+                    known = term_occurrences(source)
+                    if item.get("evidence_unavailable_reason") or not known or (
+                        scope_mode in {"evidence_paragraph", BOOK_WIDE_RECOMMENDED}
+                        and not any(entry["paragraph_sha256"] == evidence_hash for entry in known)
+                    ):
+                        return jsonify(
+                            {"error": f"No unambiguous selected-body evidence for {source}"}
+                        ), 409
                 if status == "approved" and (
                     len(evidence_hash) != 64
                     or any(char not in "0123456789abcdef" for char in evidence_hash)

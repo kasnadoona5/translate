@@ -140,10 +140,18 @@ class TranslationRefiner:
                     "issue_id", "category", "severity", "confidence",
                     "source_segment_id", "source_quote", "current_persian_quote",
                     "suggested_correction", "rationale", "readability_advisory",
+                    "approved_term_conflicts",
                 )
             }
             for detail in critique.issue_details
+            if (detail.get("canonical_quote_binding", {}) or {}).get("status")
+            != "quote_unmatched_after_canonicalization"
         ]
+        if critique.issue_details and not compact_issues:
+            return RefinementResult(
+                translation=translation, decision="preserved",
+                rationale="Canonical quote evidence is unresolved; no exact span may be edited.",
+            )
         expected_issue_ids = [
             str(detail.get("issue_id", "")).strip()
             for detail in compact_issues

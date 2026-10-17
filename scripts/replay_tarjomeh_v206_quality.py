@@ -125,6 +125,7 @@ def load_trial_config(raw_config: dict[str, Any]) -> TarjomehConfig:
     # Validate the merged saved job, not an incomplete credential-source profile.
     return TarjomehConfig.from_dict(
         raw_config, credential_source=TarjomehConfig.load(validate=False),
+        persisted_job=True,
     )
 
 

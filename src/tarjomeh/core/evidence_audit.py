@@ -36,19 +36,32 @@ def targeted_quality_evidence(
     ]
     counts = []
     for event in events:
-        if event.get("event_type") != "extra_final_refinement_completed":
+        if event.get("event_type") not in {
+            "extra_final_refinement_completed",
+            "exact_final_quality_repair",
+        }:
             continue
         payload = event.get("payload", {}) or {}
-        counts.append({
-            "chunk_index": event.get("chunk_index"), "timestamp": event.get("timestamp"),
-            "candidate_target_hash": payload.get("candidate_target_hash"),
-            "accepted": payload.get("accepted"),
-            "before_actionable_count": payload.get("before_actionable_count"),
-            "after_actionable_count": payload.get("after_actionable_count"),
-            "after_actionable_count_raw": payload.get("after_actionable_count_raw"),
-            "count_excluded_unchanged_issue_ids": payload.get("count_excluded_unchanged_issue_ids"),
-            "count_evidence_available": "after_actionable_count_raw" in payload,
-        })
+        counts.append(
+            {
+                "stage": event.get("event_type"),
+                "chunk_index": event.get("chunk_index"),
+                "timestamp": event.get("timestamp"),
+                "candidate_target_hash": payload.get("candidate_target_hash"),
+                "accepted": payload.get("accepted"),
+                "before_actionable_count": payload.get("before_actionable_count"),
+                "after_actionable_count": payload.get("after_actionable_count"),
+                "after_actionable_count_raw": payload.get("after_actionable_count_raw"),
+                "count_excluded_unchanged_issue_ids": payload.get(
+                    "count_excluded_unchanged_issue_ids"
+                ),
+                "count_excluded_refiner_veto_issue_ids": payload.get(
+                    "count_excluded_refiner_veto_issue_ids"
+                ),
+                "count_exclusion_policy": payload.get("count_exclusion_policy"),
+                "count_evidence_available": "after_actionable_count_raw" in payload,
+            }
+        )
     suffixes = []
     annotation_syntax = []
     for chunk in chunks:
@@ -79,21 +92,51 @@ def targeted_quality_evidence(
                                  "local_paragraph_index": index,
                                  "paragraph_alignment_verified": False,
                                  "paragraph_count_matches": aligned})
-    return {"version": 2, "policy": "report_only_no_authority_or_text_change",
-            "deferred_name_mappings": deferred, "extra_final_counts": counts,
-            "deferred_terminology_mappings": [
-                {"source": source, "target": target,
-                 "reason": memory.context_deferral_reason(source), "active": False}
-                for source, target in memory.all_nouns().items()
-                if memory.is_context_deferred(source)
-                and not requires_bounded_name_target(memory.category_for(source), source)
-            ],
-            "accepted_terminology_reconciliation": [
-                {"chunk_index": event.get("chunk_index"), **(event.get("payload") or {})}
-                for event in events if event.get("event_type") == "accepted_terminology_reconciled"
-            ],
-            "readability_call_accounting": readability_call_accounting(events),
-            "quoted_suffix_reports": suffixes, "source_annotation_syntax": annotation_syntax}
+    return {
+        "version": 2,
+        "policy": "report_only_no_authority_or_text_change",
+        "deferred_name_mappings": deferred,
+        "extra_final_counts": [
+            item for item in counts if item["stage"] == "extra_final_refinement_completed"
+        ],
+        "final_repair_counts": counts,
+        "canonical_quote_rebindings": [
+            {
+                "chunk_index": event.get("chunk_index"),
+                "candidate_target_hash": (event.get("payload") or {}).get("candidate_target_hash"),
+                "unmatched_issue_ids": (event.get("payload") or {}).get(
+                    "canonical_quote_unmatched_issue_ids"
+                ),
+                "issues": [
+                    {"issue_id": item.get("issue_id"), "binding": item["canonical_quote_binding"]}
+                    for item in (event.get("payload") or {}).get("issue_details", []) or []
+                    if isinstance(item, dict) and item.get("canonical_quote_binding")
+                ],
+            }
+            for event in events
+            if event.get("event_type") == "critique_completed"
+            and "canonical_quote_unmatched_issue_ids" in (event.get("payload") or {})
+        ],
+        "deferred_terminology_mappings": [
+            {
+                "source": source,
+                "target": target,
+                "reason": memory.context_deferral_reason(source),
+                "active": False,
+            }
+            for source, target in memory.all_nouns().items()
+            if memory.is_context_deferred(source)
+            and not requires_bounded_name_target(memory.category_for(source), source)
+        ],
+        "accepted_terminology_reconciliation": [
+            {"chunk_index": event.get("chunk_index"), **(event.get("payload") or {})}
+            for event in events
+            if event.get("event_type") == "accepted_terminology_reconciled"
+        ],
+        "readability_call_accounting": readability_call_accounting(events),
+        "quoted_suffix_reports": suffixes,
+        "source_annotation_syntax": annotation_syntax,
+    }
 
 
 def readability_call_accounting(events: list[dict[str, Any]]) -> dict[str, Any]:

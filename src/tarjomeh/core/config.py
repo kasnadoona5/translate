@@ -452,7 +452,8 @@ class TarjomehConfig:
         Processing order (consistent with from_toml):
         1. Expand env variables recursively.
         2. Apply mode preset defaults.
-        3. Apply simple flat .env overrides (TRANSLATOR_* / CRITIC_*).
+        3. Apply flat .env overrides. Persisted jobs retain model/quality policy;
+           only credentials, endpoints and transport may use live overrides.
         4. Enforce default country.
         """
         expanded = _expand_env_recursive(data)
@@ -552,6 +553,7 @@ class TarjomehConfig:
     def _apply_env_overrides(
         self, *, persisted_job: bool = False,
         load_diagnostics: list[dict[str, Any]] | None = None,
+        environment: dict[str, str] | None = None,
     ) -> None:
         """Apply simple flat .env overrides so users configure everything
         from ONE file (.env) without touching config.toml.
@@ -583,7 +585,7 @@ class TarjomehConfig:
         ignored: set[str] = set()
 
         def env(name: str, default: str = "") -> str:
-            value = os.environ.get(name, default)
+            value = (os.environ if environment is None else environment).get(name, default)
             if persisted_job and name not in live_fields:
                 if value.strip():
                     ignored.add(name)
@@ -667,7 +669,9 @@ class TarjomehConfig:
             }
             if load_diagnostics is not None:
                 load_diagnostics.append(diagnostic)
-            logger.info("Saved-job settings preserved; ignored overrides: %s", sorted(ignored))
+            logger.info(
+                "settings_env_difference: saved policy retained; ignored: %s", sorted(ignored)
+            )
 
     def _rehydrate_redacted_secrets(
         self,

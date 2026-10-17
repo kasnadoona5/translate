@@ -98,7 +98,7 @@ class BilingualSummary:
             if line_str == "## English Summary":
                 current_section = "english"
                 continue
-            if line_str == "## خلاصه فارسی":
+            if line_str in {"## خلاصه فارسی", "## خلاصه فارسی (RTL)"}:
                 current_section = "persian"
                 continue
             if re.match(r"^##(?:\s|$)(?!#)", line_str):

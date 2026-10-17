@@ -14,9 +14,16 @@ def test_saved_policy_isolated_but_live_transport_and_credentials_allowed(monkey
     monkeypatch.setenv("LLM_READ_TIMEOUT_SECONDS", "321")
     diagnostics = []
     config = TarjomehConfig.from_dict(
-        {"llm": {"model": "saved-route", "translation_reasoning": "disabled",
-                 "max_tokens": 12000, "critic": {"enabled": True}}},
-        persisted_job=persisted, load_diagnostics=diagnostics,
+        {
+            "llm": {
+                "model": "saved-route",
+                "translation_reasoning": "disabled",
+                "max_tokens": 12000,
+                "critic": {"enabled": True},
+            }
+        },
+        persisted_job=persisted,
+        load_diagnostics=diagnostics,
     )
     assert config.llm.model == ("saved-route" if persisted else "new-route")
     assert config.llm.translation_reasoning == ("disabled" if persisted else "auto")
@@ -34,8 +41,14 @@ def test_saved_recovery_budget_not_overridden(monkeypatch):
     monkeypatch.setenv("TRANSLATOR_RECOVERY_MAX_ATTEMPTS", "5")
     monkeypatch.setenv("CRITIC_RECOVERY_MODEL", "other")
     config = TarjomehConfig.from_dict(
-        {"llm": {"provider": "ollama", "recovery": {"max_attempts": 2},
-                 "critic": {"recovery_model": "saved"}}}, persisted_job=True,
+        {
+            "llm": {
+                "provider": "ollama",
+                "recovery": {"max_attempts": 2},
+                "critic": {"recovery_model": "saved"},
+            }
+        },
+        persisted_job=True,
     )
     assert config.llm.recovery.max_attempts == 2
     assert config.llm.critic.recovery_model == "saved"

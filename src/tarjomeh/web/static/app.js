@@ -1005,6 +1005,7 @@ async function openBookTermReview(jobId) {
             term.source_evidence || "",
             (term.source_variants || []).length ? `Variants: ${term.source_variants.join(", ")}` : "",
             term.english_explanation || "",
+            term.evidence_unavailable_reason || "",
             term.target_withheld_reason
                 ? `Persian option withheld (${term.target_withheld_reason}); enter your own rendering`
                 : ""

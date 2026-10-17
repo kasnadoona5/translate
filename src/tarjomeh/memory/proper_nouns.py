@@ -1372,23 +1372,27 @@ class ProperNouns:
             self._provenance[stored_key] = prior
 
         current_category = self._categories.get(stored_key)
-        if authority >= prior_authority and action != "preserved_higher_authority" and (
-            current_category is None
-            or new_category == "approved_term"
-            or action == "replaced_lower_authority"
-            or (
-                current_category == "technical_loanword"
-                and new_category in {
-                    "person", "source_grounded_entity"
-                }
-                and origin in {
-                    "observed_translation", "accepted_correction",
-                    "curated_glossary",
-                }
-            )
-            or (
-                current_category not in INLINE_ORIGINAL_CATEGORIES
-                and new_category in INLINE_ORIGINAL_CATEGORIES
+        if (
+            (action == "added" or authority >= prior_authority)
+            and action != "preserved_higher_authority"
+            and (
+                current_category is None
+                or new_category == "approved_term"
+                or action == "replaced_lower_authority"
+                or (
+                    current_category == "technical_loanword"
+                    and new_category in {"person", "source_grounded_entity"}
+                    and origin
+                    in {
+                        "observed_translation",
+                        "accepted_correction",
+                        "curated_glossary",
+                    }
+                )
+                or (
+                    current_category not in INLINE_ORIGINAL_CATEGORIES
+                    and new_category in INLINE_ORIGINAL_CATEGORIES
+                )
             )
         ):
             self._categories[stored_key] = new_category

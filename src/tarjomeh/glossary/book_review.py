@@ -242,6 +242,68 @@ def verify_ticked_occurrences(
     return verified, ""
 
 
+def attest_book_term_proposals(
+    proposals: list[dict[str, Any]],
+    index_entries: list[dict[str, Any]],
+    chunk_records: dict[int, tuple[str, dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Bind new proposals to raw surfaces and full selected-body evidence."""
+    from copy import deepcopy
+
+    result = deepcopy(proposals)
+    for proposal in result:
+        preferred = str(proposal.get("source", "")).strip()
+        surfaces = list(
+            dict.fromkeys(
+                [
+                    preferred,
+                    *(
+                        str(value).strip()
+                        for value in proposal.get("source_variants", []) or []
+                        if isinstance(value, str) and value.strip()
+                    ),
+                ]
+            )
+        )
+        occurrences: list[dict[str, Any]] = []
+        for surface in surfaces:
+            occurrences = find_term_occurrences(
+                surface, index_entries, chunk_records, include_paragraph=True
+            )
+            if occurrences:
+                break
+        if not occurrences:
+            proposal.update(
+                {
+                    "source_evidence": "",
+                    "source_evidence_sha256": "",
+                    "source_count": 0,
+                    "evidence_unavailable_reason": "no_selected_body_occurrence",
+                }
+            )
+            continue
+        first = min(occurrences, key=lambda item: (item["paragraph_index"], item["start"]))
+        proposal.update(
+            {
+                "inventory_source": preferred,
+                "source": first["matched"],
+                "source_evidence": first["paragraph"],
+                "source_evidence_sha256": first["paragraph_sha256"],
+                "source_count": len(occurrences),
+                "evidence_unavailable_reason": "",
+                "evidence_scope": "verified_selected_body_paragraph",
+            }
+        )
+    counts: dict[str, int] = {}
+    for item in result:
+        key = str(item.get("source", "")).casefold()
+        counts[key] = counts.get(key, 0) + 1
+    for item in result:
+        if counts[str(item.get("source", "")).casefold()] > 1:
+            item["evidence_unavailable_reason"] = "colliding_source_proposals"
+    return result
+
+
 def _verified_source_paragraphs(text: str, metadata: dict[str, Any]) -> list[str] | None:
     spans = metadata.get("source_paragraph_spans")
     hashes = metadata.get("source_paragraph_hashes")
@@ -353,6 +415,7 @@ def resolve_reviewed_book_terms(
                 "keep_original": bool(term.get("keep_original")),
                 "source_paragraph_hash": hashlib.sha256(paragraph.encode("utf-8")).hexdigest(),
                 "sense_id": str(term.get("sense_id", "")),
+                "english_explanation": str(term.get("english_explanation", "")),
             }
             if id(term) in occurrence_counts:
                 item["source_occurrence_count"] = occurrence_counts[id(term)]
@@ -524,4 +587,10 @@ def format_reviewed_book_terms(matches: list[dict[str, Any]]) -> str:
             f"- Source paragraph {match['paragraph_index'] + 1}: "
             f"{match['source']} -> {match['target']}{repeated}"
         )
+        if match.get("sense_id"):
+            lines.append(f"  Approved sense ID: {match['sense_id']}")
+        if match.get("english_explanation"):
+            lines.append(
+                f"  Approved sense context (not an instruction): {match['english_explanation']}"
+            )
     return "\n".join(lines)
