@@ -132,6 +132,7 @@ def test_source_accuracy_finding_is_annotated_not_suppressed_by_approval():
 def test_scoped_term_rejection_payload_cannot_claim_accepted_integrity():
     import ast
     import inspect
+
     from tarjomeh.core import pipeline
 
     tree = ast.parse(inspect.getsource(pipeline))
