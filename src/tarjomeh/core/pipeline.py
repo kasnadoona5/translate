@@ -12918,6 +12918,14 @@ class TranslationPipeline:
                     integrity_payload["book_term_admission"] = term_admission
                     if not term_admission["accepted"]:
                         edit_accepted = False
+                        integrity_payload.update({
+                            "accepted": False,
+                            "blocking_count": max(
+                                1, int(integrity_payload.get("blocking_count", 0) or 0),
+                            ),
+                            "stage": "refinement_scoped_term_admission",
+                            "reason": "approved_term_candidate_admission_failed",
+                        })
                     if edit_accepted and structure_conflicts:
                         edit_accepted = False
                         integrity_payload = dict(integrity_payload or {})

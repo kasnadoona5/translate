@@ -127,3 +127,34 @@ def test_source_accuracy_finding_is_annotated_not_suppressed_by_approval():
     critique = CritiqueResult(issue_details=[issue])
     _annotate_reviewed_term_conflicts(critique, source, "دستگاه عمل می‌کند.", matches)
     assert critique.issue_details == [issue] and issue["approved_term_conflicts"]
+
+
+def test_scoped_term_rejection_payload_cannot_claim_accepted_integrity():
+    import ast
+    import inspect
+    from tarjomeh.core import pipeline
+
+    tree = ast.parse(inspect.getsource(pipeline))
+    branch = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and ast.unparse(node.test) == "not term_admission['accepted']"
+        and any(
+            isinstance(child, ast.Constant) and child.value == "refinement_scoped_term_admission"
+            for child in ast.walk(node)
+        )
+    )
+    compiled = compile(ast.Module(body=[branch], type_ignores=[]), "<term-admission-event>", "exec")
+    for accepted in (False, True):
+        context = {
+            "term_admission": {"accepted": accepted},
+            "edit_accepted": True,
+            "integrity_payload": {"accepted": True, "blocking_count": 0},
+        }
+        exec(compiled, context)
+        assert context["edit_accepted"] is accepted
+        assert context["integrity_payload"]["accepted"] is accepted
+        if not accepted:
+            assert context["integrity_payload"]["blocking_count"] == 1
+            assert context["integrity_payload"]["stage"] == "refinement_scoped_term_admission"
