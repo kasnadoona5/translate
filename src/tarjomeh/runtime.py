@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v20.8.3"
+RUNTIME_RELEASE = "v20.8.4"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,16 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "persisted_job_policy_isolation": True,
+            "memory_category_and_conflict_authority": True,
+            "accepted_entity_not_lexical_plural": True,
+            "accepted_only_surface_salvage": True,
+            "shared_raw_paragraph_admission": True,
+            "canonical_quote_diff_binding": True,
+            "matched_readability_advisory_routing": True,
+            "selected_body_proposal_evidence": True,
+            "paragraph_term_candidate_admission": True,
+            "summary_exact_section_headers": True,
             "shared_source_entity_inventory_contract": True,
             "lexical_annotation_memory_deferral": True,
             "complete_terminology_reconciliation_events": True,
@@ -684,6 +694,199 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v2081_behavior_probes(),
         **_v2082_behavior_probes(),
         **_v2083_behavior_probes(),
+        **_v2084_behavior_probes(),
+    }
+
+
+def _v2084_behavior_probes() -> dict[str, bool]:
+    """Synthetic behavior only: no files, database, providers or environment writes."""
+    from types import SimpleNamespace
+
+    from tarjomeh.core.config import TarjomehConfig
+    from tarjomeh.core.pipeline import (
+        _classify_candidate_quality_count,
+        _critique_requires_refinement,
+        _merge_readability_evidence,
+        _rebind_canonical_critique,
+        _reviewed_term_candidate_admission,
+        _salvage_local_refinement_edits,
+    )
+    from tarjomeh.glossary.book_review import _sha, attest_book_term_proposals
+    from tarjomeh.memory.bilingual_summary import BilingualSummary
+    from tarjomeh.memory.proper_nouns import ProperNouns
+    from tarjomeh.quality.critique import CritiqueResult
+
+    config = TarjomehConfig()
+    config.llm.model = "saved"
+    diagnostics: list[dict[str, Any]] = []
+    config._apply_env_overrides(
+        persisted_job=True,
+        load_diagnostics=diagnostics,
+        environment={
+            "TRANSLATOR_MODEL": "other",
+            "TRANSLATOR_API_BASE": "http://router.invalid/v1",
+        },
+    )
+    nouns = ProperNouns()
+    nouns.add_noun(
+        "Ava Morris",
+        "آوا موریس",
+        category="person",
+        provenance="accepted_correction",
+        alignment_status="exact_local",
+    )
+    entity_ok = not nouns.context_deferral_reason("Ava Morris")
+    nouns.add_noun("civic order", "نظم مدنی", category="term", provenance="curated_glossary")
+    nouns.add_noun(
+        "civic order", "نظم مدنی", category="organization", provenance="observed_translation"
+    )
+    nouns.add_noun("state power", "قدرت دولتی", category="term", provenance="observed_translation")
+    nouns.mark_context_conflict("state power", corrected_source="power", corrected_target="قدرت")
+    nouns.add_noun("state power", "قدرت دولتی", category="term", provenance="observed_translation")
+    summary = BilingualSummary()
+    summary.update(
+        "## English Summary\nFirst claim.\n### Detail\nSecond claim.\n"
+        "## خلاصه فارسی\nادعای نخست.\n### جزئیات\nادعای بعدی."
+    )
+    source = "They act.\n\nA civic institution meets."
+    before = "آنها می‌روند.\n\nنهاد مدنی دیدار می‌کند."
+    after = before.replace("می‌روند", "کنش می‌کنند")
+    old = {
+        "issue_id": "old",
+        "severity": "major",
+        "category": "accuracy",
+        "confidence": 0.60,
+        "source_segment_id": "p2:s1",
+        "source_quote": "civic institution",
+        "current_persian_quote": "نهاد مدنی",
+    }
+    remaining, carried, _ = _classify_candidate_quality_count(
+        [old], source_text=source, previous_text=before, candidate_text=after
+    )
+    padded, _, _ = _classify_candidate_quality_count(
+        [old], source_text=source, previous_text=before, candidate_text=after + " "
+    )
+    binding = _rebind_canonical_critique(
+        {
+            "issue_details": [
+                {
+                    "source_segment_id": "p1:s1",
+                    "current_persian_quote": "12 مورد",
+                }
+            ]
+        },
+        "12 items.",
+        "12 مورد است.",
+        "۱۲ مورد است.",
+    )
+    issue = {
+        "issue_id": "minor",
+        "category": "fluency",
+        "severity": "minor",
+        "confidence": 0.5,
+        "source_segment_id": "p1:s1",
+        "source_quote": "A claim.",
+        "current_persian_quote": "عبارت ناقص است",
+    }
+    critique = CritiqueResult(average=9, issue_details=[issue])
+    _merge_readability_evidence(
+        critique,
+        [
+            {
+                "severity": "major",
+                "current_persian_quote": "عبارت ناقص است",
+                "suggested_correction": "عبارت کامل است",
+                "rationale": "Broken grammar and missing predicate.",
+            }
+        ],
+        source_text="A claim.",
+        translation="عبارت ناقص است.",
+    )
+    paragraph = "Institutions act."
+    metadata = {
+        "paragraph_indices": [0],
+        "structural_roles": ["body"],
+        "source_paragraph_spans": [[0, len(paragraph)]],
+        "source_paragraph_hashes": [_sha(paragraph)],
+    }
+    index = [
+        {
+            "chunk_index": 0,
+            "local_paragraph": 0,
+            "paragraph_index": 0,
+            "paragraph_sha256": _sha(paragraph),
+            "chapter_position": 2,
+        }
+    ]
+    proposals = attest_book_term_proposals(
+        [
+            {"source": "institution", "source_variants": ["Institutions"]},
+        ],
+        index,
+        {0: (paragraph, metadata)},
+    )
+    term = {
+        "source": "Institutions",
+        "target": "نهادها",
+        "paragraph_index": 0,
+        "source_paragraph_hash": _sha(paragraph),
+        "source_occurrence_count": 1,
+    }
+    term_admission = _reviewed_term_candidate_admission(
+        paragraph, "نهادها عمل می‌کنند.", "سامانه‌ها عمل می‌کنند.", metadata, [term]
+    )
+
+    class Gate:
+        def evaluate(self, *args: Any, **kwargs: Any) -> Any:
+            return SimpleNamespace(accepted=True, to_dict=lambda: {"accepted": True})
+
+    salvaged, decisions, _ = _salvage_local_refinement_edits(
+        source="It happens.",
+        previous="این امر انجام می شود.",
+        proposed="این امر انجام می‌شود.",
+        issue_details=[
+            {
+                "issue_id": "space",
+                "source_segment_id": "p1:s1",
+                "current_persian_quote": "می شود",
+                "category": "typography",
+                "rationale": "Incorrect spacing.",
+            }
+        ],
+        issue_decisions=[
+            {"issue_id": "space", "decision": "accepted", "resulting_span": "می‌شود"},
+            {
+                "issue_id": "veto",
+                "decision": "rejected",
+                "original_span": "می شود",
+                "resulting_span": "می‌شود",
+            },
+        ],
+        integrity_gate=Gate(),
+        protected_terms=[],
+        protect_inline_english=False,
+        allowed_inline_originals=[],
+    )
+    return {
+        "persisted_job_policy_isolation": config.llm.model == "saved"
+        and bool(diagnostics)
+        and config.llm.openrouter.api_base == "http://router.invalid/v1",
+        "memory_category_and_conflict_authority": nouns.category_for("civic order") == "term"
+        and nouns.is_context_deferred("state power"),
+        "accepted_entity_not_lexical_plural": entity_ok,
+        "accepted_only_surface_salvage": salvaged == "این امر انجام می‌شود."
+        and decisions[1]["commit_status"] == "not_committed",
+        "shared_raw_paragraph_admission": not remaining and carried == [old] and padded == [old],
+        "canonical_quote_diff_binding": binding["issue_details"][0]["current_persian_quote"]
+        == "۱۲ مورد",
+        "matched_readability_advisory_routing": _critique_requires_refinement(critique, 9)
+        and issue["severity"] == "minor"
+        and len(critique.issue_details) == 1,
+        "selected_body_proposal_evidence": proposals[0]["source"] == "Institutions"
+        and proposals[0]["source_evidence_sha256"] == _sha(paragraph),
+        "paragraph_term_candidate_admission": not term_admission["accepted"],
+        "summary_exact_section_headers": "Second claim." in summary.english_summary
+        and "ادعای بعدی." in summary.persian_summary,
     }
 
 
