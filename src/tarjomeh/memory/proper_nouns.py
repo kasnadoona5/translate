@@ -1361,12 +1361,18 @@ class ProperNouns:
                     or str(prior.get("stripped_target_annotation", ""))
                 ),
             }
+            if origin not in {"curated_glossary", "approved_research"}:
+                # A new automatic sighting is not an adjudication of a conflict.
+                self._provenance[stored_key].update({
+                    key: value for key, value in prior.items()
+                    if key.startswith(("context_deferred", "conflict_"))
+                })
         elif prior:
             prior["observations"] = observations
             self._provenance[stored_key] = prior
 
         current_category = self._categories.get(stored_key)
-        if (
+        if authority >= prior_authority and action != "preserved_higher_authority" and (
             current_category is None
             or new_category == "approved_term"
             or action == "replaced_lower_authority"
@@ -1566,8 +1572,11 @@ class ProperNouns:
             provenance.get("origin") == "accepted_correction"
             and (
                 provenance.get("alignment_status") != "exact_local"
-                or not is_reusable_terminology_mapping(
-                    key, self._nouns.get(key, "")
+                or not (
+                    is_safe_low_authority_mapping(
+                        key, self._nouns.get(key, ""), self.category_for(key),
+                    ) if is_automatic_entity_category(self.category_for(key))
+                    else is_reusable_terminology_mapping(key, self._nouns.get(key, ""))
                 )
                 or (
                     requires_bounded_name_target(self.category_for(key), key)
@@ -1680,7 +1689,15 @@ class ProperNouns:
                     else "first occurrence pending"
                 )
                 marker = (
-                    f"[{occurrence}; observed identity evidence, but Persian "
+                    f"[{occurrence}; "
+                    + (
+                        "unapproved extraction proposal, not an observed rendering; "
+                        if self._provenance.get(en, {}).get("origin") in {
+                            "auto_extraction", "incremental_extraction", "research_suggestion",
+                        }
+                        else "observed identity evidence, but "
+                    )
+                    + "Persian "
                     f"wording is advisory; authority={authority_class}; source "
                     "context decides; add the English original only beside a "
                     "source-faithful rendering]"

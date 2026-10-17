@@ -333,7 +333,9 @@ def main() -> None:
         return
     if args.out.exists():
         parser.error("Use a new output directory; refusing to overwrite trial evidence")
-    config = TarjomehConfig.from_dict(raw_config, credential_source=TarjomehConfig.load())
+    config = TarjomehConfig.from_dict(
+        raw_config, credential_source=TarjomehConfig.load(), persisted_job=True,
+    )
     if str(config.translation.mode).casefold() != "academic":
         parser.error("This fluency trial is for academic jobs only")
     records = asyncio.run(replay(config, pairs + controls(), with_refinement=args.with_refinement))

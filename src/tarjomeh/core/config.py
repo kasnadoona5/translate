@@ -444,6 +444,8 @@ class TarjomehConfig:
         data: dict[str, Any],
         *,
         credential_source: TarjomehConfig | None = None,
+        persisted_job: bool = False,
+        load_diagnostics: list[dict[str, Any]] | None = None,
     ) -> TarjomehConfig:
         """Create a TarjomehConfig from a dictionary.
 
@@ -459,7 +461,9 @@ class TarjomehConfig:
         # Missing in a saved job means the historical, zero-extra-call policy.
         if "extra_final_refine_attempts" not in expanded.get("translation", {}):
             config.translation.extra_final_refine_attempts = 0
-        config._apply_env_overrides()
+        config._apply_env_overrides(
+            persisted_job=persisted_job, load_diagnostics=load_diagnostics,
+        )
         # Persisted configs carry redacted credentials; refill from the
         # environment before validation rejects the empty key list.
         config._rehydrate_redacted_secrets(credential_source)
@@ -545,7 +549,10 @@ class TarjomehConfig:
 
         return config
 
-    def _apply_env_overrides(self) -> None:
+    def _apply_env_overrides(
+        self, *, persisted_job: bool = False,
+        load_diagnostics: list[dict[str, Any]] | None = None,
+    ) -> None:
         """Apply simple flat .env overrides so users configure everything
         from ONE file (.env) without touching config.toml.
 
@@ -568,7 +575,20 @@ class TarjomehConfig:
         translator fallbacks (handled via ${VAR} expansion and the client's
         endpoint resolution).
         """
-        env = os.environ.get
+        live_fields = {
+            "TRANSLATOR_API_KEY", "TRANSLATOR_API_BASE", "CRITIC_API_KEY",
+            "CRITIC_API_BASE", "LLM_STREAMING", "LLM_TRANSPORT_PROFILE",
+            "LLM_READ_TIMEOUT_SECONDS",
+        }
+        ignored: set[str] = set()
+
+        def env(name: str, default: str = "") -> str:
+            value = os.environ.get(name, default)
+            if persisted_job and name not in live_fields:
+                if value.strip():
+                    ignored.add(name)
+                return default
+            return value
 
         value = env("TRANSLATOR_MODEL", "").strip()
         if value:
@@ -639,6 +659,15 @@ class TarjomehConfig:
         value = env("CRITIC_RECOVERY_MAX_TOKENS", "").strip()
         if value.isdigit():
             self.llm.critic.recovery_max_tokens = int(value)
+        if ignored:
+            diagnostic = {
+                "event": "settings_env_difference",
+                "ignored_environment_variables": sorted(ignored),
+                "policy": "persisted_job_settings_preserved",
+            }
+            if load_diagnostics is not None:
+                load_diagnostics.append(diagnostic)
+            logger.info("Saved-job settings preserved; ignored overrides: %s", sorted(ignored))
 
     def _rehydrate_redacted_secrets(
         self,

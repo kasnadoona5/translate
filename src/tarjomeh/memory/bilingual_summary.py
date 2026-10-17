@@ -98,10 +98,10 @@ class BilingualSummary:
             if line_str == "## English Summary":
                 current_section = "english"
                 continue
-            if line_str == "## خلاصه فارسی" or "خلاصه فارسی" in line_str:
+            if line_str == "## خلاصه فارسی":
                 current_section = "persian"
                 continue
-            if line_str.startswith("##"):
+            if re.match(r"^##(?:\s|$)(?!#)", line_str):
                 current_section = None
                 continue
 

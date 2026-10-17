@@ -2091,6 +2091,7 @@ def _register_api(app: Flask) -> None:
             config = TarjomehConfig.from_dict(
                 job.get("config", {}),
                 credential_source=app.config.get("TARJOMEH_CONFIG"),
+                persisted_job=True,
             )
             pipeline = TranslationPipeline(
                 config, worker_id=_job_worker_id(job_id)
@@ -2126,6 +2127,7 @@ def _register_api(app: Flask) -> None:
         config = TarjomehConfig.from_dict(
             job.get("config", {}),
             credential_source=app.config.get("TARJOMEH_CONFIG"),
+            persisted_job=True,
         )
         pipeline = TranslationPipeline(config)
         input_path = Path(job["input_path"])
@@ -2245,6 +2247,7 @@ def _register_api(app: Flask) -> None:
                 config = TarjomehConfig.from_dict(
                     job.get("config", {}),
                     credential_source=app.config.get("TARJOMEH_CONFIG"),
+                    persisted_job=True,
                 )
                 pipeline = TranslationPipeline(
                     config, worker_id=_job_worker_id(job_id)

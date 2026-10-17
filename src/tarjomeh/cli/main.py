@@ -259,7 +259,7 @@ def cmd_jobs(args: argparse.Namespace) -> int:
 
         live_config = TarjomehConfig.load(validate=False)
         config = TarjomehConfig.from_dict(
-            job.get("config", {}), credential_source=live_config
+            job.get("config", {}), credential_source=live_config, persisted_job=True,
         )
         pipeline = TranslationPipeline(config)
 
@@ -302,7 +302,7 @@ def cmd_jobs(args: argparse.Namespace) -> int:
 
         live_config = TarjomehConfig.load(validate=False)
         config = TarjomehConfig.from_dict(
-            job.get("config", {}), credential_source=live_config
+            job.get("config", {}), credential_source=live_config, persisted_job=True,
         )
         pipeline = TranslationPipeline(config)
         try:
