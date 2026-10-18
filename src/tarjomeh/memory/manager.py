@@ -32,6 +32,7 @@ from tarjomeh.memory.bilingual_summary import BilingualSummary
 from tarjomeh.memory.long_term import LongTermMemory
 from tarjomeh.memory.short_term import ShortTermMemory
 from tarjomeh.quality.integrity import (
+    _CATALOG_TITLE_LINE_RE,
     detached_ezafe_artifacts,
     duplicated_comma_artifacts,
     foreign_script_artifacts,
@@ -135,6 +136,95 @@ _TERMINAL_PUNCTUATION_RE = re.compile(r"[.!?\u061f][\"'\u00bb)\]]*$")
 
 def _style_hash(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+_STYLE_PROSE_ROLES = frozenset({
+    "body", "academic_argument", "expository_nonfiction", "narrative_prose", "dialogue",
+})
+_STYLE_NAME_TOKEN = r"[^\W\d_]+(?:[.'\u2019-][^\W\d_]+)*\.?"
+_STYLE_CATALOG_NAME_RE = re.compile(
+    rf"^\s*({_STYLE_NAME_TOKEN}(?:\s+{_STYLE_NAME_TOKEN}){{0,3}}),\s*"
+    rf"({_STYLE_NAME_TOKEN}(?:\s+{_STYLE_NAME_TOKEN}){{0,5}})\.?\s*$",
+)
+_STYLE_REFERENCE_ENTRY_RE = re.compile(
+    r"^[A-Z\u00c0-\u024f][\w'\u2019-]+,\s+(?:[A-Z]\.\s*){1,3}"
+    r"\(?(?:18|19|20)\d{2}[a-z]?\)?[.,:]\s",
+)
+_STYLE_PUBLICATION_CONTEXT_RE = re.compile(
+    r"\b(?:copyright|publication data|catalog(?:ue|ing)?(?:[- ]in[- ]publication)?|"
+    r"bibliography|references|all rights reserved|isbn)\b", re.IGNORECASE,
+)
+_STYLE_PUBLICATION_NOTICE_RE = re.compile(
+    r"^\s*(?:first\s+published\s+(?:in\s+(?:18|19|20)\d{2}\b|by\s+)|"
+    r"published\s+in\s+(?:18|19|20)\d{2}\s+by\s+|"
+    r"(?:a|the)\s+catalog(?:ue)?\s+record\s+for\s+(?:this|the)\s+(?:book|volume|work)\b|"
+    r"typeset\s+in\b|printed\s+and\s+bound\s+in\b|"
+    r"(?:the\s+)?publisher\s+has\s+(?:used|made)\b.{0,180}\b(?:URLs?|websites?)\b)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _style_source_eligibility(
+    source: str, *, paragraph_role: str = "", chapter_title: str = "",
+    publication_context: bool = False,
+) -> dict[str, Any]:
+    """Classify style evidence, never translation quality or lexical authority.
+
+    A bare inverted name is not proven prose merely because a parser calls it
+    body. Explicit narrative/dialogue roles may explain that shape, but not in
+    publication context. No length floor or guessed grammatical analysis is used.
+    """
+    value = (source or "").strip()
+    publishing = bool(publication_context or _STYLE_PUBLICATION_CONTEXT_RE.search(chapter_title))
+    reason = ""
+    if not value:
+        reason = "missing_source_paragraph"
+    elif paragraph_role and paragraph_role not in _STYLE_PROSE_ROLES | {"mixed"}:
+        reason = "non_prose_paragraph_role"
+    elif _is_paratext_style_source(value):
+        reason = "paratext_source"
+    elif _NON_PROSE_RE.search(value):
+        reason = "non_prose_source"
+    elif _STYLE_REFERENCE_ENTRY_RE.match(value):
+        reason = "reference_entry"
+    elif _STYLE_PUBLICATION_NOTICE_RE.search(value):
+        reason = "publication_notice"
+    else:
+        author_tokens = re.findall(r"[^\W\d_]+", value.rsplit("/", 1)[-1])
+        catalogue_title = bool(
+            _CATALOG_TITLE_LINE_RE.fullmatch(value)
+            and len(author_tokens) >= 2
+            and all(token[:1].isupper() for token in author_tokens)
+        )
+        inverted = _STYLE_CATALOG_NAME_RE.fullmatch(value)
+        name_shaped = bool(inverted and all(
+            token[:1].isupper()
+            for token in re.findall(r"[^\W\d_]+", value)
+        ))
+        if catalogue_title:
+            reason = "catalogue_title_line" if publishing else "uncertain_catalogue_fragment"
+        elif name_shaped and (
+            publishing or paragraph_role not in {"narrative_prose", "dialogue"}
+        ):
+            reason = "catalogue_name_line" if publishing else "uncertain_catalogue_fragment"
+    return {
+        "version": 1, "eligible": not reason, "reason": reason,
+        "source_sha256": _style_hash(source), "paragraph_role": paragraph_role,
+        "chapter_title": chapter_title, "publication_context": publishing,
+    }
+
+
+def _style_record_source_eligibility(record: dict[str, Any]) -> dict[str, Any]:
+    stored = record.get("style_source_evidence", {})
+    stored = stored if isinstance(stored, dict) else {}
+    # Saved context can only narrow eligibility; it never proves alignment or
+    # elevates the stored role. The current source is always classified again.
+    return _style_source_eligibility(
+        str(record.get("source_text", "")),
+        paragraph_role=str(record.get("paragraph_role", "")),
+        chapter_title=str(stored.get("chapter_title", "")),
+        publication_context=stored.get("publication_context") is True,
+    )
 
 
 def _mask_style_citations(text: str) -> str:
@@ -312,7 +402,7 @@ def _style_record_is_authoritative(record: dict[str, Any]) -> bool:
         return False
     if not _has_complete_pair_proof(record):
         return False
-    if _is_paratext_style_source(str(record.get("source_text", ""))):
+    if not _style_record_source_eligibility(record)["eligible"]:
         return False
     cleaned = _clean_style_sample(
         str(record.get("text", "")), source=str(record.get("source_text", "")),
@@ -343,8 +433,7 @@ def _style_record_is_prompt_safe(record: dict[str, Any]) -> bool:
         and record.get("alignment_status") == "exact_paragraph"
         and _has_complete_pair_proof(record)
         and source
-        and not _is_paratext_style_source(source)
-        and not _NON_PROSE_RE.search(source)
+        and _style_record_source_eligibility(record)["eligible"]
         and _clean_style_sample(
             target, source=source, anchor_context=record.get("inline_anchor_context"),
         )
@@ -598,8 +687,8 @@ class MemoryManager:
             long_term=long_term_str,
             short_term=short_term_str,
             references={
-                "style_profile_version": len(
-                    [sample for sample in self.style_samples if _clean_style_sample(sample)]
+                "style_profile_version": sum(
+                    _style_record_is_prompt_safe(record) for record in self.style_sample_records
                 ),
                 "style_profile_status": self._style_profile_status(),
                 "long_term_entry_ids": [
@@ -824,7 +913,7 @@ class MemoryManager:
                 )
             )
         )
-        style_count_before = len(self.style_samples)
+        style_count_before = len(self._effective_style_samples())
         style_sample_policy: dict[str, Any] = {
             "candidate_count": 0,
             "accepted": False,
@@ -846,6 +935,8 @@ class MemoryManager:
                 paragraph_roles=(
                     structural_roles if self.quality_policy_version >= 1 else None
                 ),
+                chapter_title=chunk.chapter_title,
+                publication_context=bool(_STYLE_PUBLICATION_CONTEXT_RE.search(chunk.text)),
                 book_genre=self._book_genre(),
                 source_chunk_index=chunk.index,
                 representative=primary_role in {
@@ -886,7 +977,7 @@ class MemoryManager:
                 for reason in (reliability_reasons or [])
                 if str(reason).strip()
             )),
-            "style_sample_added": len(self.style_samples) > style_count_before,
+            "style_sample_added": len(self._effective_style_samples()) > style_count_before,
             "style_sample_policy": style_sample_policy,
             "structure_eligible": structure_eligible,
             "style_structure_eligible": style_structure_eligible,
@@ -1181,13 +1272,22 @@ class MemoryManager:
 
     def _style_profile_status(self) -> str:
         self._ensure_style_sample_records()
+        self._reconcile_style_sources()
         representative = sum(
             _style_record_is_authoritative(record)
             for record in self.style_sample_records
         )
         if representative >= self._style_min_representative_samples:
             return "established"
-        return "warming_up" if self.style_samples else "empty"
+        pending_or_eligible = any(
+            record.get("active", True)
+            and (
+                record["style_source_evidence"]["eligible"]
+                or record["style_source_evidence"]["reason"] == "missing_source_paragraph"
+            )
+            for record in self.style_sample_records
+        )
+        return "warming_up" if pending_or_eligible else "empty"
 
     def _update_style_profile(
         self,
@@ -1198,6 +1298,8 @@ class MemoryManager:
         source_alignment_proven: bool = False,
         paragraph_role: str = "body",
         paragraph_roles: list[str] | None = None,
+        chapter_title: str = "",
+        publication_context: bool = False,
         book_genre: str = "general",
         source_chunk_index: int | None = None,
         representative: bool = True,
@@ -1205,6 +1307,10 @@ class MemoryManager:
         unresolved_issue_paragraphs: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         """Maintain a compact book-level style guide from early translations."""
+        self._ensure_style_sample_records()
+        self._reconcile_style_sources()
+        stored_style_samples = list(self.style_samples)
+        self.style_samples = self._effective_style_samples()
         candidates: list[dict[str, Any]] = []
         rejections: list[dict[str, Any]] = []
         for paragraph_index, paragraph in enumerate(
@@ -1230,16 +1336,10 @@ class MemoryManager:
                     paragraph_roles[source_paragraph_index]
                     if 0 <= source_paragraph_index < len(paragraph_roles) else "unknown"
                 )
-                if candidate_role not in {
-                    "body",
-                    "academic_argument",
-                    "expository_nonfiction",
-                    "narrative_prose",
-                    "dialogue",
-                }:
-                    rejections.append({"paragraph_index": paragraph_index,
-                                       "reasons": ["non_body_paragraph_role"]})
-                    continue
+            source_evidence = _style_source_eligibility(
+                source_paragraph, paragraph_role=candidate_role,
+                chapter_title=chapter_title, publication_context=publication_context,
+            )
             anchor_context = {
                 "authorized": {
                     key: value for key, value in self.proper_nouns.inline_eligible_nouns().items()
@@ -1257,6 +1357,7 @@ class MemoryManager:
             quality["inline_anchor_context"] = anchor_context
             quality["source_text"] = source_paragraph
             quality["paragraph_role"] = candidate_role
+            quality["style_source_evidence"] = source_evidence
             # Exact only when the stored sample is the whole paragraph and the
             # paragraph itself is proven aligned with its source paragraph.
             complete_sample = str(quality.get("sample", "")) == paragraph.strip()
@@ -1311,7 +1412,14 @@ class MemoryManager:
                 quality.get("approved")
                 and float(quality.get("score", 0.0)) >= self._style_min_score
             ):
-                candidates.append(quality)
+                if source_evidence["eligible"]:
+                    candidates.append(quality)
+                else:
+                    rejections.append({
+                        **quality, "approved": False,
+                        "source_paragraph_index": source_paragraph_index,
+                        "reasons": [source_evidence["reason"]],
+                    })
             else:
                 if (
                     quality.get("approved")
@@ -1357,6 +1465,7 @@ class MemoryManager:
                 "text_hash": _style_hash(text),
                 "source_text_hash": _style_hash(source_text),
                 "paragraph_role": selected.get("paragraph_role", paragraph_role),
+                "style_source_evidence": selected["style_source_evidence"],
                 "book_genre": book_genre,
                 "representative": bool(representative or paragraph_roles is not None),
                 "fallback": not bool(representative or paragraph_roles is not None),
@@ -1413,18 +1522,14 @@ class MemoryManager:
                 weakest_score = float(
                     existing_quality[weakest_index].get("score", 0.0)
                 )
-                record_indices = (
-                    [
-                        next(
-                            index
-                            for index, existing in enumerate(self.style_sample_records)
-                            if existing.get("active", True) and existing.get("text") == sample
-                        )
-                        for sample in self.style_samples
-                    ]
-                    if self.quality_policy_version >= 1
-                    else list(range(len(self.style_samples)))
-                )
+                record_indices = [
+                    next(
+                        index for index, existing in enumerate(self.style_sample_records)
+                        if existing.get("active", True) and existing.get("text") == sample
+                        and _style_record_source_eligibility(existing)["eligible"]
+                    )
+                    for sample in self.style_samples
+                ]
                 fallback_indices = [index for index, record_index in enumerate(record_indices)
                                     if self.style_sample_records[record_index].get("fallback")]
                 replace_fallback = bool(record["representative"] and fallback_indices)
@@ -1466,6 +1571,8 @@ class MemoryManager:
                         "weakest_existing_score": weakest_score,
                     })
 
+        if not report["accepted"]:
+            self.style_samples = stored_style_samples
         self.style_profile = self._render_style_profile()
         report["profile_status"] = self._style_profile_status()
         report["style_block_characters"] = len(self.style_profile)
@@ -1482,6 +1589,7 @@ class MemoryManager:
     def _render_style_profile(self) -> str:
         """Build a prompt-safe style guide from trusted prose samples."""
         self._ensure_style_sample_records()
+        self._reconcile_style_sources()
         ordered_records = sorted(
             self.style_sample_records,
             key=lambda record: (
@@ -1557,7 +1665,7 @@ class MemoryManager:
     def _legacy_style_profile_for_prompt(self) -> str:
         """Keep old checkpoints usable when they predate persisted samples."""
         value = str(self.style_profile or "").strip()
-        if self.style_samples or not value:
+        if self.style_samples or self.style_sample_records or not value:
             return ""
         if _STYLE_PROTOCOL_RE.search(value) or _UNTRANSLATED_CITATION_PROSE_RE.search(value):
             return ""
@@ -1963,6 +2071,22 @@ class MemoryManager:
             window_size=self.short_term.window_size
         )
         self._verify_legacy_style_records()
+        self._reconcile_style_sources()
+        if self.style_sample_records:
+            self.style_profile = self._render_style_profile()
+
+    def _reconcile_style_sources(self) -> None:
+        """Retain source decisions without rewriting the raw sample list."""
+        for record in self.style_sample_records:
+            record["style_source_evidence"] = _style_record_source_eligibility(record)
+
+    def _effective_style_samples(self) -> list[str]:
+        """Return capacity-eligible samples separately from retained history."""
+        return list(dict.fromkeys(
+            str(record["text"]) for record in self.style_sample_records
+            if record.get("active", True) and record.get("text")
+            and _style_record_source_eligibility(record)["eligible"]
+        ))
 
     def _verify_legacy_style_records(self) -> dict[str, int]:
         """Prove or quarantine style records saved before complete-pair storage.

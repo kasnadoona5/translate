@@ -16,6 +16,43 @@ _POSSIBLE_SECRET_RE = re.compile(
 )
 
 
+def style_source_evidence(state: dict[str, Any]) -> dict[str, Any]:
+    """Distinguish retained style history from current usable evidence."""
+    from tarjomeh.memory.manager import (
+        _style_record_is_authoritative,
+        _style_record_is_prompt_safe,
+        _style_record_source_eligibility,
+    )
+
+    records = []
+    for index, record in enumerate(state.get("style_sample_records", []) or []):
+        if not isinstance(record, dict):
+            continue
+        source = _style_record_source_eligibility(record)
+        records.append({
+            "record_index": index, "source_chunk_index": record.get("source_chunk_index"),
+            "source_paragraph_index": record.get("source_paragraph_index"),
+            "stored_active": record.get("active", True),
+            "stored_representative": bool(record.get("representative")),
+            "target_sha256": hashlib.sha256(str(record.get("text", "")).encode()).hexdigest(),
+            "source_eligibility": source,
+            "current_prompt_eligible": _style_record_is_prompt_safe(record),
+            "current_authoritative": _style_record_is_authoritative(record),
+        })
+    return {
+        "records": records,
+        "stored_record_count": len(records),
+        "effective_prompt_count": sum(row["current_prompt_eligible"] for row in records),
+        "effective_authoritative_count": sum(row["current_authoritative"] for row in records),
+        "source_excluded_count": sum(
+            row["stored_active"] and not row["source_eligibility"]["eligible"] for row in records
+        ),
+        "historical_prompt_exposure": "inspect_saved_components_not_current_eligibility",
+        "semantic_quality": "requires_source_based_human_review",
+        "authority": "report_only_no_saved_state_rewrite",
+    }
+
+
 def targeted_quality_evidence(
     proper: dict[str, Any], events: list[dict[str, Any]], chunks: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -422,7 +459,11 @@ def quality_safeguard_evidence(
         persian_option_defect,
         resolve_reviewed_book_terms,
     )
-    from tarjomeh.memory.manager import _style_record_is_authoritative, _style_record_is_prompt_safe
+    from tarjomeh.memory.manager import (
+        _style_record_is_authoritative,
+        _style_record_is_prompt_safe,
+        _style_record_source_eligibility,
+    )
     from tarjomeh.memory.proper_nouns import ProperNouns
     from tarjomeh.quality.integrity import source_note_cue_inventory
 
@@ -500,6 +541,9 @@ def quality_safeguard_evidence(
             "stored_representative": bool(item.get("representative")),
             "current_prompt_eligible": _style_record_is_prompt_safe(item),
             "current_authoritative": _style_record_is_authoritative(item),
+            "source_eligibility": _style_record_source_eligibility(item),
+            "stored_active": item.get("active", True),
+            "historical_prompt_exposure": "consult_saved_prompt_components_not_current_eligibility",
             "alignment_evidence": "mechanical_source_target_pair_not_semantic_proof",
             "quality_evidence": "stored_model_scores_not_human_verification",
             "stored_final_scores": item.get("final_scores"),

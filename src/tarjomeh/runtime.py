@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v20.8.5"
+RUNTIME_RELEASE = "v20.8.6"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,8 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "source_eligible_style_memory": True,
+            "historical_style_source_quarantine": True,
             **{
                 name: True
                 for name in (
@@ -594,6 +596,7 @@ def runtime_behavior_probes() -> dict[str, bool]:
             manager.style_sample_records
             and manager.style_sample_records[0].get("fallback") is True
             and manager._style_profile_status() == "warming_up"
+            and not manager._render_style_profile()
         ),
         "default_benchmark_is_installed": bool(
             suite["id"] == "academic-core-v1" and len(suite["passages"]) == 4
@@ -715,7 +718,14 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v2083_behavior_probes(),
         **_v2084_behavior_probes(),
         **_v2085_behavior_probes(),
+        **_v2086_behavior_probes(),
     }
+
+
+def _v2086_behavior_probes() -> dict[str, bool]:
+    from tarjomeh.core.quality_policy_probes import style_source_probes
+
+    return style_source_probes()
 
 
 def _v2085_behavior_probes() -> dict[str, bool]:

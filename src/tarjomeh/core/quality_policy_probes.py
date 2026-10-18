@@ -1,5 +1,6 @@
 """Synthetic behavior probes: no providers, files, database or environment edits."""
 
+from copy import deepcopy
 from dataclasses import replace
 
 from tarjomeh.chunking.chunker import Chunk
@@ -16,6 +17,47 @@ from tarjomeh.glossary.book_review import (
 )
 from tarjomeh.glossary.manager import GlossaryEntry
 from tarjomeh.memory.manager import MemoryManager, _style_record_is_authoritative
+
+
+def style_source_probes() -> dict[str, bool]:
+    from tarjomeh.memory.manager import _style_hash, _style_record_is_prompt_safe
+
+    config = TarjomehConfig()
+    text = (
+        "\u0627\u062f\u0639\u0627 \u0628\u0647 \u0634\u0648\u0627\u0647\u062f "
+        "\u0648\u0627\u0628\u0633\u062a\u0647 \u0627\u0633\u062a."
+    )
+    memory = MemoryManager(config)
+    scores = dict.fromkeys(("accuracy", "fluency", "terminology", "register"), 9.5)
+    result = memory._update_style_profile(
+        text + "\n\n" + text,
+        source_paragraphs=["Wilson, Adriana.", "Evidence supports the claim."],
+        source_paragraph_indices=[0, 1], source_alignment_proven=True,
+        paragraph_role="mixed", paragraph_roles=["body", "body"],
+        publication_context=True, representative=False, final_scores=scores,
+    )
+    good = memory.style_sample_records[0]
+    bad = deepcopy(good)
+    bad.update(source_text="Wilson, Adriana.", text=text)
+    bad["source_text_hash"] = _style_hash(bad["source_text"])
+    bad.pop("style_source_evidence", None)
+    state = memory.to_dict()
+    state.update(style_sample_records=[bad], style_samples=[text], style_profile=text)
+    restored = MemoryManager(config)
+    restored.from_dict(state)
+    return {
+        "source_eligible_style_memory": result["accepted"]
+        and len(memory.style_sample_records) == 1
+        and good["source_text"] == "Evidence supports the claim."
+        and _style_record_is_authoritative(good)
+        and any("catalogue_name_line" in row["reasons"] for row in result["rejections"]),
+        "historical_style_source_quarantine": not _style_record_is_prompt_safe(bad)
+        and not _style_record_is_authoritative(bad)
+        and not restored._render_style_profile()
+        and not restored._legacy_style_profile_for_prompt()
+        and not restored._effective_style_samples()
+        and len(restored.style_sample_records) == 1,
+    }
 
 
 def quality_policy_probes() -> dict[str, bool]:
