@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v20.8.4"
+RUNTIME_RELEASE = "v20.8.5"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,23 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            **{
+                name: True
+                for name in (
+                    "order_independent_readability_evidence",
+                    "identical_term_proposal_dedup",
+                    "fresh_term_scope_default",
+                    "persian_plus_scoped_original",
+                    "pending_only_term_skip",
+                    "curated_revision_authority",
+                    "prior_only_retranslation_context",
+                    "active_memory_version_replacement",
+                    "pending_canonical_summary_coverage",
+                    "paragraph_role_style_evidence",
+                    "raw_token_counter_diagnostics",
+                    "actual_ignored_policy_diagnostics",
+                )
+            },
             "persisted_job_policy_isolation": True,
             "memory_category_and_conflict_authority": True,
             "accepted_entity_not_lexical_plural": True,
@@ -163,6 +180,8 @@ def runtime_capabilities() -> dict[str, Any]:
             "report_only_semantic_evidence_labels": True,
         },
         "policy_versions": {
+            "fresh_job_memory": 1,
+            "manual_retranslation_admission": 1,
             "structure_evidence": 3,
             "canonical_text": 3,
             "layer1_admission": 12,
@@ -187,7 +206,7 @@ def runtime_capabilities() -> dict[str, Any]:
             "attachment_trial": 1,
             "book_term_scope": 6,
             "final_language_admission": 7,
-            "book_term_review": 3,
+            "book_term_review": 4,
             "source_term_inventory": 3,
             "render_identity": 2,
             "previous_context_identity": 1,
@@ -695,7 +714,14 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v2082_behavior_probes(),
         **_v2083_behavior_probes(),
         **_v2084_behavior_probes(),
+        **_v2085_behavior_probes(),
     }
+
+
+def _v2085_behavior_probes() -> dict[str, bool]:
+    from tarjomeh.core.quality_policy_probes import quality_policy_probes
+
+    return quality_policy_probes()
 
 
 def _v2084_behavior_probes() -> dict[str, bool]:

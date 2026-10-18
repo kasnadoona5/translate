@@ -76,7 +76,7 @@ class LongTermMemory:
         if not self._pairs:
             return []
 
-        eligible_pairs = list(self._pairs)
+        eligible_pairs = [pair for pair in self._pairs if pair.get("active", True)]
         if not eligible_pairs:
             return []
 

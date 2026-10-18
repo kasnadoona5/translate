@@ -16,7 +16,7 @@ import re
 import secrets
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor, Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -29,8 +29,8 @@ from flask import (
     jsonify,
     render_template,
     request,
-    session,
     send_file,
+    session,
 )
 from werkzeug.utils import secure_filename
 
@@ -1086,6 +1086,18 @@ def _register_api(app: Flask) -> None:
             f"book_query_budget={search_config.get('max_queries_per_book')}",
             "",
         ])
+        from tarjomeh.core.evidence_audit import settings_and_token_diagnostics
+
+        diagnostics = settings_and_token_diagnostics(db.get_chunk_events(job_id))
+        lines.append("Settings and Token Diagnostics (report only):")
+        for item in diagnostics["settings_differences"]:
+            lines.append("  Saved job policy retained; ignored environment names: "
+                         + ", ".join(item["ignored_environment_variables"]))
+        for item in diagnostics["inconsistent_token_counters"]:
+            lines.append(
+                "  Inconsistent provider counters: " + json.dumps(item, ensure_ascii=False)
+            )
+        lines.extend(["  Component sums are diagnostic, not billed tokens.", ""])
         research = db.get_job_artifact(job_id, "book_research")
         book_term_snapshot = db.get_job_artifact(job_id, "book_term_snapshot_v1")
         structure_audit = db.get_job_artifact(job_id, "pdf_structure_audit")
@@ -2124,16 +2136,21 @@ def _register_api(app: Flask) -> None:
         data = request.get_json(silent=True) or {}
         fmt = data.get("format") or job.get("config", {}).get("output", {}).get("format", "docx")
         bilingual = data.get("bilingual_mode") or job.get("config", {}).get("output", {}).get("bilingual_mode")
-        config = TarjomehConfig.from_dict(
-            job.get("config", {}),
-            credential_source=app.config.get("TARJOMEH_CONFIG"),
-            persisted_job=True,
-        )
-        pipeline = TranslationPipeline(config)
-        input_path = Path(job["input_path"])
-        extension = "md" if fmt == "markdown" else fmt
-        output_path = input_path.parent / f"{input_path.stem}_reviewed.{extension}"
+        if not _try_claim_job(job_id):
+            return jsonify(
+                {"error": "Job is busy; wait for its canonical checkpoint before exporting"}
+            ), 409
+        pipeline = None
         try:
+            config = TarjomehConfig.from_dict(
+                job.get("config", {}),
+                credential_source=app.config.get("TARJOMEH_CONFIG"),
+                persisted_job=True,
+            )
+            pipeline = TranslationPipeline(config)
+            input_path = Path(job["input_path"])
+            extension = "md" if fmt == "markdown" else fmt
+            output_path = input_path.parent / f"{input_path.stem}_reviewed.{extension}"
             exported = pipeline.export_completed_job(
                 job_id,
                 output_path,
@@ -2142,6 +2159,7 @@ def _register_api(app: Flask) -> None:
             )
         finally:
             _close_pipeline(pipeline)
+            _release_job_claim(job_id)
         return jsonify({"status": "exported", "output_path": str(exported)})
 
     @app.route("/api/jobs/<job_id>/stream")
@@ -2374,14 +2392,14 @@ def _register_api(app: Flask) -> None:
     @_require_auth
     @_serialise_glossary_writes
     def api_book_term_review(job_id: str):
-        from tarjomeh.jobs.database import JobDatabase, JobStatus
-        from tarjomeh.glossary.manager import GlossaryManager
         from tarjomeh.glossary.book_review import (
+            BOOK_WIDE_RECOMMENDED,
             REVIEW_VERSION,
             REVIEWED_OCCURRENCES,
-            BOOK_WIDE_RECOMMENDED,
             verify_ticked_occurrences,
         )
+        from tarjomeh.glossary.manager import GlossaryManager
+        from tarjomeh.jobs.database import JobDatabase, JobStatus
 
         db = JobDatabase()
         job = db.get_job(job_id)
@@ -2408,7 +2426,7 @@ def _register_api(app: Flask) -> None:
 
             index = db.get_job_artifact(job_id, "book_term_body_index_v1") or {}
             if (
-                review_version not in {2, 3}
+                review_version not in {2, 3, 4}
                 or index.get("source_sha256") != review.get("source_sha256")
             ):
                 return None
@@ -2463,7 +2481,7 @@ def _register_api(app: Flask) -> None:
             })
         if job.get("raw_status") != JobStatus.AWAITING_BOOK_TERM_REVIEW or review.get("phase") != "awaiting":
             return jsonify({"error": "Book-term review is no longer awaiting decisions"}), 409
-        if review_version not in {1, 2, REVIEW_VERSION}:
+        if review_version not in {1, 2, 3, REVIEW_VERSION}:
             return jsonify({"error": "Unsupported book-term review version"}), 409
         try:
             if db.get_job_source_hash(job_id) != review.get("source_sha256"):
@@ -2483,8 +2501,16 @@ def _register_api(app: Flask) -> None:
             keep_original = payload.get("keep_original") is True
             if not source or len(source) > 120:
                 return jsonify({"error": "Enter an English term (at most 120 characters)"}), 400
-            if not target and not keep_original:
+            if not target and (review_version >= 4 or not keep_original):
                 return jsonify({"error": "Enter a Persian rendering or keep the original"}), 400
+            if (
+                review_version >= 4
+                and keep_original
+                and not re.search(r"[\u0621-\u063a\u0641-\u06d3]", target)
+            ):
+                return jsonify(
+                    {"error": "Enter the Persian rendering; the original is kept separately"}
+                ), 400
             if any(
                 str(item.get("source", "")).casefold() == source.casefold()
                 for item in proposals
@@ -2507,28 +2533,37 @@ def _register_api(app: Flask) -> None:
             curated = job_curated_glossary()
             if any(
                 entry.source.casefold() == source.casefold()
-                and not entry.is_auto and entry.target != (source if keep_original else target)
+                and not entry.is_auto
+                and entry.target != (source if keep_original and review_version < 4 else target)
                 for entry in curated.entries
             ):
                 return jsonify({"error": f"Curated glossary conflict: {source}"}), 409
             first = occurrences[0]
-            proposals.append({
-                "source": source,
-                "target": source if keep_original else target,
-                "english_explanation": " ".join(str(payload.get("sense", "")).split())[:300],
-                "source_evidence": str(first["paragraph"])[:500],
-                "source_evidence_sha256": first["paragraph_sha256"],
-                "source_count": len(occurrences),
-                "source_variants": [],
-                "origin": "user_added",
-                "status": "proposed",
-                "chapter_positions": [],
-                "sense_id": "",
-                "keep_original": keep_original,
-                "scope_mode": "evidence_paragraph",
-            })
+            proposals.append(
+                {
+                    "source": source,
+                    "target": source if keep_original and review_version < 4 else target,
+                    "english_explanation": " ".join(str(payload.get("sense", "")).split())[:300],
+                    "source_evidence": str(first["paragraph"])[:500],
+                    "source_evidence_sha256": first["paragraph_sha256"],
+                    "source_count": len(occurrences),
+                    "source_variants": [],
+                    "origin": "user_added",
+                    "status": "proposed",
+                    "chapter_positions": [],
+                    "sense_id": "",
+                    "keep_original": keep_original,
+                    "scope_mode": BOOK_WIDE_RECOMMENDED
+                    if review_version >= 4
+                    else "evidence_paragraph",
+                }
+            )
             review["proposals"] = proposals
         elif action == "decide":
+            from tarjomeh.glossary.book_review import (
+                collision_has_explicit_resolution,
+                curated_conflicting_entries,
+            )
             decisions = payload.get("decisions", [])
             if not isinstance(decisions, list) or not decisions:
                 return jsonify({"error": "Select one or more proposals"}), 400
@@ -2553,27 +2588,41 @@ def _register_api(app: Flask) -> None:
                 source = str(item.get("source", ""))
                 target = str(decision.get("target", item.get("target", ""))).strip()
                 keep_original = decision.get("keep_original") is True
-                if keep_original:
+                if keep_original and review_version < 4:
                     target = source
                 if status == "approved" and not target:
                     return jsonify({"error": f"Persian term missing for {source}"}), 400
-                if status == "approved" and any(
-                    entry.source.casefold() == source.casefold()
-                    and not entry.is_auto and entry.target != target
-                    for entry in curated.entries
+                if (status == "approved" and review_version >= 4 and keep_original
+                        and not re.search(r"[\u0621-\u063a\u0641-\u06d3]", target)):
+                    return jsonify(
+                        {
+                            "error": f"Persian rendering missing for {source}; "
+                                     "the original is separate"
+                        }
+                    ), 400
+                if status == "approved" and curated_conflicting_entries(
+                    source, target, curated.entries, item if review_version >= 4 else None,
                 ):
                     return jsonify({"error": f"Curated glossary conflict: {source}"}), 409
                 positions = decision.get("chapter_positions", [])
                 if (not isinstance(positions, list)
                         or any(not isinstance(value, int) or value < 1 for value in positions)):
                     return jsonify({"error": "Invalid chapter positions"}), 400
-                scope_mode = str(decision.get("scope_mode", "evidence_paragraph"))
+                scope_mode = str(
+                    decision.get(
+                        "scope_mode",
+                        item.get(
+                            "scope_mode",
+                            BOOK_WIDE_RECOMMENDED if review_version >= 4 else "evidence_paragraph",
+                        ),
+                    )
+                )
                 allowed_scopes = {"evidence_paragraph", REVIEWED_OCCURRENCES}
                 if review_version == 1:
                     # Previously saved legacy approvals still resolve unchanged;
                     # a new decision may not create another all-body mandate.
                     allowed_scopes = {"evidence_paragraph"}
-                elif review_version == 3:
+                elif review_version in {3, 4}:
                     allowed_scopes.add(BOOK_WIDE_RECOMMENDED)
                 if scope_mode not in allowed_scopes:
                     if scope_mode == "all_body":
@@ -2603,9 +2652,13 @@ def _register_api(app: Flask) -> None:
                             "error": f"Occurrence check failed for {source}: {failure}"
                         }), 409
                 evidence_hash = str(item.get("source_evidence_sha256", ""))
-                if status == "approved" and review_version in {2, 3}:
+                if status == "approved" and review_version in {2, 3, 4}:
                     known = term_occurrences(source)
-                    if item.get("evidence_unavailable_reason") or not known or (
+                    unavailable = item.get("evidence_unavailable_reason")
+                    if (review_version >= 4 and unavailable == "colliding_source_proposals"
+                            and collision_has_explicit_resolution(index, updated, decisions)):
+                        unavailable = ""
+                    if unavailable or not known or (
                         scope_mode in {"evidence_paragraph", BOOK_WIDE_RECOMMENDED}
                         and not any(entry["paragraph_sha256"] == evidence_hash for entry in known)
                     ):
@@ -2621,7 +2674,8 @@ def _register_api(app: Flask) -> None:
                     "status": status, "target": target if status == "approved" else "",
                     "keep_original": keep_original if status == "approved" else False,
                     "chapter_positions": sorted(set(positions)),
-                    "sense_id": str(decision.get("sense_id", "")).strip()[:60],
+                    "sense_id": str(decision.get("sense_id", item.get("sense_id", "")
+                                                 if review_version >= 4 else "")).strip()[:60],
                     "scope_mode": scope_mode,
                     "approved_occurrences": approved_occurrences,
                 })
@@ -2629,8 +2683,9 @@ def _register_api(app: Flask) -> None:
         elif action in {"start", "skip"}:
             review["phase"] = "started" if action == "start" else "skipped"
             if action == "skip":
-                for item in proposals:
-                    item["status"] = "skipped"
+                from tarjomeh.glossary.book_review import skip_pending_proposals
+
+                review["proposals"] = skip_pending_proposals(proposals, review_version)
             if not db.complete_book_term_review(job_id, review):
                 return jsonify({"error": "Book-term review changed; reload it"}), 409
             db.log_event(job_id, "INFO", f"Book-term review {review['phase']} by user.")

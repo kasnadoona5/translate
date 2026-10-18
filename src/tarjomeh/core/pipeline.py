@@ -773,6 +773,26 @@ def audit_translation_language(
         structural_role=structural_role,
         chapter_title=chapter_title,
     )
+    scoped_originals = list((anchor_context or {}).get("scoped_book_originals", []) or [])
+    if scoped_originals:
+        from tarjomeh.glossary.book_review import scoped_original_permissions
+
+        source_parts, target_parts = split_paragraphs(source), split_paragraphs(translation)
+        if len(source_parts) == len(target_parts):
+            permitted = scoped_original_permissions(source, translation, scoped_originals)
+            unexpected = []
+            for index, (source_part, target_part) in enumerate(
+                zip(source_parts, target_parts, strict=True)
+            ):
+                local = [str(item["source"]) for item in scoped_originals
+                         if item.get("paragraph_index") == index
+                         and item.get("source_paragraph_hash") == _candidate_text_hash(source_part)
+                         and item.get("original_introduction_required")
+                         and str(item["source"]) in permitted]
+                unexpected.extend(unexpected_latin_prose(
+                    source_part, target_part, allowed_originals=[*allowed_originals, *local],
+                    structural_role=structural_role, chapter_title=chapter_title,
+                ))
     repeated = source_unjustified_repeated_word_artifacts(source, translation)
     repeated_adjacent_spans = (
         source_unjustified_repeated_adjacent_span_artifacts(source, translation)
@@ -908,11 +928,15 @@ def audit_document_final_text(
     unresolved_identifiers: list[dict[str, Any]] = []
     report_only_findings: list[dict[str, Any]] = []
     for paragraph in document.paragraphs:
+        local_anchors = dict(anchor_context or {})
+        local_anchors["scoped_book_originals"] = paragraph.metadata.get(
+            "book_term_original_approvals", []
+        )
         language = audit_translation_language(
             paragraph.source_text,
             paragraph.translated_text,
             allowed_originals=allowed_originals,
-            anchor_context=anchor_context,
+            anchor_context=local_anchors,
             structural_role=str(
                 paragraph.metadata.get("structure_role", "body")
             ),
@@ -4338,7 +4362,7 @@ def _critique_for_event(
                         "rationale", "risk_flags",
                         "suggestion_orthography_normalized",
                         "source_segment_id_corrected",
-                        "readability_advisory",
+                        "readability_advisory", "readability_advisories",
                     )
                 },
                 "issue_fingerprint": _quality_issue_fingerprint(detail),
@@ -4617,7 +4641,7 @@ def _merge_readability_evidence(
         if destination is None:
             unmatched.append(readability)
             continue
-        destination["readability_advisory"] = {
+        advisory = {
             "severity": readability.get("severity"),
             "current_persian_quote": quote,
             "suggested_correction": readability.get("suggested_correction"),
@@ -4651,11 +4675,25 @@ def _merge_readability_evidence(
                     + translation[start + len(quote) :]
                 )
                 conflicts = _introduced_structure_conflicts(source_text, translation, candidate)
-                destination["readability_advisory"]["routing_eligible"] = not conflicts
+                advisory["routing_eligible"] = not conflicts
                 if conflicts:
-                    destination["readability_advisory"]["routing_suppressed_reason"] = (
+                    advisory["routing_suppressed_reason"] = (
                         "source_structure_conflict"
                     )
+        # Preserve alternatives, but expose one deterministic routing witness to
+        # existing consumers. A weaker overlapping observation cannot erase it.
+        alternatives = list(destination.get("readability_advisories", []) or [])
+        if advisory not in alternatives:
+            alternatives.append(advisory)
+        alternatives.sort(key=lambda item: (
+            not bool(item.get("routing_eligible")),
+            {"critical": 0, "major": 1, "minor": 2}.get(
+                str(item.get("severity", "")).casefold(), 3,
+            ),
+            json.dumps(item, ensure_ascii=True, sort_keys=True),
+        ))
+        destination["readability_advisories"] = alternatives
+        destination["readability_advisory"] = alternatives[0]
         matched += 1
     return matched, unmatched
 
@@ -5868,6 +5906,7 @@ def _chapter_summary_memory_admission(
     job_id: str,
     chunks: list[Chunk],
     boundary_index: int,
+    *, contributing_indices: list[int] | None = None,
 ) -> dict[str, Any]:
     """Describe source-memory trust for a chapter summary without omitting it."""
     chapter_position = int(
@@ -5876,7 +5915,8 @@ def _chapter_summary_memory_admission(
     reasons: list[str] = []
     contributing = 0
     for index, chunk in enumerate(chunks[:boundary_index + 1]):
-        if int(chunk.metadata.get("chapter_position", 1)) != chapter_position:
+        if (index not in contributing_indices if contributing_indices is not None
+                else int(chunk.metadata.get("chapter_position", 1)) != chapter_position):
             continue
         policies = [
             event.get("payload", {}) or {}
@@ -6714,6 +6754,12 @@ class TranslationPipeline:
         """Acknowledge pause only at a transaction-safe pipeline boundary."""
         job = self.db.get_job(job_id) or {}
         status = str(job.get("raw_status") or job.get("status") or "")
+        if (stage == "chunk_start" and status == JobStatus.PAUSED
+                and getattr(self, "_manual_start_paused", False)):
+            lease = self.db.get_worker_lease(job_id) or {}
+            if lease.get("worker_id") == self.worker_id and not lease.get("pause_requested_at"):
+                self._worker_heartbeat(stage, chunk_index)
+                return
         if status not in {JobStatus.PAUSING, JobStatus.PAUSED}:
             self._worker_heartbeat(stage, chunk_index)
             return
@@ -7100,6 +7146,9 @@ class TranslationPipeline:
                 f"stage={owner.get('stage', 'unknown')})."
             )
         self._worker_claimed = True
+        self._record_settings_diagnostics(job_id)
+        if not is_resume:
+            self.db.save_job_artifact(job_id, "quality_policy_v2085", {"version": 1})
         self._start_lease_heartbeat()
         self.db.log_chunk_event(job_id, -1, "worker_claimed", {
             "worker_id": self.worker_id,
@@ -7309,6 +7358,9 @@ class TranslationPipeline:
             saved_mem = self.db.get_memory_state(job_id)
             if saved_mem:
                 memory_manager.from_dict(saved_mem)
+        if (self.db.get_job_artifact(job_id, "quality_policy_v2085") or {}).get("version") == 1:
+            memory_manager.quality_policy_version = 1
+            self._synchronize_curated_policy(job_id, memory_manager, glossary_manager)
 
         # 5. Extract source-grounded body terms if configured and new job
         book_review_auto_terms: dict[str, dict[str, Any]] = {}
@@ -7466,7 +7518,8 @@ class TranslationPipeline:
 
         # Curated glossary terms opt into English originals only explicitly.
         for entry in glossary_manager.entries:
-            if bool(getattr(entry, "include_original", False)):
+            if (memory_manager.quality_policy_version < 1
+                    and bool(getattr(entry, "include_original", False))):
                 memory_manager.proper_nouns.add_noun(
                     entry.source,
                     entry.target,
@@ -7524,7 +7577,7 @@ class TranslationPipeline:
                         "chapter_positions": [],
                         "sense_id": "",
                         "keep_original": False,
-                        "scope_mode": "evidence_paragraph",
+                        "scope_mode": "book_wide_recommended",
                     })
                 from tarjomeh.context.book_term_candidates import body_term_paragraphs
 
@@ -7556,7 +7609,7 @@ class TranslationPipeline:
                         "chapter_positions": [],
                         "sense_id": "",
                         "keep_original": False,
-                        "scope_mode": "evidence_paragraph",
+                        "scope_mode": "book_wide_recommended",
                     })
                 from tarjomeh.glossary.book_review import (
                     REVIEW_VERSION,
@@ -7565,10 +7618,48 @@ class TranslationPipeline:
                 )
 
                 selected_body_index = body_paragraph_index(document, chunks)
+                # Curated rows are proposals for explicit paragraph approval,
+                # not automatic all-body authority or a new extraction call.
+                curated_sources = {
+                    entry.source.casefold()
+                    for entry in glossary_manager.entries
+                    if not entry.is_auto
+                }
+                alternatives: dict[str, list[dict[str, Any]]] = {}
+                for proposal in proposals:
+                    if proposal["source"].casefold() in curated_sources:
+                        alternatives.setdefault(proposal["source"].casefold(), []).append(proposal)
+                proposals = [proposal for proposal in proposals
+                             if proposal["source"].casefold() not in curated_sources]
+                for entry in glossary_manager.entries:
+                    if entry.is_auto:
+                        continue
+                    proposals.append(
+                        {
+                            "source": entry.source,
+                            "target": entry.target,
+                            "english_explanation": " | ".join(
+                                value for value in (entry.sense, entry.context) if value
+                            ),
+                            "sense_id": "curated-" + memory_manager.curated_identity(entry)[:12],
+                            "curated_namespace": {
+                                field: str(getattr(entry, field, ""))
+                                for field in ("sense", "author", "domain")
+                            },
+                            "alternative_proposals": alternatives.get(entry.source.casefold(), []),
+                            "origin": "curated_glossary",
+                            "status": "proposed",
+                            "chapter_positions": [],
+                            "keep_original": bool(getattr(entry, "include_original", False)),
+                            "scope_mode": "book_wide_recommended",
+                        }
+                    )
                 proposals = attest_book_term_proposals(
                     proposals, selected_body_index,
                     {item.index: (item.text, item.metadata) for item in chunks},
+                    review_version=REVIEW_VERSION,
                 )
+                proposals = [item for item in proposals if item.get("source_count", 0)]
                 review = {
                     "phase": "awaiting",
                     "review_version": REVIEW_VERSION,
@@ -7799,9 +7890,22 @@ class TranslationPipeline:
                                 
                                 new_content = "\n\n".join(chap_source)
                                 chap_translation = "\n\n".join(chap_trans)
+                                coverage_refs = None
+                                if memory_manager.quality_policy_version >= 1:
+                                    new_content, chap_translation, coverage_refs = (
+                                        memory_manager.pending_summary_inputs(idx)
+                                    )
                                 try:
                                     summary_admission = _chapter_summary_memory_admission(
-                                        self.db, job_id, chunks, idx
+                                        self.db,
+                                        job_id,
+                                        chunks,
+                                        idx,
+                                        contributing_indices=(
+                                            [ref["chunk_index"] for ref in coverage_refs]
+                                            if coverage_refs is not None
+                                            else None
+                                        ),
                                     )
                                     summary_report = self._run_async(memory_manager.update_bilingual_summary(
                                         self.llm_client,
@@ -7809,6 +7913,7 @@ class TranslationPipeline:
                                         translation=chap_translation,
                                         input_trust=summary_admission["input_trust"],
                                         trust_reasons=summary_admission["trust_reasons"],
+                                        coverage_refs=coverage_refs,
                                     ))
                                     summary_report.update({
                                         "contributing_chunks": summary_admission[
@@ -8119,9 +8224,22 @@ class TranslationPipeline:
                                 
                                 new_content = "\n\n".join(chap_source)
                                 chap_translation = "\n\n".join(chap_trans)
+                                coverage_refs = None
+                                if memory_manager.quality_policy_version >= 1:
+                                    new_content, chap_translation, coverage_refs = (
+                                        memory_manager.pending_summary_inputs(idx)
+                                    )
                                 try:
                                     summary_admission = _chapter_summary_memory_admission(
-                                        self.db, job_id, chunks, idx
+                                        self.db,
+                                        job_id,
+                                        chunks,
+                                        idx,
+                                        contributing_indices=(
+                                            [ref["chunk_index"] for ref in coverage_refs]
+                                            if coverage_refs is not None
+                                            else None
+                                        ),
                                     )
                                     summary_report = self._run_async(memory_manager.update_bilingual_summary(
                                         self.llm_client,
@@ -8129,6 +8247,7 @@ class TranslationPipeline:
                                         translation=chap_translation,
                                         input_trust=summary_admission["input_trust"],
                                         trust_reasons=summary_admission["trust_reasons"],
+                                        coverage_refs=coverage_refs,
                                     ))
                                     summary_report.update({
                                         "contributing_chunks": summary_admission[
@@ -8539,6 +8658,7 @@ class TranslationPipeline:
                 ),
             },
         )
+        self._bind_document_book_originals(trans_doc, chunks, job_id)
 
         # 8. Verify the already-canonical Persian text. Typography is applied
         # once per chunk before DB/memory admission; assembly must not rewrite it.
@@ -8951,6 +9071,8 @@ class TranslationPipeline:
         if not job:
             raise ValueError(f"Job {job_id} not found.")
 
+        self._record_settings_diagnostics(job_id)
+
         input_path = Path(job["input_path"])
         if output_format:
             self.config.output.format = output_format
@@ -9233,11 +9355,87 @@ class TranslationPipeline:
             self.db.log_event(job_id, "INFO", f"Re-exported job to {output_path}")
         return output_path
 
+    def _record_settings_diagnostics(self, job_id: str) -> None:
+        for diagnostic in getattr(self.config, "_load_diagnostics", []):
+            self.db.log_chunk_event(job_id, -1, "settings_env_difference", diagnostic)
+        self.config._load_diagnostics = []
+
+    def _synchronize_curated_policy(
+        self, job_id: str, memory: MemoryManager, glossary: GlossaryManager,
+    ) -> None:
+        review = self.db.get_job_artifact(job_id, "book_term_review_v1") or {}
+        conflicts = []
+        for term in review.get("proposals", []):
+            if term.get("status") != "approved":
+                continue
+            for entry in glossary.entries:
+                if (
+                    entry.is_auto
+                    or entry.source.casefold() != str(term.get("source", "")).casefold()
+                    or entry.target == term.get("target")
+                ):
+                    continue
+                from tarjomeh.glossary.book_review import curated_conflicting_entries
+
+                if not curated_conflicting_entries(str(term.get("source", "")),
+                                                    str(term.get("target", "")), [entry], term):
+                    continue
+                conflicts.append({"source": entry.source, "sense_id": term.get("sense_id", ""),
+                                  "reason": "curated_revision_conflicts_with_saved_approval"})
+        if conflicts:
+            self.db.log_chunk_event(
+                job_id, -1, "curated_revision_conflict", {"conflicts": conflicts}
+            )
+            self.db.update_job_status(
+                job_id,
+                JobStatus.PAUSED_ERROR,
+                "Curated glossary conflicts with saved book approvals",
+            )
+            raise ValueError(
+                "Curated glossary conflicts with saved book approvals; "
+                "restore the glossary or start a new job"
+            )
+        report = memory.synchronize_curated(glossary.entries)
+        self.db.log_chunk_event(job_id, -1, "curated_revision_reconciled", report)
+
     def retranslate_chunk(self, job_id: str, chunk_index: int) -> str:
+        policy = self.db.get_job_artifact(job_id, "quality_policy_v2085") or {}
+        if policy.get("version") != 1:
+            return self._retranslate_chunk_impl(job_id, chunk_index)
+        from tarjomeh.jobs.retranslation import staged_retranslation
+
+        original = self.db
+        prior_job = getattr(self, "current_job_id", None)
+        prior_claim = bool(getattr(self, "_worker_claimed", False))
+        lease = original.claim_worker(job_id, self.worker_id)
+        if not lease.get("acquired"):
+            raise JobWorkerBusyError("Another worker owns this job")
+        self.current_job_id, self._worker_claimed = job_id, True
+        self._manual_start_paused = (original.get_job(job_id) or {}).get(
+            "raw_status"
+        ) == JobStatus.PAUSED
+        self._start_lease_heartbeat()
+        try:
+            with staged_retranslation(original, job_id, chunk_index) as stage:
+                self.db = stage
+                self._manual_attempt_admitted = False
+                result = self._retranslate_chunk_impl(job_id, chunk_index)
+                stage.admitted = self._manual_attempt_admitted
+            return result
+        finally:
+            self.db = original
+            self._stop_lease_heartbeat()
+            original.release_worker(job_id, self.worker_id, reason="manual_retranslation_finished")
+            self.current_job_id, self._worker_claimed = prior_job, prior_claim
+            self._manual_start_paused = False
+
+    def _retranslate_chunk_impl(self, job_id: str, chunk_index: int) -> str:
         """Retranslate one chunk for editor review without touching others."""
         job = self.db.get_job(job_id)
         if not job:
             raise ValueError(f"Job {job_id} not found.")
+
+        self._record_settings_diagnostics(job_id)
 
         structure_artifact = self.db.get_job_artifact(
             job_id, "document_structure_version"
@@ -9273,8 +9471,23 @@ class TranslationPipeline:
         saved_mem = self.db.get_memory_state(job_id)
         if saved_mem:
             memory_manager.from_dict(saved_mem)
+        policy = self.db.get_job_artifact(job_id, "quality_policy_v2085") or {}
+        full_memory = None
+        prior_nouns = None
+        if policy.get("version") == 1:
+            memory_manager.quality_policy_version = 1
+            self._synchronize_curated_policy(job_id, memory_manager, glossary_manager)
+            full_memory = memory_manager
+            memory_manager, isolation_report = full_memory.prior_context_view(
+                chunk_index, self.db.get_chunks(job_id),
+            )
+            prior_nouns = deepcopy(memory_manager.proper_nouns.serialize())
+            self.db.log_chunk_event(
+                job_id, chunk_index, "retranslation_context_isolation", isolation_report
+            )
         for entry in glossary_manager.entries:
-            if bool(getattr(entry, "include_original", False)):
+            if (memory_manager.quality_policy_version < 1
+                    and bool(getattr(entry, "include_original", False))):
                 memory_manager.proper_nouns.add_noun(
                     entry.source,
                     entry.target,
@@ -9312,20 +9525,29 @@ class TranslationPipeline:
         )
 
         previous_translation = translations.get(chunk_index, "")
-        translation = self._translate_single_chunk(
-            idx=chunk_index,
-            chunk=chunks[chunk_index],
-            memory_manager=memory_manager,
-            web_searcher=web_searcher,
-            glossary_manager=glossary_manager,
-            compliance_checker=compliance_checker,
-            critique_tool=critique_tool,
-            refiner_tool=refiner_tool,
-            back_translator=back_translator,
-            translations=translations,
-            job_id=job_id,
-            adjacent_source_context=_adjacent_source_context(chunks, chunk_index),
-        )
+        try:
+            translation = self._translate_single_chunk(
+                idx=chunk_index,
+                chunk=chunks[chunk_index],
+                memory_manager=memory_manager,
+                web_searcher=web_searcher,
+                glossary_manager=glossary_manager,
+                compliance_checker=compliance_checker,
+                critique_tool=critique_tool,
+                refiner_tool=refiner_tool,
+                back_translator=back_translator,
+                translations=(
+                    {index: value for index, value in translations.items() if index < chunk_index}
+                    if full_memory is not None else translations
+                ),
+                job_id=job_id,
+                adjacent_source_context=_adjacent_source_context(chunks, chunk_index),
+            )
+        finally:
+            if full_memory is not None:
+                # Spending is not canonical authority and is never refunded by
+                # a rejected candidate or an interrupted retranslation.
+                self.db.save_job_artifact(job_id, "web_search_state", web_searcher.export_state())
         if (
             getattr(self.config.translation, "enable_integrity_gate", True)
             and previous_translation.strip()
@@ -9368,7 +9590,14 @@ class TranslationPipeline:
                     job_id, chunk_index, "integrity_edit_rejected",
                     manual_result.to_dict(),
                 )
+                if full_memory is not None:
+                    return previous_translation
                 translation = previous_translation
+        if full_memory is not None and prior_nouns is not None:
+            full_memory.merge_admitted_mapping_changes(
+                prior_nouns, memory_manager.proper_nouns.serialize()
+            )
+            memory_manager = full_memory
         checkpoint_translation, paragraph_identity = (
             _canonical_chunk_paragraph_identity(
                 chunks[chunk_index], translation
@@ -9449,6 +9678,7 @@ class TranslationPipeline:
             ),
         )
         self.db.log_event(job_id, "INFO", f"Retranslated chunk {chunk_index}.")
+        self._manual_attempt_admitted = True
         return translation
 
     def _canonicalize_final_translation(
@@ -9971,7 +10201,7 @@ class TranslationPipeline:
                 )
             )
 
-        return TranslatedDocument(
+        assembled = TranslatedDocument(
             title=document.title,
             author=document.author,
             paragraphs=final_translated_paragraphs,
@@ -9982,6 +10212,45 @@ class TranslationPipeline:
                 ),
             },
         )
+        if job_id:
+            self._bind_document_book_originals(assembled, chunks, job_id)
+        return assembled
+
+    def _bind_document_book_originals(
+        self, document: TranslatedDocument, chunks: list[Chunk], job_id: str,
+    ) -> None:
+        from tarjomeh.glossary.book_review import (
+            bind_original_introductions,
+            resolve_reviewed_book_terms,
+        )
+
+        review = self.db.get_job_artifact(job_id, "book_term_review_v1") or {}
+        if review.get("review_version") != 4 or review.get("phase") not in {"started", "skipped"}:
+            return
+        if review.get("source_sha256") != self.db.get_job_source_hash(job_id):
+            raise ValueError("Book-term approval belongs to a different source")
+        entries = (self.db.get_job_artifact(job_id, "book_term_body_index_v1") or {}).get(
+            "entries", []
+        )
+        records = {item.index: (item.text, item.metadata) for item in chunks}
+        locations: dict[int, list[dict[str, Any]]] = {}
+        for chunk in chunks:
+            matches, _ = resolve_reviewed_book_terms(
+                chunk.text,
+                chunk.metadata,
+                self._chunk_chapter_position(chunk),
+                review.get("proposals", []),
+            )
+            bind_original_introductions(matches, review, entries, records)
+            for match in matches:
+                if match.get("original_introduction_required"):
+                    locations.setdefault(match["global_paragraph_index"], []).append(match)
+        for paragraph in document.paragraphs:
+            paragraph.metadata = dict(paragraph.metadata)
+            paragraph.metadata["book_term_original_approvals"] = [
+                {**match, "paragraph_index": 0} for match in locations.get(paragraph.index, [])
+                if match["source_paragraph_hash"] == _candidate_text_hash(paragraph.source_text)
+            ]
 
     def _extra_final_quality_repair(
         self, job_id: str, chunk: Chunk, translation: str, *,
@@ -10385,11 +10654,19 @@ class TranslationPipeline:
                 include_original = bool(getattr(entry, "include_original", False))
                 if not existing and not include_original:
                     continue
+                if (memory_manager.quality_policy_version >= 1
+                        and existing.get("context_deferred")):
+                    continue
                 outcome = memory_manager.proper_nouns.add_noun(
                     entry.source,
                     entry.target,
                     category=("approved_term" if include_original else "term"),
                     provenance="curated_glossary",
+                    curated_revision_identity=(
+                        memory_manager.curated_identity(entry)
+                        if memory_manager.quality_policy_version >= 1
+                        else ""
+                    ),
                 )
                 if outcome.get("action") in {
                     "replaced_lower_authority", "confirmed"
@@ -10435,8 +10712,11 @@ class TranslationPipeline:
             review_artifact = self.db.get_job_artifact(job_id, "book_term_review_v1") or {}
             if review_artifact.get("source_sha256") != self.db.get_job_source_hash(job_id):
                 raise ValueError("Book-term approval belongs to a different source")
-            if review_artifact.get("phase") == "started":
-                if int(review_artifact.get("review_version", 1)) not in {1, 2, 3}:
+            if review_artifact.get("phase") == "started" or (
+                review_artifact.get("phase") == "skipped"
+                and review_artifact.get("review_version") == 4
+            ):
+                if int(review_artifact.get("review_version", 1)) not in {1, 2, 3, 4}:
                     raise ValueError("Unsupported book-term review version")
                 reviewed_matches, scoped_review = resolve_reviewed_book_terms(
                     chunk.text,
@@ -10444,6 +10724,26 @@ class TranslationPipeline:
                     self._chunk_chapter_position(chunk),
                     review_artifact.get("proposals", []),
                 )
+                if review_artifact.get("review_version") == 4:
+                    from tarjomeh.glossary.book_review import bind_original_introductions
+
+                    bind_original_introductions(
+                        reviewed_matches,
+                        review_artifact,
+                        (self.db.get_job_artifact(job_id, "book_term_body_index_v1") or {}).get(
+                            "entries", []
+                        ),
+                        {
+                            int(item["chunk_index"]): (
+                                str(item["text"]),
+                                item.get("metadata") or {},
+                            )
+                            for item in self.db.get_chunks(job_id)
+                        },
+                    )
+                    scoped_review.extend({**item, "reason": "original_introduction_scope_unproven"}
+                                         for item in reviewed_matches if item.get("original_policy")
+                                         and not item.get("original_introduction_scope_proven"))
                 self.db.log_chunk_event(job_id, idx, "book_term_scope_resolved", {
                     "matched": reviewed_matches,
                     "review": scoped_review,
@@ -10518,6 +10818,7 @@ class TranslationPipeline:
             getattr(self.config.translation, "enable_integrity_gate", True)
         )
         integrity_gate = PostEditIntegrityGate(
+            paragraph_originals=[item for item in reviewed_matches if item.get("original_policy")],
             min_retention_ratio=getattr(
                 self.config.translation, "integrity_min_retention_ratio", 0.65
             ),
@@ -10632,6 +10933,7 @@ class TranslationPipeline:
             str(match["source"])
             for match in reviewed_matches
             if match.get("keep_original")
+            and not match.get("original_policy")
             and str(match["source"]) in chunk.text
         ]
         required_foreign_expressions = list(dict.fromkeys([
@@ -10676,6 +10978,12 @@ class TranslationPipeline:
             "Ordinary concepts and all unlisted terms must remain Persian-only. "
             "Source citations are separate and must be preserved."
         )
+        if any(item.get("original_introduction_required") for item in reviewed_matches):
+            inline_policy_context += (
+                " Explicit approved book-term introductions above are a paragraph-only "
+                "exception: use their Persian (original) pair at that approved location "
+                "only, never as permission for Latin text elsewhere."
+            )
         self.db.log_chunk_event(job_id, idx, "inline_original_policy", {
             "enabled": protect_inline_english,
             "allowed_originals": allowed_inline_originals,
@@ -13852,6 +14160,8 @@ Output ONLY the corrected Persian translation.
             source_applicable_originals.union(source_entity_candidates)
         )
         language_anchor_context = {
+            "scoped_book_originals": [item for item in reviewed_matches
+                                     if item.get("original_policy")],
             "authorized": {
                 source: target
                 for source, target in memory_manager.proper_nouns.inline_eligible_nouns().items()

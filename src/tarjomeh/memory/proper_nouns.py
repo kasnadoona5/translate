@@ -1240,6 +1240,7 @@ class ProperNouns:
         source_surface: str = "",
         semantic_role: str = "",
         alignment_status: str = "",
+        curated_revision_identity: str = "",
     ) -> dict[str, Any]:
         """Add or reconcile a proper noun mapping by source authority.
 
@@ -1296,11 +1297,16 @@ class ProperNouns:
         elif authority > prior_authority:
             self._nouns[stored_key] = fa_val
             action = "replaced_lower_authority"
+        elif (origin == "curated_glossary" and prior.get("origin") == origin
+              and curated_revision_identity
+              and prior.get("curated_revision_identity") == curated_revision_identity):
+            self._nouns[stored_key] = fa_val
+            action = "replaced_curated_revision"
         else:
             action = "preserved_higher_authority"
 
         observations = int(prior.get("observations", 0)) + 1
-        if action in {"added", "replaced_lower_authority"} or (
+        if action in {"added", "replaced_lower_authority", "replaced_curated_revision"} or (
             action == "confirmed" and authority >= prior_authority
         ):
             history = list(prior.get("superseded", []))
@@ -1310,7 +1316,11 @@ class ProperNouns:
                     "target": previous,
                     "origin": str(prior.get("origin", "legacy")),
                 })
-            if action in {"added", "replaced_lower_authority"}:
+            if action == "replaced_curated_revision":
+                history.append({"target": previous, "origin": origin,
+                                "aliases": list(self._aliases.pop(stored_key, [])),
+                                "curated_revision_identity": curated_revision_identity})
+            if action in {"added", "replaced_lower_authority", "replaced_curated_revision"}:
                 evidence_keys: list[str] = []
                 independent = bool(context_independent)
             else:
@@ -1325,7 +1335,7 @@ class ProperNouns:
             if evidence_key and evidence_key not in evidence_keys:
                 evidence_keys.append(evidence_key)
             if context_independent is True and action in {
-                "added", "replaced_lower_authority"
+                "added", "replaced_lower_authority", "replaced_curated_revision"
             }:
                 independent = True
             authority_class = _mapping_authority_class(
@@ -1337,6 +1347,8 @@ class ProperNouns:
                 independent,
             )
             self._provenance[stored_key] = {
+                "curated_revision_identity": (curated_revision_identity
+                                              or str(prior.get("curated_revision_identity", ""))),
                 "origin": origin,
                 "authority": authority,
                 "observations": observations,

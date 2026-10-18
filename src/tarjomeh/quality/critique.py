@@ -448,7 +448,10 @@ class TranslationCritique:
                 item_errors.append("suggestion_invalid")
             if not rationale or len(rationale) > _MAX_RATIONALE_CHARS:
                 item_errors.append("rationale_invalid")
-            key = _normalize_span(current)
+            key = json.dumps(
+                [severity, _normalize_span(current), suggested, rationale],
+                ensure_ascii=True,
+            )
             if key in seen:
                 item_errors.append("duplicate_issue")
             if item_errors:

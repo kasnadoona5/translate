@@ -33,6 +33,8 @@ def test_final_candidate_identity_precedes_exact_quality_review() -> None:
 
 def test_manual_retranslation_cannot_rewrite_reviewed_candidate() -> None:
     source = inspect.getsource(TranslationPipeline.retranslate_chunk)
+    assert "_retranslate_chunk_impl" in source
+    source += inspect.getsource(TranslationPipeline._retranslate_chunk_impl)
 
     assert "_canonicalize_final_translation" not in source
     assert "checkpoint_translation != translation" in source
@@ -180,7 +182,7 @@ def test_citation_rule_does_not_rewrite_persian_prose_list() -> None:
 
 def test_v1034_release_scripts_and_runtime_contract_are_complete() -> None:
     manifest = runtime_capabilities()
-    assert manifest["release"] == "v20.8.4"
+    assert manifest["release"] == "v20.8.5"
     for capability in (
         "identity_before_final_quality",
         "atomic_final_quality_checkpoint",

@@ -3721,9 +3721,13 @@ class IntegrityResult:
 class PostEditIntegrityGate:
     """Reject high-confidence lossy edits while retaining advisory evidence."""
 
-    def __init__(self, min_retention_ratio: float = 0.65, max_growth_ratio: float = 1.75) -> None:
+    def __init__(
+        self, min_retention_ratio: float = 0.65, max_growth_ratio: float = 1.75,
+        *, paragraph_originals: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.min_retention_ratio = min_retention_ratio
         self.max_growth_ratio = max_growth_ratio
+        self.paragraph_originals = list(paragraph_originals or [])
 
     def evaluate(
         self,
@@ -3740,6 +3744,13 @@ class PostEditIntegrityGate:
         source = source or ""
         previous = previous or ""
         candidate = candidate or ""
+        if self.paragraph_originals and allowed_inline_originals is not None:
+            from tarjomeh.glossary.book_review import scoped_original_permissions
+
+            allowed_inline_originals = [
+                *allowed_inline_originals,
+                *scoped_original_permissions(source, candidate, self.paragraph_originals),
+            ]
         result = IntegrityResult(stage, len(source), len(previous), len(candidate))
 
         def add(check_id: str, severity: str, message: str, **details: Any) -> None:

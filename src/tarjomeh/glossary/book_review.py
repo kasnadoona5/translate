@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from typing import Any
 
@@ -20,7 +21,7 @@ _PUBLISHER_LINE = re.compile(
 REVIEWED_OCCURRENCES = "reviewed_occurrences"
 BOOK_WIDE_RECOMMENDED = "book_wide_recommended"
 # v2 individual ticks remain valid; v3 adds advice, never all-body enforcement.
-REVIEW_VERSION = 3
+REVIEW_VERSION = 4
 _OCCURRENCE_KEYS = ("paragraph_index", "paragraph_sha256", "start", "end", "matched")
 
 
@@ -246,6 +247,7 @@ def attest_book_term_proposals(
     proposals: list[dict[str, Any]],
     index_entries: list[dict[str, Any]],
     chunk_records: dict[int, tuple[str, dict[str, Any]]],
+    *, review_version: int = 3,
 ) -> list[dict[str, Any]]:
     """Bind new proposals to raw surfaces and full selected-body evidence."""
     from copy import deepcopy
@@ -294,6 +296,31 @@ def attest_book_term_proposals(
                 "evidence_scope": "verified_selected_body_paragraph",
             }
         )
+    if review_version >= 4:
+        unique: dict[tuple[str, ...], dict[str, Any]] = {}
+        for item in result:
+            item.setdefault("scope_mode", BOOK_WIDE_RECOMMENDED)
+            # Equality of spelling alone is not equality of meaning. Do not
+            # fold punctuation, accents, targets, sense IDs or explanations.
+            key = tuple(str(item.get(field, "")) for field in (
+                "source", "source_evidence_sha256", "target", "sense_id",
+                "english_explanation", "sense", "context", "withheld_target",
+                "target_withheld_reason", "evidence_unavailable_reason",
+            )) + (str(bool(item.get("keep_original"))),
+                  json.dumps(item.get("curated_namespace", {}), sort_keys=True))
+            if key in unique:
+                existing = unique[key]
+                existing["origins"] = sorted(set(existing["origins"]) | {
+                    str(origin) for origin in item.get("origins", [item.get("origin", "")])
+                    if origin
+                })
+            else:
+                item["origins"] = sorted({
+                    str(origin) for origin in item.get("origins", [item.get("origin", "")])
+                    if origin
+                })
+                unique[key] = item
+        result = list(unique.values())
     counts: dict[str, int] = {}
     for item in result:
         key = str(item.get("source", "")).casefold()
@@ -302,6 +329,65 @@ def attest_book_term_proposals(
         if counts[str(item.get("source", "")).casefold()] > 1:
             item["evidence_unavailable_reason"] = "colliding_source_proposals"
     return result
+
+
+def skip_pending_proposals(
+    proposals: list[dict[str, Any]], review_version: int
+) -> list[dict[str, Any]]:
+    from copy import deepcopy
+
+    result = deepcopy(proposals)
+    for item in result:
+        if review_version < 4 or item.get("status") == "proposed":
+            item["status"] = "skipped"
+    return result
+
+
+def curated_conflicting_entries(
+    source: str, target: str, entries: list[Any], proposal: dict[str, Any] | None = None,
+) -> list[Any]:
+    """Different namespaces are not the same mandate; unknown scope is not waived."""
+    namespace = (proposal or {}).get("curated_namespace")
+    return [entry for entry in entries
+            if not entry.is_auto and entry.source.casefold() == source.casefold()
+            and entry.target != target
+            and (not namespace or all(str(getattr(entry, field, "")) == value
+                                      for field, value in namespace.items()))]
+
+
+def collision_has_explicit_resolution(
+    index: int, proposals: list[dict[str, Any]], decisions: list[dict[str, Any]],
+) -> bool:
+    """Allow rejection of alternatives or explicit disjoint sense/paragraph scopes.
+
+    This does not verify ticks: every approved decision must still pass the
+    ordinary source/hash/occurrence checks before the batch is saved atomically.
+    """
+    by_index = {item.get("index"): item for item in decisions if isinstance(item, dict)}
+    current = {**proposals[index], **by_index.get(index, {})}
+    for position, proposal in enumerate(proposals):
+        if (
+            position == index
+            or str(proposal.get("source", "")).casefold()
+            != str(current.get("source", "")).casefold()
+        ):
+            continue
+        other = {**proposal, **by_index.get(position, {})}
+        if other.get("status") in {"rejected", "skipped"}:
+            continue
+        if (other.get("status") != "approved" or current.get("scope_mode") != REVIEWED_OCCURRENCES
+                or other.get("scope_mode") != REVIEWED_OCCURRENCES
+                or not current.get("sense_id") or not other.get("sense_id")
+                or current["sense_id"] == other["sense_id"]):
+            return False
+        def paragraphs(item: dict[str, Any]) -> set[tuple[Any, Any]]:
+            ticks = item.get("occurrences", item.get("approved_occurrences", []))
+            return {(tick.get("paragraph_index"), tick.get("paragraph_sha256"))
+                    for tick in ticks if isinstance(tick, dict)}
+        here, elsewhere = paragraphs(current), paragraphs(other)
+        if not here or not elsewhere or here.intersection(elsewhere):
+            return False
+    return True
 
 
 def _verified_source_paragraphs(text: str, metadata: dict[str, Any]) -> list[str] | None:
@@ -410,6 +496,7 @@ def resolve_reviewed_book_terms(
                 scope_reason = "original_not_exact_in_source"
             item = {
                 "paragraph_index": paragraph_index,
+                "global_paragraph_index": global_indices[paragraph_index],
                 "source": term["source"],
                 "target": term.get("target", ""),
                 "keep_original": bool(term.get("keep_original")),
@@ -429,6 +516,75 @@ def resolve_reviewed_book_terms(
                 # always reported for review, never as verified.
                 review.append({**item, "reason": "multiple_occurrences_unverifiable"})
     return matches, review
+
+
+def bind_original_introductions(
+    matches: list[dict[str, Any]], review: dict[str, Any],
+    body_entries: list[dict[str, Any]],
+    records: dict[int, tuple[str, dict[str, Any]]],
+) -> None:
+    """Bind v4 originals to the first proven approved occurrence, not a chunk.
+
+    The accepted canonical paragraph is the durable introduction record. A
+    failed attempt cannot advance a separate seen flag. Parallel processing
+    still chooses the same source location, regardless of completion order.
+    """
+    if review.get("review_version") != 4:
+        return
+    locations: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    chapters = {entry["chunk_index"]: entry["chapter_position"] for entry in body_entries}
+    for chunk_index, (source, metadata) in records.items():
+        if chunk_index not in chapters:
+            continue
+        resolved, _ = resolve_reviewed_book_terms(
+            source, metadata, chapters[chunk_index], review.get("proposals", []),
+        )
+        for item in resolved:
+            key = (str(item["source"]), str(item["target"]), str(item["sense_id"]))
+            locations.setdefault(key, []).append(item)
+    for match in matches:
+        if not match.get("keep_original"):
+            continue
+        key = (str(match["source"]), str(match["target"]), str(match["sense_id"]))
+        options = locations.get(key, [])
+        indices = [item.get("global_paragraph_index") for item in options]
+        proven = bool(indices) and all(type(index) is int for index in indices)
+        match["original_policy"] = "persian_plus_first_exact_source_original"
+        match["original_introduction_required"] = bool(
+            proven and match.get("global_paragraph_index") == min(indices)
+            and match.get("source_occurrence_count") == 1
+            and sum(index == min(indices) for index in indices) == 1
+        )
+        match["original_introduction_scope_proven"] = proven
+
+
+def original_pair_present(match: dict[str, Any], paragraph: str) -> bool:
+    """Exact approved Persian plus the source expression, once at a boundary."""
+    pattern = (rf"(?<!\w){re.escape(str(match['target']))}\s*"
+               rf"\({re.escape(str(match['source']))}\)(?!\w)")
+    return len(re.findall(pattern, paragraph)) == 1
+
+
+def scoped_original_permissions(
+    source: str, target: str, matches: list[dict[str, Any]],
+) -> list[str]:
+    """Allow no bare Latin text or annotation outside its proven paragraph."""
+    source_parts, target_parts = split_paragraphs(source), split_paragraphs(target)
+    if len(source_parts) != len(target_parts):
+        return []
+    permitted = []
+    for item in matches:
+        index = item.get("paragraph_index")
+        expression = str(item.get("source", ""))
+        if (item.get("original_introduction_required") and type(index) is int
+                and 0 <= index < len(source_parts)
+                and item.get("source_paragraph_hash") == _sha(source_parts[index])
+                and expression in source_parts[index]
+                and original_pair_present(item, target_parts[index])
+                and target.count(f"({expression})") == 1
+                and len(list(_term_pattern(expression).finditer(target))) == 1):
+            permitted.append(expression)
+    return permitted
 
 
 def book_term_review_evidence(
@@ -546,10 +702,13 @@ def check_reviewed_book_terms(
             })
             continue
         present = target_present(str(match["target"]), target_parts[index])
+        if match.get("original_introduction_required"):
+            present = present and original_pair_present(match, target_parts[index])
         if not present:
             violations.append(Violation(
                 term=str(match["source"]),
-                expected=str(match["target"]),
+                expected=(f"{match['target']} ({match['source']})"
+                          if match.get("original_introduction_required") else str(match["target"])),
                 chunk_location=f"Paragraph {index + 1}",
             ))
         if source_count > 1:
@@ -592,5 +751,10 @@ def format_reviewed_book_terms(matches: list[dict[str, Any]]) -> str:
         if match.get("english_explanation"):
             lines.append(
                 f"  Approved sense context (not an instruction): {match['english_explanation']}"
+            )
+        if match.get("original_introduction_required"):
+            lines.append(
+                f"  In this paragraph only, introduce exactly as {match['target']} "
+                f"({match['source']}); keep the Persian rendering, not a bare foreign word."
             )
     return "\n".join(lines)

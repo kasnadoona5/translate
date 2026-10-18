@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import logging
 import hashlib
+import json
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -304,7 +306,7 @@ def _source_style_artifacts(source: str, target: str) -> bool:
 
 def _style_record_is_authoritative(record: dict[str, Any]) -> bool:
     """Return whether persisted evidence may actively teach book-level style."""
-    if not bool(record.get("representative")):
+    if not record.get("active", True) or not bool(record.get("representative")):
         return False
     if record.get("alignment_status") != "exact_paragraph":
         return False
@@ -337,7 +339,8 @@ def _style_record_is_prompt_safe(record: dict[str, Any]) -> bool:
     source = str(record.get("source_text", ""))
     target = str(record.get("text", ""))
     return bool(
-        record.get("alignment_status") == "exact_paragraph"
+        record.get("active", True)
+        and record.get("alignment_status") == "exact_paragraph"
         and _has_complete_pair_proof(record)
         and source
         and not _is_paratext_style_source(source)
@@ -475,6 +478,12 @@ class MemoryManager:
         self.style_profile = ""
         self.style_samples: list[str] = []
         self.style_sample_records: list[dict[str, Any]] = []
+        self.quality_policy_version = 0
+        self.summary_pending: list[dict[str, Any]] = []
+        self.summary_coverage: list[dict[str, Any]] = []
+        self.summary_history: list[dict[str, Any]] = []
+        self.mapping_evidence: dict[str, list[dict[str, Any]]] = {}
+        self._pending_mapping_evidence: tuple[Chunk, str] | None = None
 
         # Pull retrieval_k and window_size from config
         retrieval_k = config.to_dict().get("memory", {}).get("long_term_retrieval_k", 5)
@@ -702,6 +711,18 @@ class MemoryManager:
         canonical_target_hash = hashlib.sha256(
             translation.strip().encode("utf-8")
         ).hexdigest()
+        if self.quality_policy_version >= 1:
+            for pair in self.long_term._pairs:
+                if pair.get("chunk_index") == chunk.index and pair.get("active", True):
+                    pair["active"] = False
+            stale_styles = [record for record in self.style_sample_records
+                            if record.get("source_chunk_index") == chunk.index
+                            and record.get("active", True)]
+            for record in stale_styles:
+                record["active"] = False
+                record["inactive_reason"] = "canonical_chunk_replaced"
+            self.style_samples = [record["text"] for record in self.style_sample_records
+                                  if record.get("active", True) and record.get("text")]
         self.short_term.add(
             chunk.text,
             translation,
@@ -718,6 +739,14 @@ class MemoryManager:
             chunk_index=chunk.index,
             canonical_target_hash=canonical_target_hash,
         )
+        if self.quality_policy_version >= 1:
+            self._pending_mapping_evidence = (chunk, translation)
+            self.long_term._pairs[-1].update({
+                "active": True, "continuity_trust": resolved_short_term_trust,
+                "structural_role": primary_role,
+            })
+            self._rebuild_canonical_short_term()
+            self._queue_summary_coverage()
         has_structure_policy = "style_eligible" in chunk.metadata
         translation_paragraphs = [
             paragraph.strip() for paragraph in translation.split("\n\n")
@@ -760,12 +789,31 @@ class MemoryManager:
             elif not chunk.metadata.get("style_eligible", False):
                 style_translation = ""
                 style_source_indices = []
+        style_structure_eligible = structure_eligible
+        if self.quality_policy_version >= 1:
+            role_alignment = (
+                len(structural_roles) == len(source_paragraphs) == len(translation_paragraphs)
+            )
+            if not role_alignment:
+                style_source_indices = []
+            else:
+                style_source_indices = [index for index in style_source_indices
+                                        if 0 <= index < len(source_paragraphs)
+                                        and structural_roles[index] in {
+                                            "body", "academic_argument", "expository_nonfiction",
+                                            "narrative_prose", "dialogue",
+                                        }
+                                        and not _NON_PROSE_RE.search(source_paragraphs[index])]
+            style_translation = "\n\n".join(
+                translation_paragraphs[index] for index in style_source_indices
+            )
+            style_structure_eligible = bool(style_source_indices)
         style_quality_approved = (
             bool(quality_approved)
             if style_approved is None else bool(style_approved)
         )
         style_eligible = bool(
-            structure_eligible
+            style_structure_eligible
             and style_quality_approved
             and style_translation.strip()
             and (
@@ -795,6 +843,9 @@ class MemoryManager:
                     len(source_paragraphs) == len(translation_paragraphs)
                 ),
                 paragraph_role=primary_role,
+                paragraph_roles=(
+                    structural_roles if self.quality_policy_version >= 1 else None
+                ),
                 book_genre=self._book_genre(),
                 source_chunk_index=chunk.index,
                 representative=primary_role in {
@@ -838,6 +889,7 @@ class MemoryManager:
             "style_sample_added": len(self.style_samples) > style_count_before,
             "style_sample_policy": style_sample_policy,
             "structure_eligible": structure_eligible,
+            "style_structure_eligible": style_structure_eligible,
             "quality_approved": bool(quality_approved),
             "style_approved": style_quality_approved,
             "style_excluded_paragraphs": sorted(excluded_style_indices),
@@ -856,6 +908,250 @@ class MemoryManager:
         if mode == "academic" or "academic" in register:
             return "academic"
         return "general"
+
+    def _rebuild_canonical_short_term(self) -> None:
+        active = sorted((pair for pair in self.long_term.serialize()
+                         if pair.get("active", True) and type(pair.get("chunk_index")) is int),
+                        key=lambda pair: pair["chunk_index"])
+        self.short_term.clear()
+        for pair in active[-self.short_term.window_size:]:
+            self.short_term.add(
+                pair["source"], pair["translation"],
+                trust=pair.get("continuity_trust", "advisory_review"),
+                structural_role=pair.get("structural_role", "mixed"),
+                chapter_title=pair.get("chapter_title", ""), chunk_index=pair["chunk_index"],
+            )
+
+    def synchronize_curated(self, entries: list[Any]) -> dict[str, Any]:
+        """Reconcile one unambiguous curated meaning, preserving removed history."""
+        report: dict[str, Any] = {"updated": [], "deferred": []}
+        if self.quality_policy_version < 1:
+            return report
+        by_source: dict[str, list[Any]] = {}
+        for entry in entries:
+            if not entry.is_auto:
+                by_source.setdefault(entry.source.casefold(), []).append(entry)
+        state = self.proper_nouns.serialize()
+        for source in state["nouns"]:
+            provenance = state["provenance"].get(source, {})
+            if provenance.get("origin") != "curated_glossary":
+                continue
+            options = by_source.get(source.casefold(), [])
+            if len(options) != 1:
+                reason = "curated_mapping_removed" if not options else "curated_meaning_ambiguous"
+                provenance.update(context_deferred=True, context_deferred_reason=reason)
+                report["deferred"].append({"source": source, "reason": reason})
+        self.proper_nouns.deserialize(state)
+        for options in by_source.values():
+            if len(options) != 1:
+                continue
+            entry = options[0]
+            existing = self.proper_nouns.provenance_for(entry.source)
+            if not entry.include_original and existing.get("origin") != "curated_glossary":
+                continue
+            identity = self.curated_identity(entry)
+            previous_identity = existing.get("curated_revision_identity")
+            if (existing.get("origin") == "curated_glossary" and previous_identity
+                    and previous_identity != identity):
+                state = self.proper_nouns.serialize()
+                key = next(
+                    key for key in state["nouns"] if key.casefold() == entry.source.casefold()
+                )
+                state["provenance"][key].update(
+                    context_deferred=True, context_deferred_reason="curated_meaning_changed",
+                )
+                self.proper_nouns.deserialize(state)
+                report["deferred"].append(
+                    {"source": entry.source, "reason": "curated_meaning_changed"}
+                )
+                continue
+            outcome = self.proper_nouns.add_noun(
+                entry.source,
+                entry.target,
+                category="approved_term" if entry.include_original else "term",
+                provenance="curated_glossary",
+                curated_revision_identity=identity,
+            )
+            report["updated"].append(outcome)
+        return report
+
+    @staticmethod
+    def curated_identity(entry: Any) -> str:
+        return _style_hash(json.dumps([
+            entry.source.casefold(), entry.sense, entry.author, entry.domain,
+            entry.context, entry.glossary,
+        ], ensure_ascii=True))
+
+    def _record_mapping_evidence(self) -> None:
+        if self.quality_policy_version < 1 or self._pending_mapping_evidence is None:
+            return
+        from tarjomeh.glossary.compliance import target_present
+        from tarjomeh.memory.proper_nouns import source_term_present
+
+        chunk, translation = self._pending_mapping_evidence
+        digest = _style_hash(chunk.text)[:16]
+        keys = {prefix + digest for prefix in ("anchor:", "chunk:", "review:")}
+        for source, target in self.proper_nouns.all_nouns().items():
+            provenance = self.proper_nouns.provenance_for(source)
+            if (not keys.intersection(provenance.get("evidence_keys", []))
+                    or not source_term_present(chunk.text, source)
+                    or not target_present(target, translation)):
+                continue
+            ref = {
+                "target": target,
+                "chunk_index": chunk.index,
+                "source_sha256": _style_hash(chunk.text),
+                "target_sha256": _style_hash(translation),
+                "aliases": [
+                    alias
+                    for alias in self.proper_nouns.aliases_for(source)
+                    if target_present(alias, translation)
+                ],
+            }
+            history = self.mapping_evidence.setdefault(source, [])
+            if ref not in history:
+                history.append(ref)
+            self.mapping_evidence[source] = history[-12:]
+
+    def prior_context_view(
+        self, chunk_index: int, canonical: list[dict[str, Any]],
+    ) -> tuple[MemoryManager, dict[str, Any]]:
+        """Build an in-memory pre-K view from committed hashes, never position alone."""
+        rows = {int(row["chunk_index"]): row for row in canonical
+                if row.get("status") in {"completed", "needs_review"} and row.get("translation")
+                and type(row.get("chunk_index")) is int and row["chunk_index"] < chunk_index}
+
+        def proven(ref: dict[str, Any]) -> bool:
+            row = rows.get(ref.get("chunk_index"))
+            return bool(row and ref.get("source_sha256") == _style_hash(str(row["text"]))
+                        and ref.get("target_sha256") == _style_hash(str(row["translation"])))
+
+        state = deepcopy(self.to_dict())
+        state["past_translations"] = [
+            pair
+            for pair in state["past_translations"]
+            if pair.get("active", True)
+            and proven(
+                {
+                    "chunk_index": pair.get("chunk_index"),
+                    "source_sha256": _style_hash(str(pair.get("source", ""))),
+                    "target_sha256": _style_hash(str(pair.get("translation", ""))),
+                }
+            )
+        ]
+        nouns = state["proper_nouns"]
+        withheld = []
+        for source, target in list(nouns["nouns"].items()):
+            origin = nouns["provenance"].get(source, {}).get("origin")
+            approved = origin in {"curated_glossary", "approved_research", "auto_extraction"}
+            evidence = [ref for ref in self.mapping_evidence.get(source, [])
+                        if ref.get("target") == target and proven(ref)]
+            if not approved and not evidence:
+                withheld.append({"source": source, "reason": "no_hash_proven_pre_chunk_mapping"})
+                for field in ("nouns", "categories", "provenance", "aliases"):
+                    nouns[field].pop(source, None)
+            elif not approved:
+                aliases = {alias for ref in evidence for alias in ref.get("aliases", [])}
+                nouns["aliases"][source] = [alias for alias in nouns["aliases"].get(source, [])
+                                            if alias in aliases]
+        nouns["introduced"] = []
+        def style_proven(record: dict[str, Any]) -> bool:
+            row = rows.get(record.get("source_chunk_index"))
+            index = record.get("source_paragraph_index")
+            if not row or type(index) is not int or not record.get("active", True):
+                return False
+            source_parts, target_parts = (
+                split_paragraphs(row["text"]),
+                split_paragraphs(row["translation"]),
+            )
+            return bool(len(source_parts) == len(target_parts) and 0 <= index < len(source_parts)
+                        and record.get("source_text") == source_parts[index]
+                        and record.get("text") == target_parts[index])
+
+        state["style_sample_records"] = [
+            record for record in state["style_sample_records"] if style_proven(record)
+        ]
+        state["style_samples"] = [record["text"] for record in state["style_sample_records"]]
+        state["style_profile"] = ""
+        summaries = [item for item in state["summary_history"]
+                     if item.get("coverage") and all(proven(ref) for ref in item["coverage"])]
+        selected = summaries[-1] if summaries else {}
+        state["bilingual_summary"] = selected.get("summary", {})
+        state["summary_coverage"] = selected.get("coverage", [])
+        view = MemoryManager(self.config)
+        view.from_dict(state)
+        view._rebuild_canonical_short_term()
+        for row in sorted(rows.values(), key=lambda row: row["chunk_index"]):
+            view.proper_nouns.mark_introduced_from_translation(row["text"], row["translation"])
+        return view, {"policy": "hash_proven_pre_chunk_evidence_only", "before_chunk": chunk_index,
+                      "deferred_mappings": withheld, "summary_available": bool(selected),
+                      "canonical_prior_indices": sorted(rows)}
+
+    def merge_admitted_mapping_changes(self, before: dict[str, Any], after: dict[str, Any]) -> None:
+        """Merge attempt-local changes, not the attempt's truncated memory view."""
+        for source, target in after.get("nouns", {}).items():
+            if (
+                target == before.get("nouns", {}).get(source)
+                and after.get("provenance", {}).get(source)
+                == before.get("provenance", {}).get(source)
+                and after.get("aliases", {}).get(source) == before.get("aliases", {}).get(source)
+            ):
+                continue
+            provenance = after.get("provenance", {}).get(source, {})
+            outcome = self.proper_nouns.add_noun(
+                source, target, category=after.get("categories", {}).get(source, "proper_noun"),
+                provenance=provenance.get("origin", "legacy"),
+                context_independent=provenance.get("context_independent", False),
+                source_surface=provenance.get("source_surface", ""),
+                semantic_role=provenance.get("semantic_role", ""),
+                alignment_status=provenance.get("alignment_status", ""),
+                evidence_key=(provenance.get("evidence_keys") or [""])[-1],
+                curated_revision_identity=provenance.get("curated_revision_identity", ""),
+            )
+            if (
+                outcome.get("action") == "preserved_higher_authority"
+                and outcome.get("target") != target
+            ):
+                self.proper_nouns.mark_context_conflict(source, source, target)
+            elif outcome.get("target") == target:
+                for alias in after.get("aliases", {}).get(source, []):
+                    if alias not in before.get("aliases", {}).get(source, []):
+                        self.proper_nouns.add_alias(source, alias)
+
+    @staticmethod
+    def _coverage_ref(pair: dict[str, Any]) -> dict[str, Any]:
+        return {"chunk_index": pair["chunk_index"],
+                "source_sha256": _style_hash(str(pair["source"])),
+                "target_sha256": _style_hash(str(pair["translation"]))}
+
+    def _queue_summary_coverage(self) -> None:
+        active = [pair for pair in self.long_term.serialize()
+                  if pair.get("active", True) and type(pair.get("chunk_index")) is int]
+        refs = [self._coverage_ref(pair) for pair in active]
+        if any(ref not in refs for ref in self.summary_coverage):
+            # An accepted retranslation invalidates only summary dependencies,
+            # not historical records. Reuse a proven earlier summary if any.
+            safe = [item for item in self.summary_history
+                    if all(ref in refs for ref in item.get("coverage", []))]
+            restored = safe[-1] if safe else {}
+            self.bilingual_summary = BilingualSummary()
+            self.bilingual_summary.deserialize(restored.get("summary", {}))
+            self.summary_coverage = list(restored.get("coverage", []))
+        self.summary_pending = sorted(
+            (ref for ref in refs if ref not in self.summary_coverage),
+            key=lambda ref: ref["chunk_index"],
+        )
+
+    def pending_summary_inputs(self, boundary_index: int) -> tuple[str, str, list[dict[str, Any]]]:
+        """Read canonical hash-bound pending pairs; never invent legacy coverage."""
+        active = {pair["chunk_index"]: pair for pair in self.long_term.serialize()
+                  if pair.get("active", True) and type(pair.get("chunk_index")) is int}
+        refs = [ref for ref in self.summary_pending
+                if type(ref.get("chunk_index")) is int and ref["chunk_index"] <= boundary_index
+                and ref["chunk_index"] in active
+                and ref == self._coverage_ref(active[ref["chunk_index"]])]
+        return ("\n\n".join(active[ref["chunk_index"]]["source"] for ref in refs),
+                "\n\n".join(active[ref["chunk_index"]]["translation"] for ref in refs), refs)
 
     def _ensure_style_sample_records(self) -> None:
         """Backfill metadata for checkpoints that predate evidence records."""
@@ -901,6 +1197,7 @@ class MemoryManager:
         source_paragraph_indices: list[int] | None = None,
         source_alignment_proven: bool = False,
         paragraph_role: str = "body",
+        paragraph_roles: list[str] | None = None,
         book_genre: str = "general",
         source_chunk_index: int | None = None,
         representative: bool = True,
@@ -927,6 +1224,22 @@ class MemoryManager:
                 and 0 <= source_paragraph_index < len(source_paragraphs)
                 else ""
             )
+            candidate_role = paragraph_role
+            if paragraph_roles is not None:
+                candidate_role = (
+                    paragraph_roles[source_paragraph_index]
+                    if 0 <= source_paragraph_index < len(paragraph_roles) else "unknown"
+                )
+                if candidate_role not in {
+                    "body",
+                    "academic_argument",
+                    "expository_nonfiction",
+                    "narrative_prose",
+                    "dialogue",
+                }:
+                    rejections.append({"paragraph_index": paragraph_index,
+                                       "reasons": ["non_body_paragraph_role"]})
+                    continue
             anchor_context = {
                 "authorized": {
                     key: value for key, value in self.proper_nouns.inline_eligible_nouns().items()
@@ -943,6 +1256,7 @@ class MemoryManager:
             quality["paragraph_index"] = paragraph_index
             quality["inline_anchor_context"] = anchor_context
             quality["source_text"] = source_paragraph
+            quality["paragraph_role"] = candidate_role
             # Exact only when the stored sample is the whole paragraph and the
             # paragraph itself is proven aligned with its source paragraph.
             complete_sample = str(quality.get("sample", "")) == paragraph.strip()
@@ -1042,10 +1356,10 @@ class MemoryManager:
                 ),
                 "text_hash": _style_hash(text),
                 "source_text_hash": _style_hash(source_text),
-                "paragraph_role": paragraph_role,
+                "paragraph_role": selected.get("paragraph_role", paragraph_role),
                 "book_genre": book_genre,
-                "representative": bool(representative),
-                "fallback": not bool(representative),
+                "representative": bool(representative or paragraph_roles is not None),
+                "fallback": not bool(representative or paragraph_roles is not None),
                 "quality_score": float(selected.get("score", 0.0)),
                 "source_chunk_index": source_chunk_index,
                 "source_paragraph_index": source_paragraph_index,
@@ -1062,7 +1376,7 @@ class MemoryManager:
                     ).items()
                     if int(issue_paragraph) == source_paragraph_index
                 ],
-                "reasons": [] if representative else [
+                "reasons": [] if representative or paragraph_roles is not None else [
                     "quality_approved_body_role_uncertain"
                 ],
             }
@@ -1099,30 +1413,45 @@ class MemoryManager:
                 weakest_score = float(
                     existing_quality[weakest_index].get("score", 0.0)
                 )
-                fallback_indices = [
-                    index for index, existing in enumerate(
-                        self.style_sample_records[:len(self.style_samples)]
-                    )
-                    if bool(existing.get("fallback"))
-                ]
-                replace_fallback = bool(representative and fallback_indices)
+                record_indices = (
+                    [
+                        next(
+                            index
+                            for index, existing in enumerate(self.style_sample_records)
+                            if existing.get("active", True) and existing.get("text") == sample
+                        )
+                        for sample in self.style_samples
+                    ]
+                    if self.quality_policy_version >= 1
+                    else list(range(len(self.style_samples)))
+                )
+                fallback_indices = [index for index, record_index in enumerate(record_indices)
+                                    if self.style_sample_records[record_index].get("fallback")]
+                replace_fallback = bool(record["representative"] and fallback_indices)
                 if replace_fallback:
                     weakest_index = min(
                         fallback_indices,
                         key=lambda index: _numeric_score(
-                            self.style_sample_records[index].get(
+                            self.style_sample_records[record_indices[index]].get(
                                 "quality_score", 0.0
                             )
                         ),
                     )
                     weakest_score = _numeric_score(
-                        self.style_sample_records[weakest_index].get(
+                        self.style_sample_records[record_indices[weakest_index]].get(
                             "quality_score", 0.0
                         )
                     )
                 if replace_fallback or float(selected["score"]) >= weakest_score + 8.0:
                     self.style_samples[weakest_index] = text
-                    self.style_sample_records[weakest_index] = record
+                    if self.quality_policy_version >= 1:
+                        old_record = self.style_sample_records[record_indices[weakest_index]]
+                        old_record.update(
+                            active=False, inactive_reason="weaker_style_sample_replaced"
+                        )
+                        self.style_sample_records.append(record)
+                    else:
+                        self.style_sample_records[record_indices[weakest_index]] = record
                     report.update({
                         "accepted": True,
                         "reason": "weaker_style_sample_replaced",
@@ -1450,10 +1779,27 @@ class MemoryManager:
         *,
         input_trust: str = "advisory_inputs",
         trust_reasons: list[str] | None = None,
+        coverage_refs: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Call the LLM to update the running bilingual summary of translated chapters."""
         from tarjomeh.core.prompts import SUMMARY_UPDATE_PROMPT
 
+        if (self.quality_policy_version >= 1 and coverage_refs == []
+                and not new_content and not translation):
+            return {"candidate_committed": False, "status": "skipped_no_pending_canonical_inputs",
+                    "replacement_count": 0, "changes": [],
+                    "pending_chunk_references": list(self.summary_pending),
+                    "authority": "argument_orientation_only"}
+        if self.quality_policy_version >= 1 and coverage_refs is not None:
+            indices = [ref.get("chunk_index") for ref in coverage_refs]
+            if not indices or any(type(index) is not int for index in indices):
+                raise ValueError("Summary coverage needs canonical chunk references")
+            expected_source, expected_target, expected_refs = self.pending_summary_inputs(
+                max(indices)
+            )
+            if (coverage_refs != expected_refs or new_content != expected_source
+                    or translation != expected_target):
+                raise ValueError("Summary inputs do not match canonical pending coverage")
         current = self.bilingual_summary.get_context() or "None"
         prompt = SUMMARY_UPDATE_PROMPT.format(
             current_summary=current,
@@ -1538,6 +1884,19 @@ class MemoryManager:
             candidate.set_input_trust(input_trust, trust_reasons)
             self.bilingual_summary = candidate
             report = self.reconcile_bilingual_summary()
+            if self.quality_policy_version >= 1 and coverage_refs is not None:
+                # Only references supplied from the canonical queue can clear it.
+                covered = [ref for ref in coverage_refs if ref in self.summary_pending]
+                self.summary_coverage.extend(
+                    ref for ref in covered if ref not in self.summary_coverage
+                )
+                self.summary_pending = [ref for ref in self.summary_pending if ref not in covered]
+                self.summary_history.append({
+                    "summary": self.bilingual_summary.serialize(),
+                    "coverage": list(self.summary_coverage),
+                })
+                report["covered_chunk_references"] = covered
+                report["pending_chunk_references"] = list(self.summary_pending)
             report.update({
                 "input_trust": self.bilingual_summary.input_trust,
                 "trust_reasons": list(self.bilingual_summary.trust_reasons),
@@ -1557,7 +1916,13 @@ class MemoryManager:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize memory state for database checkpointing."""
+        self._record_mapping_evidence()
         return {
+            "quality_policy_version": self.quality_policy_version,
+            "summary_pending": self.summary_pending,
+            "summary_coverage": self.summary_coverage,
+            "summary_history": self.summary_history,
+            "mapping_evidence": self.mapping_evidence,
             "book_context": self.book_context,
             "style_profile": self.style_profile,
             "style_samples": self.style_samples,
@@ -1571,6 +1936,12 @@ class MemoryManager:
 
     def from_dict(self, data: dict[str, Any]) -> None:
         """Restore memory state from a checkpoint dictionary."""
+        self.quality_policy_version = 1 if data.get("quality_policy_version") == 1 else 0
+        self.summary_pending = list(data.get("summary_pending", []))
+        self.summary_coverage = list(data.get("summary_coverage", []))
+        self.summary_history = list(data.get("summary_history", []))
+        self.mapping_evidence = deepcopy(data.get("mapping_evidence", {}))
+        self._pending_mapping_evidence = None
         self.book_context = str(data.get("book_context", ""))
         self.style_profile = str(data.get("style_profile", ""))
         rejected_summary = data.get("last_rejected_summary", {})

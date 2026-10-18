@@ -140,6 +140,7 @@ class TranslationRefiner:
                     "issue_id", "category", "severity", "confidence",
                     "source_segment_id", "source_quote", "current_persian_quote",
                     "suggested_correction", "rationale", "readability_advisory",
+                    "readability_advisories",
                     "approved_term_conflicts",
                 )
             }
@@ -147,6 +148,9 @@ class TranslationRefiner:
             if (detail.get("canonical_quote_binding", {}) or {}).get("status")
             != "quote_unmatched_after_canonicalization"
         ]
+        for detail in compact_issues:
+            if detail.get("readability_advisories"):
+                detail.pop("readability_advisory", None)
         if critique.issue_details and not compact_issues:
             return RefinementResult(
                 translation=translation, decision="preserved",

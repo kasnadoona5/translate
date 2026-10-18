@@ -1012,6 +1012,10 @@ async function openBookTermReview(jobId) {
         ].filter(Boolean).join(" | ");
         const status = document.createElement("small");
         status.textContent = term.status || "proposed";
+        if (term.origin === "curated_glossary") {
+            status.textContent += " | Curated glossary";
+            status.title = "Rejecting this proposal does not revoke existing curated glossary matching.";
+        }
         if (term.scope_counts) {
             status.textContent += ` | Evidence: ${term.scope_counts.evidence}` +
                 ` | Elsewhere: ${term.scope_counts.elsewhere} occurrence(s)`;
@@ -1036,7 +1040,7 @@ async function openBookTermReview(jobId) {
                { value: "reviewed_occurrences", label: "Required at reviewed occurrences" }]
             : [{ value: "evidence_paragraph", label: "Evidence paragraph" },
                { value: "all_body", label: "Legacy all-body approval", disabled: true }];
-        if (currentBookTermReviewVersion === 3) {
+        if (currentBookTermReviewVersion >= 3) {
             scopeOptions.push({ value: "book_wide_recommended",
                 label: "Required here, suggested elsewhere" });
         }
@@ -1047,7 +1051,8 @@ async function openBookTermReview(jobId) {
             element.disabled = option.disabled === true;
             scope.appendChild(element);
         });
-        scope.value = term.scope_mode || "evidence_paragraph";
+        scope.value = term.scope_mode || (currentBookTermReviewVersion >= 4
+            ? "book_wide_recommended" : "evidence_paragraph");
         const chapters = document.createElement("input");
         chapters.className = "book-term-chapters";
         chapters.placeholder = "Chapter numbers (optional)";
@@ -1063,7 +1068,8 @@ async function openBookTermReview(jobId) {
         original.className = "book-term-original";
         original.checked = term.keep_original === true;
         const originalLabel = document.createElement("label");
-        originalLabel.append(original, " Keep original");
+        originalLabel.append(original, currentBookTermReviewVersion >= 4
+            ? " Original after Persian" : " Keep original");
         controls.append(target, scope, chapters, sense, originalLabel);
         row.append(selection, details, controls);
         if (currentBookTermReviewVersion >= 2) {
@@ -1105,7 +1111,8 @@ function buildAddBookTermForm() {
     original.type = "checkbox";
     original.className = "book-term-add-original";
     const originalLabel = document.createElement("label");
-    originalLabel.append(original, " Keep original");
+    originalLabel.append(original, currentBookTermReviewVersion >= 4
+        ? " Original after Persian" : " Keep original");
     const button = document.createElement("button");
     button.type = "button";
     button.className = "btn btn-secondary btn-compact";

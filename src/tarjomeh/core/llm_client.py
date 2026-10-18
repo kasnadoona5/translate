@@ -35,6 +35,23 @@ from tarjomeh.core.transport import (
 logger = logging.getLogger(__name__)
 
 
+def token_counter_diagnostics(usage: dict[str, Any]) -> dict[str, Any]:
+    """Report compatible raw counters without changing them or estimating bills."""
+    counters = [usage.get(key) for key in ("prompt_tokens", "completion_tokens", "total_tokens")]
+    known = [
+        isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in counters
+    ]
+    result: dict[str, Any] = {"token_counter_consistency": "unknown"}
+    if all(known[:2]):
+        result["derived_component_token_sum"] = counters[0] + counters[1]
+        result["derived_component_token_sum_is_billing"] = False
+        if known[2]:
+            result["token_counter_consistency"] = (
+                "consistent" if counters[2] == counters[0] + counters[1] else "inconsistent"
+            )
+    return result
+
+
 _SCHEMA_REPAIR_OPERATIONS = {
     "critique_json_repair",
     "refinement_json_repair",
@@ -1216,6 +1233,11 @@ class LLMClient:
             if event["visible_output_present"]
             else "no_visible_output"
         )
+        # Keep provider counters verbatim. The component sum is diagnostic,
+        # never an estimate of billed tokens (reasoning may already be included).
+        event.update(token_counter_diagnostics(usage))
+        if event["token_counter_consistency"] == "inconsistent":
+            event["token_accounting_status"] = "reported_inconsistent"
         if failure_reason:
             event["failure_reason"] = failure_reason
         if error:

@@ -462,9 +462,14 @@ class TarjomehConfig:
         # Missing in a saved job means the historical, zero-extra-call policy.
         if "extra_final_refine_attempts" not in expanded.get("translation", {}):
             config.translation.extra_final_refine_attempts = 0
+        diagnostics: list[dict[str, Any]] = []
         config._apply_env_overrides(
-            persisted_job=persisted_job, load_diagnostics=load_diagnostics,
+            persisted_job=persisted_job, load_diagnostics=diagnostics,
         )
+        # Transient, names-only evidence: not a dataclass field or saved policy.
+        config._load_diagnostics = diagnostics
+        if load_diagnostics is not None:
+            load_diagnostics.extend(diagnostics)
         # Persisted configs carry redacted credentials; refill from the
         # environment before validation rejects the empty key list.
         config._rehydrate_redacted_secrets(credential_source)
@@ -583,12 +588,37 @@ class TarjomehConfig:
             "LLM_READ_TIMEOUT_SECONDS",
         }
         ignored: set[str] = set()
+        saved_policy = {
+            "TRANSLATOR_MODEL": self.llm.model,
+            "TRANSLATOR_MAX_TOKENS": self.llm.max_tokens,
+            "TRANSLATOR_REASONING": self.llm.translation_reasoning,
+            "TRANSLATOR_RECOVERY_MODEL": self.llm.recovery.model,
+            "TRANSLATOR_RECOVERY_MAX_ATTEMPTS": self.llm.recovery.max_attempts,
+            "TRANSLATOR_RECOVERY_MAX_TOKENS": self.llm.recovery.max_tokens,
+            "CRITIC_ENABLED": self.llm.critic.enabled,
+            "CRITIC_MODEL": self.llm.critic.model,
+            "CRITIC_RECOVERY_MODEL": self.llm.critic.recovery_model,
+            "CRITIC_RECOVERY_MAX_ATTEMPTS": self.llm.critic.recovery_max_attempts,
+            "CRITIC_RECOVERY_MAX_TOKENS": self.llm.critic.recovery_max_tokens,
+        }
 
         def env(name: str, default: str = "") -> str:
             value = (os.environ if environment is None else environment).get(name, default)
             if persisted_job and name not in live_fields:
-                if value.strip():
-                    ignored.add(name)
+                if value.strip() and name in saved_policy:
+                    saved = saved_policy[name]
+                    normalized: Any = value.strip()
+                    if isinstance(saved, bool):
+                        if normalized.lower() in {"1", "true", "yes", "on"}:
+                            normalized = True
+                        elif normalized.lower() in {"0", "false", "no", "off"}:
+                            normalized = False
+                    elif isinstance(saved, int) and normalized.isdigit():
+                        normalized = int(normalized)
+                    elif name == "TRANSLATOR_REASONING":
+                        normalized = normalized.lower()
+                    if normalized != saved:
+                        ignored.add(name)
                 return default
             return value
 

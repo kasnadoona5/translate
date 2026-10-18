@@ -34,7 +34,9 @@ def resolve_book_recommendations(
     mandatory_terms: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {"recommendations": [], "deferred": [], "authority": "advisory_only"}
-    if review.get("phase") != "started" or review.get("review_version") != 3:
+    if (review.get("phase") not in {"started", "skipped"}
+            or review.get("review_version") not in {3, 4}
+            or (review.get("phase") == "skipped" and review.get("review_version") != 4)):
         return result
     proposals = [
         item
@@ -66,7 +68,7 @@ def resolve_book_recommendations(
         ):
             reason = "curated_mandatory_conflict"
         # Recommendation scope never grants a new English-original permission.
-        if term.get("keep_original"):
+        if term.get("keep_original") and review.get("review_version") < 4:
             reason = "optional_original_insertion_policy_not_proven"
         if reason:
             result["deferred"].append({"source": english, "reason": reason})

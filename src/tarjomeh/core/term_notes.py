@@ -867,6 +867,15 @@ def apply_term_notes(
     for paragraph in document.paragraphs:
         candidates: list[tuple[int, str, str, str]] = []
         source_folded = paragraph.source_text.casefold()
+        from tarjomeh.glossary.book_review import scoped_original_permissions
+
+        scoped = scoped_original_permissions(
+            paragraph.source_text, paragraph.translated_text,
+            paragraph.metadata.get("book_term_original_approvals", []),
+        )
+        # An explicitly approved inline pair is already the introduction. Do
+        # not turn it into a note or add another introduction later in the book.
+        seen.update(source.casefold().strip() for source in scoped)
 
         for entry in glossary_manager.find_terms(
             paragraph.source_text,

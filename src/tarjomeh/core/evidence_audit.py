@@ -136,6 +136,109 @@ def targeted_quality_evidence(
         "readability_call_accounting": readability_call_accounting(events),
         "quoted_suffix_reports": suffixes,
         "source_annotation_syntax": annotation_syntax,
+        "settings_and_token_diagnostics": settings_and_token_diagnostics(events),
+    }
+
+
+def settings_and_token_diagnostics(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Expose diagnostics without changing billing, job policy or quality."""
+    differences = []
+    inconsistent = []
+    for event in events:
+        payload = event.get("payload") or {}
+        if event.get("event_type") == "settings_env_difference":
+            differences.append({
+                "ignored_environment_variables": payload.get("ignored_environment_variables", []),
+                "policy": "persisted_job_settings_preserved",
+            })
+        from tarjomeh.core.llm_client import token_counter_diagnostics
+
+        counters = token_counter_diagnostics(payload) if payload.get("usage_reported") else {}
+        if (event.get("event_type") == "llm_call_attempt"
+                and counters.get("token_counter_consistency") == "inconsistent"):
+            inconsistent.append({
+                "chunk_index": event.get("chunk_index"),
+                **{key: payload.get(key) for key in (
+                    "operation", "attempt", "prompt_tokens", "completion_tokens",
+                    "total_tokens",
+                )},
+                "derived_component_token_sum": counters["derived_component_token_sum"],
+            })
+    return {"settings_differences": differences, "inconsistent_token_counters": inconsistent,
+            "policy": "raw_provider_counters_retained_derived_sum_is_not_billing"}
+
+
+def fresh_memory_policy_evidence(
+    state: dict[str, Any], events: list[dict[str, Any]], chunks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Separate inactive history, active canonical references and unexercised policy."""
+    def digest(value: Any) -> str:
+        return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
+
+    canonical = {row["chunk_index"]: row for row in chunks
+                 if row.get("status") in {"completed", "needs_review"} and row.get("translation")}
+    def proven(ref: dict[str, Any]) -> bool:
+        row = canonical.get(ref.get("chunk_index"))
+        return bool(row and ref.get("source_sha256") == digest(row.get("text"))
+                    and ref.get("target_sha256") == digest(row.get("translation")))
+
+    pairs = [pair for pair in state.get("past_translations", []) if isinstance(pair, dict)]
+    active = [pair for pair in pairs if pair.get("active", True)]
+    refs = [{"chunk_index": pair.get("chunk_index"), "source_sha256": digest(pair.get("source")),
+             "target_sha256": digest(pair.get("translation"))} for pair in active]
+    pending = state.get("summary_pending", [])
+    coverage = state.get("summary_coverage", [])
+    return {
+        "policy_version": state.get("quality_policy_version", 0),
+        "legacy_not_migrated": state.get("quality_policy_version", 0) == 0,
+        "layer3_stored_versions": len(pairs),
+        "layer3_active_versions": len(active),
+        "layer3_inactive_versions": len(pairs) - len(active),
+        "active_pair_canonical_identity": [
+            {**ref, "canonical_hashes_match": proven(ref)} for ref in refs
+        ],
+        "duplicate_active_indices": [
+            index
+            for index, count in Counter(ref["chunk_index"] for ref in refs).items()
+            if index is not None and count > 1
+        ],
+        "pending_summary_coverage": [
+            {**ref, "canonical_hashes_match": proven(ref)} for ref in pending
+        ],
+        "accepted_summary_coverage": [
+            {**ref, "canonical_hashes_match": proven(ref)} for ref in coverage
+        ],
+        "historical_summary_versions": len(state.get("summary_history", [])),
+        "summary_version_evidence": state.get("summary_history", []),
+        "mapping_provenance_references": state.get("mapping_evidence", {}),
+        "inactive_layer3_history": [pair for pair in pairs if not pair.get("active", True)],
+        "inactive_style_history": [
+            record
+            for record in state.get("style_sample_records", [])
+            if record.get("active") is False
+        ],
+        "inactive_style_records": sum(
+            record.get("active") is False for record in state.get("style_sample_records", [])
+        ),
+        "curated_revision_events": [
+            event
+            for event in events
+            if event.get("event_type")
+            in {
+                "curated_revision_reconciled",
+                "curated_revision_conflict",
+            }
+        ],
+        "manual_retranslation_results": [
+            event for event in events if event.get("event_type") == "manual_retranslation_result"
+        ],
+        "retranslation_context_events": [
+            event
+            for event in events
+            if str(event.get("event_type", "")).endswith("retranslation_context_isolation")
+        ],
+        "settings_and_token_diagnostics": settings_and_token_diagnostics(events),
+        "authority": "report_only_no_semantic_certification_or_legacy_coverage_inference",
     }
 
 
