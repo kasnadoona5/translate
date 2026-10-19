@@ -320,6 +320,30 @@ def is_safe_automatic_source_span(english: str, category: str) -> bool:
     return True
 
 
+def organization_lexical_deferral(english: str, persian: str, category: str) -> str:
+    """Do not fill a translated organization's missing tokens with prose."""
+    if _normalise_category(category) not in {
+        "organization", "institution", "source_entity_candidate", "source_grounded_entity",
+    }:
+        return ""
+    words = re.findall(r"[A-Za-z\u00c0-\u024f]+", english or "")
+    if not words:
+        return ""
+    terminal = words[-1].casefold()
+    # Legal designators often follow a brand rather than head a Persian phrase.
+    if terminal in {"inc", "limited", "llc", "ltd", "plc"}:
+        return ""
+    heads = _ORGANIZATION_TARGET_HEADS.get(terminal, ())
+    target_words = _PERSIAN_WORD_RE.findall(_PERSIAN_DIACRITICS_RE.sub("", persian or ""))
+    head_index = next((i for i, word in enumerate(target_words)
+                       if any(word in {head, head + "\u06cc", head + "\u0647\u0627",
+                                       head + "\u200c\u0647\u0627", head + "\u0647\u0627\u06cc",
+                                       head + "\u200c\u0647\u0627\u06cc"} for head in heads)), None)
+    if head_index is not None and head_index > 0:
+        return "organization_lexical_start_unproven"
+    return ""
+
+
 def is_usable_observed_mapping(
     english: str,
     persian: str,
@@ -352,6 +376,8 @@ def is_usable_observed_mapping(
         return False
 
     normalized_category = _normalise_category(category)
+    if organization_lexical_deferral(source, raw_target, normalized_category):
+        return False
     source_words = (
         _PERSON_SOURCE_COMPONENT_RE.findall(source)
         if requires_bounded_name_target(normalized_category, source)
@@ -1571,6 +1597,11 @@ class ProperNouns:
         if provenance.get("context_deferred"):
             return str(provenance.get("context_deferred_reason") or "context_conflict")
         if provenance.get("origin") not in {"curated_glossary", "approved_research"}:
+            organization_risk = organization_lexical_deferral(
+                key, self._nouns.get(key, ""), self.category_for(key),
+            )
+            if organization_risk:
+                return organization_risk
             lexical_risk = lexical_annotation_deferral(key, self._nouns.get(key, ""))
             if lexical_risk:
                 return lexical_risk
@@ -1783,6 +1814,8 @@ class ProperNouns:
                 normalized = low_authority_mapping_category(
                     source_text, target_text, str(category)
                 )
+                if organization_lexical_deferral(source_text, target_text, normalized):
+                    return True
                 if (
                     requires_bounded_name_target(normalized, source_text)
                     and _automatic_name_ambiguity_reason(source_text, target_text)
@@ -1847,7 +1880,7 @@ class ProperNouns:
                     self._categories[source] = category
                     if not is_safe_low_authority_mapping(
                         source, self._nouns[source], category
-                    ):
+                    ) and not organization_lexical_deferral(source, self._nouns[source], category):
                         record.update({
                             "context_deferred": True,
                             "context_deferred_reason": (
