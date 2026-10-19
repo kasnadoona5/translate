@@ -12,12 +12,14 @@ Anything unknown or unproven blocks publication.
 from __future__ import annotations
 
 import copy
+import hashlib
 import re
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from tarjomeh.core.anchor_spans import anchor_before, anchor_spans
 from tarjomeh.exporters.base import TranslatedDocument, TranslatedParagraph
 
 _ZWNJ = chr(0x200C)
@@ -48,10 +50,6 @@ PERMITTED_RENDER_PRODUCERS = (
     "render_language_repair",
     "identifier_restoration",
 )
-# How far back from an inserted original its Persian rendering may start
-# (the anchor may extend over attached suffixes such as a plural).
-_ANCHOR_WINDOW = 24
-_ANCHOR_SUFFIX = "[" + _PERSIAN_LETTERS_RE.pattern[1:-1] + "]{0,6}"
 
 
 def _texts(document: TranslatedDocument) -> list[str]:
@@ -119,15 +117,7 @@ def _anchor_position_proven(after: str, start: int, targets: list[str]) -> bool:
     Only an attached suffix of a few letters (a plural, an ezafe yeh), spacing
     and closing quotes may stand between the rendering and the parenthesis.
     """
-    window = after[max(0, start - len(max(targets, key=len)) - _ANCHOR_WINDOW):start]
-    window_key = _persian_key(window.rstrip(" " + _CLOSING_QUOTES))
-    return any(
-        _persian_key(target)
-        and re.search(
-            re.escape(_persian_key(target)) + _ANCHOR_SUFFIX + "$", window_key
-        )
-        for target in targets
-    )
+    return anchor_before(after, start, targets) is not None
 
 
 def _proof_anchor(source: str, before: str, after: str, context: dict[str, Any]) -> str:
@@ -150,6 +140,12 @@ def _proof_anchor(source: str, before: str, after: str, context: dict[str, Any])
                 continue
             if not _anchor_position_proven(after, match.start(), targets):
                 return "anchor_position_unproven"
+            span, matched_target = anchor_before(after, match.start(), targets)
+            if span.kind != "exact" and (
+                _word_count(source, original) != 1
+                or len(anchor_spans(after, matched_target)) != 1
+            ):
+                return "anchor_inflection_source_ambiguous"
     if paired_repair:
         # A paired repair turns one bare English original into
         # "<Persian> (<original>)"; nothing else outside parentheses changes.
@@ -328,6 +324,23 @@ _TYPE_PROOFS: dict[str, Callable[[str, str, str, dict[str, Any]], str]] = {
 }
 
 
+def _anchor_evidence(source: str, rendered: str, context: dict[str, Any]) -> list[dict[str, Any]]:
+    result = []
+    for match in _LATIN_PARENTHETICAL_RE.finditer(rendered):
+        original = _squash(match.group(1))
+        evidence = anchor_before(rendered, match.start(), _anchor_targets(original, context))
+        if evidence is None:
+            continue
+        span, target = evidence
+        result.append({
+            "original": original, "target": target,
+            "start": span.start, "end": span.end, "kind": span.kind,
+            "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
+            "rendered_sha256": hashlib.sha256(rendered.encode()).hexdigest(),
+        })
+    return result
+
+
 class RenderChangeLedger:
     """Record, replay and prove every render-time change to delivered text."""
 
@@ -381,6 +394,10 @@ class RenderChangeLedger:
                 "after": after[index],
                 "replay_verified": replayed[index] == after[index],
                 "proof_failure": failure,
+                "anchor_evidence": (
+                    _anchor_evidence(paragraph.source_text, after[index], context)
+                    if producer == "inline_original_anchor" else []
+                ),
             })
         return result
 
@@ -422,7 +439,7 @@ class RenderChangeLedger:
             "changes": [
                 {key: change[key] for key in (
                     "producer", "paragraph_index", "before", "after",
-                    "replay_verified", "proof_failure",
+                    "replay_verified", "proof_failure", "anchor_evidence",
                 )}
                 for change in self.changes
             ],

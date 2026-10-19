@@ -6,6 +6,11 @@ import re
 import unicodedata
 from typing import TYPE_CHECKING, Any
 
+from tarjomeh.core.anchor_spans import (
+    ANCHOR_SUFFIX_RE as _PERSIAN_ANCHOR_SUFFIX_RE,
+    anchor_spans,
+    extend_anchor_end,
+)
 from tarjomeh.exporters.base import TranslatedDocument
 from tarjomeh.memory.proper_nouns import source_term_pattern, source_term_present
 from tarjomeh.persian.typography import PersianTypographer
@@ -56,81 +61,18 @@ def _inside_parenthetical(text: str, offset: int) -> bool:
     return text.rfind("(", 0, offset) > text.rfind(")", 0, offset)
 
 
-_PERSIAN_ANCHOR_SUFFIX_RE = re.compile(
-    r"(?:\u200c?(?:"
-    r"ها(?:ی(?:ی|م|ت|ش|مان|تان|شان)?)?"
-    r"|ی|ان|ات|تر(?:ین)?|ام|ات|اش|مان|تان|شان"
-    r"))"
-)
-
-
-_COMBINING_MARKS = frozenset(
-    "ًٌٍَُِّْٰٔ"
-)
-
-
 def _extend_persian_anchor_end(text: str, end: int) -> int:
     """Keep a productive Persian suffix attached before an English original.
 
     A combining mark written on the anchor word (e.g. an ezafe kasra) belongs
     to that word; the inserted original goes after it, never between them.
     """
-    value = text or ""
-    match = _PERSIAN_ANCHOR_SUFFIX_RE.match(value, end)
-    end = match.end() if match else end
-    while end < len(value) and value[end] in _COMBINING_MARKS:
-        end += 1
-    return end
-
-
-_PERSIAN_TARGET_TOKEN_RE = re.compile(
-    r"[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]+"
-    r"(?:\u200c[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]+)*"
-)
+    return extend_anchor_end(text or "", end)
 
 
 def _target_spans(text: str, target: str) -> list[tuple[int, int, str]]:
-    """Find exact targets, then a conservative modifier-tolerant Persian form."""
-    exact = [
-        (match.start(), match.end(), match.group())
-        for match in re.finditer(re.escape(target), text or "")
-    ]
-    if exact:
-        return exact
-
-    target_tokens = [
-        match.group().replace("\u200c", "")
-        for match in _PERSIAN_TARGET_TOKEN_RE.finditer(target or "")
-    ]
-    if len(target_tokens) < 2:
-        return []
-    text_tokens = list(_PERSIAN_TARGET_TOKEN_RE.finditer(text or ""))
-    matches: list[tuple[int, int, str]] = []
-
-    def token_matches(rendered: str, expected: str) -> bool:
-        return rendered == expected or rendered == f"{expected}\u06cc"
-
-    for start_index, token in enumerate(text_tokens):
-        if not token_matches(
-            token.group().replace("\u200c", ""), target_tokens[0]
-        ):
-            continue
-        cursor = start_index
-        for expected in target_tokens[1:]:
-            next_index = next((
-                index for index in range(cursor + 1, min(cursor + 4, len(text_tokens)))
-                if token_matches(
-                    text_tokens[index].group().replace("\u200c", ""), expected
-                )
-            ), None)
-            if next_index is None:
-                break
-            cursor = next_index
-        else:
-            start = token.start()
-            end = text_tokens[cursor].end()
-            matches.append((start, end, text[start:end]))
-    return matches
+    """Return the same bounded lexical spans consumed by render proof."""
+    return [(span.start, span.end, span.rendered) for span in anchor_spans(text, target)]
 
 
 def ensure_inline_proper_noun_originals(
@@ -216,6 +158,16 @@ def ensure_inline_proper_noun_originals(
         for (
             source_position, _source_end, source, target_variants, key, category
         ) in sorted(selected_candidates, key=lambda item: item[0]):
+            spans = [(span, target) for target in target_variants
+                     for span in anchor_spans(text, target)]
+            if any(span.kind != "exact" for span, _ in spans) and (
+                len({(span.start, span.end) for span, _ in spans}) != 1
+                or len(list(_source_original_pattern(source).finditer(paragraph.source_text))) != 1
+            ):
+                ambiguous.append({"paragraph_index": paragraph.index, "source": source,
+                                  "target": target_variants[0], "category": category,
+                                  "reason": "ambiguous_inflected_anchor"})
+                continue
             target_matches = [
                 (*match, target)
                 for target in target_variants
