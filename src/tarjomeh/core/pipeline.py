@@ -2705,6 +2705,7 @@ Requirements:
 
 def _research_context_for_memory(
     artifact: dict[str, Any] | None, *, include_suggestions: bool = True,
+    book_title: str = "",
 ) -> str:
     """Format unapproved research as non-authoritative prompt context."""
     usable_statuses = {
@@ -2712,7 +2713,19 @@ def _research_context_for_memory(
     }
     if not artifact or artifact.get("status") not in usable_statuses:
         return ""
-    parts = [str(artifact.get("book_context", "")).strip()]
+    projection = artifact.get("current_context_projection", {})
+    if book_title:
+        from tarjomeh.context.book_researcher import BookResearcher
+
+        projection = BookResearcher.project_cached_context(
+            artifact, book_title=book_title,
+            publication_evidence=(
+                projection.get("publication_evidence", [])
+                if projection.get("book_title") == book_title
+                else artifact.get("publication_evidence", [])
+            ),
+        )
+    parts = [str(projection.get("book_context", artifact.get("book_context", ""))).strip()]
     suggestions = []
     for item in artifact.get("terms", []) if include_suggestions else []:
         if not isinstance(item, dict) or item.get("status") != "suggested":
@@ -6948,6 +6961,15 @@ class TranslationPipeline:
                 )
                 artifact["source_term_candidates_version"] = 1
                 self.db.save_job_artifact(job_id, "book_research", artifact)
+            if artifact.get("status") != "disabled":
+                from tarjomeh.context.book_researcher import BookResearcher
+
+                projection = BookResearcher.project_cached_context(
+                    artifact, book_title=document.title,
+                    publication_evidence=BookResearcher._publication_metadata_evidence(document),
+                )
+                self.db.save_job_artifact(job_id, "research_context_projection", projection)
+                artifact = {**artifact, "current_context_projection": projection}
             return artifact
 
         if progress_callback:
@@ -6962,6 +6984,7 @@ class TranslationPipeline:
             BookResearcher(self.config, self.llm_client).research(document)
         )
         artifact = result.to_dict()
+        artifact["book_title"] = document.title
         existing = {
             str(term.get("source", "")).casefold()
             for term in artifact.get("terms", []) if isinstance(term, dict)
@@ -6972,6 +6995,12 @@ class TranslationPipeline:
         )
         artifact["source_term_candidates_version"] = 1
         self.db.save_job_artifact(job_id, "book_research", artifact)
+        projection = BookResearcher.project_cached_context(
+            artifact, book_title=document.title,
+            publication_evidence=BookResearcher._publication_metadata_evidence(document),
+        )
+        self.db.save_job_artifact(job_id, "research_context_projection", projection)
+        artifact = {**artifact, "current_context_projection": projection}
         if artifact.get("status") in {
             "completed", "completed_without_suggestions", "degraded", "partial"
         }:
@@ -7542,6 +7571,7 @@ class TranslationPipeline:
         }:
             memory_manager.book_context = _research_context_for_memory(
                 research_artifact,
+                book_title=research_document.title,
                 include_suggestions=(
                     not self.config.translation.review_book_terms_before_translating
                 ),
@@ -9048,9 +9078,12 @@ class TranslationPipeline:
             }
             self.db.save_job_artifact(job_id, "render_identity_audit", identity)
             if not identity["passed"]:
+                failed_part = (
+                    "canonical-to-render proof" if not render_audit["passed"] else "DOCX read-back"
+                )
                 raise RuntimeError(
-                    "Export blocked: delivered text differs from canonical text "
-                    "without a proven render change (see render_identity_audit)."
+                    f"Export blocked: {failed_part} failed; no output published "
+                    "(see render_identity_audit)."
                 )
             temporary.replace(output_path)
         finally:
@@ -9498,6 +9531,7 @@ class TranslationPipeline:
         if research_artifact is not None:
             memory_manager.book_context = _research_context_for_memory(
                 research_artifact,
+                book_title=document.title,
                 include_suggestions=(
                     not self.config.translation.review_book_terms_before_translating
                 ),

@@ -131,7 +131,7 @@ class BookResearcher:
             )
             raw_book_context = str(data.get("book_context", "")).strip()[:4000]
             context, publication_conflicts = self._reconcile_publication_context(
-                context, publication_evidence,
+                context, publication_evidence, book_title=title,
             )
             if publication_conflicts:
                 evidence_warnings.append(
@@ -239,6 +239,7 @@ class BookResearcher:
     @staticmethod
     def _reconcile_publication_context(
         context: str, evidence: list[dict[str, Any]],
+        *, book_title: str = "",
     ) -> tuple[str, list[dict[str, Any]]]:
         patterns = {
             "first_publication": (
@@ -284,6 +285,36 @@ class BookResearcher:
                 r"(?:book|work|study|volume)\s*(?:was\s+)?$",
                 text[:start], re.IGNORECASE,
             ))
+
+        title = " ".join(book_title.split())
+        if len(title.split()) >= 2 and title.casefold() != "unknown title":
+            title_pattern = re.escape(title).replace(r"\ ", r"\s+")
+            dated_title = re.compile(
+                rf"(?<!\w)(?P<title>{title_pattern})(?!\w)\s+"
+                rf"\(\s*(?P<years>{years})\s*\)", re.IGNORECASE,
+            )
+
+            def exclude_title_date(match: re.Match[str]) -> str:
+                other_title_prefix = re.search(
+                    r"\b(?:other|another|earlier|previous|later|companion)\s+"
+                    r"(?:book|work|study|volume)(?:\s+was)?[\s,:\"'*]*$",
+                    match.string[:match.start()], re.IGNORECASE,
+                )
+                if other_work_claim(match.string, match.start()) or other_title_prefix:
+                    return match.group()
+                claimed = {int(value) for value in re.findall(year, match["years"])}
+                source_years = {item["year"] for item in evidence
+                                if item.get("kind") in {"first_publication", "edition", "reprint"}}
+                if re.fullmatch(year, match["years"]) and claimed == source_years:
+                    return match.group()
+                conflicts.append({
+                    "kind": "title_adjacent_publication", "claim": match.group(),
+                    "years": sorted(claimed), "source_evidence": evidence,
+                    "reason": "publication_fact_unverified",
+                })
+                return match["title"]
+
+            context = dated_title.sub(exclude_title_date, context)
 
         for sentence in re.split(r"(?<=[.!?])\s+", context):
             def exclude_publisher_before_date(match: re.Match[str]) -> str:
@@ -356,6 +387,20 @@ class BookResearcher:
             if not excluded:
                 kept.append(sentence)
         return " ".join(kept).strip(), conflicts
+
+    @staticmethod
+    def project_cached_context(
+        artifact: dict[str, Any], *, book_title: str,
+        publication_evidence: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Recheck cached context without changing its raw research history."""
+        context, conflicts = BookResearcher._reconcile_publication_context(
+            str(artifact.get("book_context", "")), publication_evidence,
+            book_title=book_title,
+        )
+        return {"version": 1, "book_title": book_title, "book_context": context,
+                "publication_conflicts": conflicts, "publication_evidence": publication_evidence,
+                "authority": "advisory_context_only", "new_llm_calls": 0}
 
     async def _synthesise(
         self,
