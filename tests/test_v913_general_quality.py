@@ -55,11 +55,12 @@ def test_translated_citation_wrapper_preserves_semantic_integrity() -> None:
     assert "numbers_missing" not in blocking
 
 
-def test_first_occurrence_anchor_allows_bounded_persian_modifier() -> None:
+def test_first_occurrence_anchor_defers_unproven_intervening_modifier() -> None:
     document = _document(
         "A traditional three-element theory is introduced.",
         "\u062f\u0631 \u0627\u06cc\u0646\u062c\u0627 \u0646\u0638\u0631\u06cc\u0647 \u0633\u0646\u062a\u06cc \u0633\u0647\u200c\u0639\u0646\u0635\u0631\u06cc \u0645\u0639\u0631\u0641\u06cc \u0645\u06cc\u200c\u0634\u0648\u062f.",
     )
+    before = document.paragraphs[0].translated_text
     report = ensure_inline_proper_noun_originals(
         document,
         {"three-element theory": "\u0646\u0638\u0631\u06cc\u0647 \u0633\u0647\u200c\u0639\u0646\u0635\u0631\u06cc"},
@@ -67,8 +68,10 @@ def test_first_occurrence_anchor_allows_bounded_persian_modifier() -> None:
         {"three-element theory": "theory"},
         return_report=True,
     )
-    assert "\u0646\u0638\u0631\u06cc\u0647 \u0633\u0646\u062a\u06cc \u0633\u0647\u200c\u0639\u0646\u0635\u0631\u06cc (three-element theory)" in document.paragraphs[0].translated_text
-    assert report["missing_target_count"] == 0
+    assert document.paragraphs[0].translated_text == before
+    assert report["inserted_count"] == 0
+    assert report["missing_target_count"] == 1
+    assert report["missing_targets"][0]["reason"] == "known_target_not_found"
 
 
 def test_name_year_and_citation_house_style_are_source_grounded() -> None:

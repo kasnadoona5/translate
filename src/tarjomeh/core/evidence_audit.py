@@ -53,6 +53,29 @@ def style_source_evidence(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def export_memory_research_evidence(
+    state: dict[str, Any], render: dict[str, Any], projection: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep current effective deferral separate from historical raw records."""
+    from tarjomeh.memory.proper_nouns import ProperNouns
+
+    memory = ProperNouns()
+    memory.deserialize(state.get("proper_nouns", {}))
+    return {
+        "deferred_organization_mappings": [
+            {"source": source, "target": target, "reason": memory.context_deferral_reason(source),
+             "raw_record_retained": True, "prompt_eligible": False}
+            for source, target in memory.all_nouns().items()
+            if memory.context_deferral_reason(source) == "organization_lexical_start_unproven"
+        ],
+        "render_identity": render,
+        "research_context_projection": projection,
+        "summary_validation_scope": "protocol_structure_and_coverage_not_semantic_entailment",
+        "semantic_accuracy": "requires_source_based_human_review",
+        "authority": "report_only_no_memory_or_quality_penalty",
+    }
+
+
 def targeted_quality_evidence(
     proper: dict[str, Any], events: list[dict[str, Any]], chunks: list[dict[str, Any]],
 ) -> dict[str, Any]:

@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 
 from tarjomeh.core.anchor_spans import (
     ANCHOR_SUFFIX_RE as _PERSIAN_ANCHOR_SUFFIX_RE,
+)
+from tarjomeh.core.anchor_spans import (
     anchor_spans,
     extend_anchor_end,
 )

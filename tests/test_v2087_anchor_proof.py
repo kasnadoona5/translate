@@ -116,3 +116,16 @@ def test_repeated_export_is_idempotent_and_tampering_still_blocks():
     ledger = RenderChangeLedger(doc)
     doc.paragraphs[0].translated_text += " altered"
     assert not ledger.audit()["passed"]
+
+
+def test_full_authorized_phrase_can_include_an_internal_modifier():
+    target = ("\u0646\u0638\u0631\u06cc\u0647 \u0633\u0646\u062a\u06cc "
+              "\u0633\u0647\u200c\u0639\u0646\u0635\u0631\u06cc")
+    original = "traditional three-element theory"
+    doc = document(target, "A traditional three-element theory is introduced.")
+    ledger = RenderChangeLedger(doc)
+    ledger.set_authorized({original: target})
+    ledger.step("inline_original_anchor", ensure_inline_proper_noun_originals,
+                {original: target}, PersianTypographer(), {original: "theory"})
+    assert doc.paragraphs[0].translated_text == target + f" ({original})"
+    assert ledger.audit()["passed"]

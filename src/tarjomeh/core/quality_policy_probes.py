@@ -214,3 +214,47 @@ def quality_policy_probes() -> dict[str, bool]:
         and len(diagnostics) == 1
         and diagnostics[0]["ignored_environment_variables"] == ["TRANSLATOR_MODEL"],
     }
+
+
+def export_memory_research_probes() -> dict[str, bool]:
+    """Synthetic span/authority/metadata behavior, without calls or file I/O."""
+    from types import SimpleNamespace
+
+    from tarjomeh.context.book_researcher import BookResearcher
+    from tarjomeh.core.render_identity import RenderChangeLedger
+    from tarjomeh.core.term_notes import ensure_inline_proper_noun_originals
+    from tarjomeh.exporters.base import TranslatedDocument, TranslatedParagraph
+    from tarjomeh.memory.proper_nouns import ProperNouns
+
+    target = "\u062a\u062d\u0648\u0644 \u0641\u0646\u06cc"
+    inflected = "\u062a\u062d\u0648\u0644\u06cc \u0641\u0646\u06cc"
+    doc = TranslatedDocument(title="Synthetic", paragraphs=[TranslatedParagraph(
+        index=0, source_text="A technical change matters.", translated_text=inflected)])
+    ledger = RenderChangeLedger(doc)
+    ledger.set_authorized({"technical change": target})
+    ledger.step("inline_original_anchor", ensure_inline_proper_noun_originals,
+                {"technical change": target}, SimpleNamespace(process=lambda value: value))
+    source = "Regional Research Council"
+    bad = (
+        "\u0645\u0627\u0644\u06cc \u0634\u0648\u0631\u0627\u06cc "
+        "\u067e\u0698\u0648\u0647\u0634 \u0645\u0646\u0637\u0642\u0647\u200c\u0627\u06cc"
+    )
+    noun = ProperNouns()
+    noun.deserialize({"nouns": {source: bad}, "categories": {source: "organization"},
+                      "provenance": {source: {"origin": "observed_translation", "authority": 30}}})
+    title = "The Archive and Power"
+    raw = f"{title} (2004/2005) studies institutions."
+    context, conflicts = BookResearcher._reconcile_publication_context(
+        raw, [{"kind": "first_publication", "year": 2005}], book_title=title)
+    return {
+        "inflected_multiword_anchor_proof": bool(ledger.audit()["passed"]
+                                                  and ledger.canonical == [inflected]
+                                                  and doc.paragraphs[0].translated_text
+                                                  == inflected + " (technical change)"),
+        "organization_lexical_boundary": bool(noun.all_nouns().get(source) == bad
+                                                and noun.context_deferral_reason(source)
+                                                == "organization_lexical_start_unproven"
+                                                and source not in noun.inline_eligible_nouns()),
+        "book_identity_date_guard": bool(conflicts and "2004/2005" not in context
+                                         and "studies institutions" in context),
+    }

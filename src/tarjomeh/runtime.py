@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v20.8.6"
+RUNTIME_RELEASE = "v20.8.7"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,9 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "inflected_multiword_anchor_proof": True,
+            "organization_lexical_boundary": True,
+            "book_identity_date_guard": True,
             "source_eligible_style_memory": True,
             "historical_style_source_quarantine": True,
             **{
@@ -186,7 +189,7 @@ def runtime_capabilities() -> dict[str, Any]:
             "manual_retranslation_admission": 1,
             "structure_evidence": 3,
             "canonical_text": 3,
-            "layer1_admission": 12,
+            "layer1_admission": 13,
             "style_evidence": 11,
             "benchmark_schema": 1,
             "checkpoint_export": 3,
@@ -210,9 +213,9 @@ def runtime_capabilities() -> dict[str, Any]:
             "final_language_admission": 7,
             "book_term_review": 4,
             "source_term_inventory": 3,
-            "render_identity": 2,
+            "render_identity": 3,
             "previous_context_identity": 1,
-            "research_edition_metadata": 3,
+            "research_edition_metadata": 4,
             "extra_final_refinement": 1,
             "comma_surface_admission": 1,
             "prompt_component_evidence": 1,
@@ -719,7 +722,14 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v2084_behavior_probes(),
         **_v2085_behavior_probes(),
         **_v2086_behavior_probes(),
+        **_v2087_behavior_probes(),
     }
+
+
+def _v2087_behavior_probes() -> dict[str, bool]:
+    from tarjomeh.core.quality_policy_probes import export_memory_research_probes
+
+    return export_memory_research_probes()
 
 
 def _v2086_behavior_probes() -> dict[str, bool]:
