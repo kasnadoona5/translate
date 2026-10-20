@@ -519,7 +519,11 @@ def list_marker_evidence(text: str) -> list[dict[str, Any]]:
         valid_delimiters = (opening, closing) in {("(", ")"), ("[", "]"), (None, ")")}
         gap = (text or "")[previous_end:match.start()]
         new_scope = bool(re.search(r"\n\s*\n", gap))
-        if current is None or value == 1 or new_scope:
+        announced_restart = bool(
+            value == 1 and re.search(r"[:.!?\u061f]", gap)
+            and announced_count_evidence(gap)
+        )
+        if current is None or new_scope or announced_restart:
             current = {"span": [match.start(), match.end()], "markers": [],
                        "count": 0, "ordered": value == 1}
             runs.append(current)

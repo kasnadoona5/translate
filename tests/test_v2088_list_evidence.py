@@ -49,6 +49,12 @@ def test_complete_prefix_does_not_hide_duplicate_extra_item():
     assert TRANSLATION_STRUCTURE_MISMATCH in audit_payload(source, target)["classifications"]
 
 
+def test_duplicate_one_without_a_new_scope_is_not_a_fresh_list():
+    source = "There are two reasons: (1) alpha; (2) beta."
+    target = "دو دلیل: ۱) الف؛ ۲) ب؛ ۱) ج."
+    assert TRANSLATION_STRUCTURE_MISMATCH in audit_payload(source, target)["classifications"]
+
+
 @pytest.mark.parametrize(
     "target",
     [
