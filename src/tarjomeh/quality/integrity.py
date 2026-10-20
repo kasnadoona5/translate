@@ -240,16 +240,63 @@ def _orphan_object_marker_matches(target: str) -> list[re.Match[str]]:
     return matches
 
 
-def object_marker_dash_artifacts(source: str, target: str) -> list[dict[str, Any]]:
-    """Shared report/style evidence; never edits text or guesses alignment."""
+def object_marker_dash_classification(source: str, target: str) -> dict[str, Any]:
+    """Classify bounded punctuation pairs, not their semantic faithfulness."""
+    pairs: list[dict[str, Any]] = []
+    stack: list[str] = []
+    pending: tuple[int, str, tuple[str, ...]] | None = None
+    brackets = {"(": ")", "[": "]", "{": "}", "\u00ab": "\u00bb"}
+    for offset, char in enumerate(target or ""):
+        if char in ".!?\u061f\n":
+            pending = None
+        if char in brackets:
+            stack.append(brackets[char])
+        elif char in brackets.values():
+            if stack and stack[-1] == char:
+                stack.pop()
+            else:
+                pending = None
+                stack = ["unbalanced"]
+        if char not in "\u2013\u2014":
+            continue
+        left, right = target[offset - 1:offset], target[offset + 1:offset + 2]
+        # Ranges and lexical en-dashes are not aside delimiters.
+        if char == "\u2013" and left.isalnum() and right.isalnum():
+            continue
+        if pending is not None:
+            start, kind, depth = pending
+            body = target[start + 1:offset]
+            if (
+                char == kind and depth == tuple(stack) and "unbalanced" not in stack
+                and body.strip() and left.isspace()
+                and (not right or right.isspace() or right in "،؛.!?؟:)]}")
+            ):
+                pairs.append({"opening": start, "closing": offset,
+                              "classification": "structurally_paired_not_semantically_verified"})
+                pending = None
+                continue
+            pending = None
+        if (
+            right.isspace() and (not left or left.isspace() or left in "([{،؛:")
+            and "unbalanced" not in stack
+        ):
+            pending = (offset, char, tuple(stack))
+    paired_offsets = {pair[key] for pair in pairs for key in ("opening", "closing")}
     findings = [{
         "target_offset": match.start("dash"),
         "reason": "persian_object_marker_after_unmatched_dash",
     } for match in _orphan_object_marker_matches(target)]
     for match in re.finditer(r"(?:^|[\s،؛])را[ \t]+(?P<dash>[–—])[ \t]+", target or ""):
-        findings.append({"target_offset": match.start(),
-                         "reason": "persian_object_marker_detached_by_dash"})
-    return findings
+        if match.start("dash") not in paired_offsets:
+            findings.append({"target_offset": match.start(),
+                             "reason": "persian_object_marker_detached_by_dash"})
+    return {"pairs": pairs, "findings": findings,
+            "scope": "target_punctuation_only_no_source_alignment_inferred"}
+
+
+def object_marker_dash_artifacts(source: str, target: str) -> list[dict[str, Any]]:
+    """Shared report/style evidence; never edits text or guesses alignment."""
+    return object_marker_dash_classification(source, target)["findings"]
 
 
 def _sentence_scoped_orphan_dash(source: str, target: str) -> tuple[int, int] | None:
