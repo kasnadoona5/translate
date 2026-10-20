@@ -644,6 +644,24 @@ def _original_identity(value: str) -> str:
     return " ".join(normalized.casefold().split()).strip()
 
 
+def original_keeper_kind(source_text: str, content: str, original: str) -> str:
+    """Classify only retained originals supported by the final cleanup proof."""
+    content = " ".join(content.split()).strip()
+    original = " ".join(original.split()).strip()
+    if not original.strip() or not source_term_present(source_text, original):
+        return ""
+    if _original_identity(content) == _original_identity(original):
+        return "exact_original"
+    citation = re.fullmatch(
+        re.escape(original) + r"\s*,\s*(.+)", content, re.IGNORECASE
+    )
+    if citation and _source_supports_adjacent_citation(
+        source_text, original, citation.group(1)
+    ):
+        return "source_proven_citation"
+    return ""
+
+
 def plan_inline_english_original_cleanup(
     document: TranslatedDocument,
     authorized_originals: dict[str, str],
@@ -662,6 +680,7 @@ def plan_inline_english_original_cleanup(
     removed_duplicates: list[dict[str, Any]] = []
     preserved_source_grounded: list[dict[str, Any]] = []
     unapproved_ungrounded: list[dict[str, Any]] = []
+    deferred_deduplication: list[dict[str, Any]] = []
     preserved_citations = 0
 
     def digest(text: str) -> str:
@@ -702,11 +721,25 @@ def plan_inline_english_original_cleanup(
                     source_paragraph, original
                 ):
                     return
+                kind = original_keeper_kind(source_paragraph, content, original)
+                if not kind:
+                    deferred_deduplication.append({
+                        "paragraph_index": paragraph_index,
+                        "original": original,
+                        "annotation": match.group(0),
+                        "source_sha256": digest(source_paragraph),
+                        "target_sha256": digest(paragraph_target),
+                        "reason": "protected_container_not_proven_keeper",
+                        "disposition": "preserve_container_and_later_original",
+                        "authority": "report_only_no_memory_or_quality_penalty",
+                    })
+                    return
                 seen[original_key] = {
                     "position": document_position,
                     "paragraph_index": paragraph_index,
                     "original": original,
                     "identity": original_key,
+                    "kind": kind,
                     "source_sha256": digest(source_paragraph),
                     "before_sha256": digest(paragraph_target),
                     "before_span": [match.start(1) - 1, match.end()],
@@ -722,14 +755,7 @@ def plan_inline_english_original_cleanup(
                 or key in paragraph_expansions
             ):
                 leading_original = _original_identity(content.split(",", 1)[0])
-                citation = content.split(",", 1)
-                if (
-                    key == leading_original or exact_source_parenthetical
-                    or (len(citation) == 2 and _source_supports_adjacent_citation(
-                        source_paragraph, authorized.get(leading_original, ""), citation[1]
-                    ))
-                ):
-                    remember(leading_original)
+                remember(key if key in authorized else leading_original)
                 preserved_citations += 1
                 return match.group(0)
 
@@ -800,10 +826,12 @@ def plan_inline_english_original_cleanup(
         "preserved_citation_count": preserved_citations,
         "preserved_source_grounded_count": len(preserved_source_grounded),
         "unapproved_ungrounded_count": len(unapproved_ungrounded),
+        "deferred_deduplication_count": len(deferred_deduplication),
         "removed_unauthorized": removed_unauthorized,
         "removed_duplicates": removed_duplicates,
         "preserved_source_grounded": preserved_source_grounded,
         "unapproved_ungrounded": unapproved_ungrounded,
+        "deferred_deduplication": deferred_deduplication,
     }
 
 
@@ -828,6 +856,7 @@ def merge_inline_english_original_audits(
         "removed_duplicates",
         "preserved_source_grounded",
         "unapproved_ungrounded",
+        "deferred_deduplication",
     )
     count_fields = (
         "removed_unauthorized_count",
@@ -835,6 +864,7 @@ def merge_inline_english_original_audits(
         "preserved_citation_count",
         "preserved_source_grounded_count",
         "unapproved_ungrounded_count",
+        "deferred_deduplication_count",
     )
     merged: dict[str, Any] = {
         "authorized_count": max(

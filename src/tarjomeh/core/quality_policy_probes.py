@@ -307,3 +307,34 @@ def checkpoint_classification_probes() -> dict[str, bool]:
             "Source.", paired)
         and bool(object_marker_dash_artifacts("Source.", orphan)),
     }
+
+
+def original_keeper_probes() -> dict[str, bool]:
+    """Keep uncertain containers without disabling proven duplicate cleanup."""
+    from tarjomeh.core.render_identity import RenderChangeLedger
+    from tarjomeh.core.term_notes import audit_inline_english_originals
+    from tarjomeh.exporters.base import TranslatedDocument, TranslatedParagraph
+
+    original = "Example Press"
+    target = "\u0646\u0645\u0648\u0646\u0647"
+    checks = []
+    for suffix in ("London", "Ltd", "2020"):
+        annotation = f"({original}, {suffix})"
+        text = f"{target} ({original})"
+        doc = TranslatedDocument(paragraphs=[
+            TranslatedParagraph(0, f"Published by {annotation}.", annotation),
+            TranslatedParagraph(1, f"{original} publishes books.", text),
+            TranslatedParagraph(2, f"{original} returned.", text),
+        ])
+        ledger = RenderChangeLedger(doc)
+        ledger.set_authorized({original: target})
+        report = ledger.step("english_original_cleanup", audit_inline_english_originals,
+                             {original: target})
+        good = bool(ledger.audit()["passed"] and report["removed_duplicate_count"] == 1
+                    and report["deferred_deduplication_count"] == 1
+                    and doc.paragraphs[0].translated_text == annotation
+                    and doc.paragraphs[1].translated_text == text
+                    and doc.paragraphs[2].translated_text == target)
+        doc.paragraphs[1].translated_text = target
+        checks.append(good and not ledger.audit()["passed"])
+    return {"shared_original_keeper_eligibility": all(checks)}

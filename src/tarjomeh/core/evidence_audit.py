@@ -55,12 +55,15 @@ def style_source_evidence(state: dict[str, Any]) -> dict[str, Any]:
 
 def checkpoint_classification_evidence(
     state: dict[str, Any], render: dict[str, Any], chunks: list[dict[str, Any]],
+    *, original_audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Expose proof/classification only; never readmit history or change trust."""
     from tarjomeh.quality.integrity import object_marker_dash_classification
     from tarjomeh.quality.structure_audit import audit_payload
 
     rejected = state.get("last_rejected_summary", {}) or {}
+    cleanup = original_audit or {}
+    deferred_available = "deferred_deduplication" in cleanup
     english = (rejected.get("english_candidate", {}) or {}).get("text", "")
     persian = (rejected.get("persian_candidate", {}) or {}).get("text", "")
     classifications = []
@@ -76,6 +79,14 @@ def checkpoint_classification_evidence(
                 "target_sha256": hashlib.sha256(target.encode()).hexdigest(), **result,
             })
     return {
+        "deferred_deduplication": {
+            "available": deferred_available,
+            "record_count": len(cleanup["deferred_deduplication"])
+            if deferred_available else None,
+            "records": list(cleanup.get("deferred_deduplication", [])),
+            "count_kind": "cleanup_pass_records_not_unique_occurrences",
+            "authority": "report_only_no_memory_or_quality_penalty",
+        },
         "duplicate_removal_evidence": [
             evidence for change in render.get("render", {}).get("changes", [])
             for evidence in change.get("cleanup_evidence", [])

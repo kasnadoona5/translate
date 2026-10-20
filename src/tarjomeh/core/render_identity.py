@@ -294,7 +294,7 @@ def _proof_cleanup(source: str, before: str, after: str, context: dict[str, Any]
 
 
 def _cleanup_keeper_present(paragraph: TranslatedParagraph, keeper: dict[str, Any]) -> bool:
-    from tarjomeh.core.term_notes import _original_identity, _source_supports_adjacent_citation
+    from tarjomeh.core.term_notes import original_keeper_kind
     from tarjomeh.memory.proper_nouns import source_term_present
 
     if (
@@ -304,14 +304,8 @@ def _cleanup_keeper_present(paragraph: TranslatedParagraph, keeper: dict[str, An
     ):
         return False
     for match in _LATIN_PARENTHETICAL_RE.finditer(paragraph.translated_text):
-        content = match.group(1)
-        if _original_identity(content) == keeper["identity"]:
-            return True
-        citation = re.fullmatch(
-            re.escape(keeper["original"]) + r"\s*,\s*(.+)", content, re.IGNORECASE
-        )
-        if citation and _source_supports_adjacent_citation(
-            paragraph.source_text, keeper["original"], citation.group(1)
+        if original_keeper_kind(
+            paragraph.source_text, match.group(1), keeper["original"]
         ):
             return True
     return False
