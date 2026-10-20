@@ -275,6 +275,13 @@ def _proof_fragment(source: str, before: str, after: str, context: dict[str, Any
 
 
 def _proof_cleanup(source: str, before: str, after: str, context: dict[str, Any]) -> str:
+    if "cleanup_expected" in context:
+        expected = context["cleanup_expected"]
+        if context.get("cleanup_failure"):
+            return str(context["cleanup_failure"])
+        if expected != after:
+            return "cleanup_differs_from_source_grounded_plan"
+        return ""
     removed = _removed_parentheticals(before, after)
     if removed is None:
         return "cleanup_change_is_not_a_removal"
@@ -284,6 +291,30 @@ def _proof_cleanup(source: str, before: str, after: str, context: dict[str, Any]
         if original.casefold() in (source or "").casefold() and kept[original] < 1:
             return "source_grounded_original_deleted"
     return ""
+
+
+def _cleanup_keeper_present(paragraph: TranslatedParagraph, keeper: dict[str, Any]) -> bool:
+    from tarjomeh.core.term_notes import _original_identity, _source_supports_adjacent_citation
+    from tarjomeh.memory.proper_nouns import source_term_present
+
+    if (
+        paragraph.index != keeper["paragraph_index"]
+        or hashlib.sha256(paragraph.source_text.encode()).hexdigest() != keeper["source_sha256"]
+        or not source_term_present(paragraph.source_text, keeper["original"])
+    ):
+        return False
+    for match in _LATIN_PARENTHETICAL_RE.finditer(paragraph.translated_text):
+        content = match.group(1)
+        if _original_identity(content) == keeper["identity"]:
+            return True
+        citation = re.fullmatch(
+            re.escape(keeper["original"]) + r"\s*,\s*(.+)", content, re.IGNORECASE
+        )
+        if citation and _source_supports_adjacent_citation(
+            paragraph.source_text, keeper["original"], citation.group(1)
+        ):
+            return True
+    return False
 
 
 def _proof_language_repair(source: str, before: str, after: str, context: dict[str, Any]) -> str:
@@ -363,6 +394,19 @@ class RenderChangeLedger:
         """Run one render producer on the document and prove what it changed."""
         before_document = copy.deepcopy(self.document)
         before = _texts(self.document)
+        cleanup_texts: list[str] = []
+        cleanup_removals: list[dict[str, Any]] = []
+        cleanup_sources = [(p.index, p.source_text) for p in self.document.paragraphs]
+        if producer == "english_original_cleanup":
+            from tarjomeh.core.term_notes import plan_inline_english_original_cleanup
+
+            cleanup_authorized = args[0] if args else kwargs.get("authorized_originals", {})
+            if cleanup_authorized and cleanup_authorized != self.authorized:
+                raise ValueError("Cleanup authorization differs from the render ledger")
+            cleanup_texts, cleanup_report = plan_inline_english_original_cleanup(
+                before_document, cleanup_authorized
+            )
+            cleanup_removals = cleanup_report["removed_duplicates"]
         result = function(self.document, *args, **kwargs)
         after = _texts(self.document)
         changed = [
@@ -381,6 +425,16 @@ class RenderChangeLedger:
                 "aliases": self.aliases,
                 "role": str(paragraph.metadata.get("structure_role", "body")),
             }
+            evidence = [item for item in cleanup_removals if item["position"] == index]
+            if producer == "english_original_cleanup":
+                context["cleanup_expected"] = cleanup_texts[index]
+                if (
+                    not isinstance(result, dict)
+                    or result.get("removed_duplicates") != cleanup_removals
+                ):
+                    context["cleanup_failure"] = "cleanup_evidence_mismatch"
+                if (paragraph.index, paragraph.source_text) != cleanup_sources[index]:
+                    context["cleanup_failure"] = "cleanup_source_changed"
             failure = "unknown_render_producer" if proof is None else proof(
                 paragraph.source_text, before[index], after[index], context
             )
@@ -398,6 +452,7 @@ class RenderChangeLedger:
                     _anchor_evidence(paragraph.source_text, after[index], context)
                     if producer == "inline_original_anchor" else []
                 ),
+                **({"cleanup_evidence": copy.deepcopy(evidence)} if evidence else {}),
             })
         return result
 
@@ -429,6 +484,17 @@ class RenderChangeLedger:
             for change in self.changes
             if change["proof_failure"]
         ]
+        for change in self.changes:
+            for removal in change.get("cleanup_evidence", []):
+                keeper = removal["keeper"]
+                paragraph = self.document.paragraphs[keeper["position"]]
+                if not _cleanup_keeper_present(paragraph, keeper):
+                    unproven.append({
+                        "producer": "english_original_cleanup",
+                        "position": change["position"],
+                        "paragraph_index": change["paragraph_index"],
+                        "proof_failure": "cleanup_keeper_did_not_survive",
+                    })
         return {
             "canonical_paragraph_count": len(self.canonical),
             "changed_paragraph_count": len(by_position),
@@ -440,7 +506,10 @@ class RenderChangeLedger:
                 {key: change[key] for key in (
                     "producer", "paragraph_index", "before", "after",
                     "replay_verified", "proof_failure", "anchor_evidence",
-                )}
+                )} | (
+                    {"cleanup_evidence": change["cleanup_evidence"]}
+                    if "cleanup_evidence" in change else {}
+                )
                 for change in self.changes
             ],
             "unexplained": unexplained,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import unicodedata
 from typing import TYPE_CHECKING, Any
@@ -643,16 +644,11 @@ def _original_identity(value: str) -> str:
     return " ".join(normalized.casefold().split()).strip()
 
 
-def audit_inline_english_originals(
+def plan_inline_english_original_cleanup(
     document: TranslatedDocument,
     authorized_originals: dict[str, str],
-) -> dict[str, Any]:
-    """Audit Latin parentheticals and deduplicate only authorized repeats.
-
-    Numeric apparatus and source-grounded lexical expressions are preserved.
-    An unknown insertion is evidence for review, not permission to delete text:
-    removing an expression can leave a grammatically incomplete translation.
-    """
+) -> tuple[list[str], dict[str, Any]]:
+    """Plan removals without mutation, binding each to an earlier grounded keeper."""
     from tarjomeh.quality.integrity import source_abbreviation_expansions
 
     authorized = {
@@ -660,20 +656,27 @@ def audit_inline_english_originals(
         for source in authorized_originals
         if source.strip()
     }
-    seen: set[str] = set()
+    seen: dict[str, dict[str, Any]] = {}
+    texts: list[str] = []
     removed_unauthorized: list[dict[str, Any]] = []
     removed_duplicates: list[dict[str, Any]] = []
     preserved_source_grounded: list[dict[str, Any]] = []
     unapproved_ungrounded: list[dict[str, Any]] = []
     preserved_citations = 0
 
-    for paragraph in document.paragraphs:
+    def digest(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    for position, paragraph in enumerate(document.paragraphs):
         source_text = paragraph.source_text or ""
+        target_text = paragraph.translated_text or ""
         source_folded = source_text.casefold()
         source_expansions = {
             _original_identity(value)
             for value in source_abbreviation_expansions(source_text)
         }
+
+        retained_ordinal = 0
 
         def replace(
             match: re.Match[str],
@@ -681,13 +684,35 @@ def audit_inline_english_originals(
             source_paragraph: str = source_text,
             folded_source_paragraph: str = source_folded,
             paragraph_expansions: set[str] = source_expansions,
+            document_position: int = position,
+            paragraph_target: str = target_text,
         ) -> str:
-            nonlocal preserved_citations
+            nonlocal preserved_citations, retained_ordinal
             content = " ".join(match.group(1).split()).strip()
+            ordinal = retained_ordinal
+            retained_ordinal += 1
             if not re.search(r"[A-Za-z]", content):
                 return match.group(0)
 
             key = _original_identity(content)
+
+            def remember(original_key: str) -> None:
+                original = authorized.get(original_key)
+                if original_key in seen or not original or not source_term_present(
+                    source_paragraph, original
+                ):
+                    return
+                seen[original_key] = {
+                    "position": document_position,
+                    "paragraph_index": paragraph_index,
+                    "original": original,
+                    "identity": original_key,
+                    "source_sha256": digest(source_paragraph),
+                    "before_sha256": digest(paragraph_target),
+                    "before_span": [match.start(1) - 1, match.end()],
+                    "retained_ordinal": ordinal,
+                }
+
             exact_source_parenthetical = (
                 f"({content})".casefold() in folded_source_paragraph
             )
@@ -697,8 +722,7 @@ def audit_inline_english_originals(
                 or key in paragraph_expansions
             ):
                 leading_original = _original_identity(content.split(",", 1)[0])
-                if leading_original in authorized:
-                    seen.add(leading_original)
+                remember(leading_original)
                 preserved_citations += 1
                 return match.group(0)
 
@@ -708,11 +732,19 @@ def audit_inline_english_originals(
             )
             if authorized_here:
                 if key not in seen:
-                    seen.add(key)
+                    remember(key)
                     return match.group(0)
+                retained_ordinal -= 1
                 removed_duplicates.append({
+                    "position": document_position,
                     "paragraph_index": paragraph_index,
                     "original": content,
+                    "identity": key,
+                    "source_sha256": digest(source_paragraph),
+                    "before_sha256": digest(paragraph_target),
+                    "removed_span": [match.start(), match.end()],
+                    "removed_text": match.group(0),
+                    "keeper": seen[key],
                 })
                 return ""
 
@@ -738,11 +770,22 @@ def audit_inline_english_originals(
             return match.group(0)
 
         cleaned = _LATIN_PARENTHETICAL_RE.sub(
-            replace, paragraph.translated_text or ""
+            replace, target_text
         )
-        paragraph.translated_text = re.sub(r" {2,}", " ", cleaned).strip()
+        texts.append(re.sub(r" {2,}", " ", cleaned).strip())
 
-    return {
+    for keeper in seen.values():
+        text = texts[keeper["position"]]
+        match = list(_LATIN_PARENTHETICAL_RE.finditer(text))[keeper.pop("retained_ordinal")]
+        keeper.update({
+            "after_sha256": digest(text),
+            "retained_span": [match.start(1) - 1, match.end()],
+            "annotation": text[match.start(1) - 1:match.end()],
+        })
+    for removal in removed_duplicates:
+        removal["after_sha256"] = digest(texts[removal["position"]])
+
+    return texts, {
         "authorized_count": len(authorized),
         "kept_authorized": len(seen),
         "removed_unauthorized_count": len(removed_unauthorized),
@@ -755,6 +798,17 @@ def audit_inline_english_originals(
         "preserved_source_grounded": preserved_source_grounded,
         "unapproved_ungrounded": unapproved_ungrounded,
     }
+
+
+def audit_inline_english_originals(
+    document: TranslatedDocument,
+    authorized_originals: dict[str, str],
+) -> dict[str, Any]:
+    """Preserve unknown/source-authored originals; remove only proved repeats."""
+    texts, report = plan_inline_english_original_cleanup(document, authorized_originals)
+    for paragraph, text in zip(document.paragraphs, texts, strict=True):
+        paragraph.translated_text = text
+    return report
 
 
 def merge_inline_english_original_audits(
