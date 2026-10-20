@@ -241,7 +241,10 @@ _DIGIT_TRANSLATION = str.maketrans(
     "01234567890123456789",
 )
 # "(1)" / "( ۲ )" style list markers, in either digit script.
-_LIST_MARKER_RE = re.compile(r"[(\[]\s*([0-9۰-۹]{1,2})\s*[)\]]")
+_LIST_MARKER_RE = re.compile(
+    r"(?<![\w(\[])(?P<opening>[(\[])?[ \t]*"
+    r"(?P<number>[0-9۰-۹]{1,2})[ \t]*(?P<closing>[)\]])(?=\s|$)"
+)
 _CHAPTER_MARKER_RE = re.compile(
     r"(?<!\w)(?:chapter|فصل)\s*([0-9۰-۹]{1,2})(?!\d)",
     re.IGNORECASE,
@@ -505,19 +508,37 @@ def ordinal_sequence_length(text: str) -> int:
     return longest
 
 
+def list_marker_evidence(text: str) -> list[dict[str, Any]]:
+    """Keep local marker runs and their ordered prefix; never fill numbering gaps."""
+    runs: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    previous_end = 0
+    for match in _LIST_MARKER_RE.finditer(text or ""):
+        value = int(match.group("number").translate(_DIGIT_TRANSLATION))
+        opening, closing = match.group("opening"), match.group("closing")
+        valid_delimiters = (opening, closing) in {("(", ")"), ("[", "]"), (None, ")")}
+        gap = (text or "")[previous_end:match.start()]
+        new_scope = bool(re.search(r"\n\s*\n", gap))
+        if current is None or value == 1 or new_scope:
+            current = {"span": [match.start(), match.end()], "markers": [],
+                       "count": 0, "ordered": value == 1}
+            runs.append(current)
+        current["markers"].append({
+            "span": list(match.span()), "value": value,
+            "format": "bracketed" if opening else "closing_parenthesis",
+        })
+        current["span"][1] = match.end()
+        if not valid_delimiters or value != current["count"] + 1:
+            current["ordered"] = False
+        if current["ordered"]:
+            current["count"] += 1
+        previous_end = match.end()
+    return runs
+
+
 def list_marker_count(text: str) -> int:
-    """Length of a ``(1) (2) (3)`` style marker run, starting at 1."""
-    values = [
-        int(match.group(1).translate(_DIGIT_TRANSLATION))
-        for match in _LIST_MARKER_RE.finditer(text or "")
-    ]
-    if not values or values[0] != 1:
-        return 0
-    length = 1
-    for value in values[1:]:
-        if value == length + 1:
-            length = value
-    return length
+    """Longest local ordered prefix beginning at one, including ``1)`` markers."""
+    return max((run["count"] for run in list_marker_evidence(text)), default=0)
 
 
 def chapter_marker_count(text: str) -> int:
@@ -623,6 +644,11 @@ def _structural_episodes(
         announced = next((value for value in counts if value == items), None)
         if announced is None and len(set(counts)) == 1 and category != "ambiguous":
             announced = counts[0]
+        if list_marker_count(paragraph) == items and any(
+            not run["ordered"] for run in list_marker_evidence(paragraph)
+        ):
+            # A complete-looking prefix must not hide duplicated/reordered labels.
+            announced = None
         episodes.append(
             _StructuralEpisode(
                 paragraph_index=index,
@@ -752,6 +778,7 @@ def audit_structure(source: str, candidate: str) -> list[StructureFinding]:
                 candidate_episode.paragraph_index if candidate_episode else None
             ),
             "candidate_episode_recognized": candidate_episode is not None,
+            "candidate_list_marker_evidence": list_marker_evidence(aligned_candidate_paragraph),
             "candidate_cardinal_tokens_untyped": (
                 [word for word in _words(aligned_candidate_paragraph) if word in _CARDINALS]
                 if candidate_episode is None
@@ -842,4 +869,8 @@ def audit_payload(source: str, candidate: str) -> dict[str, Any]:
         "finding_count": len(findings),
         "classifications": sorted({f.classification for f in findings}),
         "findings": [f.to_dict() for f in findings],
+        "list_marker_evidence": {
+            "source": list_marker_evidence(source),
+            "candidate": list_marker_evidence(candidate),
+        },
     }
