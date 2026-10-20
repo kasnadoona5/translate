@@ -143,6 +143,17 @@ def test_keeper_can_survive_an_independently_proven_citation_merge():
     assert ledger.audit()["passed"]
 
 
+@pytest.mark.parametrize("year,removed", [("2020", 1), ("1999", 0)])
+def test_citation_keeper_requires_source_proven_citation_not_just_the_name(year, removed):
+    doc = document()
+    doc.paragraphs[0].source_text = "Example Press (2020) publishes books."
+    doc.paragraphs[0].translated_text = f"نمونه (Example Press, {year})."
+    ledger = ledger_for(doc)
+    report = ledger.step("english_original_cleanup", audit_inline_english_originals, AUTHORIZED)
+    assert report["removed_duplicate_count"] == removed
+    assert ledger.audit()["passed"]
+
+
 def test_same_paragraph_duplicates_and_multiple_keys_keep_valid_spans():
     doc = document()
     doc.paragraphs[0].source_text += " Example Institute meets."

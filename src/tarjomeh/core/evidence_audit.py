@@ -53,6 +53,42 @@ def style_source_evidence(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def checkpoint_classification_evidence(
+    state: dict[str, Any], render: dict[str, Any], chunks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Expose proof/classification only; never readmit history or change trust."""
+    from tarjomeh.quality.integrity import object_marker_dash_classification
+    from tarjomeh.quality.structure_audit import audit_payload
+
+    rejected = state.get("last_rejected_summary", {}) or {}
+    english = (rejected.get("english_candidate", {}) or {}).get("text", "")
+    persian = (rejected.get("persian_candidate", {}) or {}).get("text", "")
+    classifications = []
+    for chunk in chunks:
+        source, target = str(chunk.get("text") or ""), str(chunk.get("translation") or "")
+        if not target:
+            continue
+        result = object_marker_dash_classification(source, target)
+        if result["pairs"] or result["findings"]:
+            classifications.append({
+                "chunk_index": chunk.get("chunk_index"),
+                "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
+                "target_sha256": hashlib.sha256(target.encode()).hexdigest(), **result,
+            })
+    return {
+        "duplicate_removal_evidence": [
+            evidence for change in render.get("render", {}).get("changes", [])
+            for evidence in change.get("cleanup_evidence", [])
+        ],
+        "rejected_summary_current_structure": audit_payload(english, persian)
+        if english and persian else None,
+        "historical_summary_readmitted": False,
+        "dash_classifications": classifications,
+        "authority": "report_only_no_memory_or_quality_penalty",
+        "semantic_accuracy": "requires_source_based_human_review",
+    }
+
+
 def export_memory_research_evidence(
     state: dict[str, Any], render: dict[str, Any], projection: dict[str, Any],
 ) -> dict[str, Any]:

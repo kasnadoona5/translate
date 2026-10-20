@@ -43,6 +43,13 @@ def test_nested_announcement_in_item_is_not_an_unrelated_list():
     assert list_marker_count("1) discuss two issues; 2) compare; 3) explain.") == 3
 
 
+@pytest.mark.parametrize(
+    "text", ["(1)alpha (2)beta", "x(1), alpha x(2), beta", "(\n1\n) alpha (2) beta"]
+)
+def test_existing_wrapped_marker_boundaries_remain_supported(text):
+    assert list_marker_count(text) == 2
+
+
 def test_complete_prefix_does_not_hide_duplicate_extra_item():
     source = "There are two reasons: (1) alpha; (2) beta."
     target = "دو دلیل: ۱) الف؛ ۲) ب؛ ۲) ج."

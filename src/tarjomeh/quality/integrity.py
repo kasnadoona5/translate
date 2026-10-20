@@ -245,10 +245,12 @@ def object_marker_dash_classification(source: str, target: str) -> dict[str, Any
     pairs: list[dict[str, Any]] = []
     stack: list[str] = []
     pending: tuple[int, str, tuple[str, ...]] | None = None
+    ambiguous = False
     brackets = {"(": ")", "[": "]", "{": "}", "\u00ab": "\u00bb"}
     for offset, char in enumerate(target or ""):
         if char in ".!?\u061f\n":
             pending = None
+            ambiguous = False
         if char in brackets:
             stack.append(brackets[char])
         elif char in brackets.values():
@@ -276,9 +278,10 @@ def object_marker_dash_classification(source: str, target: str) -> dict[str, Any
                 pending = None
                 continue
             pending = None
+            ambiguous = True
         if (
             right.isspace() and (not left or left.isspace() or left in "([{،؛:")
-            and "unbalanced" not in stack
+            and "unbalanced" not in stack and not ambiguous
         ):
             pending = (offset, char, tuple(stack))
     paired_offsets = {pair[key] for pair in pairs for key in ("opening", "closing")}

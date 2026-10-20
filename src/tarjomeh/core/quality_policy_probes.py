@@ -258,3 +258,52 @@ def export_memory_research_probes() -> dict[str, bool]:
         "book_identity_date_guard": bool(conflicts and "2004/2005" not in context
                                          and "studies institutions" in context),
     }
+
+
+def checkpoint_classification_probes() -> dict[str, bool]:
+    """Generic pure controls for document-scope proof and punctuation evidence."""
+    from tarjomeh.core.render_identity import RenderChangeLedger
+    from tarjomeh.core.term_notes import audit_inline_english_originals
+    from tarjomeh.exporters.base import TranslatedDocument, TranslatedParagraph
+    from tarjomeh.quality.integrity import object_marker_dash_artifacts
+    from tarjomeh.quality.structure_audit import audit_payload, list_marker_count
+
+    name = "Example Press"
+    authorized = {name: "\u0646\u0645\u0648\u0646\u0647"}
+    text = authorized[name] + " (Example Press)"
+    doc = TranslatedDocument(paragraphs=[
+        TranslatedParagraph(0, "Published by Example Press.", text),
+        TranslatedParagraph(1, "Example Press returned.", text),
+    ])
+    ledger = RenderChangeLedger(doc)
+    ledger.set_authorized(authorized)
+    report = ledger.step("english_original_cleanup", audit_inline_english_originals, authorized)
+    good = bool(ledger.audit()["passed"] and report["removed_duplicate_count"] == 1
+                and doc.paragraphs[0].translated_text == text
+                and doc.paragraphs[1].translated_text == authorized[name])
+    doc.paragraphs[0].translated_text = authorized[name]
+    keeper_required = not ledger.audit()["passed"]
+    source = "There are three reasons: (1) observe; (2) compare; (3) explain."
+    target = (
+        "\u0633\u0647 \u062f\u0644\u06cc\u0644: \u06f1) \u0627\u0644\u0641\u061b "
+        "\u06f2) \u0628\u061b \u06f3) \u062c."
+    )
+    wrong = target.replace("\u06f2)", "\u06f3)")
+    paired = (
+        "\u0645\u0646 \u06a9\u062a\u0627\u0628 \u0631\u0627 \u2014 "
+        "\u06a9\u0647 \u0645\u06cc\u200c\u062e\u0648\u0627\u0633\u062a\u0645 "
+        "\u2014 \u062e\u0631\u06cc\u062f\u0645."
+    )
+    orphan = (
+        "\u062a\u0627\u0631\u06cc\u062e \u062f\u06cc\u06af\u0631\u0627\u0646\u2014\u0631\u0627 "
+        "\u0645\u06cc\u200c\u0633\u0627\u0632\u0646\u062f."
+    )
+    return {
+        "document_scoped_duplicate_proof": good and keeper_required,
+        "closing_parenthesis_list_evidence": list_marker_count(target) == 3
+        and "translation_structure_mismatch" not in audit_payload(source, target)["classifications"]
+        and "translation_structure_mismatch" in audit_payload(source, wrong)["classifications"],
+        "paired_object_marker_dash_classification": not object_marker_dash_artifacts(
+            "Source.", paired)
+        and bool(object_marker_dash_artifacts("Source.", orphan)),
+    }

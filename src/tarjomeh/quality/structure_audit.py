@@ -242,8 +242,8 @@ _DIGIT_TRANSLATION = str.maketrans(
 )
 # "(1)" / "( ۲ )" style list markers, in either digit script.
 _LIST_MARKER_RE = re.compile(
-    r"(?<![\w(\[])(?P<opening>[(\[])?[ \t]*"
-    r"(?P<number>[0-9۰-۹]{1,2})[ \t]*(?P<closing>[)\]])(?=\s|$)"
+    r"(?P<opening>[(\[])\s*(?P<wrapped>[0-9۰-۹]{1,2})\s*(?P<closing>[)\]])"
+    r"|(?<![\w(\[])(?P<bare>[0-9۰-۹]{1,2})\)(?=\s|$)"
 )
 _CHAPTER_MARKER_RE = re.compile(
     r"(?<!\w)(?:chapter|فصل)\s*([0-9۰-۹]{1,2})(?!\d)",
@@ -514,8 +514,8 @@ def list_marker_evidence(text: str) -> list[dict[str, Any]]:
     current: dict[str, Any] | None = None
     previous_end = 0
     for match in _LIST_MARKER_RE.finditer(text or ""):
-        value = int(match.group("number").translate(_DIGIT_TRANSLATION))
-        opening, closing = match.group("opening"), match.group("closing")
+        value = int((match.group("wrapped") or match.group("bare")).translate(_DIGIT_TRANSLATION))
+        opening, closing = match.group("opening"), match.group("closing") or ")"
         valid_delimiters = (opening, closing) in {("(", ")"), ("[", "]"), (None, ")")}
         gap = (text or "")[previous_end:match.start()]
         new_scope = bool(re.search(r"\n\s*\n", gap))

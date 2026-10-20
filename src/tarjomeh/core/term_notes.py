@@ -722,7 +722,14 @@ def plan_inline_english_original_cleanup(
                 or key in paragraph_expansions
             ):
                 leading_original = _original_identity(content.split(",", 1)[0])
-                remember(leading_original)
+                citation = content.split(",", 1)
+                if (
+                    key == leading_original or exact_source_parenthetical
+                    or (len(citation) == 2 and _source_supports_adjacent_citation(
+                        source_paragraph, authorized.get(leading_original, ""), citation[1]
+                    ))
+                ):
+                    remember(leading_original)
                 preserved_citations += 1
                 return match.group(0)
 
