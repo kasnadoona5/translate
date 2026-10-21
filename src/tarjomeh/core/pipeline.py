@@ -5962,6 +5962,7 @@ def _reconcile_committed_terminology(
     memory_manager: MemoryManager,
     source_text: str,
     final_translation: str,
+    *, chunk: Chunk | None = None,
 ) -> dict[str, Any]:
     """Promote only committed, source-grounded corrections into safe memory."""
     report: dict[str, Any] = {
@@ -5972,6 +5973,22 @@ def _reconcile_committed_terminology(
         "source_sha256": _candidate_text_hash(source_text),
         "candidate_target_hash": _candidate_text_hash(final_translation),
     }
+    if chunk is not None and callable(getattr(db, "get_chunk_events", None)):
+        from tarjomeh.memory.final_entities import reconcile_final_entities
+
+        identity_text, identity = _canonical_chunk_paragraph_identity(chunk, final_translation)
+        final_entities = reconcile_final_entities(
+            memory_manager.proper_nouns, source_text, final_translation,
+            chunk_index=chunk_index,
+            paragraph_identity=identity if identity_text == final_translation else {},
+            quality=_canonical_final_quality_record(db, job_id, chunk_index, final_translation),
+            events=db.get_chunk_events(job_id, chunk_index),
+        )
+        if final_entities["records"]:
+            report["final_entities"] = final_entities
+            db.log_chunk_event(
+                job_id, chunk_index, "final_entity_memory_reconciled", final_entities,
+            )
     if _chunk_needs_review(db, job_id, chunk_index):
         report["policy"] = "skipped_unresolved_chunk"
         return report
@@ -13462,6 +13479,10 @@ class TranslationPipeline:
                 self.db.update_chunk(job_id, idx, ChunkStatus.REFINED, translation)
                 self.db.log_chunk_event(job_id, idx, "refinement_completed", {
                     "iteration": ref_iter + 1,
+                    "accepted": bool(edit_accepted or (local_salvage or {}).get("committed_count")),
+                    "baseline_target_hash": _candidate_text_hash(before_translation),
+                    "candidate_target_hash": _candidate_text_hash(translation),
+                    "retained_target_hash": _candidate_text_hash(translation),
                     "critique_average": critique_rep.average,
                     "critique_issue_count": len(critique_rep.issues),
                     "blocking_issue_count": len(_blocking_critique_issues(critique_rep)),
@@ -15465,6 +15486,7 @@ Output ONLY the corrected Persian translation.
                     memory_manager,
                     chunk.text,
                     translation,
+                    chunk=chunk,
                 )
         else:
             reconciliation_report = _reconcile_committed_terminology(
@@ -15474,6 +15496,7 @@ Output ONLY the corrected Persian translation.
                 memory_manager,
                 chunk.text,
                 translation,
+                chunk=chunk,
             )
         if (
             reconciliation_report.get("reconciled")

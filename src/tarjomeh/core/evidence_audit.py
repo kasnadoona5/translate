@@ -16,6 +16,57 @@ _POSSIBLE_SECRET_RE = re.compile(
 )
 
 
+def original_annotation_reporting(
+    audit: dict[str, Any],
+    chunks: list[dict[str, Any]],
+    identities: dict[str, Any],
+) -> dict[str, Any]:
+    """Deduplicate display locations without granting source or memory authority."""
+    from tarjomeh.memory.proper_nouns import source_term_present
+
+    sources: dict[int, str] = {}
+    for chunk in chunks:
+        identity = identities.get(str(chunk.get("chunk_index")), {})
+        parts = re.split(r"\n\s*\n", str(chunk.get("text") or ""))
+        indices, hashes = identity.get("paragraph_indices", []), identity.get("source_hashes", [])
+        if len(parts) == len(indices) == len(hashes) and all(
+            hashlib.sha256(part.encode()).hexdigest() == digest
+            for part, digest in zip(parts, hashes, strict=True)
+        ):
+            sources.update(zip(indices, parts, strict=True))
+    raw = audit.get("unapproved_ungrounded", [])
+    locations: dict[tuple[Any, str], dict[str, Any]] = {}
+    for record in raw:
+        original, index = str(record.get("original", "")), record.get("paragraph_index")
+        key = (index, original)
+        if key not in locations:
+            source = sources.get(index, "")
+            candidate = re.sub(r"(?<=[A-Za-z])-(?=[a-z])", "", source)
+            uncertain_join = bool(
+                source
+                and source != candidate
+                and not source_term_present(source, original)
+                and source_term_present(candidate, original)
+            )
+            locations[key] = {
+                "paragraph_index": index,
+                "original": original,
+                "pass_record_count": 0,
+                "classification": "possible_pdf_word_break_not_verified"
+                if uncertain_join
+                else "source_original_evidence_unresolved",
+                "source_evidence_available": bool(source),
+                "disposition": "REVIEW",
+            }
+        locations[key]["pass_record_count"] += 1
+    return {
+        "raw_pass_record_count": len(raw),
+        "unique_location_count": len(locations),
+        "locations": list(locations.values()),
+        "authority": "report_only_no_matching_or_retention_permission",
+    }
+
+
 def style_source_evidence(state: dict[str, Any]) -> dict[str, Any]:
     """Distinguish retained style history from current usable evidence."""
     from tarjomeh.memory.manager import (

@@ -338,3 +338,90 @@ def original_keeper_probes() -> dict[str, bool]:
         doc.paragraphs[1].translated_text = target
         checks.append(good and not ledger.audit()["passed"])
     return {"shared_original_keeper_eligibility": all(checks)}
+
+
+def final_entity_probes() -> dict[str, bool]:
+    """Exercise final-name and first-use contracts without provider or file I/O."""
+    import hashlib
+
+    from tarjomeh.memory.final_entities import audit_first_occurrences, reconcile_final_entities
+    from tarjomeh.memory.proper_nouns import ProperNouns
+
+    def sha(text):
+        return hashlib.sha256(text.encode()).hexdigest()
+
+    english = "Example Press"
+    old = "\u0627\u0646\u062a\u0634\u0627\u0631\u0627\u062a \u0646\u0645\u0648\u0646\u0647"
+    new = "\u0627\u0646\u062a\u0634\u0627\u0631\u0627\u062a \u0645\u062b\u0627\u0644"
+    source = "Example Press publishes books."
+    before, after = old + " (Example Press)", new + " (Example Press)"
+    memory = ProperNouns()
+    memory.add_noun(
+        english,
+        old,
+        category="organization",
+        provenance="observed_translation",
+        evidence_key="anchor:" + sha(source)[:16],
+    )
+    memory.mark_introduced_from_translation(source, after)
+    stale = audit_first_occurrences(memory.serialize(), [{"text": source, "translation": after}])
+    missing = audit_first_occurrences(
+        memory.serialize(), [{"text": source, "translation": "\u0645\u062a\u0646"}]
+    )
+    identity = {
+        "reconstructed": False,
+        "canonical_target_hash": sha(after),
+        "paragraph_indices": [0],
+        "source_hashes": [sha(source)],
+        "target_hashes": [sha(after)],
+        "target_offsets": [[0, len(after)]],
+    }
+    quality = {
+        "candidate_target_hash": sha(after),
+        "critique_valid": True,
+        "critique_candidate_match": True,
+        "candidate_matched_critique_present": True,
+        "issues": [],
+    }
+    events = [
+        {
+            "event_type": "extra_final_refinement_completed",
+            "payload": {
+                "accepted": True,
+                "baseline_target_hash": sha(before),
+                "candidate_target_hash": sha(after),
+                "decisions": [
+                    {
+                        "decision": "accepted",
+                        "commit_status": "committed_local",
+                        "issue_id": "name",
+                        "original_span": before,
+                        "resulting_span": after,
+                    }
+                ],
+            },
+        }
+    ]
+    report = reconcile_final_entities(
+        memory,
+        source,
+        after,
+        chunk_index=0,
+        paragraph_identity=identity,
+        quality=quality,
+        events=events,
+    )
+    return {
+        "final_candidate_entity_memory": bool(
+            report["records"]
+            and report["records"][0]["action"] == "replaced_superseded_observation"
+            and memory.all_nouns()[english] == new
+            and old not in memory.aliases_for(english)
+            and memory.provenance_for(english)["authority"] == 30
+        ),
+        "first_occurrence_evidence_classification": bool(
+            stale["active_stale_mappings"] == [english]
+            and not stale["missing_first_occurrences"]
+            and missing["missing_first_occurrences"] == [english]
+        ),
+    }

@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v20.8.9"
+RUNTIME_RELEASE = "v20.8.10"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,8 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "final_candidate_entity_memory": True,
+            "first_occurrence_evidence_classification": True,
             "shared_original_keeper_eligibility": True,
             "document_scoped_duplicate_proof": True,
             "closing_parenthesis_list_evidence": True,
@@ -729,7 +731,14 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v2087_behavior_probes(),
         **_v2088_behavior_probes(),
         **_v2089_behavior_probes(),
+        **_v20810_behavior_probes(),
     }
+
+
+def _v20810_behavior_probes() -> dict[str, bool]:
+    from tarjomeh.core.quality_policy_probes import final_entity_probes
+
+    return final_entity_probes()
 
 
 def _v2089_behavior_probes() -> dict[str, bool]:

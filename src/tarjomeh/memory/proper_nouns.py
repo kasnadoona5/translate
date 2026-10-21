@@ -1506,25 +1506,19 @@ class ProperNouns:
         """Mark first use only when the accepted target visibly renders it.
 
         The English original may be emitted by the model or added later by the
-        deterministic exporter.  Requiring the established Persian target here
-        prevents a source-only candidate from consuming first-occurrence state.
+        deterministic exporter. Require a rendered target or an exact source-bound
+        English anchor; a source-only candidate cannot consume first-use state.
         """
-        compact_translation = re.sub(
-            r"[\s\u200c]+", " ", translation or ""
-        ).casefold()
+        from tarjomeh.memory.final_entities import first_occurrence_evidence
+
         for source, target in self._nouns.items():
             if source in self._introduced or not self.is_inline_eligible(source):
                 continue
             if not self.applies_to_source(source, source_text):
                 continue
-            compact_target = re.sub(r"[\s\u200c]+", " ", target).casefold()
-            target_rendered = bool(re.search(
-                rf"(?<!\w){re.escape(compact_target)}(?!\w)",
-                compact_translation,
-            ))
-            if target_rendered or has_exact_observed_anchor(
-                translation, source
-            ):
+            if first_occurrence_evidence(
+                source_text, translation, source, target,
+            )["first_occurrence_present"]:
                 self._introduced.add(source)
 
     def is_introduced(self, english: str) -> bool:
@@ -1589,6 +1583,49 @@ class ProperNouns:
         })
         self._provenance[key] = provenance
         return True
+
+    def reconcile_final_observation(
+        self, english: str, persian: str, *, evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Replace only a proof-bound automatic observation, without promotion."""
+        from tarjomeh.memory.final_entities import normalized_entity_target
+
+        key = self._stored_key(english)
+        prior = dict(self._provenance.get(key or "", {}))
+        if (not key or prior.get("origin") not in _LOW_AUTHORITY_ORIGINS
+                or evidence.get("old_target") != self._nouns[key]
+                or not evidence.get("decision_id")
+                or not all(re.fullmatch(r"[a-f0-9]{64}", str(evidence.get(field, "")))
+                           for field in ("source_sha256", "candidate_target_hash",
+                                         "source_paragraph_hash", "baseline_target_hash"))
+                or not is_safe_low_authority_mapping(key, persian, self.category_for(key))):
+            return {"action": "unchanged", "reason": "final_observation_proof_rejected"}
+        old = self._nouns[key]
+        history = list(prior.get("superseded", []))
+        history.append({"target": old, "origin": prior.get("origin"),
+                        "reason": "superseded_by_final_candidate", "evidence": dict(evidence)})
+        prior.update({"superseded": history, "final_observation": dict(evidence)})
+        self._nouns[key] = persian
+        self._provenance[key] = prior
+        self._aliases[key] = [value for value in self._aliases.get(key, [])
+                              if normalized_entity_target(value) != normalized_entity_target(old)]
+        return {"action": "replaced_superseded_observation", "target": persian,
+                "authority_class": self.authority_class_for(key), "evidence": dict(evidence)}
+
+    def defer_final_observation(
+        self, english: str, observed_target: str, *, reason: str,
+        source_sha256: str, target_sha256: str,
+    ) -> dict[str, Any]:
+        """Retain a contradicted automatic mapping for audit, not prompt reuse."""
+        key = self._stored_key(english)
+        prior = dict(self._provenance.get(key or "", {}))
+        if not key or prior.get("origin") not in _LOW_AUTHORITY_ORIGINS:
+            return {"action": "unchanged", "reason": "protected_mapping"}
+        prior.update({"context_deferred": True, "context_deferred_reason": reason,
+                      "final_observation_conflict": {"observed_target": observed_target,
+                          "source_sha256": source_sha256, "candidate_target_hash": target_sha256}})
+        self._provenance[key] = prior
+        return {"action": "context_deferred", "reason": reason, "raw_record_retained": True}
 
     def context_deferral_reason(self, english: str) -> str:
         """Explain effective deferral without rewriting historical evidence."""
