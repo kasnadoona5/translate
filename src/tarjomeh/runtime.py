@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v20.8.11"
+RUNTIME_RELEASE = "v20.8.12"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,7 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "numeric_announcement_boundaries": True,
             "final_entity_local_issue_scope": True,
             "final_candidate_entity_memory": True,
             "first_occurrence_evidence_classification": True,
@@ -734,7 +735,25 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v2089_behavior_probes(),
         **_v20810_behavior_probes(),
         **_v20811_behavior_probes(),
+        **_v20812_behavior_probes(),
     }
+
+
+def _v20812_behavior_probes() -> dict[str, bool]:
+    from tarjomeh.quality.structure_audit import announced_count_evidence, audit_structure
+
+    source = "2.2 Three elements"
+    good = "2.2 \u0633\u0647 \u0639\u0646\u0635\u0631"
+    bad = "2.2 \u062f\u0648 \u0639\u0646\u0635\u0631"
+    return {"numeric_announcement_boundaries": bool(
+        not announced_count_evidence("2.2 elements")
+        and not announced_count_evidence("\u06f2\u066b\u06f2 \u0639\u0646\u0635\u0631")
+        and [item.value for item in announced_count_evidence(source)] == [3]
+        and [item.value for item in announced_count_evidence(good)] == [3]
+        and not audit_structure(source, good)
+        and any(item.details.get("admission") == "blocking"
+                for item in audit_structure(source, bad))
+    )}
 
 
 def _v20811_behavior_probes() -> dict[str, bool]:

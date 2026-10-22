@@ -109,6 +109,10 @@ _ORDINALS: dict[str, int] = {
 # expression returned an ordinal with its comma attached. Unicode ``\w``
 # already recognises Persian letters and digits; exclude underscore.
 _WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
+_STRUCTURED_NUMBER_RE = re.compile(
+    r"[0-9\u0660-\u0669\u06f0-\u06f9]+"
+    r"(?:[.\u066b][0-9\u0660-\u0669\u06f0-\u06f9]+)+"
+)
 _ANNOUNCEMENT_CATEGORIES: dict[str, str] = {
     # Argumentative units. These are deliberately language concepts rather
     # than book terminology, so ordinary translation synonyms can align.
@@ -426,9 +430,14 @@ def announced_count_evidence(text: str) -> list[AnnouncementEvidence]:
     matches = list(_WORD_RE.finditer(text or ""))
     words = [match.group(0).casefold() for match in matches]
     reference_indices = _reference_number_indices(text or "", matches)
+    numeric_spans = [match.span() for match in _STRUCTURED_NUMBER_RE.finditer(text or "")]
     evidence: list[AnnouncementEvidence] = []
     for index, word in enumerate(words):
         if index in reference_indices:
+            continue
+        # Decimal/table identifiers are one number, not separate cardinal tokens.
+        if any(start <= matches[index].start() and matches[index].end() <= end
+               for start, end in numeric_spans):
             continue
         value: int | None = _CARDINALS.get(word)
         if value is None:
