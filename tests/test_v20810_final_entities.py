@@ -39,7 +39,7 @@ def fixture():
         "critique_valid": True,
         "critique_candidate_match": True,
         "candidate_matched_critique_present": True,
-        "issues": [{"status": "unresolved_grounded", "source_paragraph_index": 11}],
+        "issues": [{"status": "unresolved_grounded", "source_paragraph_index": 1}],
     }
     decision = {
         "decision": "accepted",
@@ -122,7 +122,7 @@ def test_missing_or_conflicting_proof_defers_without_guessing(change):
     if change == "hash":
         events[0]["payload"]["baseline_target_hash"] = "0" * 64
     if change == "paragraph":
-        quality["issues"][0]["source_paragraph_index"] = 10
+        quality["issues"][0]["source_paragraph_index"] = 0
     if change == "scope":
         quality["issues"][0].pop("source_paragraph_index")
     if change == "identity":

@@ -340,6 +340,106 @@ def original_keeper_probes() -> dict[str, bool]:
     return {"shared_original_keeper_eligibility": all(checks)}
 
 
+def final_entity_local_scope_probe() -> bool:
+    """Bind real quality-record coordinates to a later chunk, without I/O."""
+    import hashlib
+    from types import SimpleNamespace
+
+    from tarjomeh.core.pipeline import _canonical_final_quality_record
+    from tarjomeh.memory.final_entities import reconcile_final_entities
+    from tarjomeh.memory.proper_nouns import ProperNouns
+
+    def sha(text):
+        return hashlib.sha256(text.encode()).hexdigest()
+
+    english = "Example Press"
+    old = "\u0627\u0646\u062a\u0634\u0627\u0631\u0627\u062a \u0646\u0645\u0648\u0646\u0647"
+    new = "\u0627\u0646\u062a\u0634\u0627\u0631\u0627\u062a \u0645\u062b\u0627\u0644"
+    source = english + " publishes books.\n\nAnother issue remains."
+    before = old + " (" + english + ").\n\n\u0645\u0633\u0626\u0644\u0647."
+    after = before.replace(old, new)
+    parts = after.split("\n\n")
+    identity = {
+        "reconstructed": False,
+        "canonical_target_hash": sha(after),
+        "paragraph_indices": [10, 11],
+        "source_hashes": [sha(p) for p in source.split("\n\n")],
+        "target_hashes": [sha(p) for p in parts],
+        "target_offsets": [[0, len(parts[0])], [len(parts[0]) + 2, len(after)]],
+    }
+    edit = {
+        "event_type": "extra_final_refinement_completed",
+        "payload": {
+            "accepted": True,
+            "baseline_target_hash": sha(before),
+            "candidate_target_hash": sha(after),
+            "decisions": [
+                {
+                    "decision": "accepted",
+                    "commit_status": "committed_local",
+                    "issue_id": "name",
+                    "original_span": old + " (" + english + ")",
+                    "resulting_span": new + " (" + english + ")",
+                }
+            ],
+        },
+    }
+    for segment, should_defer in (
+        ("p1:s1", True),
+        ("p2:s1", False),
+        ("p99:s1", True),
+        ("p0:s1", True),
+    ):
+        nouns = ProperNouns()
+        nouns.add_noun(
+            english,
+            old,
+            category="organization",
+            provenance="observed_translation",
+            evidence_key="anchor:" + sha(source)[:16],
+        )
+        events = [
+            edit,
+            {
+                "event_type": "critique_completed",
+                "payload": {
+                    "valid": True,
+                    "candidate_target_hash": sha(after),
+                    "issue_details": [
+                        {
+                            "issue_id": "unresolved",
+                            "category": "accuracy",
+                            "severity": "major",
+                            "confidence": 0.95,
+                            "source_segment_id": segment,
+                            "source_quote": english + " publishes books.",
+                            "current_persian_quote": new,
+                            "suggested_correction": old,
+                        }
+                    ],
+                },
+            },
+            {"event_type": "chunk_review_required", "payload": {}},
+        ]
+        quality = _canonical_final_quality_record(
+            SimpleNamespace(get_chunk_events=lambda *a, events=events: events), "probe", 3, after
+        )
+        result = reconcile_final_entities(
+            nouns,
+            source,
+            after,
+            chunk_index=3,
+            paragraph_identity=identity,
+            quality=quality,
+            events=events,
+        )
+        if not result["records"] or nouns.is_context_deferred(english) != should_defer:
+            return False
+        if nouns.all_nouns()[english] != (old if should_defer else new):
+            return False
+    return True
+
+
 def final_entity_probes() -> dict[str, bool]:
     """Exercise final-name and first-use contracts without provider or file I/O."""
     import hashlib

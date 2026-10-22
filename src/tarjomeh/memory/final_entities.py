@@ -191,6 +191,8 @@ def reconcile_final_entities(
             continue
         reason = "final_entity_alignment_unproven"
         evidence: dict[str, Any] | None = None
+        local_paragraph: int | None = None
+        global_paragraph: int | None = None
         pattern = source_term_pattern(english)
         if aligned and pattern and len(list(pattern.finditer(source))) == 1:
             sources, targets = aligned
@@ -199,6 +201,7 @@ def reconcile_final_entities(
             )
             if local >= 0:
                 paragraph = paragraph_identity["paragraph_indices"][local]
+                local_paragraph, global_paragraph = local, paragraph
                 reason = "final_entity_correction_proof_unavailable"
                 quality_bound = (
                     quality.get("candidate_target_hash") == _sha(target)
@@ -213,14 +216,16 @@ def reconcile_final_entities(
                     if issues_valid
                     else []
                 )
+                # Quality pN:sM identifiers are chunk-local, unlike provenance indices.
+                issue_scope_proven = issues_valid and all(
+                    type(i.get("source_paragraph_index")) is int
+                    and 0 <= i["source_paragraph_index"] < len(sources)
+                    for i in unresolved
+                )
                 clean = (
                     not quality.get("unresolved_language_event_count", 0)
-                    and issues_valid
-                    and all(
-                        type(i.get("source_paragraph_index")) is int
-                        and i["source_paragraph_index"] != paragraph
-                        for i in unresolved
-                    )
+                    and issue_scope_proven
+                    and all(i["source_paragraph_index"] != local for i in unresolved)
                 )
                 matching = []
                 for proof in proofs:
@@ -243,7 +248,9 @@ def reconcile_final_entities(
                             == normalized_entity_target(new)
                         ):
                             matching.append((proof, decision))
-                if not clean:
+                if not issue_scope_proven:
+                    reason = "final_entity_issue_scope_unproven"
+                elif not clean:
                     reason = "final_entity_paragraph_has_unresolved_evidence"
                 elif not quality_bound:
                     reason = "final_entity_quality_not_candidate_bound"
@@ -268,6 +275,7 @@ def reconcile_final_entities(
                         "candidate_target_hash": _sha(target),
                         "source_paragraph_hash": _sha(sources[local]),
                         "paragraph_index": paragraph,
+                        "source_local_paragraph_index": local,
                         "chunk_index": chunk_index,
                         "baseline_target_hash": proof["baseline_target_hash"],
                         "decision_id": decision.get("issue_id", ""),
@@ -288,7 +296,14 @@ def reconcile_final_entities(
                 english, new, reason=reason, source_sha256=_sha(source), target_sha256=_sha(target)
             )
         report["records"].append(
-            {"source": english, "old_target": old, "observed_final_target": new, **outcome}
+            {
+                "source": english,
+                "old_target": old,
+                "observed_final_target": new,
+                "source_local_paragraph_index": local_paragraph,
+                "source_global_paragraph_index": global_paragraph,
+                **outcome,
+            }
         )
     return report
 
