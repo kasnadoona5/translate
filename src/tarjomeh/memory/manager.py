@@ -1862,7 +1862,9 @@ class MemoryManager:
                 "error": f"{type(exc).__name__}: {exc}",
             }
 
-    def reconcile_bilingual_summary(self) -> dict[str, Any]:
+    def reconcile_bilingual_summary(
+        self, *, summary: BilingualSummary | None = None,
+    ) -> dict[str, Any]:
         """Remove stale automatic renderings contradicted by accepted corrections."""
         replacements: list[tuple[str, str]] = []
         for source, target in self.proper_nouns.all_nouns().items():
@@ -1877,7 +1879,47 @@ class MemoryManager:
                 previous = str(record.get("target", "")).strip()
                 if previous and previous != target:
                     replacements.append((previous, target))
-        return self.bilingual_summary.reconcile_persian_terms(replacements)
+        selected = self.bilingual_summary if summary is None else summary
+        return selected.reconcile_persian_terms(replacements)
+
+    def _commit_bilingual_summary(
+        self,
+        candidate: BilingualSummary,
+        *,
+        coverage_refs: list[dict[str, Any]] | None,
+        candidate_quality: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Prepare every dependent record before replacing active summary state."""
+        report = self.reconcile_bilingual_summary(summary=candidate)
+        next_coverage = deepcopy(self.summary_coverage)
+        next_pending = deepcopy(self.summary_pending)
+        next_history = deepcopy(self.summary_history)
+        if self.quality_policy_version >= 1 and coverage_refs is not None:
+            covered = deepcopy([ref for ref in coverage_refs if ref in self.summary_pending])
+            next_coverage.extend(ref for ref in covered if ref not in next_coverage)
+            next_pending = [ref for ref in next_pending if ref not in covered]
+            next_history.append({
+                "summary": candidate.serialize(),
+                "coverage": deepcopy(next_coverage),
+            })
+            report["covered_chunk_references"] = deepcopy(covered)
+            report["pending_chunk_references"] = deepcopy(next_pending)
+        report.update({
+            "input_trust": candidate.input_trust,
+            "trust_reasons": list(candidate.trust_reasons),
+            "context_retained": True,
+            "candidate_committed": True,
+            "candidate_quality": candidate_quality,
+            "authority": "argument_orientation_only",
+        })
+        # No fallible preparation or await belongs after this assignment.
+        (
+            self.bilingual_summary,
+            self.summary_coverage,
+            self.summary_pending,
+            self.summary_history,
+        ) = candidate, next_coverage, next_pending, next_history
+        return report
 
     async def update_bilingual_summary(
         self,
@@ -1915,12 +1957,15 @@ class MemoryManager:
             translation=translation,
         )
 
+        failure_stage = "provider_call"
         try:
             if hasattr(llm_client, "set_operation"):
                 llm_client.set_operation("bilingual_summary_update")
             response = await llm_client.chat(prompt)
+            failure_stage = "candidate_parse"
             candidate = BilingualSummary()
             candidate.update(response)
+            failure_stage = "candidate_quality"
             candidate_quality = candidate.candidate_quality()
             from tarjomeh.quality.structure_audit import audit_payload
 
@@ -1989,37 +2034,24 @@ class MemoryManager:
                     "candidate_committed": False,
                     "authority": "argument_orientation_only",
                 }
+            failure_stage = "summary_commit_preparation"
             candidate.set_input_trust(input_trust, trust_reasons)
-            self.bilingual_summary = candidate
-            report = self.reconcile_bilingual_summary()
-            if self.quality_policy_version >= 1 and coverage_refs is not None:
-                # Only references supplied from the canonical queue can clear it.
-                covered = [ref for ref in coverage_refs if ref in self.summary_pending]
-                self.summary_coverage.extend(
-                    ref for ref in covered if ref not in self.summary_coverage
-                )
-                self.summary_pending = [ref for ref in self.summary_pending if ref not in covered]
-                self.summary_history.append({
-                    "summary": self.bilingual_summary.serialize(),
-                    "coverage": list(self.summary_coverage),
-                })
-                report["covered_chunk_references"] = covered
-                report["pending_chunk_references"] = list(self.summary_pending)
-            report.update({
-                "input_trust": self.bilingual_summary.input_trust,
-                "trust_reasons": list(self.bilingual_summary.trust_reasons),
-                "context_retained": True,
-                "candidate_committed": True,
-                "candidate_quality": candidate_quality,
-                "authority": "argument_orientation_only",
-            })
-            return report
+            return self._commit_bilingual_summary(
+                candidate, coverage_refs=coverage_refs, candidate_quality=candidate_quality,
+            )
         except Exception as exc:
             logger.warning("Failed to update running bilingual summary: %s", exc)
             return {
                 "replacement_count": 0,
                 "changes": [],
                 "error": f"{type(exc).__name__}: {exc}",
+                "candidate_committed": False,
+                "status": "failed_retained_previous_summary",
+                "failure_stage": failure_stage,
+                "context_retained": bool(current != "None"),
+                "input_trust": self.bilingual_summary.input_trust,
+                "trust_reasons": list(self.bilingual_summary.trust_reasons),
+                "authority": "argument_orientation_only",
             }
 
     def to_dict(self) -> dict[str, Any]:

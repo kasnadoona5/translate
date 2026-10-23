@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v20.8.12"
+RUNTIME_RELEASE = "v21"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,7 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "atomic_summary_commit": True,
             "numeric_announcement_boundaries": True,
             "final_entity_local_issue_scope": True,
             "final_candidate_entity_memory": True,
@@ -736,7 +737,61 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v20810_behavior_probes(),
         **_v20811_behavior_probes(),
         **_v20812_behavior_probes(),
+        **_v21_behavior_probes(),
     }
+
+
+def _v21_behavior_probes() -> dict[str, bool]:
+    """Exercise actual summary commit preparation without I/O or async providers."""
+    from copy import deepcopy
+
+    from tarjomeh.core.config import TarjomehConfig
+    from tarjomeh.memory.bilingual_summary import BilingualSummary
+    from tarjomeh.memory.manager import MemoryManager
+
+    manager = MemoryManager(TarjomehConfig())
+    manager.quality_policy_version = 1
+    manager.bilingual_summary.english_summary = "The earlier claim is conditional."
+    manager.bilingual_summary.persian_summary = (
+        "\u0627\u062f\u0639\u0627\u06cc \u067e\u06cc\u0634\u06cc\u0646 "
+        "\u0645\u0634\u0631\u0648\u0637 \u0627\u0633\u062a."
+    )
+    ref = {"chunk_index": 0, "source_sha256": "source", "target_sha256": "target"}
+    manager.summary_pending = [ref]
+
+    def state():
+        return deepcopy((manager.bilingual_summary.serialize(), manager.summary_pending,
+                         manager.summary_coverage, manager.summary_history))
+
+    class FailingCandidate(BilingualSummary):
+        def serialize(self):
+            raise RuntimeError("synthetic history preparation failure")
+
+    before = state()
+    retained = False
+    try:
+        manager._commit_bilingual_summary(
+            FailingCandidate(), coverage_refs=[ref], candidate_quality={"accepted": True},
+        )
+    except RuntimeError:
+        retained = state() == before
+    candidate = BilingualSummary()
+    candidate.english_summary = "The later claim is conditional."
+    candidate.persian_summary = (
+        "\u0627\u062f\u0639\u0627\u06cc \u0628\u0639\u062f\u06cc "
+        "\u0645\u0634\u0631\u0648\u0637 \u0627\u0633\u062a."
+    )
+    result = manager._commit_bilingual_summary(
+        candidate, coverage_refs=[ref], candidate_quality={"accepted": True},
+    )
+    committed = bool(
+        result.get("candidate_committed")
+        and manager.bilingual_summary is candidate
+        and manager.summary_pending == []
+        and manager.summary_coverage == [ref]
+        and manager.summary_history == [{"summary": candidate.serialize(), "coverage": [ref]}]
+    )
+    return {"atomic_summary_commit": retained and committed}
 
 
 def _v20812_behavior_probes() -> dict[str, bool]:
