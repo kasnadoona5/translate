@@ -3535,10 +3535,14 @@ def _salvage_local_refinement_edits(
                 for item in group
             ):
                 coherent_reason = "local_predicate_evidence_removed"
-        if not coherent_reason and not _reviewed_term_candidate_admission(
+        if not coherent_reason:
+            coherent_term_admission = _reviewed_term_candidate_admission(
                 source, current, coherent_candidate, source_metadata or {}, reviewed_matches or [],
-            )["accepted"]:
-            coherent_reason = "scoped_mandatory_term_regression"
+            )
+            for item in group:
+                item["coherent_term_admission"] = coherent_term_admission
+            if not coherent_term_admission["accepted"]:
+                coherent_reason = "scoped_mandatory_term_regression"
         if not coherent_reason:
             coherent_integrity = integrity_gate.evaluate(
                 source,
@@ -3646,10 +3650,13 @@ def _salvage_local_refinement_edits(
                             "after": 0,
                         }],
                     }
-            if not failed_reason and not _reviewed_term_candidate_admission(
+            if not failed_reason:
+                term_admission = _reviewed_term_candidate_admission(
                     source, current, candidate, source_metadata or {}, reviewed_matches or [],
-                )["accepted"]:
-                failed_reason = "scoped_mandatory_term_regression"
+                )
+                item["term_admission"] = term_admission
+                if not term_admission["accepted"]:
+                    failed_reason = "scoped_mandatory_term_regression"
             if not failed_reason:
                 integrity = integrity_gate.evaluate(
                     source,
@@ -3698,6 +3705,8 @@ def _salvage_local_refinement_edits(
             ),
             "commit_reason": reason,
             "equivalent_to_issue_id": duplicate_of,
+            "term_admission": item.get("term_admission"),
+            "coherent_term_admission": item.get("coherent_term_admission"),
         })
         enriched.append(decision)
         attempts.append({
@@ -3712,6 +3721,8 @@ def _salvage_local_refinement_edits(
             "before_chars": len(str(item["current_span"])),
             "after_chars": len(str(item["resulting_span"])),
             "integrity": integrity_payload,
+            "term_admission": item.get("term_admission"),
+            "coherent_term_admission": item.get("coherent_term_admission"),
         })
 
     return current, enriched, {
@@ -4383,6 +4394,10 @@ def _critique_for_event(
             for detail in list(getattr(critique, "issue_details", []) or [])
         ],
         "raw_response_preview": _truncate_for_event(critique.raw_response, 3000),
+        "diagnostic_evidence": (
+            critique.diagnostic_evidence()
+            if hasattr(critique, "diagnostic_evidence") else None
+        ),
     }
 
 
@@ -5034,14 +5049,23 @@ def _reviewed_term_candidate_admission(
     matches: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Protect only proven mandatory paragraph matches, never recommendations."""
+    identities = {
+        "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+        "previous_target_sha256": hashlib.sha256(previous.encode("utf-8")).hexdigest(),
+        "candidate_target_sha256": hashlib.sha256(candidate.encode("utf-8")).hexdigest(),
+    }
     if not matches:
         return {
+            **identities,
             "accepted": True,
             "violation_count": 0,
             "blocking_review_count": 0,
             "unchanged_reviews": [],
         }
-    from tarjomeh.glossary.book_review import check_reviewed_book_terms
+    from tarjomeh.glossary.book_review import (
+        check_reviewed_book_terms,
+        nested_reviewed_term_evidence,
+    )
 
     compliance, uncertain = check_reviewed_book_terms(candidate, source, metadata, matches)
     blocked, carried = _partition_unchanged_book_term_reviews(
@@ -5053,12 +5077,14 @@ def _reviewed_term_candidate_admission(
         uncertain,
     )
     return {
+        **identities,
         "accepted": not compliance.violations and not blocked,
         "violation_count": len(compliance.violations),
         "blocking_review_count": len(blocked),
         "violations": [item.__dict__ for item in compliance.violations],
         "blocking_reviews": blocked,
         "unchanged_reviews": carried,
+        "nested_source_matches": nested_reviewed_term_evidence(source, metadata, matches),
     }
 
 
@@ -10758,7 +10784,10 @@ class TranslationPipeline:
         reviewed_matches: list[dict[str, Any]] = []
         book_recommendations: list[dict[str, Any]] = []
         if self.config.translation.review_book_terms_before_translating:
-            from tarjomeh.glossary.book_review import resolve_reviewed_book_terms
+            from tarjomeh.glossary.book_review import (
+                nested_reviewed_term_evidence,
+                resolve_reviewed_book_terms,
+            )
 
             review_artifact = self.db.get_job_artifact(job_id, "book_term_review_v1") or {}
             if review_artifact.get("source_sha256") != self.db.get_job_source_hash(job_id):
@@ -10799,6 +10828,9 @@ class TranslationPipeline:
                     "matched": reviewed_matches,
                     "review": scoped_review,
                     "policy": "verified_source_paragraph_only",
+                    "nested_source_matches": nested_reviewed_term_evidence(
+                        chunk.text, chunk.metadata, reviewed_matches,
+                    ),
                 })
                 if scoped_review:
                     self.db.log_chunk_event(job_id, idx, "glossary_needs_review", {

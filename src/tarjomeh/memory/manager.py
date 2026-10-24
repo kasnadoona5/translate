@@ -764,6 +764,16 @@ class MemoryManager:
         style_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Update synchronous memory layers with a new source-translation pair."""
+        empty_fields = [
+            name for name, value in (("source", chunk.text), ("translation", translation))
+            if not value.strip()
+        ]
+        if empty_fields:
+            return {
+                "status": "skipped_empty_memory_input",
+                "memory_updated": False,
+                "empty_fields": empty_fields,
+            }
         body_indices = list(
             chunk.metadata.get("style_body_paragraphs", []) or []
         )

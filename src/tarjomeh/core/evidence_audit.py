@@ -16,6 +16,55 @@ _POSSIBLE_SECRET_RE = re.compile(
 )
 
 
+def narrow_release_reporting(
+    events: list[dict[str, Any]], chunks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Expose existing evidence only; missing historical diagnostics are not failures."""
+    from tarjomeh.glossary.book_review import book_term_review_evidence
+
+    critiques = []
+    local_admissions = []
+    for event in events:
+        payload = event.get("payload") or {}
+        if event.get("event_type") == "critique_completed":
+            diagnostic = payload.get("diagnostic_evidence")
+            critiques.append({
+                "chunk_index": event.get("chunk_index"),
+                "iteration": payload.get("iteration"),
+                "candidate_target_hash": payload.get("candidate_target_hash"),
+                "availability": "recorded" if diagnostic is not None else "unavailable",
+                "diagnostic": diagnostic,
+            })
+        if event.get("event_type") == "refinement_completed":
+            for decision in payload.get("issue_decisions", []) or []:
+                evidence = {key: decision.get(key) for key in (
+                    "coherent_term_admission", "term_admission",
+                )}
+                local_admissions.append({
+                    "chunk_index": event.get("chunk_index"),
+                    "issue_id": decision.get("issue_id"),
+                    "commit_reason": decision.get("commit_reason"),
+                    "availability": "recorded" if any(
+                        value is not None for value in evidence.values()
+                    ) else "unavailable_or_not_reached",
+                    **evidence,
+                })
+    attempts = [event for event in events if event.get("event_type") == "llm_call_attempt"]
+    term_evidence = book_term_review_evidence({}, events, chunks)
+    return {
+        "authority": "report_only_no_gate_score_trust_or_call_change",
+        "event_scope": "supplied_events; do_not_add_review_records_to_physical_attempts",
+        "physical_attempt_records": len(attempts),
+        "critique_result_records": len(critiques),
+        "critique_diagnostics": critiques,
+        "local_term_admissions": local_admissions,
+        "nested_source_matches": term_evidence["nested_source_matches"],
+        "term_authority": "mandatory_only_in_proven_paragraph; optional_elsewhere_has_no_penalty",
+        "extra_final_counts": "subset_of_physical_attempts_not_additional",
+        "semantic_accuracy": "requires_source_based_human_review",
+    }
+
+
 def original_annotation_reporting(
     audit: dict[str, Any],
     chunks: list[dict[str, Any]],

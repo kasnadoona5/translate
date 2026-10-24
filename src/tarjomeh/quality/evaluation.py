@@ -23,6 +23,7 @@ from tarjomeh.quality.integrity import (
     available_note_markers,
     extract_note_markers,
     extract_numbers,
+    reconcile_numbers,
 )
 
 
@@ -97,12 +98,13 @@ def inspect_chunk(
 
     source_numbers = extract_numbers(source)
     target_numbers = extract_numbers(translation)
-    missing_numbers = list((source_numbers - target_numbers).elements())
+    numeric_evidence = reconcile_numbers(source, translation)
+    missing_numbers = numeric_evidence["missing"]
     checks.append(_check(
         "numbers_preserved", not missing_numbers, "blocking",
         "All source numbers are preserved."
         if not missing_numbers else "One or more source numbers are missing or changed.",
-        {"missing": missing_numbers, "source": list(source_numbers.elements()),
+        {**numeric_evidence, "source": list(source_numbers.elements()),
          "target": list(target_numbers.elements())},
     ))
 

@@ -1354,14 +1354,20 @@ def _register_api(app: Flask) -> None:
             "  lexically_present_paragraph_terms="
             + str(term_evidence["lexically_present_paragraph_term_count"]),
             "  Semantic accuracy still requires source-based human review.",
+            "  Authority: mandatory in proven paragraphs only; advice elsewhere is non-binding.",
             "",
         ])
+        for item in term_evidence.get("nested_source_matches", []):
+            lines.append(
+                "  Nested source match (report only): " + json.dumps(item, ensure_ascii=False)
+            )
         extra_evidence = extra_final_refinement_evidence(
             db.get_job_artifact(job_id, "extra_final_refinement_v1") or {},
             all_events, int(translation_config.get("extra_final_refine_attempts", 0)),
         )
         lines.extend([
             "Extra Final Repair Accounting:",
+            "  Subset of total physical attempts below; do not add these counts again.",
             "  consumed_chunks=" + str(extra_evidence["consumed_chunk_count"]),
             "  active=" + json.dumps(extra_evidence["active"], ensure_ascii=False),
             "  lifetime=" + json.dumps(extra_evidence["lifetime"], ensure_ascii=False),
@@ -1419,6 +1425,16 @@ def _register_api(app: Flask) -> None:
 
         active_operations = operation_counts(current_events)
         lifetime_operations = operation_counts(all_events)
+        lines.append(
+            "Physical attempt totals: active="
+            + str(sum(row["attempts"] for row in active_operations.values()))
+            + " lifetime=" + str(sum(row["attempts"] for row in lifetime_operations.values()))
+            + " (completed attempt records; not all successful; starts excluded)"
+        )
+        lines.append(
+            "Critique/refinement/readability detail lines are recorded events, not a call count; "
+            "cached or re-logged reviews must not be added as requests."
+        )
         lines.append("LLM attempts by operation (completed attempts; starts excluded):")
         for name in sorted(set(active_operations) | set(lifetime_operations)):
             active = active_operations.get(name, {})
@@ -1788,6 +1804,12 @@ def _register_api(app: Flask) -> None:
                     )
                 elif event["event_type"] == "critique_completed":
                     scores = payload.get("scores", {})
+                    diagnostic = payload.get("diagnostic_evidence")
+                    lines.append(
+                        "    Score/grounding diagnostics (report only): "
+                        + (json.dumps(diagnostic, ensure_ascii=False)
+                           if diagnostic is not None else "unavailable in historical event")
+                    )
                     lines.append(
                         "  Critique: valid={valid} attempts={attempts} avg={average} accuracy={accuracy} fluency={fluency} "
                         "terminology={terminology} register={register} issues={issues} "
@@ -1881,6 +1903,13 @@ def _register_api(app: Flask) -> None:
                             lines.append(
                                 f"      {decision.get('rationale')}"
                             )
+                        for key in ("coherent_term_admission", "term_admission"):
+                            evidence = decision.get(key)
+                            if evidence is not None:
+                                lines.append(
+                                    f"      {key} (report only): "
+                                    + json.dumps(evidence, ensure_ascii=False)
+                                )
                 elif event["event_type"] == "critique_needs_review":
                     raw_reasons = payload.get("reason_codes", []) or []
                     reason_codes = (

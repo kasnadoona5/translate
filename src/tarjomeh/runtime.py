@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v21"
+RUNTIME_RELEASE = "v22"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,11 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "empty_memory_pair_retention": True,
+            "docx_heading_font_inheritance": True,
+            "localized_number_evaluation": True,
+            "score_grounding_diagnostics_only": True,
+            "source_scoped_admission_reporting": True,
             "atomic_summary_commit": True,
             "numeric_announcement_boundaries": True,
             "final_entity_local_issue_scope": True,
@@ -738,6 +743,91 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v20811_behavior_probes(),
         **_v20812_behavior_probes(),
         **_v21_behavior_probes(),
+        **_v22_behavior_probes(),
+    }
+
+
+def _v22_behavior_probes() -> dict[str, bool]:
+    """Pure checks for the narrow release; no provider, DB, files or semantic judge."""
+    import json
+    from copy import deepcopy
+
+    from tarjomeh.chunking.chunker import Chunk
+    from tarjomeh.core.config import TarjomehConfig
+    from tarjomeh.core.pipeline import _reviewed_term_candidate_admission
+    from tarjomeh.exporters.docx_exporter import target_run_font_size
+    from tarjomeh.memory.manager import MemoryManager
+    from tarjomeh.quality.critique import TranslationCritique
+    from tarjomeh.quality.evaluation import inspect_chunk
+
+    retained = True
+    for policy in (0, 1):
+        for seeded in (False, True):
+            manager = MemoryManager(TarjomehConfig())
+            manager.quality_policy_version = policy
+            if seeded:
+                manager.update_after_translation(
+                    Chunk(0, "An earlier claim.", "Earlier", ""),
+                    "\u0627\u062f\u0639\u0627\u06cc \u067e\u06cc\u0634\u06cc\u0646.",
+                    style_approved=False,
+                )
+            before = deepcopy(manager.to_dict())
+            for source, target in (("New source.", " \n"), (" \n", "New target.")):
+                result = manager.update_after_translation(
+                    Chunk(0, source, "Other", ""), target, style_approved=False,
+                )
+                retained &= bool(result.get("memory_updated") is False
+                                 and manager.to_dict() == before)
+
+    def number_passes(target):
+        result = inspect_chunk("Chapter 3", target, "completed", [])
+        return next(item["passed"] for item in result["checks"]
+                    if item["id"] == "numbers_preserved")
+
+    data = {"scores": dict(accuracy=2, fluency=8, terminology=8, register=8),
+            "overall": 9, "issues": []}
+    critique = TranslationCritique._parse_response(json.dumps(data))
+    diagnostic = critique.diagnostic_evidence()
+    invalid = TranslationCritique._parse_response(json.dumps({**data, "issues": [
+        {"category": "accuracy", "severity": "critical", "confidence": 0.99,
+         "source_quote": "not in source", "current_persian_quote": "target",
+         "suggested_correction": "other", "rationale": "synthetic evidence"},
+    ]}), "A source.", "A target.").diagnostic_evidence()
+
+    source = "A concept and a meta-concept differ."
+    digest = hashlib.sha256(source.encode()).hexdigest()
+    target = "\u0645\u0641\u0647\u0648\u0645"
+    matches = [
+        {"paragraph_index": 0, "source": term, "target": rendering,
+         "source_paragraph_hash": digest, "source_occurrence_count": count}
+        for term, rendering, count in (
+            ("concept", target, 2), ("meta-concept", "\u0641\u0631\u0627" + target, 1),
+        )
+    ]
+    previous = target + " \u0641\u0631\u0627" + target + " differ."
+    candidate = previous.replace("differ", "differ clearly")
+    blocked = _reviewed_term_candidate_admission(source, previous, candidate, {}, matches)
+    carried = _reviewed_term_candidate_admission(source, previous, previous, {}, matches)
+    return {
+        "empty_memory_pair_retention": retained,
+        "docx_heading_font_inheritance": all(
+            target_run_font_size(f"Heading {level}") is None for level in (1, 2, 3)
+        ) and target_run_font_size("Normal") == 11,
+        "localized_number_evaluation": bool(
+            number_passes("\u0641\u0635\u0644 \u0633\u0648\u0645")
+            and not number_passes("\u0641\u0635\u0644 \u0686\u0647\u0627\u0631\u0645")
+        ),
+        "score_grounding_diagnostics_only": bool(
+            critique.average == 9 and critique.passes_threshold(8)
+            and diagnostic["dimension_mean"] == 6.5 and diagnostic["model_overall"] == 9
+            and invalid["ignored_severe_issue_count"] == 1 and invalid["grounding_incomplete"]
+        ),
+        "source_scoped_admission_reporting": bool(
+            not blocked["accepted"] and blocked["violation_count"] == 0
+            and blocked["blocking_review_count"] == 1 and blocked["nested_source_matches"]
+            and blocked["candidate_target_sha256"] == hashlib.sha256(candidate.encode()).hexdigest()
+            and carried["accepted"] and carried["unchanged_reviews"]
+        ),
     }
 
 

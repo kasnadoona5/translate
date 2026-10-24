@@ -60,6 +60,39 @@ def _term_pattern(source: str) -> re.Pattern[str]:
     return re.compile(rf"(?<!\w){re.escape(source)}(?!\w)", re.IGNORECASE)
 
 
+def nested_reviewed_term_evidence(
+    source: str, metadata: dict[str, Any], matches: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Report literal containment only; never infer target sense or alter counts."""
+    paragraphs = _verified_source_paragraphs(source, metadata)
+    if paragraphs is None:
+        return []
+    spans = []
+    for item in matches:
+        index = item.get("paragraph_index")
+        term = str(item.get("source", ""))
+        if (type(index) is not int or not 0 <= index < len(paragraphs)
+                or not term or item.get("source_paragraph_hash") != _sha(paragraphs[index])):
+            continue
+        spans.extend(
+            (index, term, match.start(), match.end())
+            for match in _term_pattern(term).finditer(paragraphs[index])
+        )
+    return [
+        {
+            "paragraph_index": index,
+            "source_paragraph_hash": _sha(paragraphs[index]),
+            "shorter_term": term, "shorter_span": [start, end],
+            "longer_term": longer, "longer_span": [left, right],
+            "authority": "literal_containment_only_not_omission_or_sense_proof",
+        }
+        for index, term, start, end in sorted(set(spans))
+        for other_index, longer, left, right in sorted(set(spans))
+        if index == other_index and (left, right) != (start, end)
+        and left <= start < end <= right
+    ]
+
+
 def _is_publisher_line(paragraph: str) -> bool:
     return len(paragraph) < 140 and bool(_PUBLISHER_LINE.search(paragraph))
 
@@ -608,6 +641,7 @@ def book_term_review_evidence(
     evidence_events = []
     scoped = set()
     lexical = []
+    nested_matches = []
     for index, generation in by_chunk.items():
         evidence_events.extend(event for event in generation if event.get("event_type") in {
             "book_term_scope_resolved", "book_term_final_compliance",
@@ -630,6 +664,12 @@ def book_term_review_evidence(
             metadata_valid = False
         source_parts = _verified_source_paragraphs(str(chunk.get("text", "")), metadata)
         targets = split_paragraphs(str(chunk.get("translation") or ""))
+        nested_matches.extend(
+            {"db_chunk_index": index, **item}
+            for item in nested_reviewed_term_evidence(
+                str(chunk.get("text", "")), metadata, latest_scope.get("matched", []),
+            )
+        )
         for match in latest_scope.get("matched", []):
             paragraph = match.get("paragraph_index")
             scoped.add((index, paragraph, match.get("source_paragraph_hash")))
@@ -647,6 +687,7 @@ def book_term_review_evidence(
                     else "missing"
                 ) if proven else "REVIEW",
                 "semantic_accuracy": "requires_source_based_human_review",
+                "authority": "mandatory_only_in_proven_source_paragraph",
             })
     return {
         "phase": review.get("phase", "off"), "source_sha256": review.get("source_sha256"),
@@ -660,6 +701,7 @@ def book_term_review_evidence(
         ),
         "proposal_decisions": proposals, "scope_and_compliance_events": evidence_events,
         "paragraph_term_presence": lexical,
+        "nested_source_matches": nested_matches,
         "policy": (
             "approval, scope and lexical presence are distinct; none proves semantic accuracy"
         ),

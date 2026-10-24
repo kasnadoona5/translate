@@ -14,6 +14,12 @@ logger = logging.getLogger(__name__)
 # Heading of the appended term-note section (Persian "notes").
 NOTES_HEADING = "\u06cc\u0627\u062f\u062f\u0627\u0634\u062a\u200c\u0647\u0627"
 
+
+def target_run_font_size(style_name: str) -> int | None:
+    """Headings inherit their style; ordinary target runs retain the body size."""
+    return None if style_name.startswith("Heading ") else 11
+
+
 _LATIN_PARENTHETICAL_RE = re.compile(r"\([^()\n]*[A-Za-z][^()\n]*\)")
 _PERSIAN_LETTER_RE = re.compile(
     r"[\u0621-\u063a\u0641-\u064a\u066e-\u06d3\u06fa-\u06ff]"
@@ -237,9 +243,18 @@ class DocxExporter(BaseExporter):
             section.left_margin = Cm(2.2)
             section.right_margin = Cm(2.2)
 
+        def set_complex_script_size(style, size: int) -> None:
+            properties = style.element.get_or_add_rPr()
+            element = properties.find(qn("w:szCs"))
+            if element is None:
+                element = OxmlElement("w:szCs")
+                properties.append(element)
+            element.set(qn("w:val"), str(size * 2))
+
         normal_style = doc.styles["Normal"]
         normal_style.font.name = "Vazirmatn"
         normal_style.font.size = Pt(11)
+        set_complex_script_size(normal_style, 11)
         normal_style.paragraph_format.space_after = Pt(6)
         normal_style.paragraph_format.line_spacing = 1.15
 
@@ -247,6 +262,7 @@ class DocxExporter(BaseExporter):
             heading_style = doc.styles[f"Heading {level}"]
             heading_style.font.name = "Vazirmatn"
             heading_style.font.size = Pt(size)
+            set_complex_script_size(heading_style, size)
             heading_style.font.bold = True
             heading_style.font.color.rgb = RGBColor(0, 0, 0)
             heading_style.paragraph_format.keep_with_next = True
@@ -290,7 +306,9 @@ class DocxExporter(BaseExporter):
                 rFonts.set(qn("w:ascii"), "Times New Roman")
                 rFonts.set(qn("w:hAnsi"), "Times New Roman")
                 r_obj.font.name = "Times New Roman"
-            r_obj.font.size = Pt(11)
+            size = target_run_font_size(r_obj._parent.style.name)
+            if size is not None:
+                r_obj.font.size = Pt(size)
 
         def make_paragraph_rtl(p_obj, *, heading: bool = False) -> None:
             p_obj.alignment = (

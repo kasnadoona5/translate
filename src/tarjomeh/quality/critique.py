@@ -58,7 +58,7 @@ class CritiqueResult:
     register : float
         Appropriateness of formality level (1-10).
     average : float
-        Arithmetic mean of the four scores.
+        Existing score of record: model overall when supplied, otherwise the mean.
     issues : list[str]
         Human-readable descriptions of identified problems.
     raw_response : str
@@ -82,6 +82,40 @@ class CritiqueResult:
     attempts: int = 1
     advisory_term_observations: list[dict[str, Any]] = field(default_factory=list)
     advisory_term_observation_errors: list[str] = field(default_factory=list)
+    model_overall: float | None = None
+
+    def diagnostic_evidence(self) -> dict[str, Any]:
+        """Expose score provenance and discarded evidence without routing authority."""
+        invalid = [
+            item for item in self.ignored_issue_details
+            if item.get("ignored_reason") == "invalid_issue"
+        ]
+        return {
+            "authority": "report_only_no_routing_or_trust_change",
+            "score_of_record": self.average,
+            "model_overall": self.model_overall,
+            "dimension_mean": (
+                self.accuracy + self.fluency + self.terminology + self.register
+            ) / 4.0,
+            "model_overall_evidence": (
+                "recorded" if self.model_overall is not None else "not_recorded"
+            ),
+            "ignored_invalid_issue_count": len(invalid),
+            "ignored_severe_issue_count": sum(
+                item.get("severity") in {"major", "critical"} for item in invalid
+            ),
+            "grounding_incomplete": any(
+                "source_segment" in reason or "quote_not_found" in reason
+                for item in invalid for reason in item.get("validation_errors", [])
+            ),
+            "ignored_invalid_issues": [
+                {key: item.get(key) for key in (
+                    "issue_id", "severity", "category", "source_segment_id",
+                    "ignored_reason", "validation_errors",
+                )}
+                for item in invalid
+            ],
+        }
 
     def passes_threshold(self, threshold: float = 7.0) -> bool:
         """Return ``True`` if the average score meets *threshold*."""
@@ -107,6 +141,7 @@ class CritiqueResult:
             "attempts": self.attempts,
             "advisory_term_observations": self.advisory_term_observations,
             "advisory_term_observation_errors": self.advisory_term_observation_errors,
+            "model_overall": self.model_overall,
         }
 
     @classmethod
@@ -140,6 +175,7 @@ class CritiqueResult:
                 list(data["advisory_term_observation_errors"])
                 if isinstance(data.get("advisory_term_observation_errors"), list) else []
             ),
+            model_overall=data.get("model_overall"),
         )
 
 
@@ -821,6 +857,7 @@ empty. Every uncovered label needs a grounded omission or accuracy issue."""
             terminology=terminology,
             register=register,
             average=average,
+            model_overall=average if overall is not None else None,
             issues=issues,
             issue_details=issue_details,
             ignored_issue_details=ignored_issue_details,
