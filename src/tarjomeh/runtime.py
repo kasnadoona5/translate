@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v22"
+RUNTIME_RELEASE = "v22.1"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,8 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "compound_chapter_count_evidence": True,
+            "arabic_indic_chapter_references": True,
             "empty_memory_pair_retention": True,
             "docx_heading_font_inheritance": True,
             "localized_number_evaluation": True,
@@ -744,6 +746,51 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v20812_behavior_probes(),
         **_v21_behavior_probes(),
         **_v22_behavior_probes(),
+        **_v221_behavior_probes(),
+    }
+
+
+def _v221_behavior_probes() -> dict[str, bool]:
+    """Pure chapter evidence checks, including a real mismatch in each branch."""
+    from tarjomeh.quality.structure_audit import (
+        announced_count_evidence,
+        audit_payload,
+        chapter_marker_count,
+    )
+
+    source = "This ten-chapter report covers " + ", ".join(
+        f"Chapter {index}" for index in range(1, 11)
+    ) + "."
+    target = (
+        "\u0627\u06cc\u0646 \u06af\u0632\u0627\u0631\u0634 "
+        "\u062f\u0647\u200c\u0641\u0635\u0644\u06cc \u0634\u0627\u0645\u0644 "
+    ) + ", ".join(
+        "\u0641\u0635\u0644 " + str(index) for index in range(1, 11)
+    ) + "."
+
+    def mismatches(candidate):
+        return (
+            "translation_structure_mismatch" in audit_payload(source, candidate)["classifications"]
+        )
+
+    wrong = target.replace(
+        "\u062f\u0647\u200c\u0641\u0635\u0644\u06cc",
+        "\u062f\u0648\u0627\u0632\u062f\u0647\u200c\u0641\u0635\u0644\u06cc",
+    )
+    arabic = target.translate(str.maketrans(
+        "0123456789", "\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669",
+    ))
+    return {
+        "compound_chapter_count_evidence": bool(
+            any(item.value == 10 and item.semantic_category == "chapter"
+                for item in announced_count_evidence(target))
+            and not announced_count_evidence("\u0646\u0647 \u0641\u0635\u0644\u06cc")
+            and not mismatches(target) and mismatches(wrong)
+        ),
+        "arabic_indic_chapter_references": bool(
+            chapter_marker_count(arabic) == 10 and not mismatches(arabic)
+            and mismatches(arabic.replace("\u0641\u0635\u0644 \u0661\u0660", ""))
+        ),
     }
 
 

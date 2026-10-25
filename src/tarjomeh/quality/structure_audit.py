@@ -109,6 +109,10 @@ _ORDINALS: dict[str, int] = {
 # expression returned an ordinal with its comma attached. Unicode ``\w``
 # already recognises Persian letters and digits; exclude underscore.
 _WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
+_COMPOUND_CHAPTER_COUNT_RE = re.compile(
+    r"(?<![\w\u200c-])(?P<count>\u0646\u0647|\u062f\u0647)[\u200c-]"
+    r"(?P<head>\u0641\u0635\u0644\u06cc)(?![\w\u200c-])"
+)
 _STRUCTURED_NUMBER_RE = re.compile(
     r"[0-9\u0660-\u0669\u06f0-\u06f9]+"
     r"(?:[.\u066b][0-9\u0660-\u0669\u06f0-\u06f9]+)+"
@@ -250,7 +254,7 @@ _LIST_MARKER_RE = re.compile(
     r"|(?<![\w(\[])(?P<bare>[0-9۰-۹]{1,2})\)(?=\s|$)"
 )
 _CHAPTER_MARKER_RE = re.compile(
-    r"(?<!\w)(?:chapter|فصل)\s*([0-9۰-۹]{1,2})(?!\d)",
+    r"(?<!\w)(?:chapter|فصل)\s*([0-9۰-۹\u0660-\u0669]{1,2})(?!\d)",
     re.IGNORECASE,
 )
 _REFERENCE_HEADS = frozenset(
@@ -438,6 +442,18 @@ def announced_count_evidence(text: str) -> list[AnnouncementEvidence]:
         # Decimal/table identifiers are one number, not separate cardinal tokens.
         if any(start <= matches[index].start() and matches[index].end() <= end
                for start, end in numeric_spans):
+            continue
+        # Bare nine/ten are ambiguous Persian words; only this joined adjective
+        # proves a quantity without scanning through surrounding prose.
+        compound = _COMPOUND_CHAPTER_COUNT_RE.match(text or "", matches[index].start())
+        if compound is not None:
+            evidence.append(AnnouncementEvidence(
+                value=9 if compound.group("count") == "\u0646\u0647" else 10,
+                semantic_category="chapter",
+                count_span=compound.span("count"),
+                noun_span=compound.span("head"),
+                exact_span=compound.group(0),
+            ))
             continue
         value: int | None = _CARDINALS.get(word)
         if value is None:
