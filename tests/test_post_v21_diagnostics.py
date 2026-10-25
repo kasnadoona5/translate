@@ -57,7 +57,7 @@ def test_ignored_severe_grounding_is_visible_but_not_promoted():
         "scores": dict.fromkeys(("accuracy", "fluency", "terminology", "register"), 9),
         "issues": [
             {**base, "severity": "minor", "source_quote": "describe a measured trend."},
-            {**base, "severity": "critical", "source_quote": source},
+            {**base, "severity": "critical", "source_quote": source + " An absent claim."},
         ],
     }), source, target)
     segments = deepcopy(source_segments(source))

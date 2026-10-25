@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v22.1"
+RUNTIME_RELEASE = "v22.2"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,8 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "cross_segment_quote_grounding": True,
+            "offline_grouped_integer_evaluation": True,
             "compound_chapter_count_evidence": True,
             "arabic_indic_chapter_references": True,
             "empty_memory_pair_retention": True,
@@ -747,6 +749,34 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v21_behavior_probes(),
         **_v22_behavior_probes(),
         **_v221_behavior_probes(),
+        **_v222_behavior_probes(),
+    }
+
+
+def _v222_behavior_probes() -> dict[str, bool]:
+    """Location evidence and offline grouping never waive semantic admission."""
+    from tarjomeh.quality.evaluation import _offline_numeric_evidence
+    from tarjomeh.quality.grounding import resolve_source_segment, source_quote_span
+    from tarjomeh.quality.integrity import reconcile_numbers
+
+    source = "Vale et al. (2018) report a measured trend."
+    proof = source_quote_span(source, source)
+    grouped = "There are 1,000 records."
+    plain = "There are 1000 records."
+    return {
+        "cross_segment_quote_grounding": bool(
+            proof and proof["segment_ids"] == ["p1:s1", "p1:s2"]
+            and resolve_source_segment(source, source) == ("p1:s1", [])
+            and source_quote_span(source + "\n\n" + source, source) is None
+            and source_quote_span(source.replace(". (", ".\n\n("), source) is None
+            and source_quote_span("A. A. A.", "A. A.") is None
+        ),
+        "offline_grouped_integer_evaluation": bool(
+            not _offline_numeric_evidence(grouped, plain)["missing"]
+            and _offline_numeric_evidence(grouped, "There are 2000 records.")["missing"]
+            and _offline_numeric_evidence("Code: 1,000", "Code: 1000")["missing"]
+            and reconcile_numbers(grouped, plain)["missing"]
+        ),
     }
 
 

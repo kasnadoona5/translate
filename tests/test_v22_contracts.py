@@ -30,7 +30,7 @@ def test_pure_v22_probes_need_no_network_or_persistent_state(monkeypatch):
     probes = _v22_behavior_probes()
     assert set(probes) == set(CAPABILITIES) and all(probes.values())
     manifest = runtime_capabilities()
-    assert manifest["release"] == "v22.1"
+    assert manifest["release"] == "v22.2"
     assert all(manifest["capabilities"][key] for key in CAPABILITIES)
 
 
@@ -119,4 +119,4 @@ def test_router_evidence_and_update_lock_are_kept():
 
 def test_all_previous_runtime_probes_still_pass():
     probes = runtime_behavior_probes()
-    assert len(probes) == 156 and all(probes.values())
+    assert len(probes) == 158 and all(probes.values())

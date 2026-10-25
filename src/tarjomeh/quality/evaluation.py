@@ -20,14 +20,24 @@ from typing import Any
 
 from tarjomeh.jobs.database import JobDatabase
 from tarjomeh.quality.integrity import (
+    _SOURCE_METADATA_RE,
+    _identifier_occurrences,
+    _number_occurrences,
+    _numeric_text,
     available_note_markers,
     extract_note_markers,
     extract_numbers,
     reconcile_numbers,
 )
 
-
 _SPACE_RE = re.compile(r"\s+")
+_GROUPED_INTEGER_RE = re.compile(r"[1-9][0-9]{0,2}(?:,[0-9]{3})+")
+_PLAIN_INTEGER_RE = re.compile(r"[1-9][0-9]{3,}")
+_PROSE_QUANTITY_PREFIX_RE = re.compile(
+    r"\b(?:there\s+(?:are|were)|contains?|contained|includes?|included|comprises?|comprised)\s+"
+    r"(?:[0-9,]+\s+[a-z]+(?:\s+[a-z]+){0,2}\s+(?:and|or)\s+)*$",
+    re.IGNORECASE,
+)
 
 
 def source_hash(text: str) -> str:
@@ -59,6 +69,84 @@ def _check(
         "message": message,
         "details": details or {},
     }
+
+
+def _offline_numeric_evidence(source: str, target: str) -> dict[str, Any]:
+    """Reconcile well-formed prose grouping only in the offline evaluator."""
+    evidence = reconcile_numbers(source, target)
+    evidence["grouped_prose_equivalents"] = []
+    if not evidence["missing"]:
+        return evidence
+    sources, targets = _number_occurrences(source), _number_occurrences(target)
+    free_source, free_target = set(range(len(sources))), set(range(len(targets)))
+    # Mirror literal consumption before attempting any additional equivalence.
+    for predicate in (
+        lambda a, b: a.label and a.label == b.label,
+        lambda a, b: a.role == b.role,
+        lambda a, b: True,
+    ):
+        for i in sorted(free_source):
+            j = next((
+                j for j in sorted(free_target)
+                if sources[i].value == targets[j].value and predicate(sources[i], targets[j])
+            ), None)
+            if j is not None:
+                free_source.remove(i)
+                free_target.remove(j)
+
+    def eligible(item, text):
+        if item.role != "prose" or not (
+            _GROUPED_INTEGER_RE.fullmatch(item.value) or _PLAIN_INTEGER_RE.fullmatch(item.value)
+        ):
+            return False
+        start, end = item.position, item.position + len(item.value)
+        line_end = text.find("\n", end) if "\n" in text[end:] else len(text)
+        line = text[text.rfind("\n", 0, start) + 1:line_end]
+        if _SOURCE_METADATA_RE.search(line) or _identifier_occurrences(line):
+            return False
+        if any(char in line for char in (":", "\t", "|", "=")):
+            return False
+        before, after = text[max(0, start - 1):start], text[end:end + 1]
+        return not (
+            before and (before.isalnum() or before in "_-+/\u2010\u2011\u2012\u2013\u2014")
+            or after and (after.isalnum() or after in "_-+/\u2010\u2011\u2012\u2013\u2014")
+        )
+
+    source_text, target_text = _numeric_text(source), _numeric_text(target)
+    remaining = Counter(evidence["missing"])
+    roles = {role: Counter(values) for role, values in evidence["missing_by_role"].items()}
+    for i in sorted(free_source):
+        item = sources[i]
+        if not remaining[item.value] or not roles.get("prose", Counter())[item.value]:
+            continue
+        if not eligible(item, source_text):
+            continue
+        # A default "prose" role alone cannot distinguish a reference number
+        # from a quantity. Require an explicit English count construction.
+        if not _PROSE_QUANTITY_PREFIX_RE.search(source_text[:item.position]):
+            continue
+        if not re.match(r"\s+[a-z]", source_text[item.position + len(item.value):]):
+            continue
+        j = next((j for j in sorted(free_target)
+                  if eligible(targets[j], target_text)
+                  and ("," in item.value or "," in targets[j].value)
+                  and item.value.replace(",", "") == targets[j].value.replace(",", "")), None)
+        if j is None:
+            continue
+        free_target.remove(j)
+        remaining[item.value] -= 1
+        roles["prose"][item.value] -= 1
+        evidence["grouped_prose_equivalents"].append({
+            "source_value": item.value, "target_value": targets[j].value,
+            "source_start": item.position, "target_start": targets[j].position,
+            "coordinate_space": "numeric_diagnostic_normalized_text",
+            "authority": "offline_numeric_equivalence_only",
+        })
+    evidence["missing"] = list(remaining.elements())
+    evidence["missing_by_role"] = {
+        role: list(values.elements()) for role, values in roles.items() if +values
+    }
+    return evidence
 
 
 def inspect_chunk(
@@ -98,7 +186,7 @@ def inspect_chunk(
 
     source_numbers = extract_numbers(source)
     target_numbers = extract_numbers(translation)
-    numeric_evidence = reconcile_numbers(source, translation)
+    numeric_evidence = _offline_numeric_evidence(source, translation)
     missing_numbers = numeric_evidence["missing"]
     checks.append(_check(
         "numbers_preserved", not missing_numbers, "blocking",

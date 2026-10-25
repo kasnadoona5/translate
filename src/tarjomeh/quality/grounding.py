@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
-
 
 _SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+(?=[\"'“‘(\[]*[A-Z0-9])")
 
@@ -74,6 +74,31 @@ def indexed_source(source_text: str) -> str:
     ) or source_text
 
 
+def source_quote_span(source_text: str, source_quote: str) -> dict[str, Any] | None:
+    """Prove one contiguous cross-segment quote without changing segment IDs."""
+    words = (source_quote or "").split()
+    if not words:
+        return None
+    pattern = re.compile(r"\s+".join(re.escape(word) for word in words), re.IGNORECASE)
+    match = pattern.search(source_text)
+    if match is None or pattern.search(source_text, match.start() + 1) is not None:
+        return None
+    if re.search(r"\n[ \t\r]*\n", match.group()):
+        return None
+    segments = [segment for segment in source_segments(source_text)
+                if segment["start"] < match.end() and segment["end"] > match.start()]
+    if len(segments) < 2 or len({s["segment_id"].split(":")[0] for s in segments}) != 1:
+        return None
+    if match.start() < segments[0]["start"] or match.end() > segments[-1]["end"]:
+        return None
+    return {
+        "start": match.start(), "end": match.end(),
+        "source_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+        "segment_ids": [s["segment_id"] for s in segments],
+        "authority": "source_location_only_not_semantic_or_coverage_verification",
+    }
+
+
 def resolve_source_segment(
     source_text: str,
     source_quote: str,
@@ -105,6 +130,13 @@ def resolve_source_segment(
         return matches[0], [requested_error] if requested_error else []
     if len(matches) > 1:
         return matches[0], ["issue_source_segment_ambiguous"]
+    span = source_quote_span(source_text, source_quote)
+    if span is not None:
+        primary = span["segment_ids"][0]
+        return primary, (
+            ["issue_source_segment_id_corrected"]
+            if requested_id and requested_id != primary else []
+        )
     errors = ["issue_source_segment_unresolved"]
     if requested_error:
         errors.insert(0, requested_error)

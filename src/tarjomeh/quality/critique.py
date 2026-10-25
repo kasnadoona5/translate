@@ -28,9 +28,9 @@ from tarjomeh.quality.grounding import (
     concept_risks,
     indexed_source,
     resolve_source_segment,
+    source_quote_span,
     source_segments,
 )
-
 
 _MQM_CATEGORIES = {
     "accuracy", "omission", "addition", "terminology", "name", "number",
@@ -422,6 +422,9 @@ class TranslationCritique:
                 errors.extend(f"issue_{index}_{error}" for error in item_errors)
                 continue
             item["source_segment_id"] = segment_id
+            span = source_quote_span(source_text, item["source_quote"])
+            if span is not None:
+                item["source_quote_span"] = span
             item["confidence"] = confidence
             item["issue_id"] = "attachment-" + hashlib.sha256(
                 (item["source_quote"] + "\0" + item["current_persian_quote"])
@@ -762,6 +765,9 @@ empty. Every uncovered label needs a grounded omission or accuracy issue."""
                     "suggested_fix": fix,
                     "explanation": explanation,
                 }
+                span = source_quote_span(source_text, segment)
+                if span is not None:
+                    detail["source_quote_span"] = span
                 if fix_orthography_edits:
                     detail["suggestion_orthography_normalized"] = (
                         fix_orthography_edits

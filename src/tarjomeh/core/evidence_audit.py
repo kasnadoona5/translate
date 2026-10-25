@@ -16,6 +16,58 @@ _POSSIBLE_SECRET_RE = re.compile(
 )
 
 
+def quote_and_numeric_reporting(
+    events: list[dict[str, Any]], chunks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Report recorded quote proofs and current offline grouping, not authority."""
+    from tarjomeh.quality.evaluation import _offline_numeric_evidence
+    from tarjomeh.quality.grounding import source_quote_span
+
+    sources = {chunk.get("chunk_index"): str(chunk.get("text") or "") for chunk in chunks}
+    proofs = []
+
+    def visit(value, event):
+        if isinstance(value, list):
+            for item in value:
+                visit(item, event)
+        elif isinstance(value, dict):
+            if "source_quote_span" in value:
+                source = sources.get(event.get("chunk_index"), "")
+                expected = source_quote_span(source, str(value.get("source_quote") or ""))
+                proofs.append({
+                    "chunk_index": event.get("chunk_index"),
+                    "event_type": event.get("event_type"),
+                    "timestamp": event.get("timestamp"),
+                    "issue_id": value.get("issue_id"),
+                    "proof": value["source_quote_span"],
+                    "matches_saved_source": expected is not None
+                    and expected == value["source_quote_span"],
+                })
+            for key, item in value.items():
+                if key != "source_quote_span":
+                    visit(item, event)
+
+    for event in events:
+        visit(event.get("payload") or {}, event)
+    grouping = []
+    for chunk in chunks:
+        target = str(chunk.get("translation") or "")
+        if not target:
+            continue
+        evidence = _offline_numeric_evidence(str(chunk.get("text") or ""), target)
+        if evidence["grouped_prose_equivalents"]:
+            grouping.append({"chunk_index": chunk.get("chunk_index"), "evidence": evidence})
+    return {
+        "authority": "report_only_no_coverage_routing_memory_or_export_permission",
+        "event_scope": "supplied_active_events_no_historical_proof_inference",
+        "recorded_quote_span_count": len(proofs),
+        "recorded_quote_spans": proofs,
+        "historical_absence": "not_recorded_not_a_failure_or_reconstructed_proof",
+        "current_offline_grouped_equivalences": grouping,
+        "production_numeric_policy_changed": False,
+    }
+
+
 def narrow_release_reporting(
     events: list[dict[str, Any]], chunks: list[dict[str, Any]],
 ) -> dict[str, Any]:
