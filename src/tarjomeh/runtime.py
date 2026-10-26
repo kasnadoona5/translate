@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v22.3"
+RUNTIME_RELEASE = "v22.4"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,7 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "reviewed_summary_revision": True,
             "cumulative_summary_input_trust": True,
             "cross_segment_quote_grounding": True,
             "offline_grouped_integer_evaluation": True,
@@ -752,7 +753,45 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v221_behavior_probes(),
         **_v222_behavior_probes(),
         **_v223_behavior_probes(),
+        **_v224_behavior_probes(),
     }
+
+
+def _v224_behavior_probes() -> dict[str, bool]:
+    """Reviewed context is hash-bound and cannot restore superseded history."""
+    from copy import deepcopy
+
+    from tarjomeh.memory.summary_revision import document_hash, history_key, select_summary
+
+    old = {"english_summary": "The earlier claim has a different subject.",
+           "persian_summary": (
+               "\u0627\u062f\u0639\u0627 \u0628\u0647 \u06cc\u06a9 \u0634\u0631\u0637 "
+               "\u0648\u0627\u0628\u0633\u062a\u0647 \u0627\u0633\u062a."
+           ),
+           "input_trust": "advisory_inputs", "trust_reasons": ["earlier_review"]}
+    new = dict(old, english_summary="The enzyme carries a conditional signal.")
+    refs = [{"chunk_index": 0, "source_sha256": "a" * 64, "target_sha256": "b" * 64}]
+    prior = {"summary": old, "coverage": refs}
+    manifest = dict(schema=1, job_id="pure_probe", document_sha256="c" * 64,
+                    expected_memory_sha256="d" * 64, previous_summary=old,
+                    candidate_summary=new, coverage=refs, supersedes=[list(history_key(prior))],
+                    evidence=[dict(chunk_index=0, source_sha256="a" * 64, start=0, end=3,
+                                   quote="The", claim="subject")])
+    digest = document_hash(manifest)
+    entry = {"summary": new, "coverage": refs, "reviewed_revision": {
+        "schema": 1, "revision_id": digest, "approval_sha256": digest,
+        "reviewer": "synthetic reviewer", "manifest": manifest}}
+    accepted = select_summary([prior, entry], lambda ref: True) == entry
+    excluded = not select_summary([prior, entry], lambda ref: False)
+    corrupt = deepcopy(entry)
+    corrupt["reviewed_revision"]["manifest"]["candidate_summary"]["input_trust"] = "reviewed_inputs"
+    rejected = select_summary([prior, corrupt], lambda ref: True) == prior
+    revoked = {"summary": old, "coverage": refs,
+               "summary_revision_rollback": {"revision_id": digest}}
+    return {"reviewed_summary_revision": bool(
+        accepted and excluded and rejected
+        and select_summary([prior, entry, revoked], lambda ref: True) == revoked
+    )}
 
 
 def _v223_behavior_probes() -> dict[str, bool]:

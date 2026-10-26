@@ -1174,9 +1174,9 @@ class MemoryManager:
         ]
         state["style_samples"] = [record["text"] for record in state["style_sample_records"]]
         state["style_profile"] = ""
-        summaries = [item for item in state["summary_history"]
-                     if item.get("coverage") and all(proven(ref) for ref in item["coverage"])]
-        selected = summaries[-1] if summaries else {}
+        from tarjomeh.memory.summary_revision import select_summary
+
+        selected = select_summary(state["summary_history"], proven)
         state["bilingual_summary"] = selected.get("summary", {})
         state["summary_coverage"] = selected.get("coverage", [])
         view = MemoryManager(self.config)
@@ -1226,15 +1226,20 @@ class MemoryManager:
                 "target_sha256": _style_hash(str(pair["translation"]))}
 
     def _queue_summary_coverage(self) -> None:
+        from tarjomeh.memory.summary_revision import history_key, history_policy, select_summary
+
         active = [pair for pair in self.long_term.serialize()
                   if pair.get("active", True) and type(pair.get("chunk_index")) is int]
         refs = [self._coverage_ref(pair) for pair in active]
-        if any(ref not in refs for ref in self.summary_coverage):
+        policy = history_policy(self.summary_history)
+        active_key = history_key({"summary": self.bilingual_summary.serialize(),
+                                  "coverage": self.summary_coverage})
+        if (any(ref not in refs for ref in self.summary_coverage)
+                or active_key in policy["blocked"] | policy["denied"] or policy["invalid"]):
             # An accepted retranslation invalidates only summary dependencies,
             # not historical records. Reuse a proven earlier summary if any.
-            safe = [item for item in self.summary_history
-                    if all(ref in refs for ref in item.get("coverage", []))]
-            restored = safe[-1] if safe else {}
+            restored = select_summary(self.summary_history, lambda ref: ref in refs,
+                                      require_coverage=policy["has_revisions"])
             self.bilingual_summary = BilingualSummary()
             self.bilingual_summary.deserialize(restored.get("summary", {}))
             self.summary_coverage = list(restored.get("coverage", []))
@@ -2114,6 +2119,10 @@ class MemoryManager:
             data.get("short_term_context", []),
             window_size=self.short_term.window_size
         )
+        if any(isinstance(item, dict) and (
+            "reviewed_revision" in item or "summary_revision_rollback" in item
+        ) for item in self.summary_history):
+            self._queue_summary_coverage()
         self._verify_legacy_style_records()
         self._reconcile_style_sources()
         if self.style_sample_records:
