@@ -2045,7 +2045,9 @@ class MemoryManager:
                     "authority": "argument_orientation_only",
                 }
             failure_stage = "summary_commit_preparation"
-            candidate.set_input_trust(input_trust, trust_reasons)
+            candidate_quality["input_trust_lineage"] = candidate.set_cumulative_input_trust(
+                input_trust, trust_reasons, self.bilingual_summary,
+            )
             return self._commit_bilingual_summary(
                 candidate, coverage_refs=coverage_refs, candidate_quality=candidate_quality,
             )

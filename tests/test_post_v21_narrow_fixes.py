@@ -108,7 +108,9 @@ def test_heading_sizes_and_actual_identity_are_preserved(tmp_path, mode):
     ("In 1973, 40% changed.", "\u06f1\u06f9\u06f7\u06f3 40%", True),
     ("In 1973, 40% changed.", "\u06f1\u06f9\u06f7\u06f4 40%", False),
     ("ISBN 978-0-123456-78-9", "ISBN 978-0-123456-78-9", True),
-    ("There are 1,000 items.", "1000 items", True),  # v22.2: explicit prose quantity only.
+    # R212: extra grouping equivalence needs explicit quantity context on BOTH sides.
+    ("There are 1,000 items.", "1000 items", False),
+    ("There are 1,000 items.", "There are 1000 items.", True),
 ])
 def test_offline_numbers_use_only_existing_conservative_equivalences(source, target, passed):
     result = inspect_chunk(source, target, "completed", [])

@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v22.2"
+RUNTIME_RELEASE = "v22.3"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,7 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "cumulative_summary_input_trust": True,
             "cross_segment_quote_grounding": True,
             "offline_grouped_integer_evaluation": True,
             "compound_chapter_count_evidence": True,
@@ -750,7 +751,35 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v22_behavior_probes(),
         **_v221_behavior_probes(),
         **_v222_behavior_probes(),
+        **_v223_behavior_probes(),
     }
+
+
+def _v223_behavior_probes() -> dict[str, bool]:
+    """Cumulative input provenance is conservative, bounded and context-local."""
+    from tarjomeh.memory.bilingual_summary import BilingualSummary
+
+    previous = BilingualSummary()
+    previous.english_summary = "An earlier conditional claim."
+    previous.set_input_trust("advisory_inputs", ["earlier_review"])
+    before = previous.serialize()
+    candidate = BilingualSummary()
+    lineage = candidate.set_cumulative_input_trust("reviewed_inputs", [], previous)
+    mixed = (candidate.input_trust == "advisory_inputs"
+             and "earlier_review" in candidate.trust_reasons
+             and "prior_summary_advisory_inputs" in candidate.trust_reasons
+             and lineage["inherited_advisory"] is True and previous.serialize() == before)
+    previous.set_input_trust("reviewed_inputs", [])
+    candidate.set_cumulative_input_trust("reviewed_inputs", [], previous)
+    reviewed = candidate.input_trust == "reviewed_inputs"
+    previous.english_summary = ""
+    previous.set_input_trust("advisory_inputs", ["inactive"])
+    candidate.set_cumulative_input_trust("reviewed_inputs", [], previous)
+    empty = candidate.input_trust == "reviewed_inputs" and not candidate.trust_reasons
+    candidate.set_cumulative_input_trust("unknown", [], previous)
+    return {"cumulative_summary_input_trust": bool(
+        mixed and reviewed and empty and candidate.input_trust == "advisory_inputs"
+    )}
 
 
 def _v222_behavior_probes() -> dict[str, bool]:
@@ -775,6 +804,15 @@ def _v222_behavior_probes() -> dict[str, bool]:
             not _offline_numeric_evidence(grouped, plain)["missing"]
             and _offline_numeric_evidence(grouped, "There are 2000 records.")["missing"]
             and _offline_numeric_evidence("Code: 1,000", "Code: 1000")["missing"]
+            and _offline_numeric_evidence(grouped, "Account 1000")["missing"]
+            and _offline_numeric_evidence(grouped, "Reference 1000")["missing"]
+            and _offline_numeric_evidence(
+                grouped, "\u0634\u0645\u0627\u0631\u0647 \u062d\u0633\u0627\u0628 1000",
+            )["missing"]
+            and not _offline_numeric_evidence(
+                grouped, "\u062a\u0639\u062f\u0627\u062f "
+                "\u0631\u06a9\u0648\u0631\u062f\u0647\u0627 1000",
+            )["missing"]
             and reconcile_numbers(grouped, plain)["missing"]
         ),
     }

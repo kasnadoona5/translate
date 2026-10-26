@@ -78,6 +78,34 @@ class BilingualSummary:
             str(reason).strip() for reason in (reasons or []) if str(reason).strip()
         ))[:12]
 
+    def set_cumulative_input_trust(
+        self,
+        trust: str,
+        reasons: list[str] | None,
+        previous: BilingualSummary,
+    ) -> dict[str, object]:
+        """Carry active context provenance, not inactive summary history."""
+        nonempty = bool(previous.english_summary.strip() or previous.persian_summary.strip())
+        inherited = nonempty and previous.input_trust != "reviewed_inputs"
+        effective = (
+            "reviewed_inputs" if trust == "reviewed_inputs" and not inherited else "advisory_inputs"
+        )
+        # Keep the inherited advisory marker even when the bounded reason list fills.
+        merged = (["prior_summary_advisory_inputs"] if inherited else [])
+        if nonempty:
+            merged.extend(previous.trust_reasons)
+        merged.extend(reasons or [])
+        self.set_input_trust(effective, merged)
+        return {
+            "new_input_trust": (
+                "reviewed_inputs" if trust == "reviewed_inputs" else "advisory_inputs"
+            ),
+            "previous_summary_nonempty": nonempty,
+            "previous_input_trust": previous.input_trust if nonempty else None,
+            "inherited_advisory": inherited,
+            "authority": "input_provenance_not_semantic_verification",
+        }
+
     def update(self, raw_llm_output: str) -> None:
         """Parse and update the summaries from the LLM response text.
 

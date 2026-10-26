@@ -38,6 +38,33 @@ _PROSE_QUANTITY_PREFIX_RE = re.compile(
     r"(?:[0-9,]+\s+[a-z]+(?:\s+[a-z]+){0,2}\s+(?:and|or)\s+)*$",
     re.IGNORECASE,
 )
+_PERSIAN_QUANTITY_WORD = r"[\u0621-\u063a\u0641-\u065f\u0671-\u06d3\u06d5\u200c]+"
+_PERSIAN_QUANTITY_PREFIX_RE = re.compile(
+    r"(?<![\w\u200c])(?:\u0634\u0627\u0645\u0644|\u062d\u0627\u0648\u06cc|"
+    r"\u062f\u0627\u0631\u0627\u06cc)[ \t]+$"
+)
+_PERSIAN_COUNT_PREFIX_RE = re.compile(
+    r"(?<![\w\u200c])\u062a\u0639\u062f\u0627\u062f[\u064b-\u065f]*[ \t]+"
+    + _PERSIAN_QUANTITY_WORD + r"[ \t]+$"
+)
+
+
+def _offline_target_quantity_context(text: str, start: int, end: int) -> str:
+    """Recognise bounded count grammar, never a default prose-role label."""
+    before, after = text[:start], text[end:]
+    english = _PROSE_QUANTITY_PREFIX_RE.search(before)
+    if (
+        english and not re.search(r"\n\s*\n", english.group())
+        and re.match(r"[ \t]+[a-z]", after)
+    ):
+        return "english_count_construction"
+    if _PERSIAN_COUNT_PREFIX_RE.search(before):
+        return "persian_count_construction"
+    if _PERSIAN_QUANTITY_PREFIX_RE.search(before) and re.match(
+        r"[ \t]+" + _PERSIAN_QUANTITY_WORD, after
+    ):
+        return "persian_count_construction"
+    return ""
 
 
 def source_hash(text: str) -> str:
@@ -113,6 +140,12 @@ def _offline_numeric_evidence(source: str, target: str) -> dict[str, Any]:
         )
 
     source_text, target_text = _numeric_text(source), _numeric_text(target)
+    target_contexts = {
+        j: _offline_target_quantity_context(
+            target_text, targets[j].position, targets[j].position + len(targets[j].value)
+        )
+        for j in free_target
+    }
     remaining = Counter(evidence["missing"])
     roles = {role: Counter(values) for role, values in evidence["missing_by_role"].items()}
     for i in sorted(free_source):
@@ -129,6 +162,7 @@ def _offline_numeric_evidence(source: str, target: str) -> dict[str, Any]:
             continue
         j = next((j for j in sorted(free_target)
                   if eligible(targets[j], target_text)
+                  and target_contexts[j]
                   and ("," in item.value or "," in targets[j].value)
                   and item.value.replace(",", "") == targets[j].value.replace(",", "")), None)
         if j is None:
@@ -139,6 +173,7 @@ def _offline_numeric_evidence(source: str, target: str) -> dict[str, Any]:
         evidence["grouped_prose_equivalents"].append({
             "source_value": item.value, "target_value": targets[j].value,
             "source_start": item.position, "target_start": targets[j].position,
+            "target_quantity_context": target_contexts[j],
             "coordinate_space": "numeric_diagnostic_normalized_text",
             "authority": "offline_numeric_equivalence_only",
         })
