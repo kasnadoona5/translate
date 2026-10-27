@@ -132,6 +132,7 @@ from tarjomeh.quality.integrity import (
     normalize_for_match,
     protected_english_originals,
     protected_source_apparatus,
+    source_metalinguistic_evidence,
     unexpected_latin_prose,
 )
 from tarjomeh.core.prompts import (
@@ -766,6 +767,7 @@ def audit_translation_language(
 ) -> dict[str, Any]:
     """Report deterministic foreign-script leakage without rewriting semantics."""
     mixed = mixed_script_artifacts(translation)
+    metalinguistic = source_metalinguistic_evidence(source, translation)
     unexpected = unexpected_latin_prose(
         source,
         translation,
@@ -849,6 +851,7 @@ def audit_translation_language(
         "mixed_script_artifacts": mixed,
         "unexpected_latin_count": len(unexpected),
         "unexpected_latin": unexpected,
+        **({"source_metalinguistic_evidence": metalinguistic} if metalinguistic else {}),
         "repeated_word_count": len(repeated),
         "repeated_word_artifacts": repeated,
         "repeated_adjacent_span_count": len(repeated_adjacent_spans),

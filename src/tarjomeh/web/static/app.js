@@ -229,6 +229,16 @@ function updateRunSummary() {
     ].join(" · ");
 }
 
+function outputCoverageLabel(coverage) {
+    if (!coverage || !Number.isInteger(coverage.saved_finished_count)) return "";
+    const saved = coverage.saved_finished_count;
+    if (["current", "partial"].includes(coverage.status)
+        && Number.isInteger(coverage.published_finished_count)) {
+        return `Saved: ${saved} chunks | Published file: ${coverage.published_finished_count} chunks`;
+    }
+    return `Saved: ${saved} chunks | Published file coverage: ${coverage.status === "stale" ? "stale" : "unknown"}`;
+}
+
 function formatFileSize(bytes) {
     if (bytes < 1024 * 1024) {
         return Math.max(1, Math.round(bytes / 1024)) + " KB";
@@ -607,6 +617,7 @@ async function fetchJobs() {
                     <span class="job-title">${escapeHtml(outputName)}</span>
                     <span class="job-submeta">Source: ${escapeHtml(job.filename)} | Format: ${escapeHtml(outputFormat)}</span>
                     <span class="job-submeta">Created: ${escapeHtml(createdAt)} | ID: ${job.id} | Mode: ${job.mode.toUpperCase()} | Progress: ${progressPct}%</span>
+                    <span class="job-submeta">${escapeHtml(outputCoverageLabel(job.output_coverage))}</span>
                 </div>
                 <div class="job-actions">
                     <span class="badge ${badgeClass}">${job.status.toUpperCase()}</span>

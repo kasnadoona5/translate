@@ -178,7 +178,25 @@ class PersianTypographer:
                     "hazm is required for ZWNJ normalization. "
                     "Install it with:  pip install hazm"
                 ) from exc
-            self._hazm_normalizer = Normalizer()
+            class NumeralBoundaryNormalizer(Normalizer):
+                def token_spacing(self, tokens):
+                    # A dictionary compound is not proof that an authored
+                    # numeral+noun boundary should become a lexical join.
+                    result = []
+                    start = 0
+                    for index in range(1, len(tokens)):
+                        previous = tokens[index - 1]
+                        tags = self.words.get(previous, (0, ()))[1]
+                        if (
+                            (previous.isdecimal() or "NUM" in tags)
+                            and tokens[index] not in self.suffixes
+                        ):
+                            result.extend(super().token_spacing(tokens[start:index]))
+                            start = index
+                    result.extend(super().token_spacing(tokens[start:]))
+                    return result
+
+            self._hazm_normalizer = NumeralBoundaryNormalizer()
         return self._hazm_normalizer
 
     # ── public API ───────────────────────────────────────────────────

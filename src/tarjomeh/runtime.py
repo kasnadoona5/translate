@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v22.4"
+RUNTIME_RELEASE = "v22.5"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,9 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "numeral_boundary_preservation": True,
+            "source_metalinguistic_token_protection": True,
+            "published_output_coverage": True,
             "reviewed_summary_revision": True,
             "cumulative_summary_input_trust": True,
             "cross_segment_quote_grounding": True,
@@ -754,6 +757,36 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v222_behavior_probes(),
         **_v223_behavior_probes(),
         **_v224_behavior_probes(),
+        **_v225_behavior_probes(),
+    }
+
+
+def _v225_behavior_probes() -> dict[str, bool]:
+    """Synthetic behavior only: no job files, providers or configuration reads."""
+    from tarjomeh.jobs.output_coverage import output_coverage
+    from tarjomeh.persian.typography import PersianTypographer
+    from tarjomeh.quality.integrity import unexpected_latin_prose
+
+    spaced = "\u0633\u0647 \u0631\u0627\u0647"
+    joined = "\u0633\u0647\u200c\u0631\u0627\u0647"
+    p = PersianTypographer()
+    rows = [dict(chunk_index=i, status="completed", translation=f"text {i}") for i in range(3)]
+    identity = dict(persisted_chunk_count=2, lexically_identical=True,
+                    expected_hash=hashlib.sha256(b"text 0 text 1").hexdigest())
+    publication = dict(boundary_chunk_index=1, output_sha256="a" * 64)
+    coverage = output_coverage(rows, identity, publication, "a" * 64)
+    return {
+        "numeral_boundary_preservation": p.process(spaced) == spaced and p.process(joined) == joined,
+        "source_metalinguistic_token_protection": (
+            not unexpected_latin_prose("The term derives from Latin civitas.", "civitas")
+            and bool(unexpected_latin_prose("The discussion continues.", "civitas"))
+            and bool(unexpected_latin_prose("The term derives from Recent events.", "events"))
+            and bool(unexpected_latin_prose("The term derives from Latin civitas.", "civitas-like"))
+        ),
+        "published_output_coverage": (
+            coverage["status"] == "partial" and coverage["published_finished_count"] == 2
+            and output_coverage(rows, {}, {}, None)["status"] == "unknown"
+        ),
     }
 
 

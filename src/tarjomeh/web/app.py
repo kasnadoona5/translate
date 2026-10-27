@@ -682,6 +682,9 @@ def _register_api(app: Flask) -> None:
         from tarjomeh.jobs.database import JobDatabase
         db = JobDatabase()
         jobs = db.list_jobs()
+        from tarjomeh.jobs.output_coverage import read_output_coverage
+        for job in jobs:
+            job["output_coverage"] = read_output_coverage(db, job)
         return jsonify({"jobs": jobs})
 
     @app.route("/api/jobs/<job_id>")
@@ -695,10 +698,12 @@ def _register_api(app: Flask) -> None:
             return jsonify({"error": "Job not found"}), 404
 
         chunks = db.get_chunk_summary(job_id)
+        from tarjomeh.jobs.output_coverage import read_output_coverage
         return jsonify({
             "job": job,
             "chunks": chunks,
             "worker": db.get_worker_lease(job_id),
+            "output_coverage": read_output_coverage(db, job),
         })
 
     @app.route("/api/jobs/<job_id>/events")
@@ -1098,6 +1103,11 @@ def _register_api(app: Flask) -> None:
                 "  Inconsistent provider counters: " + json.dumps(item, ensure_ascii=False)
             )
         lines.extend(["  Component sums are diagnostic, not billed tokens.", ""])
+        from tarjomeh.jobs.output_coverage import read_output_coverage
+        lines.extend([
+            "Published Output Coverage (not export permission or semantic certification):",
+            "  " + json.dumps(read_output_coverage(db, job), ensure_ascii=False), "",
+        ])
         research = db.get_job_artifact(job_id, "book_research")
         book_term_snapshot = db.get_job_artifact(job_id, "book_term_snapshot_v1")
         structure_audit = db.get_job_artifact(job_id, "pdf_structure_audit")

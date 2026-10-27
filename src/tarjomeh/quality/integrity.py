@@ -3319,6 +3319,64 @@ def _citation_author_connector(text: str, start: int, end: int) -> bool:
     )
 
 
+# Language labels constrain the origin construction, not the permitted tokens.
+# Unknown labels stay in review rather than treating any capitalized adjective
+# (for example, "Recent events") as evidence of an untranslated etymon.
+_ETYMON_LANGUAGE_CUE = (
+    r"Latin|Greek|Italian|French|German|Spanish|Portuguese|Dutch|English|"
+    r"Arabic|Hebrew|Persian|Sanskrit|Pali|Chinese|Japanese|Korean|Russian|"
+    r"Turkish|Hindi|Urdu|Syriac|Aramaic|Akkadian|Sumerian|Egyptian|Swahili|"
+    r"Irish|Welsh|Gaelic|Norse|Icelandic|Finnish|Swedish|Danish|Norwegian|"
+    r"Polish|Czech|Hungarian|Romanian|Armenian|Georgian|Thai|Malay|Tamil"
+)
+_METALINGUISTIC_ORIGIN_RE = re.compile(
+    r"\b(?i:word|term|name|expression)\b[^.!?\n]{0,80}?\b"
+    r"(?i:formed\s+(?:on|from)|deriv(?:ed|es)\s+from|borrowed\s+from|"
+    r"taken\s+from|comes\s+from|originates\s+in)\s+(?i:the\s+)?"
+    r"(?:(?:Old|Middle|Modern|Ancient|Classical|Vulgar|Biblical)[ \t]+){0,2}"
+    rf"(?:{_ETYMON_LANGUAGE_CUE})[ \t]+(?i:word\s+|term\s+)?"
+    rf"(?P<etymon>[a-z\u00e0-\u024f][{_LATIN_LETTERS}'\u2019-]{{1,39}})"
+    r"(?=\s*(?:[.,;:!?\u2014\u2013)]|$))"
+)
+
+
+def source_metalinguistic_evidence(source: str, target: str) -> list[dict[str, Any]]:
+    """Locate unique retained etymons only in aligned source-origin statements."""
+    sources, targets = _paragraphs(source), _paragraphs(target)
+    if len(sources) != len(targets):
+        return []
+    proofs: list[dict[str, Any]] = []
+    source_offset = target_offset = 0
+    for index, (source_part, target_part) in enumerate(zip(sources, targets, strict=True)):
+        source_offset = source.find(source_part, source_offset)
+        target_offset = target.find(target_part, target_offset)
+        for match in _METALINGUISTIC_ORIGIN_RE.finditer(source_part):
+            token = match.group("etymon")
+            token_edge = r"[\w\u0300-\u036f\u200c'\u2019\u2010\u2011-]"
+            boundary = re.compile(
+                rf"(?<!{token_edge}){re.escape(token)}(?!{token_edge})"
+            )
+            source_matches = list(boundary.finditer(source_part))
+            target_matches = list(boundary.finditer(target_part))
+            if len(source_matches) != 1 or len(target_matches) != 1:
+                continue
+            retained = target_matches[0]
+            proofs.append({
+                "token": token, "paragraph_index": index,
+                "source_start": source_offset + match.start("etymon"),
+                "source_end": source_offset + match.end("etymon"),
+                "target_start": target_offset + retained.start(),
+                "target_end": target_offset + retained.end(),
+                "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                "target_sha256": hashlib.sha256(target.encode("utf-8")).hexdigest(),
+                "source_construction": match.group(),
+                "authority": "source_apparatus_only_not_term_or_memory_approval",
+            })
+        source_offset += len(source_part)
+        target_offset += len(target_part)
+    return proofs
+
+
 def unexpected_latin_prose(
     source: str,
     translation: str,
@@ -3348,6 +3406,10 @@ def unexpected_latin_prose(
     for phrase in grounded_phrases:
         protected_spans.extend(_grounded_phrase_spans(text, phrase))
     protected_spans.extend(_source_grounded_parenthetical_spans(source, text))
+    protected_spans.extend(
+        (proof["target_start"], proof["target_end"])
+        for proof in source_metalinguistic_evidence(source or "", text)
+    )
 
     # Preserve source-attested foreign phrases carrying an apostrophe or
     # non-ASCII Latin spelling. Ordinary English sequences remain subject to
