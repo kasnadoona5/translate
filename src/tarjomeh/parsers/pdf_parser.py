@@ -825,7 +825,7 @@ def _contents_entry_metadata(
 def _prepare_document_blocks(
     doc: fitz.Document,
     *,
-    structure_version: int = 4,
+    structure_version: int = 5,
 ) -> tuple[list[list[dict[str, Any]]], dict[str, Any]]:
     """Extract all pages, remove only recurrent edge furniture, and classify blocks."""
     pages: list[list[dict[str, Any]]] = []
@@ -1297,6 +1297,89 @@ def _is_footnote(
     return y0 / page_height >= _FOOTNOTE_Y_RATIO if page_height > 0 else False
 
 
+def _has_leading_note_marker(block: dict[str, Any]) -> bool:
+    text = str(block.get("text", "")).lstrip()
+    if text[:1] in {"[", "("}:
+        closer = "]" if text[0] == "[" else ")"
+        inner = text[1:].lstrip()
+        marker = _SUPERSCRIPT_MARKER_RE.match(inner)
+        if marker:
+            tail = inner[marker.end():].lstrip()
+            if tail.startswith(closer) and (len(tail) == 1 or tail[1].isspace()):
+                return True
+    match = _SUPERSCRIPT_MARKER_RE.match(text)
+    # An undelimited marker or unlocated superscript is not evidence of
+    # unmarked body prose. Keep the legacy role when that boundary is uncertain.
+    if match or (block.get("has_superscript") and not block.get("superscript_markers")):
+        return True
+    return any(
+        str(marker.get("text", ""))
+        and not str(marker.get("context_before", "")).strip()
+        and text.startswith(str(marker["text"]))
+        for marker in block.get("superscript_markers", []) or []
+    )
+
+
+def _page_body_font_evidence(
+    blocks: list[dict[str, Any]], median_size: float, page_height: float,
+) -> dict[str, Any]:
+    weights: dict[float, int] = {}
+    fragments: dict[float, list[str]] = {}
+    if page_height > 0 and math.isfinite(page_height):
+        for block in blocks:
+            size = float(block.get("font_size", 0))
+            text = str(block.get("text", ""))
+            if (
+                not math.isfinite(size) or size <= 0
+                or block.get("is_table")
+                or block.get("structure_role") in {"heading", "contents_entry", "footnote"}
+                or block.get("orientation", "horizontal") != "horizontal"
+                or float(block["bbox"][1]) >= page_height * _FOOTNOTE_Y_RATIO
+                or _is_heading(block, median_size)
+                or _has_leading_note_marker(block)
+                or not any(character.isalpha() for character in text)
+            ):
+                continue
+            weights[size] = weights.get(size, 0) + sum(not c.isspace() for c in text)
+            if block.get("source_fragment_id"):
+                fragments.setdefault(size, []).append(str(block["source_fragment_id"]))
+    total = sum(weights.values())
+    majority = next((size for size, count in weights.items() if count * 2 > total), None)
+    return {
+        "font_size": majority,
+        "eligible_characters": total,
+        "font_weights": [{"font_size": size, "characters": weights[size]} for size in sorted(weights)],
+        "supporting_fragment_ids": fragments.get(majority, []),
+        "authority": "source_geometry_only_not_translation_quality",
+    }
+
+
+def _classify_footnote(
+    block: dict[str, Any], median_size: float, page_height: float,
+    body_evidence: dict[str, Any] | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    legacy = _is_footnote(block, median_size, page_height)
+    result = legacy
+    reason = "legacy_classification"
+    if legacy and body_evidence is not None:
+        if _has_leading_note_marker(block):
+            reason = "leading_source_note_marker"
+        elif (
+            body_evidence.get("font_size") == block["font_size"]
+            and not block.get("is_table")
+            and block.get("structure_role", "body") in {"body", "text"}
+            and block.get("orientation", "horizontal") == "horizontal"
+        ):
+            result = False
+            reason = "matches_dominant_body_font"
+    return result, {
+        "legacy_footnote": legacy, "is_footnote": result, "reason": reason,
+        "legacy_font_baseline": median_size,
+        "body_font_evidence": body_evidence,
+        "source_fragment_id": block.get("source_fragment_id"),
+    }
+
+
 def _heading_level_from_size(font_size: float, median_size: float) -> int:
     """Map a font size to a heading level (1-3) based on its ratio to body text."""
     ratio = font_size / median_size if median_size > 0 else 1.0
@@ -1321,7 +1404,7 @@ class PyMuPDFParser(BaseParser):
     * Warning when a large fraction of pages appear scanned (image-only).
     """
 
-    def __init__(self, structure_version: int = 4) -> None:
+    def __init__(self, structure_version: int = 5) -> None:
         self.structure_version = max(1, int(structure_version))
 
     def parse(self, file_path: Path) -> Document:
@@ -1349,6 +1432,12 @@ class PyMuPDFParser(BaseParser):
                 chapters = self._parse_without_toc(doc, page_blocks)
 
             self._annotate_chapters(chapters)
+            if self.structure_version >= 5:
+                structure_audit["footnote_classifications"] = [
+                    {"page": paragraph.metadata.get("page"), **paragraph.metadata["footnote_classification"]}
+                    for chapter in chapters for paragraph in chapter.all_paragraphs
+                    if "footnote_classification" in paragraph.metadata
+                ]
             heading_audits = [
                 chapter.metadata.get("heading_audit", {}) for chapter in chapters
             ]
@@ -1516,10 +1605,16 @@ class PyMuPDFParser(BaseParser):
             )
             page_height = page.rect.height
             median = _median_font_size(current_page_blocks)
+            body_evidence = (
+                _page_body_font_evidence(current_page_blocks, median, page_height)
+                if self.structure_version >= 5 else None
+            )
             for blk in current_page_blocks:
                 blk["_page"] = page_num
                 blk["_page_height"] = page_height
                 blk["_median_size"] = median
+                if self.structure_version >= 5:
+                    blk["_body_font_evidence"] = body_evidence
             all_blocks.extend(current_page_blocks)
 
         if not all_blocks:
@@ -1540,6 +1635,9 @@ class PyMuPDFParser(BaseParser):
         for blk in all_blocks:
             median = blk["_median_size"]
             page_h = blk["_page_height"]
+            is_footnote, footnote_evidence = _classify_footnote(
+                blk, median, page_h, blk.get("_body_font_evidence")
+            )
 
             if _is_heading(blk, median):
                 level = _heading_level_from_size(blk["font_size"], median)
@@ -1588,7 +1686,7 @@ class PyMuPDFParser(BaseParser):
                         },
                     )
                 )
-            elif _is_footnote(blk, median, page_h):
+            elif is_footnote:
                 current_paragraphs.append(
                     Paragraph(
                         text=blk["text"].strip(),
@@ -1649,6 +1747,9 @@ class PyMuPDFParser(BaseParser):
                         )
                 )
 
+            if self.structure_version >= 5 and footnote_evidence["legacy_footnote"]:
+                current_paragraphs[-1].metadata["footnote_classification"] = footnote_evidence
+
         # Flush last chapter
         chap_num += 1
         chapters.append(
@@ -1708,6 +1809,10 @@ class PyMuPDFParser(BaseParser):
             )
             median = _median_font_size(blocks)
             page_height = page.rect.height
+            body_evidence = (
+                _page_body_font_evidence(blocks, median, page_height)
+                if self.structure_version >= 5 else None
+            )
 
             for blk in blocks:
                 text = blk["text"].strip()
@@ -1745,12 +1850,17 @@ class PyMuPDFParser(BaseParser):
                     ] if blk.get("source_fragment_id") else [],
                 }
 
+                is_footnote, footnote_evidence = _classify_footnote(
+                    blk, median, page_height, body_evidence
+                )
+                if self.structure_version >= 5 and footnote_evidence["legacy_footnote"]:
+                    meta["footnote_classification"] = footnote_evidence
                 if _is_heading(blk, median):
                     meta["heading_level"] = _heading_level_from_size(
                         blk["font_size"], median
                     )
                     meta["structure_role"] = "heading"
-                elif _is_footnote(blk, median, page_height):
+                elif is_footnote:
                     meta["is_footnote"] = True
                     meta["structure_role"] = "footnote"
 

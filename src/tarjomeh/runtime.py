@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v22.5"
+RUNTIME_RELEASE = "v22.6"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,7 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "versioned_body_footnote_classification": True,
             "numeral_boundary_preservation": True,
             "source_metalinguistic_token_protection": True,
             "published_output_coverage": True,
@@ -758,7 +759,54 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v223_behavior_probes(),
         **_v224_behavior_probes(),
         **_v225_behavior_probes(),
+        **_v226_behavior_probes(),
     }
+
+
+def _v226_behavior_probes() -> dict[str, bool]:
+    """Source-geometry behavior only; no PDF, job, provider or config I/O."""
+    from types import SimpleNamespace
+    from tarjomeh.parsers.pdf_parser import (
+        PyMuPDFParser, _classify_footnote, _median_font_size, _page_body_font_evidence,
+    )
+
+    def block(text, size, y):
+        return dict(text=text, font_size=size, bbox=(50, y, 370, y + 30))
+
+    blocks = [block("2", 22, 77), block("A Chapter", 18, 123),
+              block("Body text establishes its own font. " * 20, 10.5, 277),
+              block("Unmarked body continuation.", 10.5, 542)]
+    median = _median_font_size(blocks)
+    reference = _page_body_font_evidence(blocks, median, 648)
+    bottom = blocks[-1]
+    smaller = {**bottom, "font_size": 8}
+    marked = {**bottom, "text": "1 An explanatory note."}
+    bracketed = {**bottom, "text": "[1] An explanatory note."}
+    uncertain = {**bottom, "has_superscript": True}
+    undelimited = {**bottom, "text": "*An explanatory note."}
+
+    class Pages(list):
+        page_count = 1
+
+    pages = Pages([SimpleNamespace(rect=SimpleNamespace(height=648))])
+    old = PyMuPDFParser(structure_version=4)._extract_pages(pages, 0, 1, [blocks])[-1]
+    new = PyMuPDFParser(structure_version=5)._extract_pages(pages, 0, 1, [blocks])[-1]
+    return {"versioned_body_footnote_classification": (
+        PyMuPDFParser().structure_version == 5
+        and PyMuPDFParser(structure_version=4).structure_version == 4
+        and median == 14.25 and reference["font_size"] == 10.5
+        and _classify_footnote(bottom, median, 648)[0]
+        and not _classify_footnote(bottom, median, 648, reference)[0]
+        and _classify_footnote(smaller, median, 648, reference)[0]
+        and _classify_footnote(marked, median, 648, reference)[0]
+        and _classify_footnote(bracketed, median, 648, reference)[0]
+        and _classify_footnote(uncertain, median, 648, reference)[0]
+        and _classify_footnote(undelimited, median, 648, reference)[0]
+        and _classify_footnote(bottom, median, 648, {"font_size": None})[0]
+        and old.metadata.get("is_footnote") is True
+        and "footnote_classification" not in old.metadata
+        and not new.metadata.get("is_footnote")
+    )}
 
 
 def _v225_behavior_probes() -> dict[str, bool]:

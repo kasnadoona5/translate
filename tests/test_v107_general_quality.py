@@ -57,8 +57,10 @@ def test_contents_geometry_preserves_rows_and_wrapped_title() -> None:
     }
 
 
-def test_pdf_parser_defaults_to_structure_version_four() -> None:
-    assert PyMuPDFParser().structure_version == 4
+def test_pdf_parser_defaults_to_version_five_and_preserves_legacy_versions() -> None:
+    assert PyMuPDFParser().structure_version == 5
+    for version in (1, 2, 3, 4):
+        assert PyMuPDFParser(structure_version=version).structure_version == version
 
 
 def test_docx_contents_export_uses_borderless_aligned_rows(tmp_path: Path) -> None:

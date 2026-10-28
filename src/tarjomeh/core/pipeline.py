@@ -10098,7 +10098,7 @@ class TranslationPipeline:
         self,
         input_path: Path,
         chapter_positions: list[int] | None = None,
-        structure_version: int = 4,
+        structure_version: int = 5,
     ) -> tuple[Document, list[Chunk]]:
         parser = self._get_parser(input_path)
         if hasattr(parser, "structure_version"):
