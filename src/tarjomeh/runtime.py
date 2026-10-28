@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v22.6"
+RUNTIME_RELEASE = "v22.7"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,11 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "wrapped_note_marker_boundaries": True,
+            "note_marker_evidence_precision": True,
+            "retranslation_conflict_keyword_merge": True,
+            "symmetric_candidate_quality_counts": True,
+            "applied_edit_regression_attribution": True,
             "versioned_body_footnote_classification": True,
             "numeral_boundary_preservation": True,
             "source_metalinguistic_token_protection": True,
@@ -760,6 +765,87 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v224_behavior_probes(),
         **_v225_behavior_probes(),
         **_v226_behavior_probes(),
+        **_v227_behavior_probes(),
+    }
+
+
+def _v227_behavior_probes() -> dict[str, bool]:
+    """Pure version, source-scope and mapping checks; no provider or DB I/O."""
+    from .core.pipeline import _classify_candidate_quality_change, _decisions_without_regressed_edits
+    from .memory.manager import MemoryManager
+    from .memory.proper_nouns import ProperNouns
+    from .parsers.pdf_parser import _classify_footnote
+
+    def block(text):
+        return dict(text=text, font_size=10.5, bbox=(50, 542, 370, 572))
+
+    reference = {"font_size": 10.5}
+    marked = [block(text) for text in ("[1]A note.", "(1)A note.", "[\u06f1]A note.", "[\u0661]A note.")]
+    uncertain = dict(block("A note."), has_superscript=True, superscript_markers=[])
+    retained, proof = _classify_footnote(uncertain, 14.25, 648, reference, structure_version=6)
+    memory = object.__new__(MemoryManager)
+    memory.proper_nouns = ProperNouns()
+    name, old, new = "Ada Vale", "\u0622\u062f\u0627 \u0648\u06cc\u0644", "\u0622\u062f\u0627 \u0648\u0627\u06cc\u0644"
+    memory.proper_nouns.add_noun(name, old, category="person", provenance="accepted_correction",
+                                alignment_status="exact_local", context_independent=True)
+    incoming = dict(nouns={name: new}, categories={name: "person"},
+                    provenance={name: {"origin": "observed_translation"}}, aliases={})
+    try:
+        memory.merge_admitted_mapping_changes({}, incoming)
+        merged = (memory.proper_nouns.all_nouns()[name] == old
+                  and memory.proper_nouns.is_context_deferred(name)
+                  and memory.proper_nouns.provenance_for(name).get("conflict_target") == new)
+    except TypeError:
+        merged = False
+
+    source = "They act.\n\nAn institution meets."
+    before = "\u0622\u0646\u0647\u0627 \u0645\u06cc\u200c\u0631\u0648\u0646\u062f.\n\n\u0646\u0647\u0627\u062f \u0645\u06cc\u200c\u0622\u06cc\u062f."
+    candidate = before.replace("\u0622\u0646\u0647\u0627", "\u0622\u0646\u0627\u0646")
+    a = dict(issue_id="A", source_segment_id="p1:s1", source_quote="They act",
+             current_persian_quote=before.split("\n\n")[0], category="accuracy", severity="minor")
+    b = dict(issue_id="B", source_segment_id="p2:s1", source_quote="institution",
+             current_persian_quote="\u0646\u0647\u0627\u062f", category="terminology", severity="minor")
+    after_a = dict(a, current_persian_quote=candidate.split("\n\n")[0])
+    remaining, carried, _vetoed, counts = _classify_candidate_quality_change(
+        [a, b], [after_a, b], source_text=source, previous_text=before, candidate_text=candidate,
+    )
+    _remaining, _carried, _vetoed, improved = _classify_candidate_quality_change(
+        [a, b], [b], source_text=source, previous_text=before, candidate_text=candidate,
+    )
+
+    decisions = [dict(issue_id="safe", decision="accepted", original_span="safe", resulting_span="clean"),
+                 dict(issue_id="bad", decision="rejected", original_span="bad", resulting_span="worse")]
+    details = [dict(issue_id=key, source_segment_id="p1:s1", current_persian_quote=word)
+               for key, word in (("safe", "safe"), ("bad", "bad"))]
+    arguments = dict(source_text="A complete claim.", previous_text="bad has a separator and safe.",
+                     candidate_text="worse has a separator and clean.",
+                     issue_details=details)
+    rejected_owner = _decisions_without_regressed_edits(
+        decisions, [dict(current_persian_quote="worse", source_segment_id="p1:s1")], **arguments,
+    )
+    accepted = [decisions[0], dict(decisions[1], decision="accepted")]
+    retained_decisions, excluded = _decisions_without_regressed_edits(
+        accepted, [dict(current_persian_quote="worse", source_segment_id="p1:s1")], **arguments,
+    )
+    return {
+        "wrapped_note_marker_boundaries": (
+            all(_classify_footnote(item, 14.25, 648, reference, structure_version=6)[0] for item in marked)
+            and all(not _classify_footnote(item, 14.25, 648, reference, structure_version=5)[0] for item in marked)
+            and not _classify_footnote(block("Unmarked body."), 14.25, 648, reference, structure_version=6)[0]
+        ),
+        "note_marker_evidence_precision": retained and proof["reason"] == "unlocated_source_superscript",
+        "retranslation_conflict_keyword_merge": merged,
+        "symmetric_candidate_quality_counts": (
+            counts["before_actionable_count_raw"] == counts["after_actionable_count_raw"] == 2
+            and counts["before_actionable_count"] == counts["after_actionable_count"] == 1
+            and counts["before_count_excluded_unchanged_issue_ids"] == ["B"]
+            and len(remaining) == len(carried) == 1
+            and improved["before_actionable_count"] == 1 and improved["after_actionable_count"] == 0
+        ),
+        "applied_edit_regression_attribution": (
+            rejected_owner == ([], []) and [d["issue_id"] for d in retained_decisions] == ["safe"]
+            and excluded == ["bad"]
+        ),
     }
 
 
@@ -792,7 +878,7 @@ def _v226_behavior_probes() -> dict[str, bool]:
     old = PyMuPDFParser(structure_version=4)._extract_pages(pages, 0, 1, [blocks])[-1]
     new = PyMuPDFParser(structure_version=5)._extract_pages(pages, 0, 1, [blocks])[-1]
     return {"versioned_body_footnote_classification": (
-        PyMuPDFParser().structure_version == 5
+        PyMuPDFParser().structure_version == 6
         and PyMuPDFParser(structure_version=4).structure_version == 4
         and median == 14.25 and reference["font_size"] == 10.5
         and _classify_footnote(bottom, median, 648)[0]

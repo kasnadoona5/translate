@@ -1213,7 +1213,9 @@ class MemoryManager:
                 outcome.get("action") == "preserved_higher_authority"
                 and outcome.get("target") != target
             ):
-                self.proper_nouns.mark_context_conflict(source, source, target)
+                self.proper_nouns.mark_context_conflict(
+                    source, corrected_source=source, corrected_target=target,
+                )
             elif outcome.get("target") == target:
                 for alias in after.get("aliases", {}).get(source, []):
                     if alias not in before.get("aliases", {}).get(source, []):

@@ -116,8 +116,8 @@ def test_exact_vote_tie_is_not_body_proof():
     assert extract(blocks, 5, True)[-1].metadata["is_footnote"] is True
 
 
-def test_new_default_is_five_and_heading_decisions_stay_unchanged():
-    assert PyMuPDFParser().structure_version == 5
+def test_current_default_is_six_and_explicit_five_headings_stay_unchanged():
+    assert PyMuPDFParser().structure_version == 6
     old = extract(page_shape(), 4, True)
     new = extract(page_shape(), 5, True)
     assert [(p.text, p.metadata.get("heading_level")) for p in old] == [
@@ -136,7 +136,7 @@ def test_runtime_probe_is_pure_and_rejects_a_disabled_safeguard(monkeypatch):
     assert _v226_behavior_probes() == {"versioned_body_footnote_classification": True}
     original = parser_module._classify_footnote
     monkeypatch.setattr(parser_module, "_classify_footnote",
-                        lambda block, median, height, evidence=None: original(block, median, height))
+                        lambda block, median, height, evidence=None, **kwargs: original(block, median, height))
     assert _v226_behavior_probes() == {"versioned_body_footnote_classification": False}
 
 

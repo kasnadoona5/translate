@@ -58,7 +58,7 @@ def test_contents_geometry_preserves_rows_and_wrapped_title() -> None:
 
 
 def test_pdf_parser_defaults_to_version_five_and_preserves_legacy_versions() -> None:
-    assert PyMuPDFParser().structure_version == 5
+    assert PyMuPDFParser().structure_version == 6
     for version in (1, 2, 3, 4):
         assert PyMuPDFParser(structure_version=version).structure_version == version
 

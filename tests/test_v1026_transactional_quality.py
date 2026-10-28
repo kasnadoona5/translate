@@ -38,11 +38,13 @@ def test_second_stage_rollback_retains_only_unimplicated_local_edit() -> None:
         issue_details=[
             {
                 "issue_id": "term",
+                "source_segment_id": "p1:s1",
                 "source_quote": "term is precise",
                 "current_persian_quote": "اصطلاح نادقیق",
             },
             {
                 "issue_id": "grammar",
+                "source_segment_id": "p1:s1",
                 "source_quote": "construction is clear",
                 "current_persian_quote": "ساخت روشن",
             },
@@ -61,6 +63,7 @@ def test_second_stage_rollback_retains_only_unimplicated_local_edit() -> None:
         ],
         regressions=[{
             "issue_id": "late-grammar",
+            "source_segment_id": "p1:s1",
             "current_persian_quote": "ساخت خراب",
         }],
         integrity_gate=_AcceptingGate(),  # type: ignore[arg-type]

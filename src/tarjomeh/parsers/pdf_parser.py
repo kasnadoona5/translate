@@ -825,7 +825,7 @@ def _contents_entry_metadata(
 def _prepare_document_blocks(
     doc: fitz.Document,
     *,
-    structure_version: int = 5,
+    structure_version: int = 6,
 ) -> tuple[list[list[dict[str, Any]]], dict[str, Any]]:
     """Extract all pages, remove only recurrent edge furniture, and classify blocks."""
     pages: list[list[dict[str, Any]]] = []
@@ -1297,7 +1297,9 @@ def _is_footnote(
     return y0 / page_height >= _FOOTNOTE_Y_RATIO if page_height > 0 else False
 
 
-def _has_leading_note_marker(block: dict[str, Any]) -> bool:
+def _note_marker_reason(
+    block: dict[str, Any], *, structure_version: int = 5,
+) -> str | None:
     text = str(block.get("text", "")).lstrip()
     if text[:1] in {"[", "("}:
         closer = "]" if text[0] == "[" else ")"
@@ -1305,23 +1307,39 @@ def _has_leading_note_marker(block: dict[str, Any]) -> bool:
         marker = _SUPERSCRIPT_MARKER_RE.match(inner)
         if marker:
             tail = inner[marker.end():].lstrip()
-            if tail.startswith(closer) and (len(tail) == 1 or tail[1].isspace()):
-                return True
+            if tail.startswith(closer) and (
+                structure_version >= 6 or len(tail) == 1 or tail[1].isspace()
+            ):
+                return "leading_source_note_marker"
     match = _SUPERSCRIPT_MARKER_RE.match(text)
     # An undelimited marker or unlocated superscript is not evidence of
     # unmarked body prose. Keep the legacy role when that boundary is uncertain.
-    if match or (block.get("has_superscript") and not block.get("superscript_markers")):
-        return True
-    return any(
+    if match:
+        return "leading_source_note_marker"
+    if block.get("has_superscript") and not block.get("superscript_markers"):
+        return (
+            "unlocated_source_superscript" if structure_version >= 6
+            else "leading_source_note_marker"
+        )
+    if any(
         str(marker.get("text", ""))
         and not str(marker.get("context_before", "")).strip()
         and text.startswith(str(marker["text"]))
         for marker in block.get("superscript_markers", []) or []
-    )
+    ):
+        return "leading_source_note_marker"
+    return None
+
+
+def _has_leading_note_marker(
+    block: dict[str, Any], *, structure_version: int = 5,
+) -> bool:
+    return _note_marker_reason(block, structure_version=structure_version) is not None
 
 
 def _page_body_font_evidence(
     blocks: list[dict[str, Any]], median_size: float, page_height: float,
+    *, structure_version: int = 5,
 ) -> dict[str, Any]:
     weights: dict[float, int] = {}
     fragments: dict[float, list[str]] = {}
@@ -1336,7 +1354,7 @@ def _page_body_font_evidence(
                 or block.get("orientation", "horizontal") != "horizontal"
                 or float(block["bbox"][1]) >= page_height * _FOOTNOTE_Y_RATIO
                 or _is_heading(block, median_size)
-                or _has_leading_note_marker(block)
+                or _has_leading_note_marker(block, structure_version=structure_version)
                 or not any(character.isalpha() for character in text)
             ):
                 continue
@@ -1357,13 +1375,15 @@ def _page_body_font_evidence(
 def _classify_footnote(
     block: dict[str, Any], median_size: float, page_height: float,
     body_evidence: dict[str, Any] | None = None,
+    *, structure_version: int = 5,
 ) -> tuple[bool, dict[str, Any]]:
     legacy = _is_footnote(block, median_size, page_height)
     result = legacy
     reason = "legacy_classification"
     if legacy and body_evidence is not None:
-        if _has_leading_note_marker(block):
-            reason = "leading_source_note_marker"
+        marker_reason = _note_marker_reason(block, structure_version=structure_version)
+        if marker_reason:
+            reason = marker_reason
         elif (
             body_evidence.get("font_size") == block["font_size"]
             and not block.get("is_table")
@@ -1404,7 +1424,7 @@ class PyMuPDFParser(BaseParser):
     * Warning when a large fraction of pages appear scanned (image-only).
     """
 
-    def __init__(self, structure_version: int = 5) -> None:
+    def __init__(self, structure_version: int = 6) -> None:
         self.structure_version = max(1, int(structure_version))
 
     def parse(self, file_path: Path) -> Document:
@@ -1606,7 +1626,10 @@ class PyMuPDFParser(BaseParser):
             page_height = page.rect.height
             median = _median_font_size(current_page_blocks)
             body_evidence = (
-                _page_body_font_evidence(current_page_blocks, median, page_height)
+                _page_body_font_evidence(
+                    current_page_blocks, median, page_height,
+                    structure_version=self.structure_version,
+                )
                 if self.structure_version >= 5 else None
             )
             for blk in current_page_blocks:
@@ -1636,7 +1659,8 @@ class PyMuPDFParser(BaseParser):
             median = blk["_median_size"]
             page_h = blk["_page_height"]
             is_footnote, footnote_evidence = _classify_footnote(
-                blk, median, page_h, blk.get("_body_font_evidence")
+                blk, median, page_h, blk.get("_body_font_evidence"),
+                structure_version=self.structure_version,
             )
 
             if _is_heading(blk, median):
@@ -1810,7 +1834,9 @@ class PyMuPDFParser(BaseParser):
             median = _median_font_size(blocks)
             page_height = page.rect.height
             body_evidence = (
-                _page_body_font_evidence(blocks, median, page_height)
+                _page_body_font_evidence(
+                    blocks, median, page_height, structure_version=self.structure_version,
+                )
                 if self.structure_version >= 5 else None
             )
 
@@ -1851,7 +1877,8 @@ class PyMuPDFParser(BaseParser):
                 }
 
                 is_footnote, footnote_evidence = _classify_footnote(
-                    blk, median, page_height, body_evidence
+                    blk, median, page_height, body_evidence,
+                    structure_version=self.structure_version,
                 )
                 if self.structure_version >= 5 and footnote_evidence["legacy_footnote"]:
                     meta["footnote_classification"] = footnote_evidence

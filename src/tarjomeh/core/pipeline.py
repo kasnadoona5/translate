@@ -4950,6 +4950,63 @@ def _classify_candidate_quality_count(
     return remaining, carried, vetoed
 
 
+def _classify_candidate_quality_change(
+    before_details: list[dict[str, Any]],
+    after_details: list[dict[str, Any]],
+    *,
+    source_text: str,
+    previous_text: str,
+    candidate_text: str,
+    r109_unchanged: list[dict[str, Any]] | None = None,
+    vetoed_issues: list[dict[str, Any]] | None = None,
+    before_blocking_issues: list[dict[str, Any]] | None = None,
+    after_blocking_issues: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Compare the same proved edit scope without resolving any old finding."""
+    common = dict(source_text=source_text, previous_text=previous_text,
+                  candidate_text=candidate_text, r109_unchanged=r109_unchanged,
+                  vetoed_issues=vetoed_issues)
+    before, before_carried, before_vetoed = _classify_candidate_quality_count(
+        before_details, **common, blocking_issues=before_blocking_issues,
+    )
+    after, carried, vetoed = _classify_candidate_quality_count(
+        after_details, **common, blocking_issues=after_blocking_issues,
+    )
+
+    def count(details: list[dict[str, Any]]) -> int:
+        # Provider IDs and formatted labels do not distinguish otherwise
+        # identical findings. Keep every substantive field and all raw evidence.
+        return len({json.dumps({k: v for k, v in detail.items()
+                                if k not in {"issue_id", "formatted"}},
+                               ensure_ascii=True, sort_keys=True) for detail in details})
+
+    def ids(details: list[dict[str, Any]]) -> list[str]:
+        return list(dict.fromkeys(str(item.get("issue_id", "")) for item in details))
+
+    def carried_ids(raw: list[dict[str, Any]], kept: list[dict[str, Any]],
+                    excluded: list[dict[str, Any]], vetoed: list[dict[str, Any]]) -> list[str]:
+        # Classification deduplicates findings, not the provider's raw IDs.
+        keys = {_quality_issue_fingerprint(item) for item in excluded}
+        aliases = [item for item in raw if item not in kept and item not in vetoed
+                   and _quality_issue_fingerprint(item) in keys]
+        return ids([*aliases, *excluded])
+
+    report = {
+        "before_actionable_count_raw": len(before_details),
+        "before_actionable_count": count(before),
+        "after_actionable_count_raw": len(after_details),
+        "after_actionable_count": count(after),
+        "before_count_excluded_unchanged_issue_ids": carried_ids(
+            before_details, before, before_carried, before_vetoed),
+        "before_count_excluded_refiner_veto_issue_ids": ids(before_vetoed),
+        "count_excluded_unchanged_issue_ids": carried_ids(after_details, after, carried, vetoed),
+        "count_excluded_refiner_veto_issue_ids": ids(vetoed),
+        "count_comparison_policy": "symmetric_before_after_unchanged_scope",
+        "count_exclusion_policy": "same_finding_raw_paragraph_and_source_scope_unchanged",
+    }
+    return after, carried, vetoed, report
+
+
 def _blocking_issue_details(critique: Any) -> list[dict[str, Any]]:
     blocking = set(_blocking_critique_issues(critique))
     return [
@@ -5186,31 +5243,68 @@ def _candidate_regression_details(
 def _decisions_without_regressed_edits(
     issue_decisions: list[dict[str, Any]],
     regressions: list[dict[str, Any]],
+    *,
+    source_text: str = "",
+    previous_text: str = "",
+    candidate_text: str = "",
+    issue_details: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Exclude only refiner decisions implicated by a later grounded regression."""
-    regression_spans = [
-        normalize_for_match(str(detail.get("current_persian_quote", "")))
-        for detail in regressions
-        if isinstance(detail, dict)
-        and str(detail.get("current_persian_quote", "")).strip()
-    ]
-    retained: list[dict[str, Any]] = []
-    excluded: list[str] = []
+    """Attribute regressions only to accepted edits proved in the candidate."""
+    bound = bool(source_text or previous_text or candidate_text or issue_details is not None)
+    issues = {str(item.get("issue_id", "")): item for item in issue_details or []}
+    applied: list[tuple[dict[str, Any], str, int | None]] = []
     for raw in issue_decisions:
         decision = dict(raw)
-        resulting = normalize_for_match(str(decision.get("resulting_span", "")))
-        implicated = bool(
-            resulting
-            and any(
-                span and (resulting in span or span in resulting)
-                for span in regression_spans
-            )
-        )
-        if implicated:
-            excluded.append(str(decision.get("issue_id", "")).strip())
-        else:
-            retained.append(decision)
-    return retained, [issue_id for issue_id in excluded if issue_id]
+        if str(decision.get("decision", "")).strip().casefold() not in {"accepted", "partially_applied"}:
+            continue
+        status = str(decision.get("commit_status", ""))
+        if status and not status.startswith("committed"):
+            continue
+        resulting = apply_safe_persian_orthography(str(decision.get("resulting_span", "")).strip())[0]
+        paragraph = None
+        if bound:
+            detail = issues.get(str(decision.get("issue_id", "")), {})
+            quote = str(detail.get("current_persian_quote", "")).strip()
+            original = str(decision.get("original_span") or quote).strip()
+            segment = str(detail.get("source_segment_id", ""))
+            matched_segment = re.fullmatch(r"p(\d+):s\d+", segment)
+            if not (source_text and previous_text and candidate_text and original and resulting):
+                continue
+            if not matched_segment or not 1 <= int(matched_segment.group(1)) <= len(source_text.split("\n\n")):
+                continue
+            if original == resulting or _refinement_span_contract(
+                source_text, previous_text, candidate_text, segment, quote, original, resulting,
+            ):
+                continue
+            scope = _paragraph_scoped_span_start(previous_text, segment, original)
+            if scope is None:
+                continue
+            paragraph = scope[1]
+        applied.append((decision, normalize_for_match(resulting), paragraph))
+
+    excluded: set[int] = set()
+    for detail in regressions:
+        raw_quote = str(detail.get("current_persian_quote", "")).strip()
+        span = normalize_for_match(raw_quote)
+        segment = str(detail.get("source_segment_id", ""))
+        matched_segment = re.fullmatch(r"p(\d+):s\d+", segment)
+        scope = _paragraph_scoped_span_start(
+            candidate_text, segment, raw_quote,
+        ) if (bound and raw_quote and matched_segment
+              and 1 <= int(matched_segment.group(1)) <= len(source_text.split("\n\n"))) else None
+        owners = {
+            index for index, (_decision, resulting, paragraph) in enumerate(applied)
+            if span and resulting and (resulting in span or span in resulting)
+            and (not bound or scope is not None and paragraph == scope[1])
+        }
+        # One explained finding must not excuse another unlocated regression.
+        if not owners:
+            return [], []
+        excluded.update(owners)
+    retained = [decision for index, (decision, _, _) in enumerate(applied) if index not in excluded]
+    excluded_ids = list(dict.fromkeys(str(applied[index][0].get("issue_id", "")).strip()
+                                      for index in sorted(excluded)))
+    return retained, [issue_id for issue_id in excluded_ids if issue_id]
 
 
 def _recover_non_regressed_local_edits(
@@ -5238,6 +5332,8 @@ def _recover_non_regressed_local_edits(
     retained, excluded = _decisions_without_regressed_edits(
         issue_decisions,
         regressions,
+        source_text=source, previous_text=baseline, candidate_text=proposed,
+        issue_details=issue_details,
     )
     if regressions and not excluded:
         return baseline, [], {
@@ -10098,7 +10194,7 @@ class TranslationPipeline:
         self,
         input_path: Path,
         chapter_positions: list[int] | None = None,
-        structure_version: int = 5,
+        structure_version: int = 6,
     ) -> tuple[Document, list[Chunk]]:
         parser = self._get_parser(input_path)
         if hasattr(parser, "structure_version"):
@@ -10483,13 +10579,14 @@ class TranslationPipeline:
                         raw_remaining = _unresolved_grounded_memory_issues(review)
                         veto_ids = {str(item.get("issue_id", "")) for item in decisions
                                     if item.get("decision") == "rejected"}
-                        remaining, count_carried, count_vetoed = _classify_candidate_quality_count(
-                            raw_remaining,
+                        remaining, count_carried, count_vetoed, count_report = _classify_candidate_quality_change(
+                            actionable, raw_remaining,
                             source_text=chunk.text,
                             previous_text=translation,
                             candidate_text=candidate,
                             r109_unchanged=old_issues,
-                            blocking_issues=_blocking_issue_details(review),
+                            before_blocking_issues=_blocking_issue_details(baseline),
+                            after_blocking_issues=_blocking_issue_details(review),
                             vetoed_issues=[
                                 *_same_candidate_refiner_vetoes(self.db, job_id, idx, translation),
                                 *(
@@ -10503,11 +10600,6 @@ class TranslationPipeline:
                         for item in [*old_issues, *count_carried]:
                             old_by_key.setdefault(_quality_issue_fingerprint(item), item)
                         excluded_items = [item for item in raw_remaining if item not in remaining]
-                        carried_keys = {_quality_issue_fingerprint(item) for item in count_carried}
-                        excluded_ids = list(dict.fromkeys(
-                            str(item.get("issue_id", "")) for item in raw_remaining
-                            if _quality_issue_fingerprint(item) in carried_keys
-                        ))
                         old_blocking = {str(item.get("formatted") or item.get("issue_id") or item)
                                         for item in [*old_by_key.values(), *excluded_items]}
                         old_issues = list(old_by_key.values())
@@ -10517,16 +10609,7 @@ class TranslationPipeline:
                             {
                                 "regressions": regressions,
                                 "newly_observed_unchanged_issues": old_issues,
-                                "before_actionable_count": len(actionable),
-                                "after_actionable_count": len(remaining),
-                                "after_actionable_count_raw": len(raw_remaining),
-                                "count_excluded_unchanged_issue_ids": excluded_ids,
-                                "count_excluded_refiner_veto_issue_ids": [
-                                    item.get("issue_id") for item in count_vetoed
-                                ],
-                                "count_exclusion_policy": (
-                                    "same_finding_raw_paragraph_and_source_scope_unchanged"
-                                ),
+                                **count_report,
                             }
                         )
                         reviewed = _critique_for_event(
@@ -10535,7 +10618,8 @@ class TranslationPipeline:
                         )
                         accepted = bool(
                             review.valid and review.coverage_complete and not regressions
-                            and len(remaining) < len(actionable) and min(scores) >= 8.0
+                            and count_report["after_actionable_count"] < count_report["before_actionable_count"]
+                            and min(scores) >= 8.0
                             and set(_blocking_critique_issues(review)) <= old_blocking
                         )
                         self.db.log_chunk_event(
@@ -12429,6 +12513,10 @@ class TranslationPipeline:
                             _decisions_without_regressed_edits(
                                 list(pending_candidate.get("issue_decisions", []) or []),
                                 candidate_regressions,
+                                source_text=chunk.text,
+                                previous_text=baseline_translation,
+                                candidate_text=str(pending_candidate.get("proposed", rejected_translation)),
+                                issue_details=list(pending_candidate.get("issue_details", []) or []),
                             )
                         )
                         atomic_recovery: dict[str, Any] = {
@@ -15141,14 +15229,15 @@ Output ONLY the corrected Persian translation.
                                 veto_ids = {str(item.get("issue_id", ""))
                                             for item in repaired_decisions
                                             if item.get("decision") == "rejected"}
-                                remaining_actionable, count_carried, count_vetoed = (
-                                    _classify_candidate_quality_count(
-                                        repaired_actionable,
+                                remaining_actionable, count_carried, count_vetoed, count_report = (
+                                    _classify_candidate_quality_change(
+                                        final_repair_actionable, repaired_actionable,
                                         source_text=chunk.text,
                                         previous_text=translation,
                                         candidate_text=repaired_candidate,
                                         r109_unchanged=newly_observed_unchanged,
-                                        blocking_issues=_blocking_issue_details(repaired_review),
+                                        before_blocking_issues=_blocking_issue_details(final_critique_rep),
+                                        after_blocking_issues=_blocking_issue_details(repaired_review),
                                         vetoed_issues=[
                                             *_same_candidate_refiner_vetoes(
                                                 self.db, job_id, idx, translation
@@ -15192,8 +15281,8 @@ Output ONLY the corrected Persian translation.
                                     and set(_blocking_critique_issues(
                                         repaired_review
                                     )) <= old_blocking
-                                    and len(remaining_actionable)
-                                    < len(final_repair_actionable)
+                                    and count_report["after_actionable_count"]
+                                    < count_report["before_actionable_count"]
                                     and not regressions
                                     and min(repaired_scores, default=0.0) >= 8.0
                                 )
@@ -15215,18 +15304,7 @@ Output ONLY the corrected Persian translation.
                                         "integrity": repaired_integrity.to_dict(),
                                         "structure_findings": repaired_structure,
                                         "paragraph_identity": repaired_identity,
-                                        "before_actionable_count": len(final_repair_actionable),
-                                        "after_actionable_count": len(remaining_actionable),
-                                        "after_actionable_count_raw": len(repaired_actionable),
-                                        "count_excluded_unchanged_issue_ids": [
-                                            item.get("issue_id") for item in count_carried
-                                        ],
-                                        "count_excluded_refiner_veto_issue_ids": [
-                                            item.get("issue_id") for item in count_vetoed
-                                        ],
-                                        "count_exclusion_policy": (
-                                            "same_finding_raw_paragraph_and_source_scope_unchanged"
-                                        ),
+                                        **count_report,
                                         "newly_observed_unchanged_issues": (
                                             newly_observed_unchanged
                                         ),

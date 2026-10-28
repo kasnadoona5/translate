@@ -308,6 +308,7 @@ def targeted_quality_evidence(
                 "timestamp": event.get("timestamp"),
                 "candidate_target_hash": payload.get("candidate_target_hash"),
                 "accepted": payload.get("accepted"),
+                "before_actionable_count_raw": payload.get("before_actionable_count_raw"),
                 "before_actionable_count": payload.get("before_actionable_count"),
                 "after_actionable_count": payload.get("after_actionable_count"),
                 "after_actionable_count_raw": payload.get("after_actionable_count_raw"),
@@ -318,6 +319,17 @@ def targeted_quality_evidence(
                     "count_excluded_refiner_veto_issue_ids"
                 ),
                 "count_exclusion_policy": payload.get("count_exclusion_policy"),
+                "count_comparison_policy": payload.get("count_comparison_policy"),
+                "before_count_excluded_unchanged_issue_ids": payload.get(
+                    "before_count_excluded_unchanged_issue_ids"
+                ),
+                "before_count_excluded_refiner_veto_issue_ids": payload.get(
+                    "before_count_excluded_refiner_veto_issue_ids"
+                ),
+                "symmetric_count_evidence_available": (
+                    payload.get("count_comparison_policy") == "symmetric_before_after_unchanged_scope"
+                    and "before_actionable_count_raw" in payload
+                ),
                 "count_evidence_available": "after_actionable_count_raw" in payload,
             }
         )
