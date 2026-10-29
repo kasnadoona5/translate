@@ -893,10 +893,11 @@ async function retranslateChunk(jobId, chunkIndex) {
 async function exportReviewedJob() {
     if (!currentReviewJobId) return;
     const fmt = document.getElementById("exportFormat").value;
+    const scope = document.getElementById("exportScope").value;
     const response = await fetch(authUrl(`/api/jobs/${currentReviewJobId}/export`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ format: fmt })
+        body: JSON.stringify({ format: fmt, scope })
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {

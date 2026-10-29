@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v22.8"
+RUNTIME_RELEASE = "v22.9"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,7 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "source_bound_saved_prefix_export": True,
             "context_proven_local_contraction": True,
             "eligible_local_overlap_classification": True,
             "merged_post_rollback_disposition": True,
@@ -772,7 +773,30 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v226_behavior_probes(),
         **_v227_behavior_probes(),
         **_v228_behavior_probes(),
+        **_v229_behavior_probes(),
     }
+
+
+def _v229_behavior_probes() -> dict[str, bool]:
+    """Exercise prefix acceptance and refusal without files, DBs or providers."""
+    from types import SimpleNamespace
+    from .jobs.saved_prefix import saved_prefix_count
+
+    chunks = [SimpleNamespace(index=i, text=f'Source {i}') for i in range(3)]
+    records = [dict(chunk_index=i, text=c.text, status='completed' if i < 2 else 'pending',
+                    translation=f'Target {i}' if i < 2 else '') for i,c in enumerate(chunks)]
+    accepted = saved_prefix_count(chunks, records) == 2
+    rejected = 0
+    for candidate in (
+        [{**r, 'status': 'pending'} if i == 0 else dict(r) for i,r in enumerate(records)],
+        [dict(r) for r in records] + [dict(records[0])],
+        [{**r, 'text': 'Changed'} if i == 0 else dict(r) for i,r in enumerate(records)],
+    ):
+        try:
+            saved_prefix_count(chunks, candidate)
+        except ValueError:
+            rejected += 1
+    return {'source_bound_saved_prefix_export': accepted and rejected == 3}
 
 
 def _v228_behavior_probes() -> dict[str, bool]:

@@ -2186,6 +2186,9 @@ def _register_api(app: Flask) -> None:
             return jsonify({"error": "Job not found"}), 404
 
         data = request.get_json(silent=True) or {}
+        scope = data.get('scope', 'complete')
+        if scope not in ('complete', 'saved_prefix'):
+            return jsonify({'error': 'Unknown export scope'}), 400
         fmt = data.get("format") or job.get("config", {}).get("output", {}).get("format", "docx")
         bilingual = data.get("bilingual_mode") or job.get("config", {}).get("output", {}).get("bilingual_mode")
         if not _try_claim_job(job_id):
@@ -2202,13 +2205,21 @@ def _register_api(app: Flask) -> None:
             pipeline = TranslationPipeline(config)
             input_path = Path(job["input_path"])
             extension = "md" if fmt == "markdown" else fmt
-            output_path = input_path.parent / f"{input_path.stem}_reviewed.{extension}"
+            label = 'PARTIAL_REVIEW' if scope == 'saved_prefix' else 'reviewed'
+            output_path = input_path.parent / f"{input_path.stem}_{label}.{extension}"
+            options = {'saved_prefix': True} if scope == 'saved_prefix' else {}
             exported = pipeline.export_completed_job(
                 job_id,
                 output_path,
                 output_format=fmt,
                 bilingual_mode=bilingual,
+                **options,
             )
+        except (ValueError, RuntimeError) as exc:
+            if scope != 'saved_prefix':
+                raise
+            from tarjomeh.core.pipeline import JobWorkerBusyError
+            return jsonify({'error': str(exc)}), 409 if isinstance(exc, JobWorkerBusyError) else 422
         finally:
             _close_pipeline(pipeline)
             _release_job_claim(job_id)

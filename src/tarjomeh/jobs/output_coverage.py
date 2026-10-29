@@ -22,6 +22,9 @@ def output_coverage(
         "status": "unknown", "reason": "publication_proof_unavailable",
         "authority": "publication_coverage_only_not_semantic_or_export_permission",
     }
+    if publication.get('publication_kind') == 'saved_prefix_review':
+        report.update(publication_kind='saved_prefix_review', label='PARTIAL / REVIEW',
+                      total_selected_chunks=publication.get('total_selected_chunks'))
     count = identity.get("persisted_chunk_count")
     boundary = publication.get("boundary_chunk_index")
     expected_file = publication.get("output_sha256")

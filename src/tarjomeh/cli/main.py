@@ -311,6 +311,7 @@ def cmd_jobs(args: argparse.Namespace) -> int:
                 Path(args.output) if args.output else None,
                 output_format=args.format,
                 bilingual_mode=args.bilingual,
+                **({'saved_prefix': True} if getattr(args, 'saved_prefix', False) else {}),
             )
         except Exception as e:
             console.print(f"[red]Export failed:[/red] {e}")
@@ -541,6 +542,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_cleanup.add_argument("job_id", help="Job ID")
     p_export = jobs_sub.add_parser("export", help="Re-export a completed job without translating")
     p_export.add_argument("job_id", help="Job ID")
+    p_export.add_argument("--saved-prefix", action="store_true", help="Export only the finalized contiguous prefix as a partial-review DOCX")
     p_export.add_argument("--format", choices=["pdf", "epub", "docx", "markdown", "txt", "srt"], help="Output format")
     p_export.add_argument("-o", "--output", help="Output file path")
     p_export.add_argument("-b", "--bilingual", choices=["inline", "side_by_side", "target_only"], help="Bilingual mode")

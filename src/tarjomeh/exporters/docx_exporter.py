@@ -236,6 +236,15 @@ class DocxExporter(BaseExporter):
         doc = docx.Document()
         doc.core_properties.title = document.title
         doc.core_properties.author = document.author
+        prefix = document.metadata.get('saved_prefix_export')
+        if isinstance(prefix, dict):
+            label = (f"PARTIAL / REVIEW - saved chunks 1-{prefix['finished_chunks']} "
+                     f"of {prefix['total_selected_chunks']}")
+            doc.core_properties.subject = label
+            for section in doc.sections:
+                warning = section.header.paragraphs[0]
+                warning.text = label
+                warning.runs[0].font.size = Pt(9)
 
         for section in doc.sections:
             section.top_margin = Cm(2.2)

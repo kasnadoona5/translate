@@ -743,6 +743,11 @@ select {
     min-height: 32px;
 }
 
+#exportScope {
+    width: 190px;
+    max-width: 100%;
+}
+
 .review-item {
     padding: 13px;
     border: 1px solid var(--line);

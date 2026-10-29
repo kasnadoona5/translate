@@ -9351,8 +9351,47 @@ class TranslationPipeline:
         bilingual_mode: str | None = None,
         chapter_positions: list[int] | None = None,
         persist_job_output: bool = True,
+        saved_prefix: bool = False,
     ) -> Path:
         """Re-export a completed/partially-reviewed job without LLM calls."""
+        if not saved_prefix:
+            return self._export_completed_job_impl(
+                job_id, output_path, output_format=output_format,
+                bilingual_mode=bilingual_mode, chapter_positions=chapter_positions,
+                persist_job_output=persist_job_output,
+            )
+        if ((output_format or self.config.output.format).lower() != 'docx'
+                or chapter_positions is not None or not persist_job_output):
+            raise ValueError('Saved-prefix export requires DOCX and the original job selection')
+        job = self.db.get_job(job_id) or {}
+        if job.get('raw_status', job.get('status')) not in {'paused', 'paused_error', 'completed'}:
+            raise ValueError('Pause the job before requesting a saved-prefix export')
+        lease = self.db.get_worker_lease(job_id) or {}
+        if lease.get('state') in {'active', 'pausing'}:
+            raise JobWorkerBusyError('Saved-prefix export cannot interrupt an active worker')
+        claim = self.db.claim_worker(job_id, self.worker_id, allow_stale_reclaim=False)
+        if not claim.get('acquired'):
+            raise JobWorkerBusyError('Another worker owns this job')
+        prior_job = getattr(self, 'current_job_id', None)
+        prior_claim = getattr(self, '_worker_claimed', False)
+        self.current_job_id, self._worker_claimed = job_id, True
+        try:
+            self._start_lease_heartbeat()
+            return self._export_completed_job_impl(
+                job_id, output_path, output_format=output_format,
+                bilingual_mode=bilingual_mode, saved_prefix=True,
+            )
+        finally:
+            self._stop_lease_heartbeat()
+            self.db.release_worker(job_id, self.worker_id, reason='saved_prefix_export_finished')
+            self.current_job_id, self._worker_claimed = prior_job, prior_claim
+
+    def _export_completed_job_impl(
+        self, job_id: str, output_path: Path | None = None, *,
+        output_format: str | None = None, bilingual_mode: str | None = None,
+        chapter_positions: list[int] | None = None, persist_job_output: bool = True,
+        saved_prefix: bool = False,
+    ) -> Path:
         job = self.db.get_job(job_id)
         if not job:
             raise ValueError(f"Job {job_id} not found.")
@@ -9368,10 +9407,19 @@ class TranslationPipeline:
         fmt = self.config.output.format.lower()
         if output_path is None:
             extension = _output_extension(fmt)
-            output_path = input_path.parent / f"{input_path.stem}_reexported.{extension}"
+            label = 'PARTIAL_REVIEW' if saved_prefix else 'reexported'
+            output_path = input_path.parent / f"{input_path.stem}_{label}.{extension}"
         else:
             output_path = Path(output_path)
 
+        if saved_prefix and (output_path.suffix.lower() != '.docx'
+                             or output_path.is_symlink()
+                             or output_path.resolve() == input_path.resolve()):
+            raise ValueError('Saved-prefix export requires a separate regular DOCX output path')
+        if saved_prefix and job.get('source_sha256'):
+            with input_path.open('rb') as source_stream:
+                if hashlib.file_digest(source_stream, 'sha256').hexdigest() != job['source_sha256']:
+                    raise ValueError('Saved-prefix export source file changed after job creation')
         structure_artifact = self.db.get_job_artifact(
             job_id, "document_structure_version"
         ) or {}
@@ -9380,10 +9428,37 @@ class TranslationPipeline:
             chapter_positions=chapter_positions,
             structure_version=int(structure_artifact.get("version", 1)),
         )
+        records = self.db.get_chunks(job_id)
+        total_chunks = len(chunks)
+        included_paragraphs: set[int] = set()
+        if saved_prefix:
+            from tarjomeh.jobs.saved_prefix import saved_prefix_count
+
+            count = saved_prefix_count(chunks, records)
+            identities = (self.db.get_job_artifact(job_id, 'canonical_chunk_paragraphs_v1') or {}).get('chunks', {})
+            by_index = {r['chunk_index']: r for r in records}
+            for chunk in chunks[:count]:
+                identity = identities.get(str(chunk.index), {})
+                indices = chunk.metadata.get('paragraph_indices')
+                target_units = _target_units_from_identity(by_index[chunk.index]['translation'], identity)
+                if (not isinstance(indices, list) or not indices
+                        or any(type(i) is not int or i < 0 or i >= len(document.all_paragraphs) for i in indices)
+                        or identity.get('paragraph_indices') != indices
+                        or identity.get('reconstructed') is not False
+                        or indices != sorted(set(indices))
+                        or identity.get('source_count') != len(indices)
+                        or identity.get('target_count') != len(indices)
+                        or identity.get('source_hashes') != [
+                            _candidate_text_hash(document.all_paragraphs[i].text) for i in indices]
+                        or target_units is None or len(target_units) != len(indices)):
+                    raise ValueError('Saved-prefix export requires exact saved paragraph identities')
+                included_paragraphs.update(indices)
+            chunks = chunks[:count]
         translations: dict[int, str] = {}
-        for c_record in self.db.get_chunks(job_id):
+        for c_record in records:
             if c_record["status"] in (ChunkStatus.COMPLETED, ChunkStatus.NEEDS_REVIEW) and c_record.get("translation"):
-                translations[int(c_record["chunk_index"])] = c_record["translation"]
+                if not saved_prefix or c_record['chunk_index'] < len(chunks):
+                    translations[int(c_record["chunk_index"])] = c_record["translation"]
 
         missing = [idx for idx in range(len(chunks)) if not translations.get(idx, "").strip()]
         if missing:
@@ -9395,9 +9470,17 @@ class TranslationPipeline:
         trans_doc = self._assemble_translated_document(
             document, chunks, translations, job_id=job_id
         )
-        _save_canonical_document_identity(
-            self.db, job_id, trans_doc, chunks, translations
-        )
+        if saved_prefix:
+            trans_doc.paragraphs = [p for p in trans_doc.paragraphs if p.index in included_paragraphs]
+            trans_doc.metadata['saved_prefix_export'] = {
+                'finished_chunks': len(chunks), 'total_selected_chunks': total_chunks,
+                'label': 'PARTIAL / REVIEW',
+            }
+            canonical_identity = audit_canonical_document_identity(trans_doc, chunks, translations)
+            if not canonical_identity['lexically_identical']:
+                raise RuntimeError('Export blocked: saved-prefix canonical assembly differs')
+        else:
+            _save_canonical_document_identity(self.db, job_id, trans_doc, chunks, translations)
         render_ledger = RenderChangeLedger(trans_doc)
         protocol_audit = render_ledger.step(
             "protocol_sanitation", sanitize_document_protocol_artifacts
@@ -9632,7 +9715,14 @@ class TranslationPipeline:
         self._export_with_render_identity(
             job_id, trans_doc, exporter, output_path, render_ledger, fmt
         )
-        if persist_job_output:
+        if saved_prefix:
+            self.db.publish_saved_prefix(
+                job_id, self.worker_id, output_path, canonical_identity,
+                total_selected_chunks=total_chunks,
+                output_sha256=hashlib.sha256(output_path.read_bytes()).hexdigest(),
+                output_bytes=output_path.stat().st_size,
+            )
+        elif persist_job_output:
             self.db.update_job_status(
                 job_id,
                 job.get("raw_status", job["status"]),

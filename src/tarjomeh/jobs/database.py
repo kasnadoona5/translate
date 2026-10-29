@@ -702,6 +702,7 @@ class JobDatabase:
         worker_id: str,
         *,
         stale_after_seconds: float = 180.0,
+        allow_stale_reclaim: bool = True,
     ) -> dict[str, Any]:
         """Atomically claim a durable job-worker lease across processes."""
         now = datetime.utcnow()
@@ -722,7 +723,7 @@ class JobDatabase:
                     stale = (now - heartbeat).total_seconds() > stale_after_seconds
                 except (TypeError, ValueError):
                     stale = True
-            if active and str(row["worker_id"]) != worker_id and not stale:
+            if active and str(row["worker_id"]) != worker_id and (not stale or not allow_stale_reclaim):
                 self._log_worker_lifecycle(
                     conn,
                     job_id,
@@ -1690,6 +1691,55 @@ class JobDatabase:
                     _write_checkpoint_state(
                         conn, job_id, checkpoint_state, timestamp
                     )
+            conn.commit()
+
+    def publish_saved_prefix(
+        self, job_id: str, worker_id: str, output_path: Path,
+        canonical_identity: dict[str, Any], *, total_selected_chunks: int,
+        output_sha256: str, output_bytes: int,
+    ) -> None:
+        """Record a proved review publication without advancing chapter/job state."""
+        timestamp = datetime.utcnow().isoformat()
+        count = canonical_identity['persisted_chunk_count']
+        if not canonical_identity.get('lexically_identical') or not 0 < count <= total_selected_chunks:
+            raise ValueError('Invalid saved-prefix publication identity')
+        with self._get_connection() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            job = conn.execute('SELECT status FROM jobs WHERE id=?', (job_id,)).fetchone()
+            lease = conn.execute('SELECT worker_id,state FROM job_workers WHERE job_id=?', (job_id,)).fetchone()
+            if (not job or job['status'] not in {'paused','paused_error','completed'}
+                    or not lease or lease['worker_id'] != worker_id or lease['state'] != 'active'):
+                raise RuntimeError('Saved-prefix publication lost its idle-job ownership')
+            rows = conn.execute('SELECT chunk_index,status,translation FROM chunks WHERE job_id=? ORDER BY chunk_index', (job_id,)).fetchall()
+            if (len(rows) != total_selected_chunks
+                    or [r['chunk_index'] for r in rows[:count]] != list(range(count))
+                    or any(r['status'] not in {'completed','needs_review'} or not (r['translation'] or '').strip() for r in rows[:count])
+                    or any(r['status'] in {'completed','needs_review'} for r in rows[count:])):
+                raise RuntimeError('Saved-prefix publication scope changed during export')
+            surface = re.sub(r'\s+', ' ', '\n\n'.join(r['translation'].strip() for r in rows[:count])).strip()
+            if hashlib.sha256(surface.encode('utf-8')).hexdigest() != canonical_identity.get('expected_hash'):
+                raise RuntimeError('Saved-prefix publication text changed during export')
+            publication = dict(
+                publication_kind='saved_prefix_review', state='published',
+                boundary_chunk_index=count-1, total_selected_chunks=total_selected_chunks,
+                published_at=timestamp, output_path=str(output_path),
+                output_sha256=output_sha256, output_bytes=output_bytes,
+                label='PARTIAL / REVIEW', semantic_accuracy='requires_source_based_human_review',
+            )
+            state = _checkpoint_state(conn, job_id)
+            state['publications'] = [*state.get('publications', []), publication]
+            state['latest_publication'] = publication
+            _write_checkpoint_state(conn, job_id, state, timestamp)
+            conn.execute(
+                'INSERT INTO job_artifacts (job_id,artifact_key,payload,updated_at) VALUES (?,?,?,?) '
+                'ON CONFLICT(job_id,artifact_key) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at',
+                (job_id, 'canonical_document_identity', json.dumps(canonical_identity, sort_keys=True), timestamp),
+            )
+            conn.execute('UPDATE jobs SET output_path=? WHERE id=?', (str(output_path), job_id))
+            conn.execute(
+                'INSERT INTO chunk_events (job_id,chunk_index,timestamp,event_type,payload) VALUES (?,?,?,?,?)',
+                (job_id, count-1, timestamp, 'saved_prefix_published', json.dumps(publication, sort_keys=True)),
+            )
             conn.commit()
 
     def save_pending_chapter_checkpoint(
