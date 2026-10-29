@@ -25,6 +25,50 @@ REVIEW_VERSION = 4
 _OCCURRENCE_KEYS = ("paragraph_index", "paragraph_sha256", "start", "end", "matched")
 
 
+def partition_book_term_proposals(
+    proposals: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Keep unattested proposals observable without giving them approval authority."""
+    from copy import deepcopy
+
+    actionable, withheld = [], []
+    for proposal in proposals:
+        item = deepcopy(proposal)
+        if item.get("source_count", 0):
+            actionable.append(item)
+        else:
+            item.update(status="withheld", authority="report_only_not_approval_evidence")
+            withheld.append(item)
+    return actionable, withheld
+
+
+def book_term_scope_failure(
+    scope_mode: str, positions: list[int], evidence_hash: str,
+    known: list[dict[str, Any]] | None, ticks: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Validate a new chapter restriction against already verified occurrences."""
+    if not positions:
+        return None
+    relevant = ticks if scope_mode == REVIEWED_OCCURRENCES else [
+        entry for entry in (known or []) if entry.get("paragraph_sha256") == evidence_hash
+    ]
+    chapters = sorted({entry["chapter_position"] for entry in relevant
+                       if type(entry.get("chapter_position")) is int})
+    permitted = set(positions)
+    valid = bool(relevant) and (
+        all(entry.get("chapter_position") in permitted for entry in relevant)
+        if scope_mode == REVIEWED_OCCURRENCES
+        else any(entry.get("chapter_position") in permitted for entry in relevant)
+    )
+    if valid:
+        return None
+    return {
+        "reason": ("scope_excludes_reviewed_occurrence" if scope_mode == REVIEWED_OCCURRENCES
+                   else "scope_excludes_evidence"),
+        "available_chapter_positions": chapters,
+    }
+
+
 _TATWEEL = chr(0x0640)
 _ZWNJ = chr(0x200C)
 
@@ -700,6 +744,15 @@ def book_term_review_evidence(
             item["presence"] == "lexically_present" for item in lexical
         ),
         "proposal_decisions": proposals, "scope_and_compliance_events": evidence_events,
+        "withheld_recording_status": (
+            "recorded" if isinstance(review.get("withheld_proposals"), list) else "not_recorded"
+        ),
+        "withheld_proposal_count": (
+            len(review["withheld_proposals"])
+            if isinstance(review.get("withheld_proposals"), list) else None
+        ),
+        "withheld_proposals": [item for item in (review.get("withheld_proposals") or [])
+                               if isinstance(item, dict)],
         "paragraph_term_presence": lexical,
         "nested_source_matches": nested_matches,
         "policy": (

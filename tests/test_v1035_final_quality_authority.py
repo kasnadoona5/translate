@@ -85,7 +85,7 @@ def test_equivalent_overlapping_review_issues_share_one_safe_edit() -> None:
     assert enriched[1]["commit_reason"] == "equivalent_duplicate_satisfied"
 
 
-def test_conflicting_overlapping_review_edits_still_fail_closed() -> None:
+def test_candidate_invalid_overlap_does_not_block_a_valid_edit() -> None:
     previous = "این نظریه دولت را می‌سازز و توضیح می‌دهد."
     issues = [
         {
@@ -111,10 +111,10 @@ def test_conflicting_overlapping_review_edits_still_fail_closed() -> None:
         decisions,
     )
 
-    assert final == previous
-    assert report["committed_count"] == 0
+    assert final == previous.replace("می‌سازز", "می‌سازد")
+    assert report["committed_count"] == 1
     assert {item["commit_reason"] for item in enriched} == {
-        "overlapping_local_span"
+        "coherent_local_edits_committed", "resulting_span_not_in_candidate"
     }
 
 

@@ -76,8 +76,28 @@ def narrow_release_reporting(
 
     critiques = []
     local_admissions = []
+    post_rollback_dispositions = []
+    contextual_contractions = []
+
+    def visit_contractions(value, event):
+        if isinstance(value, list):
+            for item in value:
+                visit_contractions(item, event)
+        elif isinstance(value, dict):
+            proof = value.get("contextual_contraction")
+            if isinstance(proof, dict):
+                row = dict(chunk_index=event.get("chunk_index"), event_type=event.get("event_type"),
+                           issue_id=value.get("issue_id"), commit_reason=value.get("commit_reason", value.get("reason")),
+                           proof=proof)
+                if row not in contextual_contractions:
+                    contextual_contractions.append(row)
+            for key, item in value.items():
+                if key != "contextual_contraction":
+                    visit_contractions(item, event)
+
     for event in events:
         payload = event.get("payload") or {}
+        visit_contractions(payload, event)
         if event.get("event_type") == "critique_completed":
             diagnostic = payload.get("diagnostic_evidence")
             critiques.append({
@@ -87,10 +107,19 @@ def narrow_release_reporting(
                 "availability": "recorded" if diagnostic is not None else "unavailable",
                 "diagnostic": diagnostic,
             })
+        if event.get("event_type") == "post_rollback_final_validation":
+            post_rollback_dispositions.append({
+                "chunk_index": event.get("chunk_index"),
+                "availability": "recorded" if "merged_source_review" in payload else "not_recorded",
+                "candidate_target_hash": payload.get("candidate_target_hash"),
+                "review_required": payload.get("review_required"),
+                "review_details": payload.get("review_details"),
+                "merged_source_review": payload.get("merged_source_review"),
+            })
         if event.get("event_type") == "refinement_completed":
             for decision in payload.get("issue_decisions", []) or []:
                 evidence = {key: decision.get(key) for key in (
-                    "coherent_term_admission", "term_admission",
+                    "coherent_term_admission", "term_admission", "contextual_contraction",
                 )}
                 local_admissions.append({
                     "chunk_index": event.get("chunk_index"),
@@ -110,6 +139,9 @@ def narrow_release_reporting(
         "critique_result_records": len(critiques),
         "critique_diagnostics": critiques,
         "local_term_admissions": local_admissions,
+        "post_rollback_dispositions": post_rollback_dispositions,
+        "contextual_contractions": contextual_contractions,
+        "contraction_evidence_absence": "not_recorded_or_not_exercised_not_a_failure",
         "nested_source_matches": term_evidence["nested_source_matches"],
         "term_authority": "mandatory_only_in_proven_paragraph; optional_elsewhere_has_no_penalty",
         "extra_final_counts": "subset_of_physical_attempts_not_additional",

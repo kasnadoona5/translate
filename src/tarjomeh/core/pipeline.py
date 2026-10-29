@@ -3304,6 +3304,71 @@ def _sentence_terminal_count(value: str) -> int:
     return len(re.findall(r"[.!?\u061f\u2026]", value))
 
 
+def _contextual_local_contraction(
+    *, source: str, previous: str, proposed: str, source_segment_id: str,
+    source_quote: str, current_span: str, resulting_span: str, category: str,
+) -> tuple[str, str, dict[str, Any]] | None:
+    """Prove a short addition-removal using identical adjacent paragraph text."""
+    if category.casefold() != "addition" or not source_quote or not resulting_span:
+        return None
+    if (_finite_predicate_evidence_count(current_span) > 0
+            and _finite_predicate_evidence_count(resulting_span) == 0):
+        return None
+    changes = [op for op in difflib.SequenceMatcher(
+        None, current_span, resulting_span, autojunk=False,
+    ).get_opcodes() if op[0] != "equal"]
+    if len(changes) != 1 or changes[0][0] != "delete":
+        return None
+    scoped = _paragraph_scoped_span_start(previous, source_segment_id, current_span)
+    before_parts, after_parts = previous.split("\n\n"), proposed.split("\n\n")
+    source_parts = source.split("\n\n")
+    if scoped is None or len(before_parts) != len(after_parts) or len(before_parts) != len(source_parts):
+        return None
+    _, paragraph = scoped
+    segment = re.fullmatch(r"p(\d+):s\d+", source_segment_id)
+    if segment is None or int(segment.group(1)) != paragraph + 1:
+        return None
+    if source_quote not in source_parts[paragraph]:
+        return None
+    before, after = before_parts[paragraph], after_parts[paragraph]
+    if after.count(resulting_span) != 1:
+        return None
+    start, result_start = before.index(current_span), after.index(resulting_span)
+    end, result_end = start + len(current_span), result_start + len(resulting_span)
+    windows = sorted(
+        (left + right, left, right)
+        for left in range(min(48, start) + 1)
+        for right in range(min(48, len(before) - end) + 1)
+        if (left or right)
+        and (not left or start - left == 0 or before[start - left - 1].isspace())
+        and (not right or end + right == len(before) or before[end + right].isspace())
+    )
+    for _, left, right in windows:
+        if result_start < left or result_end + right > len(after):
+            continue
+        prefix, suffix = before[start - left:start], before[end:end + right]
+        if after[result_start - left:result_start] != prefix or after[result_end:result_end + right] != suffix:
+            continue
+        old, new = prefix + current_span + suffix, prefix + resulting_span + suffix
+        if len(old) > 320 or len(new) > 480 or not 0.5 <= len(new) / len(old) <= 2.0:
+            continue
+        if _refinement_span_contract(
+            source, previous, proposed, source_segment_id, current_span, old, new,
+        ):
+            continue
+        return old, new, {
+            "original_span": current_span, "resulting_span": resulting_span,
+            "effective_original_span": old, "effective_resulting_span": new,
+            "left_context_chars": left, "right_context_chars": right,
+            "paragraph_index": paragraph,
+            "before_sha256": hashlib.sha256(previous.encode("utf-8")).hexdigest(),
+            "candidate_sha256": hashlib.sha256(proposed.encode("utf-8")).hexdigest(),
+            "source_paragraph_sha256": hashlib.sha256(source_parts[paragraph].encode("utf-8")).hexdigest(),
+            "proof": "single_deletion_with_identical_unchanged_paragraph_context",
+        }
+    return None
+
+
 def _salvage_local_refinement_edits(
     *,
     source: str,
@@ -3330,45 +3395,7 @@ def _salvage_local_refinement_edits(
     committed = 0
     comparison_proposed = apply_safe_persian_orthography(proposed)[0]
 
-    spans: dict[str, tuple[int, int]] = {}
     equivalent_to: dict[str, str] = {}
-    seen_edits: dict[tuple[int, int, str], str] = {}
-    for raw in issue_decisions:
-        if str(raw.get("decision", "")).strip().lower() not in {"accepted", "partially_applied"}:
-            continue
-        issue_id = str(raw.get("issue_id", "")).strip()
-        source_segment_id = str(
-            issues.get(issue_id, {}).get("source_segment_id", "")
-        ).strip()
-        current_span = str(
-            raw.get("original_span")
-            or issues.get(issue_id, {}).get("current_persian_quote", "")
-        ).strip()
-        scoped = _paragraph_scoped_span_start(
-            previous, source_segment_id, current_span
-        ) if current_span else None
-        if scoped is not None:
-            start, _paragraph = scoped
-            end = start + len(current_span)
-            normalized_result = apply_safe_persian_orthography(
-                str(raw.get("resulting_span", "")).strip()
-            )[0]
-            fingerprint = (start, end, normalized_result)
-            if normalized_result and fingerprint in seen_edits:
-                equivalent_to[issue_id] = seen_edits[fingerprint]
-            else:
-                spans[issue_id] = (start, end)
-                if normalized_result:
-                    seen_edits[fingerprint] = issue_id
-    overlapping_ids: set[str] = set()
-    ordered_spans = sorted(spans.items(), key=lambda item: item[1])
-    for position, (issue_id, (start, end)) in enumerate(ordered_spans):
-        for other_id, (other_start, other_end) in ordered_spans[position + 1:]:
-            if other_start >= end:
-                break
-            if start < other_end and other_start < end:
-                overlapping_ids.update({issue_id, other_id})
-
     sentence_terminal_count = _sentence_terminal_count
 
     prepared: list[dict[str, Any]] = []
@@ -3391,6 +3418,7 @@ def _salvage_local_refinement_edits(
             str(decision.get("resulting_span", "")).strip()
         )[0]
         contract_resulting_span = resulting_span
+        contextual_contraction = None
         surface_only = bool(
             current_span != resulting_span
             and re.sub(r"[\s\u200c]+", "", current_span)
@@ -3411,10 +3439,6 @@ def _salvage_local_refinement_edits(
             and not surface_only
         ):
             reason = "no_textual_change"
-        elif issue_id in equivalent_to:
-            reason = "equivalent_duplicate_issue"
-        elif issue_id in overlapping_ids:
-            reason = "overlapping_local_span"
         scoped = _paragraph_scoped_span_start(
             previous, source_segment_id, current_span
         ) if current_span else None
@@ -3425,7 +3449,14 @@ def _salvage_local_refinement_edits(
                 reason = "resulting_span_not_in_candidate"
             elif "\n\n" in current_span or "\n\n" in resulting_span:
                 reason = "paragraph_boundary_edit"
-            elif (
+        if not reason:
+            reason = _refinement_span_contract(
+                source, previous, comparison_proposed, source_segment_id,
+                str(issues.get(issue_id, {}).get("current_persian_quote", "")).strip(),
+                str(decision.get("original_span", "")).strip(), contract_resulting_span,
+            )
+        if not reason:
+            if (
                 len(current_span) > 320
                 or len(resulting_span) > 480
                 or not 0.5 <= len(resulting_span) / max(1, len(current_span)) <= 2.0
@@ -3438,6 +3469,16 @@ def _salvage_local_refinement_edits(
                     resulting_span=resulting_span,
                 )
                 if minimal is None:
+                    contextual = _contextual_local_contraction(
+                        source=source, previous=previous, proposed=comparison_proposed,
+                        source_segment_id=source_segment_id, source_quote=source_quote,
+                        current_span=current_span, resulting_span=resulting_span,
+                        category=str(issues.get(issue_id, {}).get("category", "")),
+                    )
+                    if contextual is not None:
+                        current_span, resulting_span, contextual_contraction = contextual
+                        minimal = (current_span, resulting_span)
+                if minimal is None:
                     reason = (
                         "edit_not_local"
                         if len(current_span) > 320 or len(resulting_span) > 480
@@ -3448,12 +3489,6 @@ def _salvage_local_refinement_edits(
                     scoped = _paragraph_scoped_span_start(
                         previous, source_segment_id, current_span
                     )
-        if not reason:
-            reason = _refinement_span_contract(
-                source, previous, comparison_proposed, source_segment_id,
-                str(issues.get(issue_id, {}).get("current_persian_quote", "")).strip(),
-                str(decision.get("original_span", "")).strip(), contract_resulting_span,
-            )
         item = {
             "order": order,
             "decision": decision,
@@ -3468,11 +3503,56 @@ def _salvage_local_refinement_edits(
             "reason": reason,
             "integrity": None,
             "committed": False,
+            "contextual_contraction": contextual_contraction,
+            "span_start": scoped[0] if scoped is not None else None,
+            "paragraph": scoped[1] if scoped is not None else None,
         }
         prepared.append(item)
-        if not reason:
-            _start, paragraph = cast(tuple[int, int], scoped)
-            paragraph_groups.setdefault(paragraph, []).append(item)
+
+    # Padding must not acquire veto authority over another otherwise valid edit.
+    eligible = [item for item in prepared if not item["reason"]]
+    for item in eligible:
+        if not item["contextual_contraction"]:
+            continue
+        start, end = int(item["span_start"]), int(item["span_start"]) + len(item["current_span"])
+        for other in eligible:
+            if other is item or (
+                other["span_start"] == start and other["current_span"] == item["current_span"]
+                and other["resulting_span"] == item["resulting_span"]
+            ):
+                continue
+            other_start = int(other["span_start"])
+            if start < other_start + len(other["current_span"]) and other_start < end:
+                item["reason"] = "contextual_contraction_overlaps_edit"
+                break
+    spans: dict[str, tuple[int, int]] = {}
+    seen_edits: dict[tuple[int, int, str], str] = {}
+    for item in prepared:
+        if item["reason"]:
+            continue
+        start = int(item["span_start"])
+        end = start + len(item["current_span"])
+        fingerprint = (start, end, str(item["resulting_span"]))
+        issue_id = str(item["issue_id"])
+        if fingerprint in seen_edits:
+            equivalent_to[issue_id] = seen_edits[fingerprint]
+            item["reason"] = "equivalent_duplicate_issue"
+        else:
+            spans[issue_id] = (start, end)
+            seen_edits[fingerprint] = issue_id
+    overlapping_ids: set[str] = set()
+    ordered_spans = sorted(spans.items(), key=lambda value: value[1])
+    for position, (issue_id, (start, end)) in enumerate(ordered_spans):
+        for other_id, (other_start, other_end) in ordered_spans[position + 1:]:
+            if other_start >= end:
+                break
+            if start < other_end:
+                overlapping_ids.update({issue_id, other_id})
+    for item in prepared:
+        if not item["reason"] and item["issue_id"] in overlapping_ids:
+            item["reason"] = "overlapping_local_span"
+        if not item["reason"]:
+            paragraph_groups.setdefault(int(item["paragraph"]), []).append(item)
 
     prepared_by_id = {
         str(item["issue_id"]): item for item in prepared
@@ -3696,9 +3776,15 @@ def _salvage_local_refinement_edits(
             dict[str, Any] | None, item["integrity"]
         )
         reason = str(item["reason"])
+        contextual = item["contextual_contraction"]
         decision.update({
             "raw_resulting_span": decision.get("resulting_span", ""),
-            "resulting_span": item["resulting_span"],
+            "resulting_span": (
+                contextual["resulting_span"]
+                if contextual and item["boundary_deduplication"] is None
+                else item["resulting_span"]
+            ),
+            "effective_resulting_span": item["resulting_span"],
             "boundary_deduplication": item["boundary_deduplication"],
             "commit_status": "committed_local" if was_committed else "not_committed",
             "integrity_status": (
@@ -3710,6 +3796,7 @@ def _salvage_local_refinement_edits(
             "equivalent_to_issue_id": duplicate_of,
             "term_admission": item.get("term_admission"),
             "coherent_term_admission": item.get("coherent_term_admission"),
+            "contextual_contraction": item["contextual_contraction"],
         })
         enriched.append(decision)
         attempts.append({
@@ -3726,6 +3813,7 @@ def _salvage_local_refinement_edits(
             "integrity": integrity_payload,
             "term_admission": item.get("term_admission"),
             "coherent_term_admission": item.get("coherent_term_admission"),
+            "contextual_contraction": item["contextual_contraction"],
         })
 
     return current, enriched, {
@@ -4330,6 +4418,26 @@ def _quality_issue_fingerprint(detail: dict[str, Any]) -> str:
         )
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
+def _post_rollback_review_evidence(
+    critique: Any, threshold: float, iteration: int, candidate: str,
+    review_required: bool, review_details: list[str],
+) -> dict[str, Any]:
+    """Persist merged retained-text evidence without rewriting the source call."""
+    details = list(review_details)
+    merged = None
+    if critique is not None:
+        merged = _critique_for_event(
+            critique, threshold, iteration, candidate_text=candidate,
+            candidate_stage="post_rollback_merged_validation",
+        )
+        if not getattr(critique, "valid", True) or _critique_requires_refinement(critique, threshold):
+            review_required = True
+            if "post_rollback_merged_review" not in details:
+                details.append("post_rollback_merged_review")
+    return dict(review_required=review_required, review_details=details,
+                merged_source_review=merged, candidate_target_hash=_candidate_text_hash(candidate))
 
 
 def _critique_for_event(
@@ -7831,12 +7939,15 @@ class TranslationPipeline:
                     {item.index: (item.text, item.metadata) for item in chunks},
                     review_version=REVIEW_VERSION,
                 )
-                proposals = [item for item in proposals if item.get("source_count", 0)]
+                from tarjomeh.glossary.book_review import partition_book_term_proposals
+
+                proposals, withheld_proposals = partition_book_term_proposals(proposals)
                 review = {
                     "phase": "awaiting",
                     "review_version": REVIEW_VERSION,
                     "source_sha256": self.db.get_job_source_hash(job_id),
                     "proposals": proposals,
+                    "withheld_proposals": withheld_proposals,
                 }
                 # Locations (no text) of every body paragraph, so the reviewer
                 # can list and verify each occurrence of any term.
@@ -12918,8 +13029,13 @@ class TranslationPipeline:
                         if post_critique is not None:
                             critique_rep = post_critique
                             final_critique_rep = post_critique
-                        post_validation["review_required"] = post_review_required
-                        post_validation["review_details"] = post_review_details
+                        merged_disposition = _post_rollback_review_evidence(
+                            post_critique, threshold, ref_iter, translation,
+                            post_review_required, post_review_details,
+                        )
+                        post_validation.update(merged_disposition)
+                        post_review_required = merged_disposition["review_required"]
+                        post_review_details = merged_disposition["review_details"]
                         self.db.log_chunk_event(
                             job_id,
                             idx,

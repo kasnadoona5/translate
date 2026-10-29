@@ -1097,6 +1097,24 @@ async function openBookTermReview(jobId) {
         }
         list.appendChild(row);
     });
+    const withheld = data.review.withheld_proposals;
+    if (Array.isArray(withheld) && withheld.length) {
+        const group = document.createElement("details");
+        group.className = "book-term-withheld";
+        const summary = document.createElement("summary");
+        summary.textContent = `Withheld proposals (${withheld.length})`;
+        group.appendChild(summary);
+        withheld.forEach(term => {
+            const item = document.createElement("p");
+            const name = document.createElement("strong");
+            name.textContent = term.source || "";
+            const reason = document.createElement("span");
+            reason.textContent = ` | ${term.evidence_unavailable_reason || "Evidence unavailable"}`;
+            item.append(name, reason);
+            group.appendChild(item);
+        });
+        list.appendChild(group);
+    }
     section.hidden = false;
     section.scrollIntoView({ behavior: "smooth", block: "start" });
 }

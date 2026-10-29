@@ -1223,3 +1223,13 @@ select {
         justify-content: flex-start;
     }
 }
+.book-term-withheld {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid #d5dfe0;
+    overflow-wrap: anywhere;
+}
+
+.book-term-withheld p {
+    margin: 8px 0;
+}

@@ -1350,7 +1350,7 @@ def _register_api(app: Flask) -> None:
             lines.append("")
         all_events = db.get_chunk_events(job_id)
         all_chunks = db.get_chunks(job_id)
-        from tarjomeh.core.evidence_audit import extra_final_refinement_evidence
+        from tarjomeh.core.evidence_audit import extra_final_refinement_evidence, narrow_release_reporting
         from tarjomeh.glossary.book_review import book_term_review_evidence
 
         term_evidence = book_term_review_evidence(
@@ -1371,6 +1371,19 @@ def _register_api(app: Flask) -> None:
             lines.append(
                 "  Nested source match (report only): " + json.dumps(item, ensure_ascii=False)
             )
+        lines.extend([
+            "Withheld Book-Term Proposals (report only; no approval authority):",
+            "  recording_status=" + term_evidence["withheld_recording_status"],
+            "  count=" + str(term_evidence["withheld_proposal_count"]),
+        ])
+        for item in term_evidence["withheld_proposals"]:
+            lines.append("  " + json.dumps(item, ensure_ascii=False))
+        lines.append("")
+        lines.extend([
+            "Bounded Local / Post-Rollback Evidence (recorded only):",
+            "  " + json.dumps(narrow_release_reporting(all_events, all_chunks), ensure_ascii=False),
+            "",
+        ])
         extra_evidence = extra_final_refinement_evidence(
             db.get_job_artifact(job_id, "extra_final_refinement_v1") or {},
             all_events, int(translation_config.get("extra_final_refine_attempts", 0)),
@@ -2645,7 +2658,7 @@ def _register_api(app: Flask) -> None:
                     return jsonify({"error": f"Curated glossary conflict: {source}"}), 409
                 positions = decision.get("chapter_positions", [])
                 if (not isinstance(positions, list)
-                        or any(not isinstance(value, int) or value < 1 for value in positions)):
+                        or any(type(value) is not int or value < 1 for value in positions)):
                     return jsonify({"error": "Invalid chapter positions"}), 400
                 scope_mode = str(
                     decision.get(
@@ -2709,6 +2722,18 @@ def _register_api(app: Flask) -> None:
                     or any(char not in "0123456789abcdef" for char in evidence_hash)
                 ):
                     return jsonify({"error": f"Missing source evidence for {source}"}), 409
+                if status == "approved" and positions:
+                    from tarjomeh.glossary.book_review import book_term_scope_failure
+
+                    scope_failure = book_term_scope_failure(
+                        scope_mode, positions, evidence_hash, term_occurrences(source),
+                        approved_occurrences,
+                    )
+                    if scope_failure:
+                        return jsonify({
+                            "error": f"Chapter selection excludes approval evidence for {source}",
+                            "index": index, **scope_failure,
+                        }), 409
                 item.update({
                     "status": status, "target": target if status == "approved" else "",
                     "keep_original": keep_original if status == "approved" else False,

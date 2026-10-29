@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v22.7"
+RUNTIME_RELEASE = "v22.8"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,11 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "context_proven_local_contraction": True,
+            "eligible_local_overlap_classification": True,
+            "merged_post_rollback_disposition": True,
+            "approval_evidence_chapter_consistency": True,
+            "withheld_book_proposal_reporting": True,
             "wrapped_note_marker_boundaries": True,
             "note_marker_evidence_precision": True,
             "retranslation_conflict_keyword_merge": True,
@@ -766,6 +771,78 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v225_behavior_probes(),
         **_v226_behavior_probes(),
         **_v227_behavior_probes(),
+        **_v228_behavior_probes(),
+    }
+
+
+def _v228_behavior_probes() -> dict[str, bool]:
+    """Exercise the five bounded fixes without providers, files or databases."""
+    from .core.pipeline import (
+        _contextual_local_contraction, _merge_readability_evidence,
+        _post_rollback_review_evidence, _salvage_local_refinement_edits,
+    )
+    from .glossary.book_review import (
+        book_term_review_evidence, book_term_scope_failure, partition_book_term_proposals,
+    )
+    from .quality.critique import CritiqueResult
+    from .quality.integrity import PostEditIntegrityGate
+
+    old, new = "به ثبت رسیده و احراز شده است.", "احراز شده است."
+    before = "حق نویسنده بر وفق قانون مصوب 1988 " + old
+    source = "The author's right has been asserted under the Act of 1988."
+    args = dict(source=source, previous=before, proposed=before.replace(old, new),
+                source_segment_id="p1:s1", source_quote="has been asserted",
+                current_span=old, resulting_span=new, category="addition")
+    contextual = _contextual_local_contraction(**args)
+    withheld = _contextual_local_contraction(**dict(args, source_quote="not in source"))
+    predicate = "شرح داده شده است"
+    predicate_before = "متن حاضر درست است " + predicate + " و ادامه دارد."
+    masked_predicate = _contextual_local_contraction(**dict(
+        args, previous=predicate_before, proposed=predicate_before.replace(predicate, "شرح"),
+        current_span=predicate, resulting_span="شرح",
+    ))
+    target = "آنها نهاد را می‌سازز و توضیح می‌دهند."
+    fixed = target.replace("می‌سازز", "می‌سازند")
+    issue = dict(issue_id="good", source_segment_id="p1:s1", source_quote="build and explain",
+                 category="fluency", severity="minor", confidence=0.5,
+                 current_persian_quote="می‌سازز", suggested_correction="می‌سازند")
+    decision = dict(issue_id="good", decision="accepted", resulting_span="می‌سازند")
+    noop = dict(issue, issue_id="noop")
+    text, decisions, report = _salvage_local_refinement_edits(
+        source="They build and explain the institution.", previous=target, proposed=fixed,
+        issue_details=[noop, issue], issue_decisions=[
+            dict(decision, issue_id="noop", resulting_span="می‌سازز"), decision,
+        ], integrity_gate=PostEditIntegrityGate(), protected_terms=[],
+        protect_inline_english=False, allowed_inline_originals=[],
+    )
+    critique = CritiqueResult(accuracy=9, fluency=9, terminology=9, register=9,
+                              average=9, issues=["verb"], issue_details=[dict(issue)])
+    _merge_readability_evidence(critique, [dict(issue, severity="major",
+        rationale="Malformed verb orthography in the Persian predicate.")],
+        source_text="They build and explain the institution.", translation=target)
+    merged = _post_rollback_review_evidence(critique, 9, 1, target, False, [])
+    prior = _post_rollback_review_evidence(None, 9, 1, target, True, ["prior"])
+    known = [dict(paragraph_sha256="hash", chapter_position=1)]
+    bad_scope = book_term_scope_failure("evidence_paragraph", [2], "hash", known, [])
+    bad_tick = book_term_scope_failure("reviewed_occurrences", [1], "hash", known,
+                                      [dict(chapter_position=1), dict(chapter_position=2)])
+    actionable, deferred = partition_book_term_proposals([
+        dict(source="present", source_count=1), dict(source="absent", source_count=0),
+    ])
+    terms = book_term_review_evidence(dict(proposals=actionable, withheld_proposals=deferred), [], [])
+    legacy = book_term_review_evidence({}, [], [])
+    return {
+        "context_proven_local_contraction": contextual is not None and withheld is None and masked_predicate is None
+            and contextual[0].replace(old, new, 1) == contextual[1],
+        "eligible_local_overlap_classification": text == fixed and report["committed_count"] == 1
+            and decisions[0]["commit_reason"] == "no_textual_change",
+        "merged_post_rollback_disposition": merged["review_required"]
+            and merged["merged_source_review"]["force_refinement"] and prior["review_required"],
+        "approval_evidence_chapter_consistency": bad_scope is not None and bad_tick is not None
+            and book_term_scope_failure("evidence_paragraph", [1], "hash", known, []) is None,
+        "withheld_book_proposal_reporting": len(actionable) == len(deferred) == 1
+            and deferred[0]["status"] == "withheld" and terms["withheld_proposal_count"] == 1
+            and terms["approved_proposal_count"] == 0 and legacy["withheld_proposal_count"] is None,
     }
 
 
