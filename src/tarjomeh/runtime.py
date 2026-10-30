@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v22.10"
+RUNTIME_RELEASE = "v22.11"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,9 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "position_scoped_note_resolution": True,
+            "geometry_scoped_note_reporting": True,
+            "structured_note_rejection_reporting": True,
             "geometry_bound_note_admission": True,
             "grouped_integer_spacing": True,
             "approved_canonical_text_revision": True,
@@ -778,6 +781,39 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v228_behavior_probes(),
         **_v229_behavior_probes(),
         **_v2210_behavior_probes(),
+        **_v2211_behavior_probes(),
+    }
+
+
+def _v2211_behavior_probes() -> dict[str, bool]:
+    """Exercise actual cue/report producers without I/O or model requests."""
+    from tarjomeh.quality.note_evidence import paragraph_note_evidence, revision_audit_evidence
+    from tarjomeh.quality.integrity import PostEditIntegrityGate
+    from tarjomeh.exporters.docx_exporter import source_superscript_spans
+    from tarjomeh.core.evidence_audit import quality_safeguard_evidence
+
+    source = "1 a hypothetical2 claim; 2 a provisional3 argument; 3 another view."
+    target = "(\u06f1) \u0627\u062f\u0639\u0627\u06cc \u0641\u0631\u0636\u06cc \u06f2\u061b (\u06f2) \u0627\u0633\u062a\u062f\u0644\u0627\u0644 \u0645\u0648\u0642\u062a \u06f3\u061b (\u06f3) \u062f\u06cc\u062f\u06af\u0627\u0647\u06cc \u062f\u06cc\u06af\u0631."
+    metadata = {"superscript_markers": [{"text": digit, "offset": source.index(digit),
+        "context_before": source[max(0, source.index(digit) - 24):source.index(digit)],
+        "context_after": source[source.index(digit) + 1:source.index(digit) + 25]} for digit in ("2", "3")]}
+    proof = paragraph_note_evidence(source, metadata)
+    gate = PostEditIntegrityGate(note_evidence=proof)
+    faithful = gate.evaluate(source, target)
+    missing = target.replace("\u0641\u0631\u0636\u06cc \u06f2", "\u0641\u0631\u0636\u06cc")
+    chunk = dict(chunk_index=0, status="needs_review", text=source, translation=missing,
+                 metadata={"source_note_evidence_v1": proof})
+    report = quality_safeguard_evidence({}, {}, {}, [chunk], [], {})["current_note_cue_evaluation"][0]
+    event = dict(event_type="extra_final_refinement_completed", payload={"accepted": False,
+        "integrity": {"accepted": False, "findings": [{"check_id": "note_markers_missing"}]}})
+    rejected = revision_audit_evidence([event, event], {})["rejected_repairs"]
+    return {
+        "position_scoped_note_resolution": bool(faithful.accepted
+            and len(source_superscript_spans(target, metadata, source)) == 2
+            and any(item.check_id == "note_markers_missing" for item in gate.evaluate(source, missing).blocking)),
+        "geometry_scoped_note_reporting": bool(report["evidence_scope"] == "verified_source_geometry"
+                                                and report["missing"] == ["2"]),
+        "structured_note_rejection_reporting": rejected == [event],
     }
 
 

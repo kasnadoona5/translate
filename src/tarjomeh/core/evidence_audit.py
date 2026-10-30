@@ -744,15 +744,25 @@ def quality_safeguard_evidence(
         if not source or not target or chunk.get("status") not in {"completed", "needs_review"}:
             continue
         metadata = chunk.get("metadata") or {}
+        if isinstance(metadata, str):
+            metadata = json.loads(metadata)
+        proof = metadata.get("source_note_evidence_v1")
+        scope = "verified_source_geometry" if proof is not None else "text_only_geometry_unavailable"
+        reason = ""
+        try:
+            inventory = source_note_cue_inventory(source, target, note_evidence=proof)
+        except (ValueError, KeyError, TypeError) as exc:
+            inventory = source_note_cue_inventory(source, target)
+            scope, reason = "text_only_geometry_rejected", str(exc)
         note_cues.append({
             "chunk_index": chunk["chunk_index"],
             "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
             "target_sha256": hashlib.sha256(target.encode("utf-8")).hexdigest(),
-            **source_note_cue_inventory(source, target),
+            **inventory,
+            "evidence_scope": scope,
+            "geometry_unavailable_reason": reason,
             "authority": "current_policy_evaluation_not_historical_rewrite",
         })
-        if isinstance(metadata, str):
-            metadata = json.loads(metadata)
         context = {
             "authorized": {
                 name: value

@@ -95,12 +95,14 @@ def source_superscript_spans(
     """
     from tarjomeh.parsers.pdf_parser import locate_source_marker
     from tarjomeh.quality.integrity import source_note_cue_inventory
-    from tarjomeh.quality.note_evidence import paragraph_note_evidence
+    from tarjomeh.quality.note_evidence import paragraph_note_evidence, geometry_plain_target_cues
 
     records = metadata.get("superscript_markers", []) or []
     if not isinstance(records, list):
         return []
     selected: list[tuple[int, int]] = []
+    evidence = paragraph_note_evidence(source_text, metadata) if source_text else None
+    resolved = geometry_plain_target_cues(source_text, text or "", evidence) if evidence else []
     for record in records:
         if not isinstance(record, dict):
             continue
@@ -121,6 +123,14 @@ def source_superscript_spans(
                 item["marker"] == normalized and "unicode_superscript" in item["representations"]
                 for item in inventory["occurrences"]
             ):
+                continue
+            # New medial geometry cases use exactly the admission resolver.
+            # Old punctuation-confirmed notes retain their established policy.
+            from tarjomeh.quality.integrity import extract_note_markers
+
+            if normalized not in extract_note_markers(source_text):
+                selected.extend((cue["start"], cue["end"]) for cue in resolved
+                                if cue["marker"] == normalized and (cue["start"], cue["end"]) not in selected)
                 continue
         if normalized.isdigit():
             pattern = "".join(

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+import unicodedata
 from copy import deepcopy
 from typing import Any
 
@@ -138,6 +140,14 @@ def scoped_note_evidence(source: str, original: str, evidence: dict | None) -> d
 
 def revision_audit_evidence(events: list, artifacts: dict) -> dict:
     """Report recorded proofs without fabricating historical note admission."""
+    rejected, seen = [], set()
+    for event in events:
+        if not _rejected_note_finding(event.get("payload")):
+            continue
+        identity = json.dumps(event, sort_keys=True, ensure_ascii=False)
+        if identity not in seen:
+            rejected.append(event)
+            seen.add(identity)
     return {
         "source_note_admissions": [
             {"chunk_index": event.get("chunk_index"), "stage": event.get("payload", {}).get("stage"),
@@ -145,8 +155,7 @@ def revision_audit_evidence(events: list, artifacts: dict) -> dict:
             for event in events if isinstance(event.get("payload"), dict)
             and event["payload"].get("source_note_evidence") is not None
         ],
-        "rejected_repairs": [event for event in events
-            if "reject" in event.get("event_type", "") and "note_marker" in str(event.get("payload", {}))],
+        "rejected_repairs": rejected,
         "delivered_note_cues": artifacts.get("render_identity_audit", {}).get("delivered", {}).get("source_note_cues"),
         "text_revision_receipts": [
             {key: value.get(key) for key in ("status", "revision_id", "reviewer", "after_snapshot_sha256", "publication")}
@@ -160,48 +169,117 @@ def revision_audit_evidence(events: list, artifacts: dict) -> dict:
     }
 
 
-def geometry_plain_target_cues(source: str, target: str, evidence: dict) -> list[dict]:
-    """Recognize an existing unique plain cue, never insert or move a digit.
+def _rejected_note_finding(value: Any, rejected: bool = False) -> bool:
+    if isinstance(value, dict):
+        rejected = rejected or value.get("accepted") is False or value.get("committed") is False
+        if (rejected and value.get("severity", "blocking") == "blocking"
+                and value.get("check_id") in {"note_markers_missing", "note_markers_surplus"}):
+            return True
+        return any(_rejected_note_finding(item, rejected) for item in value.values())
+    return isinstance(value, list) and any(_rejected_note_finding(item, rejected) for item in value)
 
-    A source quantity with the same value, multiple target candidates, a label,
-    formula or a leading quantity defeats this proof. Rich cues remain handled
-    by the inventory's existing physical-span deduplication.
+
+_CARDINAL_WORDS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+                  "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
+                  "seventeen", "eighteen", "nineteen", "twenty")
+_ORDINAL_WORDS = ("zeroth", "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth",
+                 "tenth", "eleventh", "twelfth", "thirteenth", "fourteenth", "fifteenth", "sixteenth",
+                 "seventeenth", "eighteenth", "nineteenth", "twentieth")
+
+
+def _ordinary_number_count(text: str, value: int) -> int | None:
+    from tarjomeh.quality.integrity import extract_numbers, _persian_cardinal, _persian_number_forms
+
+    count = extract_numbers(text)[str(value)]
+    if value < len(_CARDINAL_WORDS):
+        count += len(re.findall(rf"\b(?:{_CARDINAL_WORDS[value]}|{_ORDINAL_WORDS[value]})\b", text, re.IGNORECASE))
+    elif re.search(r"\b(?:" + "|".join(_CARDINAL_WORDS + _ORDINAL_WORDS)
+                   + r"|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion)\b", text, re.IGNORECASE):
+        # Do not invent a compound English word-number parser. An unresolved
+        # quantity defeats plain-cue proof; explicit superscripts still work.
+        return None
+    forms = _persian_number_forms(value)
+    # Bare Persian nine/ten also mean "no"/"give"; they cannot prove quantity.
+    if value in {9, 10}:
+        forms.discard(_persian_cardinal(value))
+    words = "|".join(re.escape(form) for form in sorted(forms, key=len, reverse=True))
+    if words:
+        count += len(re.findall(rf"(?<![\w\u200c])(?:{words})(?:[ \t\u200c]*\u062a\u0627\u06cc?)?(?![\w\u200c])", text))
+    return count
+
+
+def _masked(text: str, spans: list[tuple[int, int]]) -> str:
+    for start, end in sorted(spans, reverse=True):
+        text = text[:start] + " " * (end - start) + text[end:]
+    return text
+
+
+def _target_reference_label(before: str) -> str:
+    from tarjomeh.quality.integrity import _structural_aliases
+
+    aliases = _structural_aliases()
+    labels = "|".join(re.escape(label) for label in sorted(aliases, key=len, reverse=True))
+    match = re.search(rf"(?<!\w)(?P<label>{labels})(?:s|\u200c?\u0647\u0627\u06cc?)?\.?\s*$",
+                      _without_marks(before), re.IGNORECASE)
+    return aliases[match.group("label").casefold()] if match else ""
+
+
+def _without_marks(text: str) -> str:
+    return "".join(char for char in text if not unicodedata.combining(char))
+
+
+def geometry_plain_target_cues(source: str, target: str, evidence: dict) -> list[dict]:
+    """Resolve existing physical cues identically for admission and rendering.
+
+    Non-note quantities must remain independently accounted for after the proven
+    cue is masked. Parenthesized labels never supply a missing medial note.
+    No source/target paragraph alignment or insertion position is inferred.
     """
     from collections import Counter
-    from tarjomeh.quality.integrity import _structural_label, extract_numbers
+    from tarjomeh.quality.integrity import _structural_label, _number_occurrences
 
     cues = verified_note_cues(source, evidence)
     counts = Counter(cue["marker"] for cue in cues)
-    ordinary_source = source
-    for cue in sorted(cues, key=lambda item: item["start"], reverse=True):
-        ordinary_source = ordinary_source[:cue["start"]] + ordinary_source[cue["end"]:]
-    numbers = extract_numbers(ordinary_source)
-    cardinal = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
-                "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
-                "seventeen", "eighteen", "nineteen", "twenty")
-    ordinal = ("zeroth", "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth",
-               "tenth", "eleventh", "twelfth", "thirteenth", "fourteenth", "fifteenth", "sixteenth",
-               "seventeenth", "eighteenth", "nineteenth", "twentieth")
+    ordinary_source = _masked(source, [(cue["start"], cue["end"]) for cue in cues])
+    source_references = Counter((item.value, item.label) for item in _number_occurrences(ordinary_source)
+                                if item.role == "structural") if cues else Counter()
     result = []
     normalized = target.translate(_DIGITS)
     for marker, count in counts.items():
         value = int(marker)
-        if count != 1 or numbers[marker] or value >= len(cardinal):
+        if count != 1:
             continue
-        if re.search(rf"\b(?:{cardinal[value]}|{ordinal[value]})\b", ordinary_source, re.IGNORECASE):
-            continue
-        matches = list(re.finditer(rf"(?<!\d){re.escape(marker)}(?!\d)", normalized))
+        matches = [match for match in re.finditer(rf"(?<!\d){re.escape(marker)}(?!\d)", normalized)
+                   if target[:match.start()].count("(") == target[:match.start()].count(")")
+                   and target[:match.start()].count("[") == target[:match.start()].count("]")]
+        references = {match.span(): _target_reference_label(target[:match.start()]) for match in matches}
+        reference_counts = Counter(label for label in references.values() if label)
+        # Exclude a competing chapter/table/page digit only when the source
+        # independently contains enough references of that same role and value.
+        matches = [match for match in matches if not (
+            (label := references[match.span()]) and source_references[marker, label] >= reference_counts[label])]
         if len(matches) != 1:
             continue
         match = matches[0]
         before, after = target[:match.start()], target[match.end():]
         decimal_tail = len(after) > 1 and after[0] in ".\u066b" and after[1].isdecimal()
-        if (not re.search(r"[^\W\d_]{2,}$", before, re.UNICODE)
+        stem = re.search(r"[^\W\d_]{2,}$", _without_marks(before).rstrip(" \t\u00a0"), re.UNICODE)
+        if (not stem
                 or (after and after[0].isalnum()) or decimal_tail
-                or _structural_label(before[-80:], after[:80])
-                or re.search(r"[=+*/^]\s*\S*$", before)
+                or _structural_label(_without_marks(before[-80:]), _without_marks(after[:80]))
+                or re.search(r"[=+*/^]\s*\S*$", before.rstrip(" \t\u00a0"))
                 or before.count("(") != before.count(")")
                 or before.count("[") != before.count("]")):
+            continue
+        if stem.group().isascii():
+            source_stems = [re.search(r"[^\W\d_]+$", source[:cue["start"]].rstrip(), re.UNICODE)
+                            for cue in cues if cue["marker"] == marker]
+            if not any(item and item.group().casefold() == stem.group().casefold() for item in source_stems):
+                continue
+        ordinary_target = _masked(target, [match.span()])
+        source_count = _ordinary_number_count(ordinary_source, value)
+        target_count = _ordinary_number_count(ordinary_target, value)
+        if source_count is None or target_count is None or source_count > target_count:
             continue
         result.append({"start": match.start(), "end": match.end(), "marker": marker})
     return result
