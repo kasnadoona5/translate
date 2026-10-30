@@ -661,16 +661,31 @@ def _delivered_note_cue_evidence(
     expected: list[dict[str, Any]],
     actual: list[dict[str, Any]],
     bilingual_mode: str,
+    canonical_texts: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Check target cues only, excluding explicitly generated terminology notes."""
     from tarjomeh.exporters.term_notes import paragraph_note_parts
     from tarjomeh.quality.integrity import extract_note_markers, source_note_cue_inventory
+    from tarjomeh.quality.note_evidence import paragraph_note_evidence
 
     evidence = []
+    canonical_by_identity = {
+        id(paragraph): text for paragraph, text in zip(document.paragraphs, canonical_texts, strict=True)
+    } if canonical_texts is not None else {}
 
     def inspect(paragraph: TranslatedParagraph, text: str, spans: list) -> None:
-        if not extract_note_markers(paragraph.source_text):
+        source = paragraph.source_text
+        note_evidence = paragraph_note_evidence(source, paragraph.metadata)
+        required = Counter(extract_note_markers(source, note_evidence=note_evidence))
+        if not required:
             return
+        old_required = Counter(extract_note_markers(source))
+        canonical_text = canonical_by_identity.get(id(paragraph), paragraph.translated_text)
+        canonical = source_note_cue_inventory(source, canonical_text, note_evidence=note_evidence)
+        # Only newly recognized geometry-only omissions already in canonical text
+        # are review-only. Losing a canonical cue or any old enforced cue is fatal.
+        legacy_missing = ((required - old_required)
+                          & (required - Counter(canonical["available"])))
         generated = []
         cursor = 0
         for segment, ref in paragraph_note_parts(paragraph.translated_text, paragraph.metadata):
@@ -684,12 +699,17 @@ def _delivered_note_cue_evidence(
             text,
             styled_spans=spans,
             excluded_spans=generated,
+            note_evidence=note_evidence,
         )
         evidence.append(
             {
                 "paragraph_index": paragraph.index,
                 **inventory,
-                "passed": not inventory["missing"] and not inventory["surplus"],
+                **({
+                    "legacy_source_fidelity_missing": list(legacy_missing.elements()),
+                    "source_fidelity_status": "REVIEW" if inventory["missing"] else "cues_present_not_semantic_certification",
+                } if required - old_required else {}),
+                "passed": not (Counter(inventory["missing"]) - legacy_missing) and not inventory["surplus"],
             }
         )
 
@@ -773,6 +793,7 @@ def compare_docx_to_rendered(
     document: TranslatedDocument,
     path: Path,
     bilingual_mode: str,
+    *, canonical_texts: list[str] | None = None,
 ) -> dict[str, Any]:
     """Compare the written DOCX with the rendered document unit by unit."""
     expected = expected_delivered_units(document, bilingual_mode)
@@ -805,7 +826,9 @@ def compare_docx_to_rendered(
         })
         if len(mismatches) >= 20:
             break
-    note_evidence = _delivered_note_cue_evidence(document, expected, actual, bilingual_mode)
+    note_evidence = _delivered_note_cue_evidence(
+        document, expected, actual, bilingual_mode, canonical_texts,
+    )
     return {
         "mapping": f"exporter_{bilingual_mode}",
         "verified": True,

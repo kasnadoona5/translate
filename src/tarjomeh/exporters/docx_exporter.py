@@ -95,6 +95,7 @@ def source_superscript_spans(
     """
     from tarjomeh.parsers.pdf_parser import locate_source_marker
     from tarjomeh.quality.integrity import source_note_cue_inventory
+    from tarjomeh.quality.note_evidence import paragraph_note_evidence
 
     records = metadata.get("superscript_markers", []) or []
     if not isinstance(records, list):
@@ -108,7 +109,10 @@ def source_superscript_spans(
             continue
         normalized = raw.translate(_DIGIT_TO_ASCII)
         if source_text and normalized.isdigit():
-            inventory = source_note_cue_inventory(source_text, text or "")
+            inventory = source_note_cue_inventory(
+                source_text, text or "",
+                note_evidence=paragraph_note_evidence(source_text, metadata),
+            )
             if inventory["available"].get(normalized, 0) > inventory["required"].get(normalized, 0):
                 continue
             # A Unicode superscript already renders the cue; do not also style

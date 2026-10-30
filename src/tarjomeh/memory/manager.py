@@ -2123,6 +2123,7 @@ class MemoryManager:
         )
         if any(isinstance(item, dict) and (
             "reviewed_revision" in item or "summary_revision_rollback" in item
+            or "reviewed_text_continuity" in item
         ) for item in self.summary_history):
             self._queue_summary_coverage()
         self._verify_legacy_style_records()

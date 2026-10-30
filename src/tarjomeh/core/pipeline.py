@@ -105,6 +105,7 @@ from tarjomeh.quality.critique import TranslationCritique
 from tarjomeh.quality.refiner import TranslationRefiner
 from tarjomeh.quality.back_translator import BackTranslator
 from tarjomeh.quality.structure_audit import audit_payload
+from tarjomeh.quality.note_evidence import attach_chunk_note_evidence
 from tarjomeh.quality.integrity import (
     PostEditIntegrityGate,
     extract_identifiers,
@@ -192,10 +193,11 @@ def _previous_context_reference(
 def _restore_source_bound_artifacts(
     source: str,
     translation: str,
+    *, note_evidence: dict | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Canonicalize exact identifiers and uniquely proven note markers."""
     repaired, identifier_report = restore_source_identifiers(source, translation)
-    repaired, note_report = restore_source_note_markers(source, repaired)
+    repaired, note_report = restore_source_note_markers(source, repaired, note_evidence=note_evidence)
     report = dict(identifier_report)
     report["identifier_repair_count"] = int(
         identifier_report.get("repair_count", 0) or 0
@@ -7564,6 +7566,7 @@ class TranslationPipeline:
             chunks = chunker.chunk(document)
             self.db.save_chunks(job_id, chunks)
 
+        attach_chunk_note_evidence(document, chunks)
         structure_audit = research_document.metadata.get(
             "pdf_structure_audit"
         )
@@ -9311,7 +9314,8 @@ class TranslationPipeline:
             render_audit = render_ledger.audit()
             if str(output_format).lower() == "docx":
                 delivered_audit = compare_docx_to_rendered(
-                    trans_doc, temporary, bilingual_mode
+                    trans_doc, temporary, bilingual_mode,
+                    canonical_texts=render_ledger.canonical,
                 )
             else:
                 delivered_audit = {
@@ -9930,6 +9934,8 @@ class TranslationPipeline:
             and previous_translation.strip()
         ):
             manual_gate = PostEditIntegrityGate(
+                note_evidence=chunks[chunk_index].metadata.get("source_note_evidence_v1"),
+                note_source=chunks[chunk_index].text,
                 min_retention_ratio=getattr(
                     self.config.translation, "integrity_min_retention_ratio", 0.65
                 ),
@@ -10101,7 +10107,9 @@ class TranslationPipeline:
             normalize_citation_house_style_text(canonical)
         )
         canonical, final_source_artifact_report = (
-            _restore_source_bound_artifacts(chunk.text, canonical)
+            _restore_source_bound_artifacts(
+                chunk.text, canonical, note_evidence=chunk.metadata.get("source_note_evidence_v1"),
+            )
         )
         canonical, proven_surface_edits = repair_proven_surface_artifacts(
             chunk.text,
@@ -10120,7 +10128,9 @@ class TranslationPipeline:
             proven_surface_edits = []
             citation_house_style_changes = []
             canonical, final_source_artifact_report = (
-                _restore_source_bound_artifacts(chunk.text, canonical)
+                _restore_source_bound_artifacts(
+                    chunk.text, canonical, note_evidence=chunk.metadata.get("source_note_evidence_v1"),
+                )
             )
         missing_identifiers = extract_identifiers(chunk.text) - extract_identifiers(
             canonical
@@ -10422,7 +10432,9 @@ class TranslationPipeline:
                 max_tokens=self.config.chunking.max_chunk_tokens,
                 token_counter=token_counter,
             )
-        return document, chunker.chunk(document)
+        chunks = chunker.chunk(document)
+        attach_chunk_note_evidence(document, chunks)
+        return document, chunks
 
     def _assemble_translated_document(
         self,
@@ -11189,6 +11201,8 @@ class TranslationPipeline:
             getattr(self.config.translation, "enable_integrity_gate", True)
         )
         integrity_gate = PostEditIntegrityGate(
+            note_evidence=chunk.metadata.get("source_note_evidence_v1"),
+            note_source=chunk.text,
             paragraph_originals=[item for item in reviewed_matches if item.get("original_policy")],
             min_retention_ratio=getattr(
                 self.config.translation, "integrity_min_retention_ratio", 0.65
@@ -12040,7 +12054,8 @@ class TranslationPipeline:
             log_recovery_protocol("adaptive_recovery_assembly", translation)
 
             translation, identifier_repairs = _restore_source_bound_artifacts(
-                chunk.text, translation
+                chunk.text, translation,
+                note_evidence=chunk.metadata.get("source_note_evidence_v1"),
             )
             if identifier_repairs["repair_count"]:
                 self.db.log_chunk_event(
@@ -12077,7 +12092,8 @@ class TranslationPipeline:
                         "adaptive_recovery_strict_assembly", translation
                     )
                     translation, identifier_repairs = _restore_source_bound_artifacts(
-                        chunk.text, translation
+                        chunk.text, translation,
+                        note_evidence=chunk.metadata.get("source_note_evidence_v1"),
                     )
                     if identifier_repairs["repair_count"]:
                         self.db.log_chunk_event(
@@ -12113,7 +12129,8 @@ class TranslationPipeline:
             translation
         )
         translation, identifier_repairs = _restore_source_bound_artifacts(
-            chunk.text, translation
+            chunk.text, translation,
+            note_evidence=chunk.metadata.get("source_note_evidence_v1"),
         )
         if identifier_repairs["repair_count"]:
             self.db.log_chunk_event(
@@ -12266,7 +12283,8 @@ class TranslationPipeline:
                         )
                         repaired_translation, repair_identifiers = (
                             _restore_source_bound_artifacts(
-                                chunk.text, repaired_translation
+                                chunk.text, repaired_translation,
+                                note_evidence=chunk.metadata.get("source_note_evidence_v1"),
                             )
                         )
                         try:
@@ -13533,7 +13551,10 @@ class TranslationPipeline:
                     apply_safe_persian_orthography(proposed_translation)
                 )
                 proposed_translation, refinement_identifier_repairs = (
-                    _restore_source_bound_artifacts(chunk.text, proposed_translation)
+                    _restore_source_bound_artifacts(
+                        chunk.text, proposed_translation,
+                        note_evidence=chunk.metadata.get("source_note_evidence_v1"),
+                    )
                 )
                 if refinement_identifier_repairs["repair_count"]:
                     self.db.log_chunk_event(
@@ -14164,7 +14185,8 @@ Output ONLY the corrected Persian translation.
 
         if integrity_enabled:
             translation, identifier_repairs = _restore_source_bound_artifacts(
-                chunk.text, translation
+                chunk.text, translation,
+                note_evidence=chunk.metadata.get("source_note_evidence_v1"),
             )
             if identifier_repairs["repair_count"]:
                 self.db.log_chunk_event(
@@ -14465,7 +14487,10 @@ Output ONLY the corrected Persian translation.
             )
         )
         language_candidate, source_bound_repairs = (
-            _restore_source_bound_artifacts(chunk.text, language_candidate)
+            _restore_source_bound_artifacts(
+                chunk.text, language_candidate,
+                note_evidence=chunk.metadata.get("source_note_evidence_v1"),
+            )
         )
         safe_language_repair["source_bound_repairs"] = source_bound_repairs
         safe_language_repair["accepted"] = False
@@ -15015,7 +15040,10 @@ Output ONLY the corrected Persian translation.
             targeted_language_repair,
         )
         translation, final_source_bound_repairs = (
-            _restore_source_bound_artifacts(chunk.text, translation)
+            _restore_source_bound_artifacts(
+                chunk.text, translation,
+                note_evidence=chunk.metadata.get("source_note_evidence_v1"),
+            )
         )
         self.db.log_chunk_event(
             job_id,

@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v22.9"
+RUNTIME_RELEASE = "v22.10"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,9 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "geometry_bound_note_admission": True,
+            "grouped_integer_spacing": True,
+            "approved_canonical_text_revision": True,
             "source_bound_saved_prefix_export": True,
             "context_proven_local_contraction": True,
             "eligible_local_overlap_classification": True,
@@ -774,6 +777,46 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v227_behavior_probes(),
         **_v228_behavior_probes(),
         **_v229_behavior_probes(),
+        **_v2210_behavior_probes(),
+    }
+
+
+def _v2210_behavior_probes() -> dict[str, bool]:
+    from tarjomeh.quality.note_evidence import paragraph_note_evidence
+    from tarjomeh.quality.integrity import PostEditIntegrityGate, extract_note_markers
+    from tarjomeh.persian.typography import rejoin_grouped_integers
+    from tarjomeh.memory.text_revision import revised_coverage
+
+    source = "A hypothetical4 claim remains contested."
+    start = source.index("4")
+    evidence = paragraph_note_evidence(source, {"superscript_markers": [{
+        "text": "4", "offset": start, "context_before": "hypothetical", "context_after": " claim",
+    }]})
+    gate = PostEditIntegrityGate(note_evidence=evidence)
+    kept = gate.evaluate(source, "A hypothetical\u2074 claim remains contested.")
+    lost = gate.evaluate(source, "A hypothetical claim remains contested.")
+    extra = gate.evaluate(source, "A hypothetical\u2074 claim\u2074 remains contested.")
+    change = {"chunk_index": 0, "source": "Source", "before": "Old", "after": "New"}
+    coverage = [{"chunk_index": 0, "source_sha256": hashlib.sha256(b"Source").hexdigest(),
+                 "target_sha256": hashlib.sha256(b"Old").hexdigest()}]
+    revised = revised_coverage(coverage, [change])
+    stale_rejected = False
+    try:
+        revised_coverage([{**coverage[0], "target_sha256": "0" * 64}], [change])
+    except ValueError:
+        stale_rejected = True
+    return {
+        "geometry_bound_note_admission": bool(
+            kept.accepted and any(f.check_id == "note_markers_missing" for f in lost.blocking)
+            and any(f.check_id == "note_markers_surplus" for f in extra.blocking)
+            and extract_note_markers("ModelX4 and H2O") == []),
+        "grouped_integer_spacing": bool(
+            rejoin_grouped_integers("5 \u066c 200") == "5\u066c200"
+            and rejoin_grouped_integers("5 \u066c 20") == "5 \u066c 20"
+            and rejoin_grouped_integers("5 \u066c\n200") == "5 \u066c\n200"),
+        "approved_canonical_text_revision": bool(
+            revised[0]["target_sha256"] == hashlib.sha256(b"New").hexdigest()
+            and coverage[0]["target_sha256"] == hashlib.sha256(b"Old").hexdigest() and stale_rejected),
     }
 
 

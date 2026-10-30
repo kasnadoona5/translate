@@ -133,6 +133,22 @@ _SENTINEL_RE = re.compile(f"{_SENTINEL_OPEN}(.){_SENTINEL_CLOSE}")
 _SPACED_DECIMAL_RE = re.compile(
     "([0-9\u06f0-\u06f9])[ \t]*\u066b[ \t]*([0-9\u06f0-\u06f9])"
 )
+_GROUPED_INTEGER_RE = re.compile(
+    r"(?<![\w\u066b\u066c.])"
+    r"[0-9\u0660-\u0669\u06f0-\u06f9]{1,3}"
+    r"(?:[ \t]*\u066c[ \t]*[0-9\u0660-\u0669\u06f0-\u06f9]{3})+"
+    r"(?![\w\u066b\u066c.]|[ \t]*\u066c)"
+)
+
+
+def rejoin_grouped_integers(text: str) -> str:
+    """Only complete U+066C integer groups; never bridge a line boundary."""
+    def rejoin(match: re.Match[str]) -> str:
+        if text[:match.start()].rstrip(" \t").endswith("\u066c"):
+            return match.group()
+        return re.sub(r"[ \t]+", "", match.group())
+
+    return _GROUPED_INTEGER_RE.sub(rejoin, text)
 
 
 class PersianTypographer:
@@ -254,6 +270,7 @@ class PersianTypographer:
             text = self.normalize_zwnj(text)
             text = self._repair_false_mi_splits(text)
             text = _SPACED_DECIMAL_RE.sub("\\1\u066b\\2", text)
+            text = rejoin_grouped_integers(text)
         if self._convert_numerals:
             text = self.convert_numerals(text)
         if self._fix_punctuation:

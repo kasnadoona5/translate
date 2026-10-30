@@ -852,7 +852,9 @@ def _plain_note_matches(
     return sorted(distinct.values(), key=lambda match: match.start("marker"))
 
 
-def extract_note_markers(text: str, *, allow_spaced: bool = False) -> list[str]:
+def extract_note_markers(
+    text: str, *, allow_spaced: bool = False, note_evidence: dict | None = None,
+) -> list[str]:
     """Extract note markers, including PDF-flattened source superscripts.
 
     PyMuPDF can preserve superscript evidence in paragraph metadata while its
@@ -868,6 +870,16 @@ def extract_note_markers(text: str, *, allow_spaced: bool = False) -> list[str]:
     markers.extend(match.group("marker") for match in _plain_note_matches(
         text, allow_spaced=allow_spaced
     ))
+    if note_evidence is not None:
+        from tarjomeh.quality.note_evidence import verified_note_cues
+
+        occupied = [match.span(1 if match.group(1) is not None else 2)
+                    for match in _NOTE_RE.finditer(text or "")]
+        occupied.extend(match.span("marker") for match in _plain_note_matches(
+            text, allow_spaced=allow_spaced))
+        for cue in verified_note_cues(text, note_evidence):
+            if not any(cue["start"] < end and cue["end"] > start for start, end in occupied):
+                markers.append(cue["marker"])
     return markers
 
 
@@ -1006,9 +1018,10 @@ def source_note_cue_inventory(
     *,
     styled_spans: Iterable[tuple[int, int]] = (),
     excluded_spans: Iterable[tuple[int, int]] = (),
+    note_evidence: dict | None = None,
 ) -> dict[str, Any]:
     """Count physical cues once, including Unicode and DOCX run representations."""
-    required = Counter(extract_note_markers(source))
+    required = Counter(extract_note_markers(source, note_evidence=note_evidence))
     excluded = list(excluded_spans)
     cues: dict[tuple[int, int], dict[str, Any]] = {}
 
@@ -1057,6 +1070,12 @@ def source_note_cue_inventory(
             marker = match.group().translate(_SUPERSCRIPT_MAP).translate(_DIGIT_MAP)
             if required[marker]:
                 add(start + match.start(), start + match.end(), marker, "docx_superscript")
+    if note_evidence is not None:
+        from tarjomeh.quality.note_evidence import geometry_plain_target_cues
+
+        for cue in geometry_plain_target_cues(source, text, note_evidence):
+            if (cue["start"], cue["end"]) not in cues:
+                add(cue["start"], cue["end"], cue["marker"], "source_geometry_plain_boundary")
     available = Counter(item["marker"] for item in cues.values())
     return {
         "required": dict(required),
@@ -1073,10 +1092,11 @@ def available_note_markers(
     required: Counter[str],
     *,
     source: str = "",
+    note_evidence: dict | None = None,
 ) -> Counter[str]:
     """Return target note evidence without treating arbitrary numbers as notes."""
     if source:
-        return Counter(source_note_cue_inventory(source, text)["available"])
+        return Counter(source_note_cue_inventory(source, text, note_evidence=note_evidence)["available"])
     strict = Counter(extract_note_markers(text))
     if not required:
         return strict
@@ -1085,6 +1105,20 @@ def available_note_markers(
 
 
 def restore_source_note_markers(
+    source: str,
+    translation: str,
+    *, note_evidence: dict | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Preserve old proven repairs; report geometry without guessing new anchors."""
+    repaired, report = _restore_legacy_source_note_markers(source, translation)
+    if note_evidence is not None:
+        inventory = source_note_cue_inventory(source, repaired, note_evidence=note_evidence)
+        report.update(evidence=note_evidence, inventory=inventory,
+                      unresolved=inventory["missing"], surplus=inventory["surplus"])
+    return repaired, report
+
+
+def _restore_legacy_source_note_markers(
     source: str,
     translation: str,
 ) -> tuple[str, dict[str, Any]]:
@@ -3804,6 +3838,7 @@ class IntegrityResult:
     previous_chars: int
     candidate_chars: int
     findings: list[IntegrityFinding] = field(default_factory=list)
+    source_note_evidence: dict[str, Any] | None = None
 
     @property
     def blocking(self) -> list[IntegrityFinding]:
@@ -3827,6 +3862,8 @@ class IntegrityResult:
             "blocking_count": len(self.blocking),
             "warning_count": len(self.warnings),
             "findings": [finding.to_dict() for finding in self.findings],
+            **({"source_note_evidence": self.source_note_evidence}
+               if self.source_note_evidence is not None else {}),
         }
 
 
@@ -3836,10 +3873,14 @@ class PostEditIntegrityGate:
     def __init__(
         self, min_retention_ratio: float = 0.65, max_growth_ratio: float = 1.75,
         *, paragraph_originals: list[dict[str, Any]] | None = None,
+        note_evidence: dict | None = None,
+        note_source: str | None = None,
     ) -> None:
         self.min_retention_ratio = min_retention_ratio
         self.max_growth_ratio = max_growth_ratio
         self.paragraph_originals = list(paragraph_originals or [])
+        self.note_evidence = note_evidence
+        self.note_source = note_source
 
     def evaluate(
         self,
@@ -3852,6 +3893,7 @@ class PostEditIntegrityGate:
         protect_inline_english: bool = False,
         allowed_inline_originals: Iterable[str] | None = None,
         enforce_all_terms: bool = False,
+        note_evidence: dict | None = None,
     ) -> IntegrityResult:
         source = source or ""
         previous = previous or ""
@@ -3969,14 +4011,29 @@ class PostEditIntegrityGate:
                 missing_by_role=number_reconciliation.roles_payload(),
             )
 
-        required_notes = Counter(extract_note_markers(source))
+        evidence = note_evidence if note_evidence is not None else self.note_evidence
+        # A gate may validate a smaller recovery segment; never reuse whole-chunk
+        # geometry against different bytes. Explicit per-call stale evidence fails.
+        if evidence is not None and evidence.get("source_sha256") != hashlib.sha256(source.encode("utf-8")).hexdigest():
+            if note_evidence is not None or self.note_source is None:
+                raise ValueError("Source note evidence does not match this segment")
+            from tarjomeh.quality.note_evidence import scoped_note_evidence
+
+            evidence = scoped_note_evidence(source, self.note_source, evidence)
+        required_notes = Counter(extract_note_markers(source, note_evidence=evidence))
+        if evidence is not None:
+            result.source_note_evidence = {
+                "schema": 1, "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                "candidate_sha256": hashlib.sha256(candidate.encode("utf-8")).hexdigest(),
+                **source_note_cue_inventory(source, candidate, note_evidence=evidence),
+            }
         if previous:
             required_notes |= Counter(extract_note_markers(previous))
         missing_note_counts = required_notes - available_note_markers(
-            candidate, required_notes, source=source
+            candidate, required_notes, source=source, note_evidence=evidence
         )
         previous_missing_note_counts = (
-            required_notes - available_note_markers(previous, required_notes, source=source)
+            required_notes - available_note_markers(previous, required_notes, source=source, note_evidence=evidence)
             if previous else Counter()
         )
         newly_missing_note_counts = (
@@ -3996,10 +4053,10 @@ class PostEditIntegrityGate:
                 missing=list(missing_note_counts.elements()),
             )
         surplus_note_counts = (
-            available_note_markers(candidate, required_notes, source=source) - required_notes
+            available_note_markers(candidate, required_notes, source=source, note_evidence=evidence) - required_notes
         )
         previous_surplus_note_counts = (
-            available_note_markers(previous, required_notes, source=source) - required_notes
+            available_note_markers(previous, required_notes, source=source, note_evidence=evidence) - required_notes
             if previous else Counter()
         )
         newly_surplus_note_counts = (

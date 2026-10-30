@@ -182,12 +182,22 @@ def history_policy(history: list[dict[str, Any]]) -> dict[str, Any]:
     invalid: list[int] = []
     allowed_markers: set[int] = set()
     has_revisions = False
+    continuity_keys = []
     for index, entry in enumerate(history):
         if not isinstance(entry, dict):
             continue
-        has_revisions |= "reviewed_revision" in entry or "summary_revision_rollback" in entry
+        has_revisions |= ("reviewed_revision" in entry or "summary_revision_rollback" in entry
+                          or "reviewed_text_continuity" in entry)
         try:
-            if "reviewed_revision" in entry:
+            if "reviewed_text_continuity" in entry:
+                from tarjomeh.memory.text_revision import validate_continuity
+
+                prior, current = validate_continuity(entry, history[:index])
+                if prior in {history_key(history[i]) for i in invalid}:
+                    raise ValueError("Continuity depends on invalid history")
+                continuity_keys.append((prior, current))
+                allowed_markers.add(index)
+            elif "reviewed_revision" in entry:
                 record = entry["reviewed_revision"]
                 manifest = record["manifest"]
                 validate_manifest(manifest)
@@ -227,6 +237,9 @@ def history_policy(history: list[dict[str, Any]]) -> dict[str, Any]:
         tuple(key) for digest in active for key in revisions[digest]["manifest"]["supersedes"]
     }
     approved_keys = {revisions[digest]["key"] for digest in active}
+    for prior, current in continuity_keys:
+        blocked.add(prior)
+        approved_keys.add(current)
     denied = {record["key"] for digest, record in revisions.items() if digest not in active}
     for index in invalid:
         try:
@@ -258,6 +271,7 @@ def select_summary(
             continue
         if (
             "reviewed_revision" in entry or "summary_revision_rollback" in entry
+            or "reviewed_text_continuity" in entry
         ) and index not in policy["allowed_markers"]:
             continue
         if history_key(entry) in policy["blocked"] | policy["denied"]:
