@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v22.11"
+RUNTIME_RELEASE = "v22.12"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,7 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "export_document_ledger_binding": True,
             "position_scoped_note_resolution": True,
             "geometry_scoped_note_reporting": True,
             "structured_note_rejection_reporting": True,
@@ -782,7 +783,32 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v229_behavior_probes(),
         **_v2210_behavior_probes(),
         **_v2211_behavior_probes(),
+        **_v2212_behavior_probes(),
     }
+
+
+def _v2212_behavior_probes() -> dict[str, bool]:
+    """Bind the actual export state, permitting unchanged document copies."""
+    from copy import deepcopy
+    from tarjomeh.core.render_identity import RenderChangeLedger
+    from tarjomeh.exporters.base import TranslatedDocument, TranslatedParagraph
+
+    document = TranslatedDocument(paragraphs=[TranslatedParagraph(0, "A claim.", "A claim.")])
+    ledger = RenderChangeLedger(document)
+    equal_copy = deepcopy(document)
+    changed = deepcopy(document)
+    changed.paragraphs[0].translated_text += " Unexpected."
+    source_changed = deepcopy(document)
+    source_changed.paragraphs[0].source_text += " Unexpected."
+    metadata_changed = deepcopy(document)
+    metadata_changed.paragraphs[0].metadata["structure_role"] = "footnote"
+    return {"export_document_ledger_binding": bool(
+        ledger.audit(document=document)["passed"]
+        and ledger.audit(document=equal_copy)["passed"]
+        and not ledger.audit(document=changed)["passed"]
+        and not ledger.audit(document=source_changed)["passed"]
+        and not ledger.audit(document=metadata_changed)["passed"]
+    )}
 
 
 def _v2211_behavior_probes() -> dict[str, bool]:

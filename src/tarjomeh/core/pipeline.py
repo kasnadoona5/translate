@@ -9306,12 +9306,28 @@ class TranslationPipeline:
         )
         bilingual_mode = self.config.output.bilingual_mode
         try:
+            render_audit = render_ledger.audit(document=trans_doc)
+            if not render_audit["export_document_matches_ledger"]:
+                self.db.save_job_artifact(job_id, "render_identity_audit", {
+                    "render": render_audit,
+                    "delivered": {
+                        "mapping": "not_exported",
+                        "verified": False,
+                        "passed": None,
+                        "mismatches": [],
+                    },
+                    "passed": False,
+                })
+                raise RuntimeError(
+                    "Export blocked: canonical-to-render proof failed; no output published "
+                    "(see render_identity_audit)."
+                )
             exporter.export(
                 document=trans_doc,
                 output_path=temporary,
                 bilingual_mode=bilingual_mode,
             )
-            render_audit = render_ledger.audit()
+            render_audit = render_ledger.audit(document=trans_doc)
             if str(output_format).lower() == "docx":
                 delivered_audit = compare_docx_to_rendered(
                     trans_doc, temporary, bilingual_mode,

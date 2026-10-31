@@ -450,7 +450,7 @@ class RenderChangeLedger:
             })
         return result
 
-    def audit(self) -> dict[str, Any]:
+    def audit(self, *, document: TranslatedDocument | None = None) -> dict[str, Any]:
         """Check that every canonical-to-rendered difference has a proven chain."""
         final = _texts(self.document)
         by_position: dict[int, list[dict[str, Any]]] = {}
@@ -489,7 +489,7 @@ class RenderChangeLedger:
                         "paragraph_index": change["paragraph_index"],
                         "proof_failure": "cleanup_keeper_did_not_survive",
                     })
-        return {
+        result = {
             "canonical_paragraph_count": len(self.canonical),
             "changed_paragraph_count": len(by_position),
             "change_count": len(self.changes),
@@ -510,6 +510,13 @@ class RenderChangeLedger:
             "unproven": unproven,
             "passed": not unexplained and not unproven,
         }
+        if document is not None:
+            # Equal copies are safe only when their complete exported state
+            # still matches the document whose producer chain was audited.
+            matches = document is self.document or document == self.document
+            result["export_document_matches_ledger"] = matches
+            result["passed"] = result["passed"] and matches
+        return result
 
 
 def expected_delivered_units(
