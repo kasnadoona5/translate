@@ -636,9 +636,33 @@ def bind_original_introductions(
 
 
 def original_pair_present(match: dict[str, Any], paragraph: str) -> bool:
-    """Exact approved Persian plus the source expression, once at a boundary."""
-    pattern = (rf"(?<!\w){re.escape(str(match['target']))}\s*"
-               rf"\({re.escape(str(match['source']))}\)(?!\w)")
+    """Match bounded Persian spellings, never derivations or a different original."""
+    from unicodedata import category
+
+    target, source = str(match["target"]), str(match["source"])
+    # An annotation needs a visible target, not just spelling/format marks.
+    if not any(char != _TATWEEL and (char.isalnum() or category(char)[0] in {"P", "S"})
+               for char in target) or not source.strip():
+        return False
+    # Only the Persian side has spelling equivalence. Do not normalize the
+    # paragraph or use the broader glossary matcher, which permits derivations.
+    target = target.removesuffix("\u0650")
+    if target.endswith("\u0647\u0654"):
+        target = target[:-1]
+    elif target.endswith("\u06c0"):
+        target = target[:-1] + "\u0647"
+    parts = re.split(r"[\s\u200c]+", target)
+    variants = {"\u06cc": "[\u06cc\u064a]", "\u064a": "[\u06cc\u064a]",
+                "\u06a9": "[\u06a9\u0643]", "\u0643": "[\u06a9\u0643]"}
+    persian = r"[\s\u200c]+".join(
+        "".join(variants.get(char, re.escape(char)) for char in part) for part in parts
+    )
+    if target.endswith("\u0647"):
+        persian = persian[:-1] + r"(?:\u0647[\u0654\u0650]?|\u06c0)"
+    elif re.search(r"[\u0621-\u063a\u0641-\u064a\u0671-\u06d3]$", target):
+        persian += r"\u0650?"
+    pattern = (rf"(?<![\w\u200c\u064b-\u065f\u0670]){persian}\s*"
+               rf"\({re.escape(source)}\)(?!\w)")
     return len(re.findall(pattern, paragraph)) == 1
 
 
@@ -796,9 +820,9 @@ def check_reviewed_book_terms(
                 "recorded_occurrence_count": recorded_count,
             })
             continue
-        present = target_present(str(match["target"]), target_parts[index])
-        if match.get("original_introduction_required"):
-            present = present and original_pair_present(match, target_parts[index])
+        present = (original_pair_present(match, target_parts[index])
+                   if match.get("original_introduction_required")
+                   else target_present(str(match["target"]), target_parts[index]))
         if not present:
             violations.append(Violation(
                 term=str(match["source"]),

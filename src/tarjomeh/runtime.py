@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v22.12"
+RUNTIME_RELEASE = "v22.13"
 RUNTIME_REVISION = 1
 
 
@@ -22,6 +22,7 @@ def runtime_capabilities() -> dict[str, Any]:
         "revision": RUNTIME_REVISION,
         "capabilities": {
             "export_document_ledger_binding": True,
+            "bounded_approved_original_pair_spelling": True,
             "position_scoped_note_resolution": True,
             "geometry_scoped_note_reporting": True,
             "structured_note_rejection_reporting": True,
@@ -784,7 +785,41 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v2210_behavior_probes(),
         **_v2211_behavior_probes(),
         **_v2212_behavior_probes(),
+        **_v2213_behavior_probes(),
     }
+
+
+def _v2213_behavior_probes() -> dict[str, bool]:
+    """Bounded pair spelling, without broadening paragraph or Latin authority."""
+    from tarjomeh.glossary.book_review import (
+        original_pair_present, scoped_original_permissions, check_reviewed_book_terms,
+    )
+    from hashlib import sha256
+
+    source = "Its locus verum matters."
+    target = "\u0646\u0642\u062f \u0627\u06cc\u062f\u0626\u0648\u0644\u0648\u0698\u06cc"
+    item = dict(source="locus verum", target=target, paragraph_index=0,
+                original_introduction_required=True,
+                source_paragraph_hash=sha256(source.encode()).hexdigest())
+    pair = target + "\u0650 (locus verum)"
+    heh_item = dict(item, target="\u0634\u06cc\u0648\u0647")
+    report, review = check_reviewed_book_terms(
+        "\u0634\u06cc\u0648\u06c0 (locus verum)", source, {}, [heh_item],
+    )
+    return {"bounded_approved_original_pair_spelling": bool(
+        original_pair_present(item, pair)
+        and original_pair_present(item, target.replace(" ", "\u200c") + " (locus verum)")
+        and not original_pair_present(item, target + "\u06cc (locus verum)")
+        and not original_pair_present(item, target + " (Locus verum)")
+        and not original_pair_present(item, pair + " " + pair)
+        and not original_pair_present(dict(item, target="\u0650"), "(locus verum)")
+        and not original_pair_present(dict(item, target="\u200c"), " (locus verum)")
+        and not original_pair_present(dict(item, target="\ufeff"), "\ufeff (locus verum)")
+        and scoped_original_permissions(source, pair, [item]) == ["locus verum"]
+        and not scoped_original_permissions(source + " Changed.", pair, [item])
+        and not scoped_original_permissions(source, pair + " locus verum", [item])
+        and not report.violations and not review
+    )}
 
 
 def _v2212_behavior_probes() -> dict[str, bool]:
