@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v22.13"
+RUNTIME_RELEASE = "v22.14"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,7 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "source_bound_surplus_note_reporting": True,
             "export_document_ledger_binding": True,
             "bounded_approved_original_pair_spelling": True,
             "position_scoped_note_resolution": True,
@@ -786,7 +787,36 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v2211_behavior_probes(),
         **_v2212_behavior_probes(),
         **_v2213_behavior_probes(),
+        **_v2214_behavior_probes(),
     }
+
+
+def _v2214_behavior_probes() -> dict[str, bool]:
+    """Pure current-report checks; no source replay, clients or file I/O."""
+    from tarjomeh.quality.note_reporting import audit_note_markers
+    from tarjomeh.quality.note_evidence import paragraph_note_evidence
+
+    source = "An illustrative7 claim."
+    start = source.index("7")
+    proof = paragraph_note_evidence(source, {"superscript_markers": [{
+        "text": "7", "offset": start, "context_before": source[:start],
+        "context_after": source[start + 1:],
+    }]})
+    def report(target, metadata):
+        return audit_note_markers({}, [dict(chunk_index=0, status="completed",
+            text=source, translation=target, metadata=metadata)], {})
+    metadata = {"source_note_evidence_v1": proof}
+    faithful = report("An assertion\u2077.", metadata)
+    wrong = report("An assertion\u2077\u2077 and another\u2079.", metadata)
+    unresolved = report("An assertion\u2077.", {})
+    return {"source_bound_surplus_note_reporting": bool(
+        faithful["chunks"][0]["required"] == {"7": 1}
+        and not faithful["surplus_note_markers"]
+        and not faithful["unresolved_surplus_note_markers"]
+        and wrong["surplus_note_markers"]
+        and not unresolved["surplus_note_markers"]
+        and unresolved["unresolved_surplus_note_markers"]
+    )}
 
 
 def _v2213_behavior_probes() -> dict[str, bool]:
