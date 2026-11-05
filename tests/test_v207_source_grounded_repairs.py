@@ -331,7 +331,8 @@ def test_unchanged_review_is_carried_not_resolved():
         matches,
         review,
     )
-    assert blocked == [] and carried == review
+    assert blocked == [] and carried == [{**item, "carry_proof": "paragraph_unchanged"}
+                                        for item in review]
     assert check_reviewed_book_terms(after, source, metadata, matches)[1] == review
 
 
@@ -361,7 +362,8 @@ def test_uncertain_or_changed_term_review_still_blocks(change):
         matches,
         review,
     )
-    assert blocked == review and not carried
+    assert [{key: value for key, value in item.items() if key != "carry_proof_rejection"}
+            for item in blocked] == review and not carried
 
 
 def test_independent_extra_repair_reaches_existing_critic_and_old_review_survives(tmp_path):

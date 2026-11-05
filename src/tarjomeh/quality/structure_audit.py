@@ -272,6 +272,7 @@ _REFERENCE_HEADS = frozenset(
         "part",
         "parts",
         "فصل",
+        "\u0641\u0635\u0648\u0644",
         "صفحه",
         "صفحات",
         "بخش",
@@ -533,12 +534,21 @@ def ordinal_sequence_length(text: str) -> int:
     return longest
 
 
+def _reference_number_spans(text: str) -> set[tuple[int, int]]:
+    """Convert the existing reference token classifications to exact raw spans."""
+    matches = list(_WORD_RE.finditer(text or ""))
+    return {matches[index].span() for index in _reference_number_indices(text or "", matches)}
+
+
 def list_marker_evidence(text: str) -> list[dict[str, Any]]:
     """Keep local marker runs and their ordered prefix; never fill numbering gaps."""
     runs: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
     previous_end = 0
+    reference_spans = _reference_number_spans(text)
     for match in _LIST_MARKER_RE.finditer(text or ""):
+        if match.group("bare") is not None and match.span("bare") in reference_spans:
+            continue
         value = int((match.group("wrapped") or match.group("bare")).translate(_DIGIT_TRANSLATION))
         opening, closing = match.group("opening"), match.group("closing") or ")"
         valid_delimiters = (opening, closing) in {("(", ")"), ("[", "]"), (None, ")")}

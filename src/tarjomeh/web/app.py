@@ -1371,6 +1371,8 @@ def _register_api(app: Flask) -> None:
             lines.append(
                 "  Nested source match (report only): " + json.dumps(item, ensure_ascii=False)
             )
+        for item in term_evidence.get("original_introduction_notes", []):
+            lines.append("  Original introduction (report only): " + json.dumps(item, ensure_ascii=False))
         lines.extend([
             "Withheld Book-Term Proposals (report only; no approval authority):",
             "  recording_status=" + term_evidence["withheld_recording_status"],
@@ -1424,6 +1426,14 @@ def _register_api(app: Flask) -> None:
             for chunk_events in current_events_by_chunk.values()
             for event in chunk_events
         ]
+        from tarjomeh.core.evidence_audit import refiner_recovery_reporting
+
+        lines.extend([
+            "Refiner JSON Recovery Diagnostics (report only; physical sends are subsets of totals):",
+            "  active=" + json.dumps(refiner_recovery_reporting(current_events), ensure_ascii=False),
+            "  lifetime=" + json.dumps(refiner_recovery_reporting(all_events), ensure_ascii=False),
+            "",
+        ])
 
         def operation_counts(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
             counts: dict[str, dict[str, Any]] = {}

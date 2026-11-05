@@ -606,7 +606,13 @@ def bind_original_introductions(
     failed attempt cannot advance a separate seen flag. Parallel processing
     still chooses the same source location, regardless of completion order.
     """
-    if review.get("review_version") != 4:
+    version = review.get("review_version")
+    if type(version) is int and version in {1, 2, 3}:
+        for match in matches:
+            if match.get("keep_original"):
+                match["legacy_original_review_version"] = version
+        return
+    if version != 4:
         return
     locations: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     chapters = {entry["chunk_index"]: entry["chapter_position"] for entry in body_entries}
@@ -633,6 +639,16 @@ def bind_original_introductions(
             and sum(index == min(indices) for index in indices) == 1
         )
         match["original_introduction_scope_proven"] = proven
+        if not proven:
+            match["original_introduction_reason"] = "first_approved_location_unproven"
+        elif match.get("global_paragraph_index") != min(indices):
+            match["original_introduction_reason"] = "later_approved_paragraph"
+        elif sum(index == min(indices) for index in indices) != 1:
+            match["original_introduction_reason"] = "ambiguous_first_approved_paragraph"
+        elif match.get("source_occurrence_count") != 1:
+            match["original_introduction_reason"] = "repeated_occurrence_in_first_approved_paragraph"
+        else:
+            match["original_introduction_reason"] = "first_exact_approved_occurrence"
 
 
 def original_pair_present(match: dict[str, Any], paragraph: str) -> bool:
@@ -677,13 +693,17 @@ def scoped_original_permissions(
     for item in matches:
         index = item.get("paragraph_index")
         expression = str(item.get("source", ""))
-        if (item.get("original_introduction_required") and type(index) is int
+        version = item.get("legacy_original_review_version")
+        legacy = (type(version) is int and version in {1, 2, 3}
+                  and item.get("keep_original") and not item.get("original_policy"))
+        if ((item.get("original_introduction_required") or legacy) and type(index) is int
                 and 0 <= index < len(source_parts)
                 and item.get("source_paragraph_hash") == _sha(source_parts[index])
                 and expression in source_parts[index]
                 and original_pair_present(item, target_parts[index])
-                and target.count(f"({expression})") == 1
-                and len(list(_term_pattern(expression).finditer(target))) == 1):
+                and (target_parts[index] if legacy else target).count(f"({expression})") == 1
+                and len(list(_term_pattern(expression).finditer(
+                    target_parts[index] if legacy else target))) == 1):
             permitted.append(expression)
     return permitted
 
@@ -778,6 +798,14 @@ def book_term_review_evidence(
         "withheld_proposals": [item for item in (review.get("withheld_proposals") or [])
                                if isinstance(item, dict)],
         "paragraph_term_presence": lexical,
+        "original_introduction_notes": [
+            {"chunk_index": event.get("chunk_index"),
+             "paragraph_index": item.get("paragraph_index"), "source": item.get("source"),
+             "reason": item["original_introduction_reason"]}
+            for event in evidence_events if event.get("event_type") == "book_term_scope_resolved"
+            for item in event.get("payload", {}).get("matched", [])
+            if item.get("original_introduction_reason")
+        ],
         "nested_source_matches": nested_matches,
         "policy": (
             "approval, scope and lexical presence are distinct; none proves semantic accuracy"

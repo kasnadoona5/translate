@@ -16,6 +16,55 @@ _POSSIBLE_SECRET_RE = re.compile(
 )
 
 
+def refiner_recovery_reporting(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Count existing invalid records separately from physical JSON-helper sends.
+
+    The caller selects active or lifetime events. A retried event duplicates the
+    invalid event, so it is not another logical failure. Historical/stage gaps
+    cannot be reconstructed from helper counts or successful transport alone.
+    """
+    known_errors = {
+        "invalid_json", "top_level_must_be_object", "translation_is_required",
+        "decision_must_be_revised_preserved_or_mixed", "rationale_is_required",
+        "issue_decisions_must_be_array", "issue_decision_must_be_object",
+        "unknown_issue_decision", "duplicate_issue_decision", "invalid_issue_decision",
+        "resulting_span_required", "resulting_span_not_in_translation",
+        "issue_rationale_required", "missing_issue_decision",
+    }
+    invalid = [event.get("payload") or {} for event in events
+               if event.get("event_type") == "refiner_response_invalid"]
+    repairs = [event.get("payload") or {} for event in events
+               if event.get("event_type") == "llm_call_attempt"
+               and (event.get("payload") or {}).get("operation") == "refinement_json_repair"]
+    errors: Counter[str] = Counter()
+    for payload in invalid:
+        values = payload.get("validation_errors")
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            category = str(value).partition(":")[0]
+            errors[category if category in known_errors else "unclassified"] += 1
+    stages: Counter[str] = Counter()
+    for payload in repairs:
+        context = payload.get("quality_attempt_context")
+        stage = context.get("stage") if isinstance(context, dict) else None
+        # Report only fixed stage labels, never arbitrary provider/exception text.
+        stages[stage if stage in {"extra_final_refinement", "refinement",
+                                 "post_rollback_readability"} else "not_recorded"] += 1
+    return {
+        "authority": "report_only_no_admission_or_retry_change",
+        "scope": "supplied_events_only",
+        "logical_invalid_records": len(invalid),
+        "recovered_logical_records": sum(item.get("recovered") is True for item in invalid),
+        "validation_error_categories": dict(errors),
+        "physical_json_repair_attempts": len(repairs),
+        "physical_json_repair_failures": sum(item.get("success") is False for item in repairs),
+        "physical_json_repairs_by_stage": dict(stages),
+        "missing_logical_evidence_is_not_zero_invalidity": True,
+        "helper_count_is_not_logical_invalid_reply_count": True,
+    }
+
+
 def quote_and_numeric_reporting(
     events: list[dict[str, Any]], chunks: list[dict[str, Any]],
 ) -> dict[str, Any]:

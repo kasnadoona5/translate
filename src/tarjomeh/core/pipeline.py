@@ -791,7 +791,8 @@ def audit_translation_language(
                 local = [str(item["source"]) for item in scoped_originals
                          if item.get("paragraph_index") == index
                          and item.get("source_paragraph_hash") == _candidate_text_hash(source_part)
-                         and item.get("original_introduction_required")
+                         and scoped_original_permissions(
+                             source_part, target_part, [{**item, "paragraph_index": 0}])
                          and str(item["source"]) in permitted]
                 unexpected.extend(unexpected_latin_prose(
                     source_part, target_part, allowed_originals=[*allowed_originals, *local],
@@ -5162,6 +5163,93 @@ def _same_candidate_refiner_vetoes(
     return vetoes
 
 
+def _protected_term_segment_spans(text: str) -> list[tuple[int, int]] | None:
+    """Use core.pipeline._SENTENCE_SPLIT_RE, NOT integrity's similarly named regex.
+
+    This proof-only view keeps raw separators; ambiguous stops retain the old
+    paragraph-level rule instead of guessing a linguistic sentence boundary.
+    """
+    if re.search(
+        r"\u2026|\.{2,}|(?<!\w)[A-Za-z]+\.|"
+        r"(?<![\w\u200c])[\u0621-\u063a\u0641-\u064a\u0671-\u06d3][\u064b-\u065f\u0670]*\.",
+        text,
+    ):
+        return None
+    boundaries = {match.start(): match.end() for match in _SENTENCE_SPLIT_RE.finditer(text)}
+    stack: list[str] = []
+    pairs = {")": "(", "]": "[", "\u00bb": "\u00ab"}
+    for position, char in enumerate(text):
+        if position in boundaries and stack:
+            return None
+        if char in "([\u00ab":
+            stack.append(char)
+        elif char in pairs:
+            if not stack or stack.pop() != pairs[char]:
+                return None
+    if stack:
+        return None
+    spans = []
+    start = 0
+    for end in boundaries.values():
+        spans.append((start, end))
+        start = end
+    if start < len(text):
+        spans.append((start, len(text)))
+    return spans
+
+
+def _reviewed_term_segment_proof(
+    previous: str, candidate: str, targets: list[str],
+) -> dict[str, Any]:
+    """Prove raw protected segments survived; this is NOT term-sense verification."""
+    from tarjomeh.glossary.book_review import _rendering_count
+
+    def rejected(reason: str) -> dict[str, Any]:
+        return {"accepted": False, "reason": reason}
+
+    before = _protected_term_segment_spans(previous)
+    after = _protected_term_segment_spans(candidate)
+    if before is None or after is None:
+        return rejected("ambiguous_protected_segment_boundaries")
+    if not targets or any(not target for target in targets):
+        return rejected("protected_rendering_unavailable")
+    protected: set[int] = set()
+    for target in set(targets):
+        count = _rendering_count(target, previous)
+        if not count or count != _rendering_count(target, candidate):
+            return rejected("protected_rendering_count_changed")
+        for value, spans in ((previous, before), (candidate, after)):
+            if sum(_rendering_count(target, value[left:right]) for left, right in spans) != count:
+                return rejected("protected_rendering_coverage_unproven")
+        protected.update(index for index, (left, right) in enumerate(before)
+                         if _rendering_count(target, previous[left:right]))
+    equal = [op for op in difflib.SequenceMatcher(
+        None, previous, candidate, autojunk=False,
+    ).get_opcodes() if op[0] == "equal"]
+    mapped = []
+    for index in sorted(protected):
+        left, right = before[index]
+        raw = previous[left:right]
+        # Separator padding must not make identical sentences appear unique.
+        core = raw.rstrip()
+        if sum(previous[a:b].rstrip() == core for a, b in before) != 1:
+            return rejected("protected_segment_alignment_ambiguous")
+        if sum(candidate[a:b].rstrip() == core for a, b in after) > 1:
+            return rejected("protected_segment_alignment_ambiguous")
+        locations = [(a, b) for a, b in after if candidate[a:b] == raw]
+        if len(locations) != 1:
+            return rejected("protected_segment_changed" if not locations
+                            else "protected_segment_alignment_ambiguous")
+        dest, _ = locations[0]
+        if not any(i1 <= left and right <= i2 and j1 + left - i1 == dest
+                   for _, i1, i2, j1, _ in equal):
+            return rejected("protected_segment_mapping_unproven")
+        mapped.append(dest)
+    if mapped != sorted(set(mapped)):
+        return rejected("protected_segment_order_changed")
+    return {"accepted": True, "reason": "protected_raw_segments_unchanged"}
+
+
 def _partition_unchanged_book_term_reviews(
     source: str,
     previous: str,
@@ -5170,7 +5258,7 @@ def _partition_unchanged_book_term_reviews(
     matches: list[dict[str, Any]],
     candidate_reviews: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Carry only scoped, byte-identical old REVIEW, never clear its authority risk."""
+    """Carry proven old REVIEW without clearing its authority or uncertainty."""
     from tarjomeh.glossary.book_review import check_reviewed_book_terms
 
     _compliance, baseline_reviews = check_reviewed_book_terms(previous, source, metadata, matches)
@@ -5198,7 +5286,6 @@ def _partition_unchanged_book_term_reviews(
         proven = bool(
             type(index) is int
             and 0 <= index < len(source_parts)
-            and before_parts[index] == after_parts[index]
             and len(matching) == 1
             and matching[0].get("source_paragraph_hash")
             == _candidate_text_hash(source_parts[index])
@@ -5207,7 +5294,25 @@ def _partition_unchanged_book_term_reviews(
             and set(reasons) <= {"multiple_occurrences_unverifiable", "rendering_count_short"}
             and json.dumps(item, sort_keys=True, ensure_ascii=True) in baseline_keys
         )
-        (carried if proven else blocked).append(item)
+        if not proven:
+            blocked.append(item)
+            continue
+        if before_parts[index] == after_parts[index]:
+            carried.append({**item, "carry_proof": "paragraph_unchanged"})
+            continue
+        paragraph_matches = [match for match in matches if match.get("paragraph_index") == index]
+        if any(match.get("source_paragraph_hash") != _candidate_text_hash(source_parts[index])
+               for match in paragraph_matches):
+            blocked.append(item)
+            continue
+        proof = _reviewed_term_segment_proof(
+            before_parts[index], after_parts[index],
+            [str(match.get("target", "")) for match in paragraph_matches],
+        )
+        if proof["accepted"]:
+            carried.append({**item, "carry_proof": proof["reason"]})
+        else:
+            blocked.append({**item, "carry_proof_rejection": proof["reason"]})
     return blocked, carried
 
 
@@ -10630,7 +10735,10 @@ class TranslationPipeline:
         )
 
         review = self.db.get_job_artifact(job_id, "book_term_review_v1") or {}
-        if review.get("review_version") != 4 or review.get("phase") not in {"started", "skipped"}:
+        version = review.get("review_version")
+        if (type(version) is not int or version not in {1, 2, 3, 4}
+                or review.get("phase") not in {"started", "skipped"}
+                or (version != 4 and review.get("phase") != "started")):
             return
         if review.get("source_sha256") != self.db.get_job_source_hash(job_id):
             raise ValueError("Book-term approval belongs to a different source")
@@ -10648,7 +10756,7 @@ class TranslationPipeline:
             )
             bind_original_introductions(matches, review, entries, records)
             for match in matches:
-                if match.get("original_introduction_required"):
+                if match.get("original_introduction_required") or match.get("legacy_original_review_version"):
                     locations.setdefault(match["global_paragraph_index"], []).append(match)
         for paragraph in document.paragraphs:
             paragraph.metadata = dict(paragraph.metadata)
@@ -11140,6 +11248,10 @@ class TranslationPipeline:
                     scoped_review.extend({**item, "reason": "original_introduction_scope_unproven"}
                                          for item in reviewed_matches if item.get("original_policy")
                                          and not item.get("original_introduction_scope_proven"))
+                else:
+                    from tarjomeh.glossary.book_review import bind_original_introductions
+
+                    bind_original_introductions(reviewed_matches, review_artifact, [], {})
                 self.db.log_chunk_event(job_id, idx, "book_term_scope_resolved", {
                     "matched": reviewed_matches,
                     "review": scoped_review,
@@ -14586,7 +14698,8 @@ Output ONLY the corrected Persian translation.
         )
         language_anchor_context = {
             "scoped_book_originals": [item for item in reviewed_matches
-                                     if item.get("original_policy")],
+                                     if item.get("original_policy")
+                                     or item.get("legacy_original_review_version")],
             "authorized": {
                 source: target
                 for source, target in memory_manager.proper_nouns.inline_eligible_nouns().items()

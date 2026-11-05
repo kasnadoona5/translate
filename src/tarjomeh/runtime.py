@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v22.14"
+RUNTIME_RELEASE = "v22.15"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,11 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "protected_raw_term_segments": True,
+            "reference_tail_list_boundaries": True,
+            "legacy_paragraph_original_permissions": True,
+            "original_introduction_reason_reporting": True,
+            "refiner_json_recovery_reporting": True,
             "source_bound_surplus_note_reporting": True,
             "export_document_ledger_binding": True,
             "bounded_approved_original_pair_spelling": True,
@@ -788,6 +793,52 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v2212_behavior_probes(),
         **_v2213_behavior_probes(),
         **_v2214_behavior_probes(),
+        **_v2215_behavior_probes(),
+    }
+
+
+def _v2215_behavior_probes() -> dict[str, bool]:
+    """Pure admission/report checks; no providers, files or job mutation."""
+    from tarjomeh.core.pipeline import _reviewed_term_segment_proof
+    from tarjomeh.core.evidence_audit import refiner_recovery_reporting
+    from tarjomeh.glossary.book_review import bind_original_introductions, scoped_original_permissions
+    from tarjomeh.quality.structure_audit import audit_payload, list_marker_count
+
+    term = "\u0646\u0647\u0627\u062f"
+    before = term + " \u067e\u0627\u0628\u0631\u062c\u0627\u0633\u062a. \u0627\u062f\u0639\u0627\u06cc\u06cc \u062f\u06cc\u06af\u0631."
+    after = before.replace("\u062f\u06cc\u06af\u0631", "\u062c\u062f\u06cc\u062f")
+    source = "An institution mediates the claim."
+    item = dict(source="institution", target=term, keep_original=True, sense_id="",
+                paragraph_index=0, source_paragraph_hash=hashlib.sha256(source.encode()).hexdigest())
+    legacy = [dict(item)]
+    bind_original_introductions(legacy, {"review_version": 2}, [], {})
+    notes = [dict(item)]
+    bind_original_introductions(notes, {"review_version": 4}, [], {})
+    listed = "There are three tasks: 1) record; 2) compare; 3) report."
+    report = refiner_recovery_reporting([
+        {"event_type": "refiner_response_invalid", "payload": {"recovered": True,
+            "validation_errors": ["invalid_json: missing delimiter"]}},
+        {"event_type": "refiner_response_retried", "payload": {}},
+        {"event_type": "llm_call_attempt", "payload": {"operation": "refinement_json_repair", "success": True}},
+    ])
+    return {
+        "protected_raw_term_segments": bool(
+            _reviewed_term_segment_proof(before, after, [term])["accepted"]
+            and not _reviewed_term_segment_proof(before, before.replace(term, term + "\u0650"), [term])["accepted"]),
+        "reference_tail_list_boundaries": bool(
+            list_marker_count(listed + " (Chapters 2-4)") == 3
+            and not audit_payload(listed, listed + " (Chapters 2-4)")["classifications"]
+            and audit_payload(listed, listed.replace("3) report", "2) report"))["classifications"]),
+        "legacy_paragraph_original_permissions": bool(
+            scoped_original_permissions(source, term + " (institution)", legacy) == ["institution"]
+            and not scoped_original_permissions(source, "institution", legacy)
+            and not scoped_original_permissions(source, term + " (institution)", [item])),
+        "original_introduction_reason_reporting": bool(
+            notes[0].get("original_introduction_reason") == "first_approved_location_unproven"
+            and not notes[0]["original_introduction_required"]),
+        "refiner_json_recovery_reporting": bool(
+            report["logical_invalid_records"] == report["physical_json_repair_attempts"] == 1
+            and report["validation_error_categories"] == {"invalid_json": 1}),
     }
 
 
@@ -2022,7 +2073,7 @@ def _v207_behavior_probes() -> dict[str, bool]:
         )[0]
         == target,
         "unchanged_term_review_is_carried_not_cleared": not blocked
-        and carried == reviews
+        and carried == [{**item, "carry_proof": "paragraph_unchanged"} for item in reviews]
         and bool(reviews),
         "changed_term_paragraph_still_blocks": bool(
             _partition_unchanged_book_term_reviews(
