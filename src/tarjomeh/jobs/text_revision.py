@@ -160,7 +160,8 @@ def _stage(conn, proposal):
             after, chunk.text, glossary, entries=curated,
         ).compliant:
             raise ValueError("Correction conflicts with a mandatory curated term")
-        gate = PostEditIntegrityGate(note_evidence=metadata.get("source_note_evidence_v1"))
+        gate = PostEditIntegrityGate(note_evidence=metadata.get("source_note_evidence_v1"),
+                                     formula_evidence=metadata.get("source_formula_evidence_v1"))
         integrity = gate.evaluate(chunk.text, after, previous=requested["before"], stage="reviewed_text_revision")
         if not integrity.accepted:
             raise ValueError("Correction failed deterministic integrity: " + _encode(integrity.to_dict()))

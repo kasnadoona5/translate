@@ -6,7 +6,7 @@ from collections import Counter
 import hashlib
 from typing import Any
 
-RUNTIME_RELEASE = "v22.15"
+RUNTIME_RELEASE = "v22.16"
 RUNTIME_REVISION = 1
 
 
@@ -21,6 +21,7 @@ def runtime_capabilities() -> dict[str, Any]:
         "release": RUNTIME_RELEASE,
         "revision": RUNTIME_REVISION,
         "capabilities": {
+            "geometry_bound_numeric_artifacts": True,
             "protected_raw_term_segments": True,
             "reference_tail_list_boundaries": True,
             "legacy_paragraph_original_permissions": True,
@@ -794,7 +795,40 @@ def runtime_behavior_probes() -> dict[str, bool]:
         **_v2213_behavior_probes(),
         **_v2214_behavior_probes(),
         **_v2215_behavior_probes(),
+        **_v2216_behavior_probes(),
     }
+
+
+def _v2216_behavior_probes() -> dict[str, bool]:
+    from tarjomeh.parsers.pdf_parser import _join_span_texts, _line_superscript_markers
+    from tarjomeh.quality.integrity import PostEditIntegrityGate
+    from tarjomeh.quality.note_evidence import paragraph_note_evidence, text_hash
+    from tarjomeh.quality.numeric_artifacts import line_formula_records
+
+    spans = [{"text": "In 1983 the ratio was 46:1.", "flags": 0},
+             {"text": "3", "flags": 1}, {"text": " The trend continued.", "flags": 0}]
+    offsets: dict[int, int] = {}
+    ratio = _join_span_texts(spans, offsets)
+    notes = paragraph_note_evidence(ratio, {"superscript_markers": _line_superscript_markers(spans, ratio, offsets)})
+    ratio_gate = PostEditIntegrityGate(note_evidence=notes)
+    ratio_target = "\u062f\u0631 1983 \u0646\u0633\u0628\u062a 46 \u0628\u0647 1 \u0628\u0648\u062f.\u00b3 \u0631\u0648\u0646\u062f \u0627\u062f\u0627\u0645\u0647 \u06cc\u0627\u0641\u062a."
+    source = "They measured C 0 2 emissions and 0 kg of residue."
+    formula = {"source_sha256": text_hash(source), "records": [
+        {"paragraph": [0, len(source)], "paragraph_sha256": text_hash(source),
+         "spans": [[14, 19, "C 0 2"]]},
+    ]}
+    geometry = line_formula_records([
+        {"text": "They measured C 0", "size": 9, "origin": (0, 10), "bbox": (0, 0, 60, 10)},
+        {"text": "2", "size": 3, "origin": (62, 11), "bbox": (62, 0, 65, 11)},
+    ], source, (1.0, 0.0))
+    formula_gate = PostEditIntegrityGate(formula_evidence=formula)
+    target = "\u0627\u0646\u062a\u0634\u0627\u0631 CO2 \u0633\u0646\u062c\u06cc\u062f\u0647 \u0634\u062f \u0648 0 \u06a9\u06cc\u0644\u0648\u06af\u0631\u0645 \u0628\u0627\u0642\u06cc \u0645\u0627\u0646\u062f."
+    return {"geometry_bound_numeric_artifacts": bool(
+        geometry and ratio_gate.evaluate(ratio, ratio_target).accepted
+        and not ratio_gate.evaluate(ratio, ratio_target.replace("\u00b3", "")).accepted
+        and formula_gate.evaluate(source, target).accepted
+        and not formula_gate.evaluate(source, target.replace(" 0 ", " ")).accepted
+    )}
 
 
 def _v2215_behavior_probes() -> dict[str, bool]:

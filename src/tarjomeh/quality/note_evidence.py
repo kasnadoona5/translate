@@ -94,6 +94,9 @@ def verified_note_cues(source: str, evidence: dict | None) -> list[dict]:
 
 def attach_chunk_note_evidence(document: Any, chunks: list) -> None:
     """Add evidence after chunking; source bytes, indices and parser stay intact."""
+    from tarjomeh.quality.numeric_artifacts import attach_formula_evidence
+
+    attach_formula_evidence(document, chunks)
     paragraphs = document.all_paragraphs
     for chunk in chunks:
         indices = chunk.metadata.get("paragraph_indices", [])

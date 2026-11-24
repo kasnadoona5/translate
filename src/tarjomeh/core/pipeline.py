@@ -10056,6 +10056,7 @@ class TranslationPipeline:
         ):
             manual_gate = PostEditIntegrityGate(
                 note_evidence=chunks[chunk_index].metadata.get("source_note_evidence_v1"),
+                formula_evidence=chunks[chunk_index].metadata.get("source_formula_evidence_v1"),
                 note_source=chunks[chunk_index].text,
                 min_retention_ratio=getattr(
                     self.config.translation, "integrity_min_retention_ratio", 0.65
@@ -11331,6 +11332,7 @@ class TranslationPipeline:
         integrity_gate = PostEditIntegrityGate(
             note_evidence=chunk.metadata.get("source_note_evidence_v1"),
             note_source=chunk.text,
+            formula_evidence=chunk.metadata.get("source_formula_evidence_v1"),
             paragraph_originals=[item for item in reviewed_matches if item.get("original_policy")],
             min_retention_ratio=getattr(
                 self.config.translation, "integrity_min_retention_ratio", 0.65

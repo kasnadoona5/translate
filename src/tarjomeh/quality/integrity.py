@@ -3875,12 +3875,14 @@ class PostEditIntegrityGate:
         *, paragraph_originals: list[dict[str, Any]] | None = None,
         note_evidence: dict | None = None,
         note_source: str | None = None,
+        formula_evidence: dict | None = None,
     ) -> None:
         self.min_retention_ratio = min_retention_ratio
         self.max_growth_ratio = max_growth_ratio
         self.paragraph_originals = list(paragraph_originals or [])
         self.note_evidence = note_evidence
         self.note_source = note_source
+        self.formula_evidence = formula_evidence
 
     def evaluate(
         self,
@@ -3974,11 +3976,38 @@ class PostEditIntegrityGate:
                 missing=list(missing_identifiers.elements()),
             )
 
-        number_reconciliation = _reconcile_numbers(source, candidate)
-        previous_number_reconciliation = (
-            _reconcile_numbers(source, previous)
-            if previous else _NumberReconciliation()
-        )
+        evidence = note_evidence if note_evidence is not None else self.note_evidence
+        # Segment recovery needs evidence tied to the exact slice it is checking.
+        if evidence is not None and evidence.get("source_sha256") != hashlib.sha256(source.encode("utf-8")).hexdigest():
+            if note_evidence is not None or self.note_source is None:
+                raise ValueError("Source note evidence does not match this segment")
+            from tarjomeh.quality.note_evidence import scoped_note_evidence
+
+            evidence = scoped_note_evidence(source, self.note_source, evidence)
+
+        def numeric_view(text: str):
+            if evidence is None and self.formula_evidence is None:
+                return source, text, [], []
+            from tarjomeh.quality.numeric_artifacts import project_numeric_artifacts
+
+            return project_numeric_artifacts(
+                source, text, evidence, self.formula_evidence, formula_source=self.note_source,
+            )
+
+        numeric_source, numeric_target, missing_artifacts, artifacts = numeric_view(candidate)
+        number_reconciliation = _reconcile_numbers(numeric_source, numeric_target)
+        previous_number_reconciliation = _NumberReconciliation()
+        if previous:
+            previous_source, previous_target, _, _ = numeric_view(previous)
+            previous_number_reconciliation = _reconcile_numbers(previous_source, previous_target)
+        if artifacts:
+            add("source_numeric_artifact_evidence", "info",
+                "Verified source geometry distinguished a note or formula from a quantity.",
+                artifacts=artifacts)
+        if missing_artifacts:
+            add("source_numeric_artifact_missing", "blocking",
+                "A geometry-confirmed ratio or formula was not preserved in its aligned paragraph.",
+                missing=missing_artifacts)
         missing_number_counts = number_reconciliation.missing
         previous_missing_number_counts = previous_number_reconciliation.missing
         newly_missing_number_counts = (
@@ -4011,15 +4040,6 @@ class PostEditIntegrityGate:
                 missing_by_role=number_reconciliation.roles_payload(),
             )
 
-        evidence = note_evidence if note_evidence is not None else self.note_evidence
-        # A gate may validate a smaller recovery segment; never reuse whole-chunk
-        # geometry against different bytes. Explicit per-call stale evidence fails.
-        if evidence is not None and evidence.get("source_sha256") != hashlib.sha256(source.encode("utf-8")).hexdigest():
-            if note_evidence is not None or self.note_source is None:
-                raise ValueError("Source note evidence does not match this segment")
-            from tarjomeh.quality.note_evidence import scoped_note_evidence
-
-            evidence = scoped_note_evidence(source, self.note_source, evidence)
         required_notes = Counter(extract_note_markers(source, note_evidence=evidence))
         if evidence is not None:
             result.source_note_evidence = {

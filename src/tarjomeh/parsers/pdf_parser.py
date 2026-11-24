@@ -27,6 +27,7 @@ from tarjomeh.parsers.base import (
     Paragraph,
     Section,
 )
+from tarjomeh.quality.numeric_artifacts import line_formula_records
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +155,7 @@ def _join_block_lines(
     return out.replace(_SOFT_HYPHEN, "").strip()
 
 
-def _join_span_texts(spans: list[dict[str, Any]]) -> str:
+def _join_span_texts(spans: list[dict[str, Any]], offsets: dict[int, int] | None = None) -> str:
     """Join styled PDF spans while restoring only geometry-evidenced spaces."""
     output = ""
     previous: dict[str, Any] | None = None
@@ -177,8 +178,14 @@ def _join_span_texts(spans: list[dict[str, Any]]) -> str:
                 and re.match(r"[A-Za-z0-9]", value)
             ):
                 output += " "
+        if offsets is not None:
+            offsets[id(span)] = len(output) + len(value) - len(value.lstrip())
         output += value
         previous = span
+    if offsets is not None:
+        leading = len(output) - len(output.lstrip())
+        for key in offsets:
+            offsets[key] -= leading
     return output.strip()
 
 
@@ -191,6 +198,7 @@ _SUPERSCRIPT_MARKER_RE = re.compile(
 def _line_superscript_markers(
     spans: list[dict[str, Any]],
     line_text: str,
+    offsets: dict[int, int] | None = None,
 ) -> list[dict[str, Any]]:
     """Retain source-confirmed note-marker positions without inferring them."""
     markers: list[dict[str, Any]] = []
@@ -204,10 +212,11 @@ def _line_superscript_markers(
             or not _SUPERSCRIPT_MARKER_RE.fullmatch(value)
         ):
             continue
-        offset = line_text.find(value, cursor)
-        if offset < 0:
-            offset = line_text.find(value)
-        if offset < 0:
+        if offsets is None:
+            offset = line_text.find(value, cursor)
+        else:
+            offset = offsets.get(id(span), -1)
+        if offset < 0 or line_text[offset:offset + len(value)] != value:
             continue
         cursor = offset + len(value)
         markers.append({
@@ -224,6 +233,10 @@ def _line_superscript_markers(
             ],
         })
     return markers
+
+
+def _block_formula_geometry(block: dict) -> list[dict]:
+    return [record for line in block.get("lines", []) for record in line.get("formula_geometry", [])]
 
 
 _MARKER_CONTEXT = 14
@@ -425,9 +438,10 @@ def _extract_page_blocks(
                     sizes.append(span.get("size", 0.0))
                     font_names.append(span.get("font", ""))
             if text_parts:
+                offsets: dict[int, int] = {}
                 line_text = _join_span_texts([
                     span for span in spans if str(span.get("text", "")).strip()
-                ])
+                ], offsets)
                 line_texts.append(line_text)
                 line_sizes = [
                     float(span.get("size", 0.0))
@@ -447,8 +461,9 @@ def _extract_page_blocks(
                         if str(span.get("text", "")).strip()
                     ),
                     "superscript_markers": _line_superscript_markers(
-                        spans, line_text
+                        spans, line_text, offsets
                     ),
+                    "formula_geometry": line_formula_records(spans, line_text, tuple(line.get("dir", (1.0, 0.0)))),
                     "span_count": len([
                         span for span in spans
                         if str(span.get("text", "")).strip()
@@ -1061,6 +1076,8 @@ def _merge_continuation_paragraphs(paragraphs: list[Paragraph]) -> list[Paragrap
             prev.metadata["superscript_markers"] = _joined_superscript_markers(
                 prev, para, joiner
             )
+            if para.metadata.get("formula_geometry"):
+                prev.metadata.setdefault("formula_geometry", []).extend(para.metadata["formula_geometry"])
             prev.metadata["italic_source_spans"] = _joined_italic_spans(
                 prev, para, joiner
             )
@@ -1136,6 +1153,8 @@ def _merge_table_interrupted_continuations(
         left.metadata["superscript_markers"] = _joined_superscript_markers(
             left, right, joiner
         )
+        if right.metadata.get("formula_geometry"):
+            left.metadata.setdefault("formula_geometry", []).extend(right.metadata["formula_geometry"])
         left.metadata["italic_source_spans"] = _joined_italic_spans(
             left, right, joiner
         )
@@ -1771,6 +1790,9 @@ class PyMuPDFParser(BaseParser):
                         )
                 )
 
+            formulas = _block_formula_geometry(blk)
+            if formulas:
+                current_paragraphs[-1].metadata["formula_geometry"] = formulas
             if self.structure_version >= 5 and footnote_evidence["legacy_footnote"]:
                 current_paragraphs[-1].metadata["footnote_classification"] = footnote_evidence
 
@@ -1875,6 +1897,10 @@ class PyMuPDFParser(BaseParser):
                         str(blk.get("source_fragment_id", ""))
                     ] if blk.get("source_fragment_id") else [],
                 }
+
+                formulas = _block_formula_geometry(blk)
+                if formulas:
+                    meta["formula_geometry"] = formulas
 
                 is_footnote, footnote_evidence = _classify_footnote(
                     blk, median, page_height, body_evidence,
